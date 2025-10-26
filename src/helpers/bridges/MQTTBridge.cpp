@@ -23,6 +23,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   strncpy(_device_id, "DEVICE_ID_PLACEHOLDER", sizeof(_device_id) - 1);
   strncpy(_firmware_version, "unknown", sizeof(_firmware_version) - 1);
   strncpy(_board_model, "unknown", sizeof(_board_model) - 1);
+  strncpy(_build_date, "unknown", sizeof(_build_date) - 1);
   _status_enabled = true;
   _packets_enabled = true;
   _raw_enabled = false;
@@ -335,6 +336,10 @@ void MQTTBridge::publishStatus() {
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
   origin_id[sizeof(origin_id) - 1] = '\0';
   
+  // Build client version string
+  char client_version[64];
+  snprintf(client_version, sizeof(client_version), "meshcore-custom-repeater/%s", _build_date);
+  
   // Build status message
   int len = MQTTMessageBuilder::buildStatusMessage(
     _origin,
@@ -342,7 +347,7 @@ void MQTTBridge::publishStatus() {
     _board_model,  // model - now dynamic!
     _firmware_version,  // firmware version
     radio_info,
-    "custom-mqtt-bridge",
+    client_version,  // client version
     "online",
     timestamp,
     json_buffer,
@@ -537,6 +542,11 @@ void MQTTBridge::setFirmwareVersion(const char* firmware_version) {
 void MQTTBridge::setBoardModel(const char* board_model) {
   strncpy(_board_model, board_model, sizeof(_board_model) - 1);
   _board_model[sizeof(_board_model) - 1] = '\0';
+}
+
+void MQTTBridge::setBuildDate(const char* build_date) {
+  strncpy(_build_date, build_date, sizeof(_build_date) - 1);
+  _build_date[sizeof(_build_date) - 1] = '\0';
 }
 
 void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi) {
@@ -782,38 +792,58 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
   char status_topic[128];
   snprintf(status_topic, sizeof(status_topic), "meshcore/%s/%s/status", _iata, _device_id);
   
-  // Build status JSON
-  char status_payload[512];
-  snprintf(status_payload, sizeof(status_payload),
-    "{"
-    "\"device_id\":\"%s\","
-    "\"origin_id\":\"%s\","
-    "\"origin\":\"%s\","
-    "\"iata\":\"%s\","
-    "\"server\":\"%s\","
-    "\"status\":\"connected\","
-    "\"timestamp\":%lu,"
-    "\"uptime\":%lu"
-    "}",
-    _device_id,
-    _device_id,  // origin_id should be the device_id (public key)
+  // Build proper status message using MQTTMessageBuilder
+  char json_buffer[512];
+  char origin_id[65];
+  char timestamp[32];
+  char radio_info[64];
+  
+  // Get current timestamp in ISO 8601 format
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", &timeinfo);
+  } else {
+    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+  }
+  
+  // Build radio info string (freq,bw,sf,cr)
+  snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d", 
+           _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
+  
+  // Use actual device ID
+  strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
+  origin_id[sizeof(origin_id) - 1] = '\0';
+  
+  // Build client version string
+  char client_version[64];
+  snprintf(client_version, sizeof(client_version), "meshcore-custom-repeater/%s", _build_date);
+  
+  // Build status message using MQTTMessageBuilder
+  int len = MQTTMessageBuilder::buildStatusMessage(
     _origin,
-    _iata,
-    server_name,
-    time(nullptr),
-    millis() / 1000
+    origin_id,
+    _board_model,  // model
+    _firmware_version,  // firmware version
+    radio_info,
+    client_version,  // client version
+    "online",
+    timestamp,
+    json_buffer,
+    sizeof(json_buffer)
   );
   
-  MQTT_DEBUG_PRINTLN("Publishing status to %s server", server_name);
-  MQTT_DEBUG_PRINTLN("Status topic: %s", status_topic);
-  MQTT_DEBUG_PRINTLN("Status payload: %s", status_payload);
-  
-  // Publish status message (retained)
-  int result = client->publish(status_topic, 1, true, status_payload, strlen(status_payload));
-  if (result > 0) {
-    MQTT_DEBUG_PRINTLN("Status published to %s server successfully, result=%d", server_name, result);
-  } else {
-    MQTT_DEBUG_PRINTLN("Status publish to %s server failed, result=%d", server_name, result);
+  if (len > 0) {
+    MQTT_DEBUG_PRINTLN("Publishing status to %s server", server_name);
+    MQTT_DEBUG_PRINTLN("Status topic: %s", status_topic);
+    MQTT_DEBUG_PRINTLN("Status payload: %s", json_buffer);
+    
+    // Publish status message (retained)
+    int result = client->publish(status_topic, 1, true, json_buffer, strlen(json_buffer));
+    if (result > 0) {
+      MQTT_DEBUG_PRINTLN("Status published to %s server successfully, result=%d", server_name, result);
+    } else {
+      MQTT_DEBUG_PRINTLN("Status publish to %s server failed, result=%d", server_name, result);
+    }
   }
 }
 

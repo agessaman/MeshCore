@@ -71,6 +71,7 @@ private:
   char _device_id[65];  // Device public key (hex string)
   char _firmware_version[64];  // Firmware version string
   char _board_model[64];  // Board model string
+  char _build_date[32];  // Build date string
   bool _status_enabled;
   bool _packets_enabled;
   bool _raw_enabled;
@@ -234,6 +235,13 @@ public:
    * @param board_model Board model string
    */
   void setBoardModel(const char* board_model);
+
+  /**
+   * Set build date for client version
+   *
+   * @param build_date Build date string
+   */
+  void setBuildDate(const char* build_date);
 
   /**
    * Stores raw radio data for MQTT messages
