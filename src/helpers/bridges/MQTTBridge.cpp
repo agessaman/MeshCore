@@ -11,7 +11,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
       _active_brokers(0), _queue_head(0), _queue_tail(0), _queue_count(0),
       _last_status_publish(0), _status_interval(300000), // 5 minutes default
       _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false),
-      _timezone(nullptr) {
+      _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0) {
   
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -22,6 +22,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _status_enabled = true;
   _packets_enabled = true;
   _raw_enabled = false;
+  _tx_enabled = false;  // Disable TX packets by default
   
   // Initialize packet queue
   memset(_packet_queue, 0, sizeof(_packet_queue));
@@ -71,6 +72,7 @@ void MQTTBridge::begin() {
   _status_enabled = _prefs->mqtt_status_enabled;
   _packets_enabled = _prefs->mqtt_packets_enabled;
   _raw_enabled = _prefs->mqtt_raw_enabled;
+  _tx_enabled = _prefs->mqtt_tx_enabled;
   _status_interval = _prefs->mqtt_status_interval;
   
   MQTT_DEBUG_PRINTLN("Origin: %s, IATA: %s", _origin, _iata);
@@ -173,9 +175,9 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled) return;
+  if (!_initialized || !_packets_enabled || !_tx_enabled) return;
   
-  // Queue packet for transmission
+  // Queue packet for transmission (only if TX enabled)
   queuePacket(packet, true);
 }
 
@@ -319,10 +321,20 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
   origin_id[sizeof(origin_id) - 1] = '\0';
   
-  // Build packet message
-  int len = MQTTMessageBuilder::buildPacketJSON(
-    packet, is_tx, _origin, origin_id, _timezone, json_buffer, sizeof(json_buffer)
-  );
+  // Build packet message using raw radio data if available
+  int len;
+  if (_last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
+    // Use raw radio data (within 1 second of packet)
+    len = MQTTMessageBuilder::buildPacketJSONFromRaw(
+      _last_raw_data, _last_raw_len, packet, is_tx, _origin, origin_id, 
+      _last_snr, _last_rssi, _timezone, json_buffer, sizeof(json_buffer)
+    );
+  } else {
+    // Fallback to reconstructed packet data
+    len = MQTTMessageBuilder::buildPacketJSON(
+      packet, is_tx, _origin, origin_id, _timezone, json_buffer, sizeof(json_buffer)
+    );
+  }
   
   if (len > 0) {
     // Publish to all connected brokers
@@ -448,6 +460,17 @@ void MQTTBridge::setFirmwareVersion(const char* firmware_version) {
 void MQTTBridge::setBoardModel(const char* board_model) {
   strncpy(_board_model, board_model, sizeof(_board_model) - 1);
   _board_model[sizeof(_board_model) - 1] = '\0';
+}
+
+void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi) {
+  if (len > 0 && len <= sizeof(_last_raw_data)) {
+    memcpy(_last_raw_data, raw_data, len);
+    _last_raw_len = len;
+    _last_snr = snr;
+    _last_rssi = rssi;
+    _last_raw_timestamp = millis();
+    MQTT_DEBUG_PRINTLN("Stored raw radio data: %d bytes, SNR=%.1f, RSSI=%.1f", len, snr, rssi);
+  }
 }
 
 void MQTTBridge::setMessageTypes(bool status, bool packets, bool raw) {

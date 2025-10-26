@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <Timezone.h>
+#include "MeshCore.h"
 
 int MQTTMessageBuilder::buildStatusMessage(
   const char* origin,
@@ -146,9 +147,11 @@ int MQTTMessageBuilder::buildPacketJSON(
   int packet_type = packet->getPayloadType();
   const char* route_str = getRouteTypeString(packet->isRouteDirect() ? 1 : 0);
   
-  // Create hash (simplified - use first 8 bytes of packet)
+  // Create proper packet hash using MeshCore's calculatePacketHash method
   char hash_str[17];
-  bytesToHex(packet->payload, min(8, (int)packet->payload_len), hash_str, sizeof(hash_str));
+  uint8_t packet_hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(packet_hash);
+  bytesToHex(packet_hash, MAX_HASH_SIZE, hash_str, sizeof(hash_str));
   
   // Build path string for direct packets
   char path_str[128] = "";
@@ -167,6 +170,87 @@ int MQTTMessageBuilder::buildPacketJSON(
     raw_hex,
     12.5f, // SNR - using reasonable default
     -65,   // RSSI - using reasonable default
+    hash_str,
+    packet->isRouteDirect() ? path_str : nullptr,
+    buffer, buffer_size
+  );
+}
+
+int MQTTMessageBuilder::buildPacketJSONFromRaw(
+  const uint8_t* raw_data,
+  int raw_len,
+  mesh::Packet* packet,
+  bool is_tx,
+  const char* origin,
+  const char* origin_id,
+  float snr,
+  float rssi,
+  Timezone* timezone,
+  char* buffer,
+  size_t buffer_size
+) {
+  if (!packet || !raw_data || raw_len <= 0) return 0;
+  
+  // Get current device time (should be UTC since system timezone is set to UTC)
+  time_t now = time(nullptr);
+  
+  // Convert to local time using timezone library (for timestamp field only)
+  time_t local_time = timezone ? timezone->toLocal(now) : now;
+  struct tm* local_timeinfo = localtime(&local_time);
+  
+  // Format timestamp in ISO 8601 format (LOCAL TIME)
+  char timestamp[32];
+  if (local_timeinfo) {
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", local_timeinfo);
+  } else {
+    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+  }
+  
+  // Get UTC time (since system timezone is UTC, time() returns UTC)
+  struct tm* utc_timeinfo = gmtime(&now);
+  
+  // Format time and date (ALWAYS UTC)
+  char time_str[16];
+  char date_str[16];
+  if (utc_timeinfo) {
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", utc_timeinfo);
+    strftime(date_str, sizeof(date_str), "%d/%m/%Y", utc_timeinfo);
+  } else {
+    strcpy(time_str, "12:00:00");
+    strcpy(date_str, "01/01/2024");
+  }
+  
+  // Convert raw radio data to hex (this includes radio headers)
+  char raw_hex[512];
+  bytesToHex(raw_data, raw_len, raw_hex, sizeof(raw_hex));
+  
+  // Get packet characteristics from the parsed packet
+  int packet_type = packet->getPayloadType();
+  const char* route_str = getRouteTypeString(packet->isRouteDirect() ? 1 : 0);
+  
+  // Create proper packet hash using MeshCore's calculatePacketHash method
+  char hash_str[17];
+  uint8_t packet_hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(packet_hash);
+  bytesToHex(packet_hash, MAX_HASH_SIZE, hash_str, sizeof(hash_str));
+  
+  // Build path string for direct packets
+  char path_str[128] = "";
+  if (packet->isRouteDirect() && packet->path_len > 0) {
+    // Simplified path representation
+    snprintf(path_str, sizeof(path_str), "path_len_%d", packet->path_len);
+  }
+  
+  return buildPacketMessage(
+    origin, origin_id, timestamp,
+    is_tx ? "tx" : "rx",
+    time_str, date_str,
+    raw_len, // Use actual raw radio data length
+    packet_type, route_str,
+    packet->payload_len,
+    raw_hex,
+    snr,  // Use actual SNR from radio
+    rssi, // Use actual RSSI from radio
     hash_str,
     packet->isRouteDirect() ? path_str : nullptr,
     buffer, buffer_size
