@@ -128,6 +128,20 @@ public:
     size_t buffer_size
   );
 
+  static int buildPacketJSONFromRaw(
+    const uint8_t* raw_data,
+    int raw_len,
+    mesh::Packet* packet,
+    bool is_tx,
+    const char* origin,
+    const char* origin_id,
+    float snr,
+    float rssi,
+    Timezone* timezone,
+    char* buffer,
+    size_t buffer_size
+  );
+
   /**
    * Convert packet to raw JSON message
    *
