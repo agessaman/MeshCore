@@ -74,6 +74,7 @@ private:
   bool _status_enabled;
   bool _packets_enabled;
   bool _raw_enabled;
+  bool _tx_enabled;
   unsigned long _last_status_publish;
   unsigned long _status_interval;
   
@@ -98,6 +99,13 @@ private:
   
   // Timezone handling
   Timezone* _timezone;
+  
+  // Raw radio data storage
+  uint8_t _last_raw_data[256];
+  int _last_raw_len;
+  float _last_snr;
+  float _last_rssi;
+  unsigned long _last_raw_timestamp;
   
   // Internal methods
   void connectToBrokers();
@@ -211,6 +219,16 @@ public:
    * @param board_model Board model string
    */
   void setBoardModel(const char* board_model);
+
+  /**
+   * Stores raw radio data for MQTT messages
+   *
+   * @param raw_data Raw radio transmission data
+   * @param len Length of raw data
+   * @param snr Signal-to-noise ratio
+   * @param rssi Received signal strength indicator
+   */
+  void storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi);
 
   /**
    * Enable/disable message types
