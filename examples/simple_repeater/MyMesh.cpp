@@ -733,6 +733,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   // WiFi defaults
   StrHelper::strncpy(_prefs.wifi_ssid, "ssid_here", sizeof(_prefs.wifi_ssid));
   StrHelper::strncpy(_prefs.wifi_password, "password_here", sizeof(_prefs.wifi_password));
+  
+  // Timezone defaults (Pacific Time with DST support)
+  StrHelper::strncpy(_prefs.timezone_string, "America/Los_Angeles", sizeof(_prefs.timezone_string));
+  _prefs.timezone_offset = -8; // fallback
 }
 
 void MyMesh::begin(FILESYSTEM *fs) {

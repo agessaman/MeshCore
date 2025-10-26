@@ -96,6 +96,7 @@ struct MQTTPrefs {
   // Timezone settings
   char timezone_string[32]; // Timezone string (e.g., "America/Los_Angeles")
   int8_t timezone_offset;   // Timezone offset in hours (-12 to +14) - fallback
+<<<<<<< HEAD
   
   // MQTT server settings
   char mqtt_server[64];     // MQTT server hostname
@@ -108,6 +109,8 @@ struct MQTTPrefs {
   uint8_t mqtt_analyzer_eu_enabled; // Enable EU analyzer server
   char mqtt_owner_public_key[65]; // Owner public key (hex string, same length as repeater public key)
   char mqtt_email[64]; // Owner email address for matching nodes with owners
+=======
+>>>>>>> 0b761e8 (Add timezone support to MQTT Bridge and CLI configuration)
 };
 #endif
 

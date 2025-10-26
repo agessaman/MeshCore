@@ -3,6 +3,7 @@
 #include "MeshCore.h"
 #include <ArduinoJson.h>
 #include <Mesh.h>
+#include <Timezone.h>
 
 /**
  * @brief Utility class for building MQTT JSON messages
@@ -122,6 +123,7 @@ public:
     bool is_tx,
     const char* origin,
     const char* origin_id,
+    Timezone* timezone,
     char* buffer,
     size_t buffer_size
   );
@@ -140,6 +142,7 @@ public:
     mesh::Packet* packet,
     const char* origin,
     const char* origin_id,
+    Timezone* timezone,
     char* buffer,
     size_t buffer_size
   );

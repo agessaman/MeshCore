@@ -1,6 +1,7 @@
 #include "MQTTMessageBuilder.h"
 #include <ArduinoJson.h>
 #include <time.h>
+#include <Timezone.h>
 
 int MQTTMessageBuilder::buildStatusMessage(
   const char* origin,
@@ -102,29 +103,36 @@ int MQTTMessageBuilder::buildPacketJSON(
   bool is_tx,
   const char* origin,
   const char* origin_id,
+  Timezone* timezone,
   char* buffer,
   size_t buffer_size
 ) {
   if (!packet) return 0;
   
-  // Get current device time
+  // Get current device time (should be UTC since system timezone is set to UTC)
   time_t now = time(nullptr);
-  struct tm* timeinfo = localtime(&now);
   
-  // Format timestamp in ISO 8601 format
+  // Convert to local time using timezone library (for timestamp field only)
+  time_t local_time = timezone ? timezone->toLocal(now) : now;
+  struct tm* local_timeinfo = localtime(&local_time);
+  
+  // Format timestamp in ISO 8601 format (LOCAL TIME)
   char timestamp[32];
-  if (timeinfo) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", timeinfo);
+  if (local_timeinfo) {
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", local_timeinfo);
   } else {
     strcpy(timestamp, "2024-01-01T12:00:00.000000");
   }
   
-  // Format time and date
+  // Get UTC time (since system timezone is UTC, time() returns UTC)
+  struct tm* utc_timeinfo = gmtime(&now);
+  
+  // Format time and date (ALWAYS UTC)
   char time_str[16];
   char date_str[16];
-  if (timeinfo) {
-    strftime(time_str, sizeof(time_str), "%H:%M:%S", timeinfo);
-    strftime(date_str, sizeof(date_str), "%d/%m/%Y", timeinfo);
+  if (utc_timeinfo) {
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", utc_timeinfo);
+    strftime(date_str, sizeof(date_str), "%d/%m/%Y", utc_timeinfo);
   } else {
     strcpy(time_str, "12:00:00");
     strcpy(date_str, "01/01/2024");
@@ -169,6 +177,7 @@ int MQTTMessageBuilder::buildRawJSON(
   mesh::Packet* packet,
   const char* origin,
   const char* origin_id,
+  Timezone* timezone,
   char* buffer,
   size_t buffer_size
 ) {
@@ -176,7 +185,10 @@ int MQTTMessageBuilder::buildRawJSON(
   
   // Get current device time
   time_t now = time(nullptr);
-  struct tm* timeinfo = localtime(&now);
+  
+  // Convert to local time using timezone library
+  time_t local_time = timezone ? timezone->toLocal(now) : now;
+  struct tm* timeinfo = localtime(&local_time);
   
   // Format timestamp in ISO 8601 format
   char timestamp[32];

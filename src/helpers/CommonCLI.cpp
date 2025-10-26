@@ -69,6 +69,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.read((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.read((uint8_t *)&_prefs->advert_loc_policy, sizeof (_prefs->advert_loc_policy));          // 161
+<<<<<<< HEAD
     file.read((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162 (from upstream)
     // MQTT settings - skip reading from main prefs file (now stored separately)
     // For backward compatibility, we'll skip these bytes if they exist in old files
@@ -173,6 +174,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.write((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
+<<<<<<< HEAD
     file.write((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162 (from upstream)
     // MQTT settings - no longer saved here (stored in separate /mqtt_prefs file)
     // Write zeros/padding to maintain file format compatibility
@@ -403,6 +405,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 sprintf(reply, "> %s", _prefs->wifi_ssid);
               } else if (memcmp(config, "wifi.pwd", 8) == 0) {
                 sprintf(reply, "> %s", _prefs->wifi_password);
+              } else if (memcmp(config, "timezone", 8) == 0) {
+                sprintf(reply, "> %s", _prefs->timezone_string);
+              } else if (memcmp(config, "timezone.offset", 15) == 0) {
+                sprintf(reply, "> %d", _prefs->timezone_offset);
 #endif
       } else {
         sprintf(reply, "??: %s", config);
@@ -634,6 +640,19 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 StrHelper::strncpy(_prefs->wifi_password, &config[9], sizeof(_prefs->wifi_password));
                 savePrefs();
                 strcpy(reply, "OK");
+              } else if (memcmp(config, "timezone ", 10) == 0) {
+                StrHelper::strncpy(_prefs->timezone_string, &config[10], sizeof(_prefs->timezone_string));
+                savePrefs();
+                strcpy(reply, "OK");
+              } else if (memcmp(config, "timezone.offset ", 17) == 0) {
+                int8_t offset = _atoi(&config[17]);
+                if (offset >= -12 && offset <= 14) {
+                  _prefs->timezone_offset = offset;
+                  savePrefs();
+                  strcpy(reply, "OK");
+                } else {
+                  strcpy(reply, "Error: timezone offset must be between -12 and +14");
+                }
 #endif
       } else {
         sprintf(reply, "unknown config: %s", config);

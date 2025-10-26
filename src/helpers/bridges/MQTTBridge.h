@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include <Timezone.h>
 
 #if defined(MQTT_DEBUG) && defined(ARDUINO)
   #include <Arduino.h>
@@ -95,6 +96,9 @@ private:
   unsigned long _last_ntp_sync;
   bool _ntp_synced;
   
+  // Timezone handling
+  Timezone* _timezone;
+  
   // Internal methods
   void connectToBrokers();
   void processPacketQueue();
@@ -106,6 +110,7 @@ private:
   bool isAnyBrokerConnected();
   void setBrokerDefaults();
   void syncTimeWithNTP();
+  Timezone* createTimezoneFromString(const char* tz_string);
   
 public:
   /**
