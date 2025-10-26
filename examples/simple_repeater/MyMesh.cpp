@@ -680,7 +680,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #elif defined(WITH_ESPNOW_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
 #elif defined(WITH_MQTT_BRIDGE)
-      , bridge(&_prefs, _mgr, &rtc)
+      , bridge(&_prefs, _mgr, &rtc, &self_id)
 #endif
 {
   last_millis = 0;
@@ -742,9 +742,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   StrHelper::strncpy(_prefs.wifi_ssid, "ssid_here", sizeof(_prefs.wifi_ssid));
   StrHelper::strncpy(_prefs.wifi_password, "password_here", sizeof(_prefs.wifi_password));
   
-  // Timezone defaults (Pacific Time with DST support)
-  StrHelper::strncpy(_prefs.timezone_string, "America/Los_Angeles", sizeof(_prefs.timezone_string));
-  _prefs.timezone_offset = -8; // fallback
+        // Timezone defaults (Pacific Time with DST support)
+        StrHelper::strncpy(_prefs.timezone_string, "America/Los_Angeles", sizeof(_prefs.timezone_string));
+        _prefs.timezone_offset = -8; // fallback
+        
+        // Let's Mesh Analyzer defaults (both enabled by default)
+        _prefs.mqtt_analyzer_us_enabled = 1; // enabled
+        _prefs.mqtt_analyzer_eu_enabled = 1; // enabled
 }
 
 void MyMesh::begin(FILESYSTEM *fs) {

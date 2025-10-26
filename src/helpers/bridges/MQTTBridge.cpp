@@ -4,14 +4,18 @@
 #include <WiFiUdp.h>
 #include <Timezone.h>
 
+// Using ESP32's built-in certificate bundle
+
 #ifdef WITH_MQTT_BRIDGE
 
-MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc)
-    : BridgeBase(prefs, mgr, rtc), _mqtt_client(nullptr), _wifi_client(nullptr),
+MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
+    : BridgeBase(prefs, mgr, rtc), _mqtt_client(nullptr),
       _active_brokers(0), _queue_head(0), _queue_tail(0), _queue_count(0),
       _last_status_publish(0), _status_interval(300000), // 5 minutes default
-      _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false),
-      _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0) {
+              _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false),
+              _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
+              _analyzer_us_enabled(false), _analyzer_eu_enabled(false), _identity(identity),
+              _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr) {
   
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -102,12 +106,44 @@ void MQTTBridge::begin() {
     return;
   }
   
-  // Initialize WiFi client
-  _wifi_client = new WiFiClient();
-  _mqtt_client = new PubSubClient(*_wifi_client);
+  // Initialize PsychicMqttClient
+  _mqtt_client = new PsychicMqttClient();
+  
+  // Set up event callbacks for the main MQTT client
+  _mqtt_client->onConnect([this](bool sessionPresent) {
+    MQTT_DEBUG_PRINTLN("MQTT client connected, session present: %s", sessionPresent ? "true" : "false");
+    // Update broker connection status
+    for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
+      if (_brokers[i].enabled && !_brokers[i].connected) {
+        _brokers[i].connected = true;
+        _active_brokers++;
+        MQTT_DEBUG_PRINTLN("Broker %d marked as connected", i);
+        break;
+      }
+    }
+  });
+  
+  _mqtt_client->onDisconnect([this](bool sessionPresent) {
+    MQTT_DEBUG_PRINTLN("MQTT client disconnected, session present: %s", sessionPresent ? "true" : "false");
+    // Update broker connection status
+    for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
+      if (_brokers[i].connected) {
+        _brokers[i].connected = false;
+        _active_brokers--;
+        MQTT_DEBUG_PRINTLN("Broker %d marked as disconnected", i);
+        break;
+      }
+    }
+  });
   
   // Set default broker (meshtastic.pugetmesh.org)
   setBroker(0, "meshtastic.pugetmesh.org", 1883, "meshdev", "large4cats", true);
+  
+  // Setup Let's Mesh Analyzer servers
+  setupAnalyzerServers();
+  
+  // Setup PsychicMqttClient WebSocket clients for analyzer servers
+  setupAnalyzerClients();
   
   // Connect to brokers
   connectToBrokers();
@@ -127,6 +163,18 @@ void MQTTBridge::end() {
     }
   }
   
+  // Disconnect analyzer clients
+  if (_analyzer_us_client) {
+    _analyzer_us_client->disconnect();
+    delete _analyzer_us_client;
+    _analyzer_us_client = nullptr;
+  }
+  if (_analyzer_eu_client) {
+    _analyzer_eu_client->disconnect();
+    delete _analyzer_eu_client;
+    _analyzer_eu_client = nullptr;
+  }
+  
   // Clear packet queue
   _queue_count = 0;
   _queue_head = 0;
@@ -136,10 +184,6 @@ void MQTTBridge::end() {
   if (_mqtt_client) {
     delete _mqtt_client;
     _mqtt_client = nullptr;
-  }
-  if (_wifi_client) {
-    delete _wifi_client;
-    _wifi_client = nullptr;
   }
   
   _initialized = false;
@@ -151,6 +195,9 @@ void MQTTBridge::loop() {
   
   // Maintain broker connections
   connectToBrokers();
+  
+  // Maintain analyzer server connections
+  maintainAnalyzerConnections();
   
   // Process packet queue
   processPacketQueue();
@@ -168,8 +215,13 @@ void MQTTBridge::loop() {
 }
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled) return;
+  if (!_initialized || !_packets_enabled) {
+    MQTT_DEBUG_PRINTLN("Packet received but not processing - initialized: %s, packets_enabled: %s", 
+                      _initialized ? "true" : "false", _packets_enabled ? "true" : "false");
+    return;
+  }
   
+  MQTT_DEBUG_PRINTLN("Packet received, queuing for transmission");
   // Queue packet for transmission
   queuePacket(packet, false);
 }
@@ -182,6 +234,8 @@ void MQTTBridge::sendPacket(mesh::Packet *packet) {
 }
 
 void MQTTBridge::connectToBrokers() {
+  // For now, connect to the first enabled broker
+  // TODO: Implement multi-broker support with PsychicMqttClient
   for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
     if (!_brokers[i].enabled) continue;
     
@@ -191,42 +245,32 @@ void MQTTBridge::connectToBrokers() {
       
       MQTT_DEBUG_PRINTLN("Connecting to broker %d: %s:%d", i, _brokers[i].host, _brokers[i].port);
       
-      // Set broker for this connection
-      _mqtt_client->setServer(_brokers[i].host, _brokers[i].port);
-      
       // Generate unique client ID
       char client_id[32];
       snprintf(client_id, sizeof(client_id), "%s_%d_%lu", _origin, i, millis());
       
-      // Attempt connection
-      bool connected = _mqtt_client->connect(
-        client_id,
-        _brokers[i].username,
-        _brokers[i].password
-      );
+      // Set broker URI and connect using PsychicMqttClient API
+      char broker_uri[128];
+      snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
+      _mqtt_client->setServer(broker_uri);
       
-      if (connected) {
-        _brokers[i].connected = true;
-        _brokers[i].reconnect_interval = 5000; // Reset to 5 seconds
-        _active_brokers++;
-        MQTT_DEBUG_PRINTLN("Connected to broker %d", i);
-        
-        // Publish initial status
-        if (_status_enabled) {
-          publishStatus();
-        }
-      } else {
-        _brokers[i].connected = false;
-        _brokers[i].last_attempt = millis();
-        // Exponential backoff: 5s, 10s, 20s, 30s max
-        _brokers[i].reconnect_interval = min(30000UL, _brokers[i].reconnect_interval * 2);
-        MQTT_DEBUG_PRINTLN("Failed to connect to broker %d", i);
+      // Set credentials if provided
+      if (strlen(_brokers[i].username) > 0) {
+        _mqtt_client->setCredentials(_brokers[i].username, _brokers[i].password);
       }
+      
+      // Connect to the broker (PsychicMqttClient uses async connection)
+      _mqtt_client->connect();
+      
+      // Update attempt timestamp
+      _brokers[i].last_attempt = millis();
+      MQTT_DEBUG_PRINTLN("Initiating connection to broker %d", i);
     }
     
     // Maintain connection
     if (_brokers[i].connected) {
-      _mqtt_client->loop();
+      // PsychicMqttClient handles connection maintenance internally
+      // TODO: Implement proper connection state checking with callbacks
       if (!_mqtt_client->connected()) {
         _brokers[i].connected = false;
         _active_brokers--;
@@ -237,12 +281,21 @@ void MQTTBridge::connectToBrokers() {
 }
 
 void MQTTBridge::processPacketQueue() {
-  if (_queue_count == 0 || !isAnyBrokerConnected()) return;
+  if (_queue_count == 0 || !isAnyBrokerConnected()) {
+    if (_queue_count > 0) {
+      MQTT_DEBUG_PRINTLN("Queue has %d packets but no brokers connected", _queue_count);
+    }
+    return;
+  }
+  
+  MQTT_DEBUG_PRINTLN("Processing packet queue - count: %d", _queue_count);
   
   // Process up to 5 packets per loop to avoid blocking
   int processed = 0;
   while (_queue_count > 0 && processed < 5) {
     QueuedPacket& queued = _packet_queue[_queue_head];
+    
+    MQTT_DEBUG_PRINTLN("Processing queued packet (is_tx: %s)", queued.is_tx ? "true" : "false");
     
     // Publish packet
     publishPacket(queued.packet, queued.is_tx);
@@ -296,19 +349,27 @@ void MQTTBridge::publishStatus() {
     sizeof(json_buffer)
   );
   
-  if (len > 0) {
-    // Publish to all connected brokers
-    for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
-      if (_brokers[i].enabled && _brokers[i].connected) {
-        char topic[128];
-        snprintf(topic, sizeof(topic), "meshcore/%s/%s/status", _iata, _device_id);
-        MQTT_DEBUG_PRINTLN("Publishing status to topic: %s", topic);
-        
-        _mqtt_client->setServer(_brokers[i].host, _brokers[i].port);
-        _mqtt_client->publish(topic, json_buffer, true); // retained
-      }
-    }
-  }
+          if (len > 0) {
+            // Publish to all connected brokers
+            for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
+              if (_brokers[i].enabled && _brokers[i].connected) {
+                char topic[128];
+                snprintf(topic, sizeof(topic), "meshcore/%s/%s/status", _iata, _device_id);
+                MQTT_DEBUG_PRINTLN("Publishing status to topic: %s", topic);
+                
+                // Set broker for this connection (PsychicMqttClient uses URI format)
+                char broker_uri[128];
+                snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
+                _mqtt_client->setServer(broker_uri);
+                _mqtt_client->publish(topic, 1, true, json_buffer, strlen(json_buffer)); // qos=1, retained=true
+              }
+            }
+            
+            // Also publish to Let's Mesh Analyzer servers
+            char analyzer_topic[128];
+            snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/status", _iata, _device_id);
+            publishToAnalyzerServers(analyzer_topic, json_buffer, true);
+          }
 }
 
 void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
@@ -344,10 +405,18 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
         snprintf(topic, sizeof(topic), "meshcore/%s/%s/packets", _iata, _device_id);
         MQTT_DEBUG_PRINTLN("Publishing packet to topic: %s", topic);
         
-        _mqtt_client->setServer(_brokers[i].host, _brokers[i].port);
-        _mqtt_client->publish(topic, json_buffer);
+        // Set broker for this connection (PsychicMqttClient uses URI format)
+        char broker_uri[128];
+        snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
+        _mqtt_client->setServer(broker_uri);
+        _mqtt_client->publish(topic, 1, false, json_buffer, strlen(json_buffer)); // qos=1, retained=false
       }
     }
+    
+    // Also publish to Let's Mesh Analyzer servers
+    char analyzer_topic[128];
+    snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/packets", _iata, _device_id);
+    publishToAnalyzerServers(analyzer_topic, json_buffer, false);
   }
 }
 
@@ -373,10 +442,18 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
         char topic[128];
         snprintf(topic, sizeof(topic), "meshcore/%s/%s/raw", _iata, _device_id);
         
-        _mqtt_client->setServer(_brokers[i].host, _brokers[i].port);
-        _mqtt_client->publish(topic, json_buffer);
+        // Set broker for this connection (PsychicMqttClient uses URI format)
+        char broker_uri[128];
+        snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
+        _mqtt_client->setServer(broker_uri);
+        _mqtt_client->publish(topic, 1, false, json_buffer, strlen(json_buffer)); // qos=1, retained=false
       }
     }
+    
+    // Also publish to Let's Mesh Analyzer servers
+    char analyzer_topic[128];
+    snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/raw", _iata, _device_id);
+    publishToAnalyzerServers(analyzer_topic, json_buffer, false);
   }
 }
 
@@ -471,6 +548,279 @@ void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, 
     _last_raw_timestamp = millis();
     MQTT_DEBUG_PRINTLN("Stored raw radio data: %d bytes, SNR=%.1f, RSSI=%.1f", len, snr, rssi);
   }
+}
+
+void MQTTBridge::setupAnalyzerServers() {
+  // Update analyzer server settings from preferences
+  _analyzer_us_enabled = _prefs->mqtt_analyzer_us_enabled;
+  _analyzer_eu_enabled = _prefs->mqtt_analyzer_eu_enabled;
+  
+  MQTT_DEBUG_PRINTLN("Analyzer servers - US: %s, EU: %s", 
+                     _analyzer_us_enabled ? "enabled" : "disabled",
+                     _analyzer_eu_enabled ? "enabled" : "disabled");
+  
+  // Create authentication token if any analyzer servers are enabled
+  if (_analyzer_us_enabled || _analyzer_eu_enabled) {
+    if (createAuthToken()) {
+      MQTT_DEBUG_PRINTLN("Created authentication token for analyzer servers");
+    } else {
+      MQTT_DEBUG_PRINTLN("Failed to create authentication token");
+    }
+  }
+}
+
+bool MQTTBridge::createAuthToken() {
+  if (!_identity) {
+    MQTT_DEBUG_PRINTLN("No identity available for creating auth token");
+    return false;
+  }
+  
+  // Create username in the format: v1_{UPPERCASE_PUBLIC_KEY}
+  char public_key_hex[65];
+  mesh::Utils::toHex(public_key_hex, _identity->pub_key, PUB_KEY_SIZE);
+  
+  snprintf(_analyzer_username, sizeof(_analyzer_username), "v1_%s", public_key_hex);
+  
+  MQTT_DEBUG_PRINTLN("Creating auth token for username: %s", _analyzer_username);
+  
+  bool us_token_created = false;
+  bool eu_token_created = false;
+  
+  // Create JWT token for US server
+  if (_analyzer_us_enabled) {
+    MQTT_DEBUG_PRINTLN("Creating JWT token for US server...");
+    if (JWTHelper::createAuthToken(
+        *_identity, "mqtt-us-v1.letsmesh.net", 
+        0, 86400, _auth_token_us, sizeof(_auth_token_us))) {
+      MQTT_DEBUG_PRINTLN("Created auth token for US server");
+      us_token_created = true;
+    } else {
+      MQTT_DEBUG_PRINTLN("Failed to create auth token for US server");
+    }
+  }
+  
+  // Create JWT token for EU server
+  if (_analyzer_eu_enabled) {
+    MQTT_DEBUG_PRINTLN("Creating JWT token for EU server...");
+    if (JWTHelper::createAuthToken(
+        *_identity, "mqtt-eu-v1.letsmesh.net", 
+        0, 86400, _auth_token_eu, sizeof(_auth_token_eu))) {
+      MQTT_DEBUG_PRINTLN("Created auth token for EU server");
+      eu_token_created = true;
+    } else {
+      MQTT_DEBUG_PRINTLN("Failed to create auth token for EU server");
+    }
+  }
+  
+  return us_token_created || eu_token_created;
+}
+
+void MQTTBridge::publishToAnalyzerServers(const char* topic, const char* payload, bool retained) {
+  if (!_analyzer_us_enabled && !_analyzer_eu_enabled) {
+    MQTT_DEBUG_PRINTLN("No analyzer servers enabled, skipping publish to topic: %s", topic);
+    return;
+  }
+  
+  MQTT_DEBUG_PRINTLN("Publishing to analyzer servers via WebSocket MQTT");
+  MQTT_DEBUG_PRINTLN("Topic: %s", topic);
+  MQTT_DEBUG_PRINTLN("Payload length: %d", strlen(payload));
+  MQTT_DEBUG_PRINTLN("US enabled: %s, EU enabled: %s", _analyzer_us_enabled ? "true" : "false", _analyzer_eu_enabled ? "true" : "false");
+  
+  // Publish to US server if enabled
+  if (_analyzer_us_enabled && _analyzer_us_client) {
+    MQTT_DEBUG_PRINTLN("Publishing to US analyzer server");
+    publishToAnalyzerClient(_analyzer_us_client, topic, payload, retained);
+  } else {
+    MQTT_DEBUG_PRINTLN("US analyzer server not available (enabled: %s, client: %s)", 
+                      _analyzer_us_enabled ? "true" : "false", _analyzer_us_client ? "exists" : "null");
+  }
+  
+  // Publish to EU server if enabled
+  if (_analyzer_eu_enabled && _analyzer_eu_client) {
+    MQTT_DEBUG_PRINTLN("Publishing to EU analyzer server");
+    publishToAnalyzerClient(_analyzer_eu_client, topic, payload, retained);
+  } else {
+    MQTT_DEBUG_PRINTLN("EU analyzer server not available (enabled: %s, client: %s)", 
+                      _analyzer_eu_enabled ? "true" : "false", _analyzer_eu_client ? "exists" : "null");
+  }
+}
+
+// Google Trust Services - GTS Root R4
+const char* GTS_ROOT_R4 = 
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIDejCCAmKgAwIBAgIQf+UwvzMTQ77dghYQST2KGzANBgkqhkiG9w0BAQsFADBX\n"
+    "MQswCQYDVQQGEwJCRTEZMBcGA1UEChMQR2xvYmFsU2lnbiBudi1zYTEQMA4GA1UE\n"
+    "CxMHUm9vdCBDQTEbMBkGA1UEAxMSR2xvYmFsU2lnbiBSb290IENBMB4XDTIzMTEx\n"
+    "NTAzNDMyMVoXDTI4MDEyODAwMDA0MlowRzELMAkGA1UEBhMCVVMxIjAgBgNVBAoT\n"
+    "GUdvb2dsZSBUcnVzdCBTZXJ2aWNlcyBMTEMxFDASBgNVBAMTC0dUUyBSb290IFI0\n"
+    "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE83Rzp2iLYK5DuDXFgTB7S0md+8Fhzube\n"
+    "Rr1r1WEYNa5A3XP3iZEwWus87oV8okB2O6nGuEfYKueSkWpz6bFyOZ8pn6KY019e\n"
+    "WIZlD6GEZQbR3IvJx3PIjGov5cSr0R2Ko4H/MIH8MA4GA1UdDwEB/wQEAwIBhjAd\n"
+    "BgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDwYDVR0TAQH/BAUwAwEB/zAd\n"
+    "BgNVHQ4EFgQUgEzW63T/STaj1dj8tT7FavCUHYwwHwYDVR0jBBgwFoAUYHtmGkUN\n"
+    "l8qJUC99BM00qP/8/UswNgYIKwYBBQUHAQEEKjAoMCYGCCsGAQUFBzAChhpodHRw\n"
+    "Oi8vaS5wa2kuZ29vZy9nc3IxLmNydDAtBgNVHR8EJjAkMCKgIKAehhxodHRwOi8v\n"
+    "Yy5wa2kuZ29vZy9yL2dzcjEuY3JsMBMGA1UdIAQMMAowCAYGZ4EMAQIBMA0GCSqG\n"
+    "SIb3DQEBCwUAA4IBAQAYQrsPBtYDh5bjP2OBDwmkoWhIDDkic574y04tfzHpn+cJ\n"
+    "odI2D4SseesQ6bDrarZ7C30ddLibZatoKiws3UL9xnELz4ct92vID24FfVbiI1hY\n"
+    "+SW6FoVHkNeWIP0GCbaM4C6uVdF5dTUsMVs/ZbzNnIdCp5Gxmx5ejvEau8otR/Cs\n"
+    "kGN+hr/W5GvT1tMBjgWKZ1i4//emhA1JG1BbPzoLJQvyEotc03lXjTaCzv8mEbep\n"
+    "8RqZ7a2CPsgRbuvTPBwcOMBBmuFeU88+FSBX6+7iP0il8b4Z0QFqIwwMHfs/L6K1\n"
+    "vepuoxtGzi4CZ68zJpiq1UvSqTbFJjtbD4seiMHl\n"
+    "-----END CERTIFICATE-----\n";
+
+void MQTTBridge::setupAnalyzerClients() {
+  if (!_analyzer_us_enabled && !_analyzer_eu_enabled) {
+    MQTT_DEBUG_PRINTLN("No analyzer servers enabled, skipping PsychicMqttClient setup");
+    return;
+  }
+
+  MQTT_DEBUG_PRINTLN("Setting up PsychicMqttClient WebSocket clients...");
+
+  // Setup US server client
+  if (_analyzer_us_enabled) {
+    _analyzer_us_client = new PsychicMqttClient();
+
+    // Set up event callbacks for US server
+    _analyzer_us_client->onConnect([this](bool sessionPresent) {
+      MQTT_DEBUG_PRINTLN("Connected to Let's Mesh US server, session present: %s", sessionPresent ? "true" : "false");
+      // Publish status message when connected
+      publishStatusToAnalyzerClient(_analyzer_us_client, "mqtt-us-v1.letsmesh.net");
+    });
+
+    _analyzer_us_client->onDisconnect([this](bool sessionPresent) {
+      MQTT_DEBUG_PRINTLN("Disconnected from Let's Mesh US server, session present: %s", sessionPresent ? "true" : "false");
+    });
+
+            _analyzer_us_client->onError([this](esp_mqtt_error_codes error) {
+              MQTT_DEBUG_PRINTLN("Let's Mesh US server error - error_type: %d, connect_return_code: %d", 
+                                error.error_type, error.connect_return_code);
+            });
+
+    // Set up WebSocket MQTT over TLS connection to US server
+    _analyzer_us_client->setServer("wss://mqtt-us-v1.letsmesh.net:443/mqtt");
+    MQTT_DEBUG_PRINTLN("US Server - Username: %s", _analyzer_username);
+    MQTT_DEBUG_PRINTLN("US Server - Auth token length: %d", strlen(_auth_token_us));
+    MQTT_DEBUG_PRINTLN("US Server - Auth token (first 50 chars): %.50s...", _auth_token_us);
+    _analyzer_us_client->setCredentials(_analyzer_username, _auth_token_us);
+
+    // Configure TLS - use specific GTS Root R4 certificate
+    MQTT_DEBUG_PRINTLN("Using GTS Root R4 certificate for US server");
+    _analyzer_us_client->setCACert(GTS_ROOT_R4);
+
+    // Connect to US server (async connection)
+    _analyzer_us_client->connect();
+    MQTT_DEBUG_PRINTLN("Initiating connection to Let's Mesh US server");
+  }
+
+  // Setup EU server client
+  if (_analyzer_eu_enabled) {
+    _analyzer_eu_client = new PsychicMqttClient();
+
+    // Set up event callbacks for EU server
+    _analyzer_eu_client->onConnect([this](bool sessionPresent) {
+      MQTT_DEBUG_PRINTLN("Connected to Let's Mesh EU server, session present: %s", sessionPresent ? "true" : "false");
+      // Publish status message when connected
+      publishStatusToAnalyzerClient(_analyzer_eu_client, "mqtt-eu-v1.letsmesh.net");
+    });
+
+    _analyzer_eu_client->onDisconnect([this](bool sessionPresent) {
+      MQTT_DEBUG_PRINTLN("Disconnected from Let's Mesh EU server, session present: %s", sessionPresent ? "true" : "false");
+    });
+
+            _analyzer_eu_client->onError([this](esp_mqtt_error_codes error) {
+              MQTT_DEBUG_PRINTLN("Let's Mesh EU server error - error_type: %d, connect_return_code: %d", 
+                                error.error_type, error.connect_return_code);
+            });
+
+    // Set up WebSocket MQTT over TLS connection to EU server
+    _analyzer_eu_client->setServer("wss://mqtt-eu-v1.letsmesh.net:443/mqtt");
+    MQTT_DEBUG_PRINTLN("EU Server - Username: %s", _analyzer_username);
+    MQTT_DEBUG_PRINTLN("EU Server - Auth token length: %d", strlen(_auth_token_eu));
+    MQTT_DEBUG_PRINTLN("EU Server - Auth token (first 50 chars): %.50s...", _auth_token_eu);
+    _analyzer_eu_client->setCredentials(_analyzer_username, _auth_token_eu);
+
+    // Configure TLS - use specific GTS Root R4 certificate
+    MQTT_DEBUG_PRINTLN("Using GTS Root R4 certificate for EU server");
+    _analyzer_eu_client->setCACert(GTS_ROOT_R4);
+
+    // Connect to EU server (async connection)
+    _analyzer_eu_client->connect();
+    MQTT_DEBUG_PRINTLN("Initiating connection to Let's Mesh EU server");
+  }
+}
+
+void MQTTBridge::publishToAnalyzerClient(PsychicMqttClient* client, const char* topic, const char* payload, bool retained) {
+  if (!client) {
+    MQTT_DEBUG_PRINTLN("PsychicMqttClient is null");
+    return;
+  }
+  
+  if (!client->connected()) {
+    MQTT_DEBUG_PRINTLN("PsychicMqttClient not connected - skipping publish to topic: %s", topic);
+    return;
+  }
+  
+  MQTT_DEBUG_PRINTLN("Publishing to analyzer client - topic: %s, payload length: %d, retained: %s", 
+                    topic, strlen(payload), retained ? "true" : "false");
+  
+  // Publish message using PsychicMqttClient API
+  int result = client->publish(topic, 1, retained, payload, strlen(payload));
+  if (result > 0) {
+    MQTT_DEBUG_PRINTLN("PsychicMqttClient message published successfully, result=%d", result);
+  } else {
+    MQTT_DEBUG_PRINTLN("PsychicMqttClient publish failed, result=%d", result);
+  }
+}
+
+void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const char* server_name) {
+  if (!client || !client->connected()) {
+    return;
+  }
+  
+  // Create status message
+  char status_topic[128];
+  snprintf(status_topic, sizeof(status_topic), "meshcore/%s/%s/status", _iata, _device_id);
+  
+  // Build status JSON
+  char status_payload[512];
+  snprintf(status_payload, sizeof(status_payload),
+    "{"
+    "\"device_id\":\"%s\","
+    "\"origin_id\":\"%s\","
+    "\"origin\":\"%s\","
+    "\"iata\":\"%s\","
+    "\"server\":\"%s\","
+    "\"status\":\"connected\","
+    "\"timestamp\":%lu,"
+    "\"uptime\":%lu"
+    "}",
+    _device_id,
+    _device_id,  // origin_id should be the device_id (public key)
+    _origin,
+    _iata,
+    server_name,
+    time(nullptr),
+    millis() / 1000
+  );
+  
+  MQTT_DEBUG_PRINTLN("Publishing status to %s server", server_name);
+  MQTT_DEBUG_PRINTLN("Status topic: %s", status_topic);
+  MQTT_DEBUG_PRINTLN("Status payload: %s", status_payload);
+  
+  // Publish status message (retained)
+  int result = client->publish(status_topic, 1, true, status_payload, strlen(status_payload));
+  if (result > 0) {
+    MQTT_DEBUG_PRINTLN("Status published to %s server successfully, result=%d", server_name, result);
+  } else {
+    MQTT_DEBUG_PRINTLN("Status publish to %s server failed, result=%d", server_name, result);
+  }
+}
+
+void MQTTBridge::maintainAnalyzerConnections() {
+  // PsychicMqttClient handles connection maintenance and reconnection automatically
+  // No manual maintenance needed - the library manages this internally
+  // Connection state changes are handled via the onConnect/onDisconnect callbacks
 }
 
 void MQTTBridge::setMessageTypes(bool status, bool packets, bool raw) {

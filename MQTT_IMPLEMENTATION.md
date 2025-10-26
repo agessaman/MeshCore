@@ -56,6 +56,8 @@ The MQTT bridge comes with the following defaults:
 - **WiFi Password**: "password_here" (must be configured)
 - **Timezone**: "America/Los_Angeles" (Pacific Time with DST support)
 - **Timezone Offset**: -8 hours (fallback)
+- **Let's Mesh Analyzer US**: Enabled (mqtt-us-v1.letsmesh.net:443)
+- **Let's Mesh Analyzer EU**: Enabled (mqtt-eu-v1.letsmesh.net:443)
 
 ## CLI Commands
 
@@ -69,6 +71,8 @@ The MQTT bridge comes with the following defaults:
 - `get mqtt.raw` - Get raw message setting (on/off)
 - `get mqtt.tx` - Get TX message setting (on/off)
 - `get mqtt.interval` - Get status publish interval (ms)
+- `get mqtt.analyzer.us` - Get US Let's Mesh Analyzer server setting (on/off)
+- `get mqtt.analyzer.eu` - Get EU Let's Mesh Analyzer server setting (on/off)
 
 #### Set Commands
 - `set mqtt.origin <name>` - Set device origin name
@@ -78,6 +82,8 @@ The MQTT bridge comes with the following defaults:
 - `set mqtt.raw on|off` - Enable/disable raw messages
 - `set mqtt.tx on|off` - Enable/disable TX packet messages
 - `set mqtt.interval <ms>` - Set status publish interval (1000-3600000 ms)
+- `set mqtt.analyzer.us on|off` - Enable/disable US Let's Mesh Analyzer server
+- `set mqtt.analyzer.eu on|off` - Enable/disable EU Let's Mesh Analyzer server
 
 ### WiFi Commands
 
@@ -219,6 +225,16 @@ Minimal raw packet data for map integration.
 - Periodic time updates (every hour)
 - Proper UTC system time handling
 
+### Let's Mesh Analyzer Integration
+- **JWT Authentication**: Ed25519-signed tokens for secure MQTT authentication
+- **WebSocket MQTT**: Support for MQTT over WebSocket connections (TLS/SSL)
+- **Dual Server Support**: Both US and EU servers enabled by default
+- **Automatic Token Generation**: Creates authentication tokens using device's Ed25519 keys
+- **Username Format**: `v1_{UPPERCASE_PUBLIC_KEY}` (e.g., `v1_7E7662676F7F0850A8A355BAAFBFC1EB7B4174C340442D7D7161C9474A2C9400`)
+- **Server Configuration**:
+  - US Server: `mqtt-us-v1.letsmesh.net:443` (WebSocket with TLS)
+  - EU Server: `mqtt-eu-v1.letsmesh.net:443` (WebSocket with TLS)
+
 ## Testing
 
 1. Flash the MQTT bridge firmware to your device
@@ -235,11 +251,14 @@ Minimal raw packet data for map integration.
 - **NTPClient**: Network time protocol client
 - **Timezone**: Timezone conversion library (JChristensen/Timezone)
 - **WiFi**: ESP32 WiFi functionality
+- **Ed25519**: Cryptographic library for JWT token signing
+- **JWTHelper**: Custom JWT token generation for Let's Mesh Analyzer authentication
 
 ## Future Enhancements
 
-- Device-signed JWTs for WebSocket MQTT servers
+- Full WebSocket MQTT implementation (currently JWT tokens are generated but WebSocket publishing is pending)
 - Multiple broker configuration via CLI
 - Advanced packet filtering
 - Custom topic templates
 - TLS/SSL support for secure connections
+- Real-time WebSocket MQTT publishing to Let's Mesh Analyzer servers

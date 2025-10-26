@@ -14,10 +14,7 @@ bool JWTHelper::createAuthToken(
   unsigned long issuedAt,
   unsigned long expiresIn,
   char* token,
-  size_t tokenSize,
-  const char* owner,
-  const char* client,
-  const char* email
+  size_t tokenSize
 ) {
   Serial.printf("JWTHelper: Starting JWT creation for audience: %s\n", audience);
   
@@ -55,7 +52,7 @@ bool JWTHelper::createAuthToken(
   
   // Create payload with HEX public key (not base64!)
   char payload[512];
-  size_t payloadLen = createPayload(publicKeyHex, audience, issuedAt, expiresIn, payload, sizeof(payload), owner, client, email);
+  size_t payloadLen = createPayload(publicKeyHex, audience, issuedAt, expiresIn, payload, sizeof(payload));
   if (payloadLen == 0) {
     Serial.printf("JWTHelper: Failed to create payload\n");
     return false;
@@ -164,6 +161,7 @@ size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* o
     return 0;
   }
   
+  // Use ESP32's built-in mbedTLS base64 encoding
   size_t outlen = 0;
   int ret = mbedtls_base64_encode((unsigned char*)output, outputSize - 1, &outlen, input, inputLen);
   
@@ -174,22 +172,22 @@ size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* o
   
   Serial.printf("JWTHelper: mbedtls_base64_encode result: %s (outlen: %d)\n", output, (int)outlen);
   
-  // Convert to base64 URL format in-place (replace + with -, / with _, remove padding =)
-  for (size_t i = 0; i < outlen; i++) {
-    if (output[i] == '+') {
-      output[i] = '-';
-    } else if (output[i] == '/') {
-      output[i] = '_';
-    }
+  // Convert to base64 URL format (replace + with -, / with _, remove padding =)
+  String encoded(output);
+  encoded.replace('+', '-');
+  encoded.replace('/', '_');
+  encoded.replace("=", "");
+  
+  // Copy back to output buffer
+  size_t len = encoded.length();
+  if (len >= outputSize) {
+    Serial.printf("JWTHelper: base64UrlEncode output too large: %d >= %d\n", (int)len, (int)outputSize);
+    return 0;
   }
   
-  // Remove padding '=' characters
-  while (outlen > 0 && output[outlen-1] == '=') {
-    outlen--;
-  }
-  output[outlen] = '\0';
-  Serial.printf("JWTHelper: base64UrlEncode completed, outputLen: %d\n", (int)outlen);
-  return outlen;
+  strcpy(output, encoded.c_str());
+  Serial.printf("JWTHelper: base64UrlEncode completed, outputLen: %d\n", (int)len);
+  return len;
 }
 
 size_t JWTHelper::createHeader(char* output, size_t outputSize) {
@@ -221,23 +219,11 @@ size_t JWTHelper::createPayload(
   unsigned long issuedAt,
   unsigned long expiresIn,
   char* output,
-  size_t outputSize,
-  const char* owner,
-  const char* client,
-  const char* email
+  size_t outputSize
 ) {
   Serial.printf("JWTHelper: createPayload called with outputSize: %d\n", (int)outputSize);
   Serial.printf("JWTHelper: publicKey: %s, audience: %s, issuedAt: %lu, expiresIn: %lu\n", 
                 publicKey, audience, issuedAt, expiresIn);
-  if (owner) {
-    Serial.printf("JWTHelper: owner: %s\n", owner);
-  }
-  if (client) {
-    Serial.printf("JWTHelper: client: %s\n", client);
-  }
-  if (email) {
-    Serial.printf("JWTHelper: email: %s\n", email);
-  }
   
   // Create JWT payload
   DynamicJsonDocument doc(512);
@@ -247,21 +233,6 @@ size_t JWTHelper::createPayload(
   
   if (expiresIn > 0) {
     doc["exp"] = issuedAt + expiresIn;
-  }
-  
-  // Add optional owner field if provided
-  if (owner && strlen(owner) > 0) {
-    doc["owner"] = owner;
-  }
-  
-  // Add optional client field if provided
-  if (client && strlen(client) > 0) {
-    doc["client"] = client;
-  }
-  
-  // Add optional email field if provided
-  if (email && strlen(email) > 0) {
-    doc["email"] = email;
   }
   
   // Use temporary buffer for JSON

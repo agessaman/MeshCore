@@ -69,6 +69,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.read((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.read((uint8_t *)&_prefs->advert_loc_policy, sizeof (_prefs->advert_loc_policy));          // 161
+<<<<<<< HEAD
     file.read((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162 (from upstream)
     // MQTT settings - skip reading from main prefs file (now stored separately)
     // For backward compatibility, we'll skip these bytes if they exist in old files
@@ -97,6 +98,29 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       file.read(skip_buffer, to_read);
       remaining -= to_read;
     }
+=======
+    // MQTT settings
+    file.read((uint8_t *)&_prefs->mqtt_origin, sizeof(_prefs->mqtt_origin));                         // 162
+    file.read((uint8_t *)&_prefs->mqtt_iata, sizeof(_prefs->mqtt_iata));                           // 194
+        file.read((uint8_t *)&_prefs->mqtt_status_enabled, sizeof(_prefs->mqtt_status_enabled));         // 202
+        file.read((uint8_t *)&_prefs->mqtt_packets_enabled, sizeof(_prefs->mqtt_packets_enabled));       // 203
+        file.read((uint8_t *)&_prefs->mqtt_raw_enabled, sizeof(_prefs->mqtt_raw_enabled));               // 204
+        file.read((uint8_t *)&_prefs->mqtt_tx_enabled, sizeof(_prefs->mqtt_tx_enabled));                 // 205
+        file.read((uint8_t *)&_prefs->mqtt_status_interval, sizeof(_prefs->mqtt_status_interval));       // 206
+    
+    // WiFi settings
+    file.read((uint8_t *)&_prefs->wifi_ssid, sizeof(_prefs->wifi_ssid));                             // 209
+    file.read((uint8_t *)&_prefs->wifi_password, sizeof(_prefs->wifi_password));                    // 241
+    
+        // Timezone settings
+        file.read((uint8_t *)&_prefs->timezone_string, sizeof(_prefs->timezone_string));                // 305
+        file.read((uint8_t *)&_prefs->timezone_offset, sizeof(_prefs->timezone_offset));                // 337
+        
+        // Let's Mesh Analyzer settings
+        file.read((uint8_t *)&_prefs->mqtt_analyzer_us_enabled, sizeof(_prefs->mqtt_analyzer_us_enabled)); // 338
+        file.read((uint8_t *)&_prefs->mqtt_analyzer_eu_enabled, sizeof(_prefs->mqtt_analyzer_eu_enabled)); // 339
+    // 209
+>>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -173,6 +197,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.write((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
+<<<<<<< HEAD
     file.write((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162 (from upstream)
     // MQTT settings - no longer saved here (stored in separate /mqtt_prefs file)
     // Write zeros/padding to maintain file format compatibility
@@ -199,6 +224,29 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
       file.write(pad, to_write);
       remaining -= to_write;
     }
+=======
+    // MQTT settings
+    file.write((uint8_t *)&_prefs->mqtt_origin, sizeof(_prefs->mqtt_origin));                         // 162
+    file.write((uint8_t *)&_prefs->mqtt_iata, sizeof(_prefs->mqtt_iata));                           // 194
+        file.write((uint8_t *)&_prefs->mqtt_status_enabled, sizeof(_prefs->mqtt_status_enabled));         // 202
+        file.write((uint8_t *)&_prefs->mqtt_packets_enabled, sizeof(_prefs->mqtt_packets_enabled));       // 203
+        file.write((uint8_t *)&_prefs->mqtt_raw_enabled, sizeof(_prefs->mqtt_raw_enabled));               // 204
+        file.write((uint8_t *)&_prefs->mqtt_tx_enabled, sizeof(_prefs->mqtt_tx_enabled));                 // 205
+        file.write((uint8_t *)&_prefs->mqtt_status_interval, sizeof(_prefs->mqtt_status_interval));     // 206
+    
+    // WiFi settings
+    file.write((uint8_t *)&_prefs->wifi_ssid, sizeof(_prefs->wifi_ssid));                             // 209
+    file.write((uint8_t *)&_prefs->wifi_password, sizeof(_prefs->wifi_password));                    // 241
+    
+        // Timezone settings
+        file.write((uint8_t *)&_prefs->timezone_string, sizeof(_prefs->timezone_string));                // 305
+        file.write((uint8_t *)&_prefs->timezone_offset, sizeof(_prefs->timezone_offset));                // 337
+        
+        // Let's Mesh Analyzer settings
+        file.write((uint8_t *)&_prefs->mqtt_analyzer_us_enabled, sizeof(_prefs->mqtt_analyzer_us_enabled)); // 338
+        file.write((uint8_t *)&_prefs->mqtt_analyzer_eu_enabled, sizeof(_prefs->mqtt_analyzer_eu_enabled)); // 339
+    // 209
+>>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
 
     file.close();
   }
@@ -409,6 +457,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 sprintf(reply, "> %s", _prefs->timezone_string);
               } else if (memcmp(config, "timezone.offset", 15) == 0) {
                 sprintf(reply, "> %d", _prefs->timezone_offset);
+              } else if (memcmp(config, "mqtt.analyzer.us", 16) == 0) {
+                sprintf(reply, "> %s", _prefs->mqtt_analyzer_us_enabled ? "on" : "off");
+              } else if (memcmp(config, "mqtt.analyzer.eu", 16) == 0) {
+                sprintf(reply, "> %s", _prefs->mqtt_analyzer_eu_enabled ? "on" : "off");
 #endif
       } else {
         sprintf(reply, "??: %s", config);
@@ -657,6 +709,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 } else {
                   strcpy(reply, "Error: timezone offset must be between -12 and +14");
                 }
+              } else if (memcmp(config, "mqtt.analyzer.us ", 17) == 0) {
+                _prefs->mqtt_analyzer_us_enabled = memcmp(&config[17], "on", 2) == 0;
+                savePrefs();
+                strcpy(reply, "OK");
+              } else if (memcmp(config, "mqtt.analyzer.eu ", 17) == 0) {
+                _prefs->mqtt_analyzer_eu_enabled = memcmp(&config[17], "on", 2) == 0;
+                savePrefs();
+                strcpy(reply, "OK");
 #endif
       } else {
         sprintf(reply, "unknown config: %s", config);

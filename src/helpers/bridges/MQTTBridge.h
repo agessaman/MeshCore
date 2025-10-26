@@ -2,11 +2,12 @@
 
 #include "MeshCore.h"
 #include "helpers/bridges/BridgeBase.h"
-#include <PubSubClient.h>
+#include <PsychicMqttClient.h>
 #include <WiFi.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
+#include "helpers/JWTHelper.h"
 
 #if defined(MQTT_DEBUG) && defined(ARDUINO)
   #include <Arduino.h>
@@ -44,8 +45,7 @@
  */
 class MQTTBridge : public BridgeBase {
 private:
-  PubSubClient* _mqtt_client;
-  WiFiClient* _wifi_client;
+  PsychicMqttClient* _mqtt_client;
   
   // MQTT broker configuration
   struct MQTTBroker {
@@ -107,6 +107,20 @@ private:
   float _last_rssi;
   unsigned long _last_raw_timestamp;
   
+  // Let's Mesh Analyzer support
+  bool _analyzer_us_enabled;
+  bool _analyzer_eu_enabled;
+  char _auth_token_us[1024]; // JWT token for US server authentication
+  char _auth_token_eu[1024]; // JWT token for EU server authentication
+  char _analyzer_username[70]; // Username in format v1_{UPPERCASE_PUBLIC_KEY}
+  
+  // Device identity for JWT token creation
+  mesh::LocalIdentity *_identity;
+  
+  // PsychicMqttClient instances for different brokers
+  PsychicMqttClient* _analyzer_us_client;
+  PsychicMqttClient* _analyzer_eu_client;
+  
   // Internal methods
   void connectToBrokers();
   void processPacketQueue();
@@ -127,8 +141,9 @@ public:
    * @param prefs Node preferences for configuration settings
    * @param mgr PacketManager for allocating and queuing packets
    * @param rtc RTCClock for timestamping debug messages
+   * @param identity Device identity for JWT token creation
    */
-  MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc);
+  MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
 
   /**
    * Initializes the MQTT bridge
@@ -229,6 +244,17 @@ public:
    * @param rssi Received signal strength indicator
    */
   void storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi);
+  
+  // Let's Mesh Analyzer methods
+  void setupAnalyzerServers();
+  bool createAuthToken();
+  void publishToAnalyzerServers(const char* topic, const char* payload, bool retained = false);
+  
+  // PsychicMqttClient WebSocket methods
+  void setupAnalyzerClients();
+  void maintainAnalyzerConnections();
+  void publishToAnalyzerClient(PsychicMqttClient* client, const char* topic, const char* payload, bool retained = false);
+  void publishStatusToAnalyzerClient(PsychicMqttClient* client, const char* server_name);
 
   /**
    * Enable/disable message types
