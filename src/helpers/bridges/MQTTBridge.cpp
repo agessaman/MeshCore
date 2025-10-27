@@ -15,7 +15,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
               _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false),
               _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
               _analyzer_us_enabled(false), _analyzer_eu_enabled(false), _identity(identity),
-              _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr) {
+              _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr), _config_valid(false) {
   
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -29,6 +29,26 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _raw_enabled = false;
   _tx_enabled = false;  // Disable TX packets by default
   
+  // Initialize MQTT server settings with defaults
+  strncpy(_prefs->mqtt_server, "your-mqtt-broker.com", sizeof(_prefs->mqtt_server) - 1);
+  _prefs->mqtt_port = 1883;
+  strncpy(_prefs->mqtt_username, "your-username", sizeof(_prefs->mqtt_username) - 1);
+  strncpy(_prefs->mqtt_password, "your-password", sizeof(_prefs->mqtt_password) - 1);
+  
+  // Override with build flags if defined
+#ifdef MQTT_SERVER
+  strncpy(_prefs->mqtt_server, MQTT_SERVER, sizeof(_prefs->mqtt_server) - 1);
+#endif
+#ifdef MQTT_PORT
+  _prefs->mqtt_port = MQTT_PORT;
+#endif
+#ifdef MQTT_USERNAME
+  strncpy(_prefs->mqtt_username, MQTT_USERNAME, sizeof(_prefs->mqtt_username) - 1);
+#endif
+#ifdef MQTT_PASSWORD
+  strncpy(_prefs->mqtt_password, MQTT_PASSWORD, sizeof(_prefs->mqtt_password) - 1);
+#endif
+  
   // Initialize packet queue
   memset(_packet_queue, 0, sizeof(_packet_queue));
   
@@ -38,6 +58,15 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
 
 void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("Initializing MQTT Bridge...");
+  
+  // Validate configuration once and store the result
+  _config_valid = isMQTTConfigValid();
+  if (!_config_valid) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - configuration not valid");
+    return;
+  }
+  
+  MQTT_DEBUG_PRINTLN("MQTT configuration is valid - proceeding with initialization");
   
   // Update origin and IATA from preferences
   strncpy(_origin, _prefs->mqtt_origin, sizeof(_origin) - 1);
@@ -137,8 +166,8 @@ void MQTTBridge::begin() {
     }
   });
   
-  // Set default broker (meshtastic.pugetmesh.org)
-  setBroker(0, "meshtastic.pugetmesh.org", 1883, "meshdev", "large4cats", true);
+  // Set default broker from preferences or build flags
+  setBroker(0, _prefs->mqtt_server, _prefs->mqtt_port, _prefs->mqtt_username, _prefs->mqtt_password, true);
   
   // Setup Let's Mesh Analyzer servers
   setupAnalyzerServers();
@@ -191,6 +220,37 @@ void MQTTBridge::end() {
   MQTT_DEBUG_PRINTLN("MQTT Bridge stopped");
 }
 
+bool MQTTBridge::isConfigValid() const {
+  return _config_valid;
+}
+
+bool MQTTBridge::isConfigValid(const NodePrefs* prefs) {
+  // Check if MQTT server is configured (not default placeholder)
+  if (strlen(prefs->mqtt_server) == 0 || 
+      strcmp(prefs->mqtt_server, "your-mqtt-broker.com") == 0) {
+    return false;
+  }
+  
+  // Check if MQTT port is valid
+  if (prefs->mqtt_port == 0 || prefs->mqtt_port > 65535) {
+    return false;
+  }
+  
+  // Check if MQTT username is configured (not default placeholder)
+  if (strlen(prefs->mqtt_username) == 0 || 
+      strcmp(prefs->mqtt_username, "your-username") == 0) {
+    return false;
+  }
+  
+  // Check if MQTT password is configured (not default placeholder)
+  if (strlen(prefs->mqtt_password) == 0 || 
+      strcmp(prefs->mqtt_password, "your-password") == 0) {
+    return false;
+  }
+  
+  return true;
+}
+
 void MQTTBridge::loop() {
   if (!_initialized) return;
   
@@ -216,9 +276,9 @@ void MQTTBridge::loop() {
 }
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled) {
-    MQTT_DEBUG_PRINTLN("Packet received but not processing - initialized: %s, packets_enabled: %s", 
-                      _initialized ? "true" : "false", _packets_enabled ? "true" : "false");
+  if (!_initialized || !_packets_enabled || !_config_valid) {
+    MQTT_DEBUG_PRINTLN("Packet received but not processing - initialized: %s, packets_enabled: %s, config_valid: %s", 
+                      _initialized ? "true" : "false", _packets_enabled ? "true" : "false", _config_valid ? "true" : "false");
     return;
   }
   
@@ -228,13 +288,45 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled || !_tx_enabled) return;
+  if (!_initialized || !_packets_enabled || !_tx_enabled || !_config_valid) return;
   
   // Queue packet for transmission (only if TX enabled)
   queuePacket(packet, true);
 }
 
+bool MQTTBridge::isMQTTConfigValid() {
+  // Check if MQTT server is configured (not default placeholder)
+  if (strlen(_prefs->mqtt_server) == 0 || 
+      strcmp(_prefs->mqtt_server, "your-mqtt-broker.com") == 0) {
+    return false;
+  }
+  
+  // Check if MQTT port is valid
+  if (_prefs->mqtt_port == 0 || _prefs->mqtt_port > 65535) {
+    return false;
+  }
+  
+  // Check if MQTT username is configured (not default placeholder)
+  if (strlen(_prefs->mqtt_username) == 0 || 
+      strcmp(_prefs->mqtt_username, "your-username") == 0) {
+    return false;
+  }
+  
+  // Check if MQTT password is configured (not default placeholder)
+  if (strlen(_prefs->mqtt_password) == 0 || 
+      strcmp(_prefs->mqtt_password, "your-password") == 0) {
+    return false;
+  }
+  
+  return true;
+}
+
 void MQTTBridge::connectToBrokers() {
+  // Check if MQTT configuration is valid before attempting connection
+  if (!_config_valid) {
+    return;
+  }
+  
   // For now, connect to the first enabled broker
   // TODO: Implement multi-broker support with PsychicMqttClient
   for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
@@ -282,9 +374,9 @@ void MQTTBridge::connectToBrokers() {
 }
 
 void MQTTBridge::processPacketQueue() {
-  if (_queue_count == 0 || !isAnyBrokerConnected()) {
+  if (_queue_count == 0 || !isAnyBrokerConnected() || !_config_valid) {
     if (_queue_count > 0) {
-      MQTT_DEBUG_PRINTLN("Queue has %d packets but no brokers connected", _queue_count);
+      MQTT_DEBUG_PRINTLN("Queue has %d packets but no brokers connected or config invalid", _queue_count);
     }
     return;
   }
@@ -313,7 +405,7 @@ void MQTTBridge::processPacketQueue() {
 }
 
 void MQTTBridge::publishStatus() {
-  if (!isAnyBrokerConnected()) return;
+  if (!isAnyBrokerConnected() || !_config_valid) return;
   
   char json_buffer[512];
   char origin_id[65];
@@ -378,7 +470,7 @@ void MQTTBridge::publishStatus() {
 }
 
 void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
-  if (!packet) return;
+  if (!packet || !_config_valid) return;
   
   char json_buffer[1024];
   char origin_id[65];
@@ -426,7 +518,7 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
 }
 
 void MQTTBridge::publishRaw(mesh::Packet* packet) {
-  if (!packet) return;
+  if (!packet || !_config_valid) return;
   
   char json_buffer[512];
   char origin_id[65];

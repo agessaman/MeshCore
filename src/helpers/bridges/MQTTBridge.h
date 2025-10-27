@@ -122,6 +122,9 @@ private:
   PsychicMqttClient* _analyzer_us_client;
   PsychicMqttClient* _analyzer_eu_client;
   
+  // Configuration validation state
+  bool _config_valid;
+  
   // Internal methods
   void connectToBrokers();
   void processPacketQueue();
@@ -134,6 +137,7 @@ private:
   void setBrokerDefaults();
   void syncTimeWithNTP();
   Timezone* createTimezoneFromString(const char* tz_string);
+  bool isMQTTConfigValid();
   
 public:
   /**
@@ -163,6 +167,21 @@ public:
    * - Releases resources
    */
   void end() override;
+
+  /**
+   * Checks if MQTT configuration is valid
+   *
+   * @return true if all required MQTT settings are properly configured
+   */
+  bool isConfigValid() const;
+
+  /**
+   * Static method to validate MQTT configuration from preferences
+   *
+   * @param prefs Node preferences containing MQTT settings
+   * @return true if all required MQTT settings are properly configured
+   */
+  static bool isConfigValid(const NodePrefs* prefs);
 
   /**
    * Main loop handler
