@@ -184,6 +184,13 @@ public:
   static bool isConfigValid(const NodePrefs* prefs);
 
   /**
+   * Check if MQTT bridge is ready to operate (has WiFi credentials)
+   *
+   * @return true if WiFi credentials are configured and bridge can connect
+   */
+  bool isReady() const;
+
+  /**
    * Main loop handler
    * - Maintains broker connections
    * - Processes packet queue

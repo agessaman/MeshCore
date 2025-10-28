@@ -2,6 +2,53 @@
 
 This document describes the MQTT bridge implementation that allows MeshCore repeaters to uplink packet data to multiple MQTT brokers.
 
+## Quick Start Guide
+
+### Essential Commands to Get MQTT Repeater Running
+
+**1. Connect to device console via repeater login or serial console (115200 baud)**
+```bash
+# Connect to device via serial
+```
+
+**2. Configure WiFi Credentials**
+```bash
+set wifi.ssid YourWiFiNetwork
+set wifi.pwd YourWiFiPassword
+```
+
+**3. Reboot to Connect to WiFi**
+```bash
+reboot
+```
+
+**4. Verify Configuration**
+```bash
+get wifi.ssid
+get bridge.enabled
+get mqtt.origin
+get mqtt.iata
+```
+If you wish to change mqtt.iata, use `set mqtt.iata XXX`
+
+**5. Restart Bridge (if needed)**
+```bash
+# Option A: Toggle bridge off then on
+set bridge.enabled off
+set bridge.enabled on
+
+# Option B: Full device reboot
+reboot
+```
+
+**That's it!** The device will now:
+- Connect to WiFi automatically
+- Start uplinking mesh packets to Let's Mesh Analyzer
+- Publish to both custom MQTT broker and Let's Mesh Analyzer servers
+- Use device name as MQTT origin (set automatically)
+
+---
+
 ## Overview
 
 The MQTT bridge implementation provides:

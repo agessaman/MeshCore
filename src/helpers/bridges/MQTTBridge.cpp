@@ -6,6 +6,37 @@
 
 // Using ESP32's built-in certificate bundle
 
+// Helper function to strip quotes from strings (both single and double quotes)
+static void stripQuotes(char* str, size_t max_len) {
+  if (!str || max_len == 0) return;
+  
+  size_t len = strlen(str);
+  if (len == 0) return;
+  
+  // Remove leading quote (single or double)
+  if (str[0] == '"' || str[0] == '\'') {
+    memmove(str, str + 1, len);
+    len--;
+  }
+  
+  // Remove trailing quote (single or double)
+  if (len > 0 && (str[len-1] == '"' || str[len-1] == '\'')) {
+    str[len-1] = '\0';
+  }
+}
+
+// Helper function to check if WiFi credentials are valid
+static bool isWiFiConfigValid(const NodePrefs* prefs) {
+  // Check if WiFi SSID is configured (not empty)
+  if (strlen(prefs->wifi_ssid) == 0) {
+    return false;
+  }
+  
+  // WiFi password can be empty for open networks, so we don't check it
+  
+  return true;
+}
+
 #ifdef WITH_MQTT_BRIDGE
 
 MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
@@ -29,11 +60,11 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _raw_enabled = false;
   _tx_enabled = false;  // Disable TX packets by default
   
-  // Initialize MQTT server settings with defaults
-  strncpy(_prefs->mqtt_server, "your-mqtt-broker.com", sizeof(_prefs->mqtt_server) - 1);
-  _prefs->mqtt_port = 1883;
-  strncpy(_prefs->mqtt_username, "your-username", sizeof(_prefs->mqtt_username) - 1);
-  strncpy(_prefs->mqtt_password, "your-password", sizeof(_prefs->mqtt_password) - 1);
+  // Initialize MQTT server settings with defaults (empty/null values)
+  _prefs->mqtt_server[0] = '\0';  // Empty string
+  _prefs->mqtt_port = 0;          // Invalid port
+  _prefs->mqtt_username[0] = '\0'; // Empty string
+  _prefs->mqtt_password[0] = '\0'; // Empty string
   
   // Override with build flags if defined
 #ifdef MQTT_SERVER
@@ -59,14 +90,19 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
 void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("Initializing MQTT Bridge...");
   
-  // Validate configuration once and store the result
-  _config_valid = isMQTTConfigValid();
-  if (!_config_valid) {
-    MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - configuration not valid");
+  // Check if WiFi credentials are configured first
+  if (!isWiFiConfigValid(_prefs)) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - WiFi credentials not configured");
     return;
   }
   
-  MQTT_DEBUG_PRINTLN("MQTT configuration is valid - proceeding with initialization");
+  // Validate custom MQTT broker configuration (optional)
+  _config_valid = isMQTTConfigValid();
+  if (!_config_valid) {
+    MQTT_DEBUG_PRINTLN("No valid custom MQTT server configured - analyzer servers will still work");
+  } else {
+    MQTT_DEBUG_PRINTLN("Custom MQTT server configuration is valid");
+  }
   
   // Update origin and IATA from preferences
   strncpy(_origin, _prefs->mqtt_origin, sizeof(_origin) - 1);
@@ -74,32 +110,19 @@ void MQTTBridge::begin() {
   strncpy(_iata, _prefs->mqtt_iata, sizeof(_iata) - 1);
   _iata[sizeof(_iata) - 1] = '\0';
   
+  // Strip quotes from MQTT server configuration if present
+  stripQuotes(_prefs->mqtt_server, sizeof(_prefs->mqtt_server));
+  stripQuotes(_prefs->mqtt_username, sizeof(_prefs->mqtt_username));
+  stripQuotes(_prefs->mqtt_password, sizeof(_prefs->mqtt_password));
+  
   // Strip quotes from origin if present
   MQTT_DEBUG_PRINTLN("Origin before stripping: '%s'", _origin);
-  size_t origin_len = strlen(_origin);
-  if (origin_len > 0) {
-    if (_origin[0] == '"') {
-      memmove(_origin, _origin + 1, origin_len);
-      origin_len--;
-    }
-    if (origin_len > 0 && _origin[origin_len-1] == '"') {
-      _origin[origin_len-1] = '\0';
-    }
-  }
+  stripQuotes(_origin, sizeof(_origin));
   MQTT_DEBUG_PRINTLN("Origin after stripping: '%s'", _origin);
   
   // Strip quotes from IATA if present
   MQTT_DEBUG_PRINTLN("IATA before stripping: '%s'", _iata);
-  size_t iata_len = strlen(_iata);
-  if (iata_len > 0) {
-    if (_iata[0] == '"') {
-      memmove(_iata, _iata + 1, iata_len);
-      iata_len--;
-    }
-    if (iata_len > 0 && _iata[iata_len-1] == '"') {
-      _iata[iata_len-1] = '\0';
-    }
-  }
+  stripQuotes(_iata, sizeof(_iata));
   MQTT_DEBUG_PRINTLN("IATA after stripping: '%s'", _iata);
   
   // Update enabled flags from preferences
@@ -251,6 +274,10 @@ bool MQTTBridge::isConfigValid(const NodePrefs* prefs) {
   return true;
 }
 
+bool MQTTBridge::isReady() const {
+  return _initialized && isWiFiConfigValid(_prefs);
+}
+
 void MQTTBridge::loop() {
   if (!_initialized) return;
   
@@ -276,9 +303,19 @@ void MQTTBridge::loop() {
 }
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled || !_config_valid) {
-    MQTT_DEBUG_PRINTLN("Packet received but not processing - initialized: %s, packets_enabled: %s, config_valid: %s", 
-                      _initialized ? "true" : "false", _packets_enabled ? "true" : "false", _config_valid ? "true" : "false");
+  if (!_initialized || !_packets_enabled) {
+    MQTT_DEBUG_PRINTLN("Packet received but not processing - initialized: %s, packets_enabled: %s", 
+                      _initialized ? "true" : "false", _packets_enabled ? "true" : "false");
+    return;
+  }
+  
+  // Check if we have any valid brokers to send to
+  bool has_valid_brokers = _config_valid || 
+                          (_analyzer_us_enabled && _analyzer_us_client) ||
+                          (_analyzer_eu_enabled && _analyzer_eu_client);
+  
+  if (!has_valid_brokers) {
+    MQTT_DEBUG_PRINTLN("Packet received but no valid brokers available - discarding");
     return;
   }
   
@@ -288,7 +325,7 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled || !_tx_enabled || !_config_valid) return;
+  if (!_initialized || !_packets_enabled || !_tx_enabled) return;
   
   // Queue packet for transmission (only if TX enabled)
   queuePacket(packet, true);
@@ -374,9 +411,18 @@ void MQTTBridge::connectToBrokers() {
 }
 
 void MQTTBridge::processPacketQueue() {
-  if (_queue_count == 0 || !isAnyBrokerConnected() || !_config_valid) {
+  if (_queue_count == 0) {
+    return;
+  }
+  
+  // Check if we have any connected brokers (custom or analyzer)
+  bool has_connected_brokers = isAnyBrokerConnected() || 
+                               (_analyzer_us_enabled && _analyzer_us_client && _analyzer_us_client->connected()) ||
+                               (_analyzer_eu_enabled && _analyzer_eu_client && _analyzer_eu_client->connected());
+  
+  if (!has_connected_brokers) {
     if (_queue_count > 0) {
-      MQTT_DEBUG_PRINTLN("Queue has %d packets but no brokers connected or config invalid", _queue_count);
+      MQTT_DEBUG_PRINTLN("Queue has %d packets but no brokers connected", _queue_count);
     }
     return;
   }
@@ -470,7 +516,7 @@ void MQTTBridge::publishStatus() {
 }
 
 void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
-  if (!packet || !_config_valid) return;
+  if (!packet) return;
   
   char json_buffer[1024];
   char origin_id[65];
@@ -495,22 +541,24 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
   }
   
   if (len > 0) {
-    // Publish to all connected brokers
-    for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
-      if (_brokers[i].enabled && _brokers[i].connected) {
-        char topic[128];
-        snprintf(topic, sizeof(topic), "meshcore/%s/%s/packets", _iata, _device_id);
-        MQTT_DEBUG_PRINTLN("Publishing packet to topic: %s", topic);
-        
-        // Set broker for this connection (PsychicMqttClient uses URI format)
-        char broker_uri[128];
-        snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
-        _mqtt_client->setServer(broker_uri);
-        _mqtt_client->publish(topic, 1, false, json_buffer, strlen(json_buffer)); // qos=1, retained=false
+    // Publish to custom brokers (only if config is valid)
+    if (_config_valid) {
+      for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
+        if (_brokers[i].enabled && _brokers[i].connected) {
+          char topic[128];
+          snprintf(topic, sizeof(topic), "meshcore/%s/%s/packets", _iata, _device_id);
+          // MQTT_DEBUG_PRINTLN("Publishing packet to topic: %s", topic);
+          
+          // Set broker for this connection (PsychicMqttClient uses URI format)
+          char broker_uri[128];
+          snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
+          _mqtt_client->setServer(broker_uri);
+          _mqtt_client->publish(topic, 1, false, json_buffer, strlen(json_buffer)); // qos=1, retained=false
+        }
       }
     }
     
-    // Also publish to Let's Mesh Analyzer servers
+    // Always publish to Let's Mesh Analyzer servers (independent of custom broker config)
     char analyzer_topic[128];
     snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/packets", _iata, _device_id);
     publishToAnalyzerServers(analyzer_topic, json_buffer, false);
@@ -518,7 +566,7 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
 }
 
 void MQTTBridge::publishRaw(mesh::Packet* packet) {
-  if (!packet || !_config_valid) return;
+  if (!packet) return;
   
   char json_buffer[512];
   char origin_id[65];
@@ -533,21 +581,23 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
   );
   
   if (len > 0) {
-    // Publish to all connected brokers
-    for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
-      if (_brokers[i].enabled && _brokers[i].connected) {
-        char topic[128];
-        snprintf(topic, sizeof(topic), "meshcore/%s/%s/raw", _iata, _device_id);
-        
-        // Set broker for this connection (PsychicMqttClient uses URI format)
-        char broker_uri[128];
-        snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
-        _mqtt_client->setServer(broker_uri);
-        _mqtt_client->publish(topic, 1, false, json_buffer, strlen(json_buffer)); // qos=1, retained=false
+    // Publish to custom brokers (only if config is valid)
+    if (_config_valid) {
+      for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
+        if (_brokers[i].enabled && _brokers[i].connected) {
+          char topic[128];
+          snprintf(topic, sizeof(topic), "meshcore/%s/%s/raw", _iata, _device_id);
+          
+          // Set broker for this connection (PsychicMqttClient uses URI format)
+          char broker_uri[128];
+          snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
+          _mqtt_client->setServer(broker_uri);
+          _mqtt_client->publish(topic, 1, false, json_buffer, strlen(json_buffer)); // qos=1, retained=false
+        }
       }
     }
     
-    // Also publish to Let's Mesh Analyzer servers
+    // Always publish to Let's Mesh Analyzer servers (independent of custom broker config)
     char analyzer_topic[128];
     snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/raw", _iata, _device_id);
     publishToAnalyzerServers(analyzer_topic, json_buffer, false);
