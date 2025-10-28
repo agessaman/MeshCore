@@ -172,22 +172,22 @@ size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* o
   
   Serial.printf("JWTHelper: mbedtls_base64_encode result: %s (outlen: %d)\n", output, (int)outlen);
   
-  // Convert to base64 URL format (replace + with -, / with _, remove padding =)
-  String encoded(output);
-  encoded.replace('+', '-');
-  encoded.replace('/', '_');
-  encoded.replace("=", "");
-  
-  // Copy back to output buffer
-  size_t len = encoded.length();
-  if (len >= outputSize) {
-    Serial.printf("JWTHelper: base64UrlEncode output too large: %d >= %d\n", (int)len, (int)outputSize);
-    return 0;
+  // Convert to base64 URL format in-place (replace + with -, / with _, remove padding =)
+  for (size_t i = 0; i < outlen; i++) {
+    if (output[i] == '+') {
+      output[i] = '-';
+    } else if (output[i] == '/') {
+      output[i] = '_';
+    }
   }
   
-  strcpy(output, encoded.c_str());
-  Serial.printf("JWTHelper: base64UrlEncode completed, outputLen: %d\n", (int)len);
-  return len;
+  // Remove padding '=' characters
+  while (outlen > 0 && output[outlen-1] == '=') {
+    outlen--;
+  }
+  output[outlen] = '\0';
+  Serial.printf("JWTHelper: base64UrlEncode completed, outputLen: %d\n", (int)outlen);
+  return outlen;
 }
 
 size_t JWTHelper::createHeader(char* output, size_t outputSize) {

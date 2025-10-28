@@ -228,10 +228,25 @@ void MQTTBridge::end() {
     _analyzer_eu_client = nullptr;
   }
   
+  // Clean up queued packets to prevent memory leaks
+  for (int i = 0; i < _queue_count; i++) {
+    int index = (_queue_head + i) % MAX_QUEUE_SIZE;
+    if (_packet_queue[index].packet) {
+      _mgr->free(_packet_queue[index].packet);
+      _packet_queue[index].packet = nullptr;
+    }
+  }
+  
   // Clear packet queue
   _queue_count = 0;
   _queue_head = 0;
   _queue_tail = 0;
+  
+  // Clean up timezone object to prevent memory leak
+  if (_timezone) {
+    delete _timezone;
+    _timezone = nullptr;
+  }
   
   // Clean up resources
   if (_mqtt_client) {
@@ -1044,6 +1059,12 @@ void MQTTBridge::syncTimeWithNTP() {
       
       // Set timezone from string (with DST support)
       MQTT_DEBUG_PRINTLN("Setting timezone: %s", _prefs->timezone_string);
+      
+      // Clean up old timezone object to prevent memory leak
+      if (_timezone) {
+        delete _timezone;
+        _timezone = nullptr;
+      }
       
       // Create timezone object based on timezone string
       Timezone* tz = createTimezoneFromString(_prefs->timezone_string);
