@@ -315,6 +315,39 @@ void MQTTBridge::loop() {
     publishStatus();
     _last_status_publish = millis();
   }
+  
+  // Memory monitoring (every 5 minutes)
+  static unsigned long last_memory_log = 0;
+  if (millis() - last_memory_log > 300000) { // 5 minutes
+    logMemoryStatus();
+    last_memory_log = millis();
+  }
+  
+  // Critical memory check (every 15 minutes)
+  static unsigned long last_critical_check = 0;
+  if (millis() - last_critical_check > 900000) { // 15 minutes
+    if (ESP.getMaxAllocHeap() < 60000) { // Less than 60KB max alloc
+      MQTT_DEBUG_PRINTLN("WARNING: Max alloc heap below 60KB - potential memory leak detected!");
+      MQTT_DEBUG_PRINTLN("Free: %d, Min: %d, Max: %d", ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
+      
+      // Attempt memory defragmentation by forcing garbage collection
+      MQTT_DEBUG_PRINTLN("Attempting memory defragmentation...");
+      // Force a small allocation and immediate free to trigger defrag
+      void* temp = malloc(1024);
+      if (temp) {
+        free(temp);
+        MQTT_DEBUG_PRINTLN("Defragmentation complete. New Max Alloc: %d", ESP.getMaxAllocHeap());
+      }
+    }
+    
+    // Critical threshold check
+    if (ESP.getMaxAllocHeap() < 40000) { // Less than 40KB max alloc
+      MQTT_DEBUG_PRINTLN("CRITICAL: Max alloc heap below 40KB - severe memory leak!");
+      MQTT_DEBUG_PRINTLN("Free: %d, Min: %d, Max: %d", ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
+    }
+    
+    last_critical_check = millis();
+  }
 }
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
@@ -459,6 +492,12 @@ void MQTTBridge::processPacketQueue() {
       publishRaw(queued.packet);
     }
     
+    // Free packet memory before removing from queue
+    if (queued.packet) {
+      _mgr->free(queued.packet);
+      queued.packet = nullptr;
+    }
+    
     // Remove from queue
     dequeuePacket();
     processed++;
@@ -533,7 +572,7 @@ void MQTTBridge::publishStatus() {
 void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
   if (!packet) return;
   
-  char json_buffer[1024];
+  char json_buffer[512];
   char origin_id[65];
   
   // Use actual device ID
@@ -1057,26 +1096,41 @@ void MQTTBridge::syncTimeWithNTP() {
       
       MQTT_DEBUG_PRINTLN("Time synced: %lu", epochTime);
       
-      // Set timezone from string (with DST support)
-      MQTT_DEBUG_PRINTLN("Setting timezone: %s", _prefs->timezone_string);
-      
-      // Clean up old timezone object to prevent memory leak
-      if (_timezone) {
-        delete _timezone;
-        _timezone = nullptr;
-      }
-      
-      // Create timezone object based on timezone string
-      Timezone* tz = createTimezoneFromString(_prefs->timezone_string);
-      if (tz) {
-        MQTT_DEBUG_PRINTLN("Timezone created successfully");
-        // Store timezone for later use in message building
-        _timezone = tz;
-      } else {
-        MQTT_DEBUG_PRINTLN("Failed to create timezone, using UTC");
-        // Create UTC timezone as fallback
-        TimeChangeRule utc = {"UTC", Last, Sun, Mar, 0, 0};
-        _timezone = new Timezone(utc, utc);
+      // Set timezone from string (with DST support) - only if changed
+      static char last_timezone[64] = "";
+      if (strcmp(_prefs->timezone_string, last_timezone) != 0) {
+        MQTT_DEBUG_PRINTLN("Setting timezone: %s", _prefs->timezone_string);
+        
+        // Clean up old timezone object to prevent memory leak
+        if (_timezone) {
+          delete _timezone;
+          _timezone = nullptr;
+        }
+        
+        // Create timezone object based on timezone string
+        Timezone* tz = createTimezoneFromString(_prefs->timezone_string);
+        if (tz) {
+          MQTT_DEBUG_PRINTLN("Timezone created successfully");
+          // Store timezone for later use in message building
+          _timezone = tz;
+        } else {
+          MQTT_DEBUG_PRINTLN("Failed to create timezone, using UTC");
+          // Create UTC timezone as fallback
+          TimeChangeRule utc = {"UTC", Last, Sun, Mar, 0, 0};
+          _timezone = new Timezone(utc, utc);
+        }
+        
+        // Remember this timezone string
+        strncpy(last_timezone, _prefs->timezone_string, sizeof(last_timezone) - 1);
+        last_timezone[sizeof(last_timezone) - 1] = '\0';
+        
+        // Force memory defragmentation after timezone recreation
+        MQTT_DEBUG_PRINTLN("Forcing memory defragmentation after timezone change");
+        void* temp = malloc(1024);
+        if (temp) {
+          free(temp);
+          MQTT_DEBUG_PRINTLN("Defragmentation complete. Max Alloc: %d", ESP.getMaxAllocHeap());
+        }
       }
       
       // Show current time in both UTC and local
@@ -1225,6 +1279,17 @@ Timezone* MQTTBridge::createTimezoneFromString(const char* tz_string) {
     MQTT_DEBUG_PRINTLN("Unknown timezone: %s", tz_string);
     return nullptr;
   }
+}
+
+void MQTTBridge::logMemoryStatus() {
+  MQTT_DEBUG_PRINTLN("=== Memory Status ===");
+  MQTT_DEBUG_PRINTLN("Free heap: %d bytes", ESP.getFreeHeap());
+  MQTT_DEBUG_PRINTLN("Min free heap: %d bytes", ESP.getMinFreeHeap());
+  MQTT_DEBUG_PRINTLN("Max alloc heap: %d bytes", ESP.getMaxAllocHeap());
+  MQTT_DEBUG_PRINTLN("Heap size: %d bytes", ESP.getHeapSize());
+  MQTT_DEBUG_PRINTLN("Free PSRAM: %d bytes", ESP.getFreePsram());
+  MQTT_DEBUG_PRINTLN("Queue size: %d/%d packets", _queue_count, MAX_QUEUE_SIZE);
+  MQTT_DEBUG_PRINTLN("===================");
 }
 
 #endif

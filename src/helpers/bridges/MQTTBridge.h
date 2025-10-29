@@ -86,7 +86,7 @@ private:
     bool is_tx;
   };
   
-  static const int MAX_QUEUE_SIZE = 50;
+  static const int MAX_QUEUE_SIZE = 10;
   QueuedPacket _packet_queue[MAX_QUEUE_SIZE];
   int _queue_head;
   int _queue_tail;
@@ -111,8 +111,8 @@ private:
   // Let's Mesh Analyzer support
   bool _analyzer_us_enabled;
   bool _analyzer_eu_enabled;
-  char _auth_token_us[1024]; // JWT token for US server authentication
-  char _auth_token_eu[1024]; // JWT token for EU server authentication
+  char _auth_token_us[512]; // JWT token for US server authentication
+  char _auth_token_eu[512]; // JWT token for EU server authentication
   char _analyzer_username[70]; // Username in format v1_{UPPERCASE_PUBLIC_KEY}
   
   // Device identity for JWT token creation
@@ -312,6 +312,12 @@ public:
    * @return Number of queued packets
    */
   int getQueueSize() const;
+
+private:
+  /**
+   * Log memory status for debugging
+   */
+  void logMemoryStatus();
 };
 
 #endif
