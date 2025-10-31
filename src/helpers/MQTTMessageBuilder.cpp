@@ -51,7 +51,15 @@ int MQTTMessageBuilder::buildPacketMessage(
   char* buffer,
   size_t buffer_size
 ) {
-  DynamicJsonDocument doc(1024);
+  // Size-adaptive JSON document: estimate needed size based on raw hex string length
+  // Base JSON overhead ~200 bytes, raw hex can be up to 510 chars (255 bytes packet)
+  // Use minimum needed to reduce memory fragmentation
+  size_t raw_len = raw ? strlen(raw) : 0;
+  size_t doc_size = 256 + raw_len + 128; // Base + raw + overhead, but cap at buffer_size
+  if (doc_size > buffer_size) doc_size = buffer_size;
+  if (doc_size < 512) doc_size = 512;   // Minimum for small packets
+  if (doc_size > 2048) doc_size = 2048; // Maximum cap
+  DynamicJsonDocument doc(doc_size);
   JsonObject root = doc.to<JsonObject>();
   
   root["origin"] = origin;
@@ -140,7 +148,8 @@ int MQTTMessageBuilder::buildPacketJSON(
   }
   
   // Convert packet to hex
-  char raw_hex[512];
+  // MAX_TRANS_UNIT is 255 bytes, hex = 510 chars, but allow for larger with headers
+  char raw_hex[1024];
   packetToHex(packet, raw_hex, sizeof(raw_hex));
   
   // Get packet characteristics
@@ -221,7 +230,8 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
   }
   
   // Convert raw radio data to hex (this includes radio headers)
-  char raw_hex[512];
+  // MAX_TRANS_UNIT is 255 bytes, hex = 510 chars, but allow for larger with headers
+  char raw_hex[1024];
   bytesToHex(raw_data, raw_len, raw_hex, sizeof(raw_hex));
   
   // Get packet characteristics from the parsed packet
@@ -283,7 +293,8 @@ int MQTTMessageBuilder::buildRawJSON(
   }
   
   // Convert packet to hex
-  char raw_hex[512];
+  // MAX_TRANS_UNIT is 255, so max hex size is 510 chars + null = 511 bytes
+  char raw_hex[1024];
   packetToHex(packet, raw_hex, sizeof(raw_hex));
   
   return buildRawMessage(origin, origin_id, timestamp, raw_hex, buffer, buffer_size);
@@ -345,21 +356,15 @@ void MQTTMessageBuilder::bytesToHex(const uint8_t* data, size_t len, char* hex, 
 }
 
 void MQTTMessageBuilder::packetToHex(mesh::Packet* packet, char* hex, size_t hex_size) {
-  // Convert entire packet to hex string
-  size_t total_len = packet->path_len + packet->payload_len + 2;
-  if (hex_size < total_len * 2 + 1) return;
+  // Serialize full on-air/wire format using Packet::writeTo()
+  // This includes header, transport codes (if present), path_len, path, and payload
+  uint8_t raw_buf[512];
+  uint8_t raw_len = packet->writeTo(raw_buf);
+  if (raw_len == 0 || raw_len > sizeof(raw_buf)) return;
   
-  size_t offset = 0;
+  // Check if hex buffer is large enough (2 hex chars per byte + null terminator)
+  if (hex_size < (size_t)raw_len * 2 + 1) return;
   
-  // Add path data
-  if (packet->path_len > 0) {
-    bytesToHex(packet->path, packet->path_len, hex + offset, hex_size - offset);
-    offset += packet->path_len * 2;
-  }
-  
-  // Add payload data
-  if (packet->payload_len > 0) {
-    bytesToHex(packet->payload, packet->payload_len, hex + offset, hex_size - offset);
-    offset += packet->payload_len * 2;
-  }
+  // Convert serialized packet to hex
+  bytesToHex(raw_buf, raw_len, hex, hex_size);
 }

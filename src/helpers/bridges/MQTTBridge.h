@@ -84,6 +84,12 @@ private:
     mesh::Packet* packet;
     unsigned long timestamp;
     bool is_tx;
+    // Store raw radio data with each packet to avoid it being overwritten
+    uint8_t raw_data[256];
+    int raw_len;
+    float snr;
+    float rssi;
+    bool has_raw_data;
   };
   
   static const int MAX_QUEUE_SIZE = 10;
@@ -129,7 +135,9 @@ private:
   void connectToBrokers();
   void processPacketQueue();
   void publishStatus();
-  void publishPacket(mesh::Packet* packet, bool is_tx);
+  void publishPacket(mesh::Packet* packet, bool is_tx, 
+                     const uint8_t* raw_data = nullptr, int raw_len = 0, 
+                     float snr = 0.0f, float rssi = 0.0f);
   void publishRaw(mesh::Packet* packet);
   void queuePacket(mesh::Packet* packet, bool is_tx);
   void dequeuePacket();

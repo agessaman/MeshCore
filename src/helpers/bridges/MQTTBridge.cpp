@@ -82,6 +82,10 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   
   // Initialize packet queue
   memset(_packet_queue, 0, sizeof(_packet_queue));
+  // Initialize has_raw_data flags
+  for (int i = 0; i < MAX_QUEUE_SIZE; i++) {
+    _packet_queue[i].has_raw_data = false;
+  }
   
   // Set default broker configuration
   setBrokerDefaults();
@@ -235,12 +239,17 @@ void MQTTBridge::end() {
       _mgr->free(_packet_queue[index].packet);
       _packet_queue[index].packet = nullptr;
     }
+    // Clear the entire structure to free raw_data buffers
+    memset(&_packet_queue[index], 0, sizeof(QueuedPacket));
   }
   
   // Clear packet queue
   _queue_count = 0;
   _queue_head = 0;
   _queue_tail = 0;
+  
+  // Clear all queue slots for safety
+  memset(_packet_queue, 0, sizeof(_packet_queue));
   
   // Clean up timezone object to prevent memory leak
   if (_timezone) {
@@ -367,7 +376,13 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
     return;
   }
   
-  MQTT_DEBUG_PRINTLN("Packet received, queuing for transmission");
+  // Debug logging for packet types that might be getting filtered
+  uint8_t packet_type = packet->getPayloadType();
+  if (packet_type == 4 || packet_type == 9) {  // ADVERT or TRACE
+    MQTT_DEBUG_PRINTLN("Packet received: type=%d (ADVERT=%d, TRACE=%d), queuing for transmission", 
+                      packet_type, (packet_type == 4), (packet_type == 9));
+  }
+  
   // Queue packet for transmission
   queuePacket(packet, false);
 }
@@ -477,15 +492,20 @@ void MQTTBridge::processPacketQueue() {
   
   MQTT_DEBUG_PRINTLN("Processing packet queue - count: %d", _queue_count);
   
-  // Process up to 5 packets per loop to avoid blocking
+  // Process up to MAX_QUEUE_SIZE packets per loop to keep up with packet arrival rate
   int processed = 0;
-  while (_queue_count > 0 && processed < 5) {
+  int max_per_loop = MAX_QUEUE_SIZE; // Process all queued packets per loop
+  while (_queue_count > 0 && processed < max_per_loop) {
     QueuedPacket& queued = _packet_queue[_queue_head];
     
     MQTT_DEBUG_PRINTLN("Processing queued packet (is_tx: %s)", queued.is_tx ? "true" : "false");
     
-    // Publish packet
-    publishPacket(queued.packet, queued.is_tx);
+    // Publish packet (use stored raw data if available)
+    publishPacket(queued.packet, queued.is_tx, 
+                  queued.has_raw_data ? queued.raw_data : nullptr,
+                  queued.has_raw_data ? queued.raw_len : 0,
+                  queued.has_raw_data ? queued.snr : 0.0f,
+                  queued.has_raw_data ? queued.rssi : 0.0f);
     
     // Publish raw if enabled
     if (_raw_enabled) {
@@ -507,6 +527,7 @@ void MQTTBridge::processPacketQueue() {
 void MQTTBridge::publishStatus() {
   if (!isAnyBrokerConnected() || !_config_valid) return;
   
+  // Status messages are smaller, but use consistent buffer size
   char json_buffer[512];
   char origin_id[65];
   char timestamp[32];
@@ -569,28 +590,42 @@ void MQTTBridge::publishStatus() {
           }
 }
 
-void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
+void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx, 
+                                const uint8_t* raw_data, int raw_len, 
+                                float snr, float rssi) {
   if (!packet) return;
   
-  char json_buffer[512];
+  // Size-adaptive buffer: estimate needed size based on packet size
+  // Most packets are <100 bytes (need ~400 byte JSON), large packets need ~1500 bytes
+  int packet_size = packet->getRawLength();
+  size_t json_buffer_size = (packet_size > 150) ? 2048 : 1024;
+  char json_buffer[2048]; // Always allocate max, but pass actual needed size to builders
   char origin_id[65];
   
   // Use actual device ID
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
   origin_id[sizeof(origin_id) - 1] = '\0';
   
-  // Build packet message using raw radio data if available
+  // Build packet message using raw radio data if provided
+  // Use size-adaptive buffer size based on actual packet size
+  size_t buffer_size = (packet->getRawLength() > 150) ? 2048 : 1024;
   int len;
-  if (_last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
-    // Use raw radio data (within 1 second of packet)
+  if (raw_data && raw_len > 0) {
+    // Use provided raw radio data
+    len = MQTTMessageBuilder::buildPacketJSONFromRaw(
+      raw_data, raw_len, packet, is_tx, _origin, origin_id, 
+      snr, rssi, _timezone, json_buffer, buffer_size
+    );
+  } else if (_last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
+    // Fallback to global raw radio data (within 1 second of packet)
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
       _last_raw_data, _last_raw_len, packet, is_tx, _origin, origin_id, 
-      _last_snr, _last_rssi, _timezone, json_buffer, sizeof(json_buffer)
+      _last_snr, _last_rssi, _timezone, json_buffer, buffer_size
     );
   } else {
     // Fallback to reconstructed packet data
     len = MQTTMessageBuilder::buildPacketJSON(
-      packet, is_tx, _origin, origin_id, _timezone, json_buffer, sizeof(json_buffer)
+      packet, is_tx, _origin, origin_id, _timezone, json_buffer, buffer_size
     );
   }
   
@@ -616,13 +651,20 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx) {
     char analyzer_topic[128];
     snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/packets", _iata, _device_id);
     publishToAnalyzerServers(analyzer_topic, json_buffer, false);
+  } else {
+    // Debug: log when packet message building fails
+    uint8_t packet_type = packet->getPayloadType();
+    if (packet_type == 4 || packet_type == 9) {  // ADVERT or TRACE
+      MQTT_DEBUG_PRINTLN("Failed to build packet JSON for type=%d (len=%d), packet not published", packet_type, len);
+    }
   }
 }
 
 void MQTTBridge::publishRaw(mesh::Packet* packet) {
   if (!packet) return;
   
-  char json_buffer[512];
+  // Large packets need larger buffer for raw JSON too
+  char json_buffer[2048];
   char origin_id[65];
   
   // Use actual device ID
@@ -660,14 +702,36 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
 
 void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   if (_queue_count >= MAX_QUEUE_SIZE) {
-    // Queue full, remove oldest
+    // Queue full, remove oldest and free its memory
+    QueuedPacket& oldest = _packet_queue[_queue_head];
+    if (oldest.packet) {
+      MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet (queue size: %d)", _queue_count);
+      _mgr->free(oldest.packet);
+      oldest.packet = nullptr;
+    }
+    // dequeuePacket() will clear the structure
     dequeuePacket();
   }
   
   QueuedPacket& queued = _packet_queue[_queue_tail];
+  // Clear structure first to ensure clean state (removes any stale data)
+  memset(&queued, 0, sizeof(QueuedPacket));
+  
   queued.packet = packet;
   queued.timestamp = millis();
   queued.is_tx = is_tx;
+  queued.has_raw_data = false; // Default to false, set true if we have valid data
+  
+  // Capture current raw radio data if available (within 1 second window)
+  if (_last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
+    if (_last_raw_len <= sizeof(queued.raw_data)) {
+      memcpy(queued.raw_data, _last_raw_data, _last_raw_len);
+      queued.raw_len = _last_raw_len;
+      queued.snr = _last_snr;
+      queued.rssi = _last_rssi;
+      queued.has_raw_data = true;
+    }
+  }
   
   _queue_tail = (_queue_tail + 1) % MAX_QUEUE_SIZE;
   _queue_count++;
@@ -675,6 +739,11 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
 
 void MQTTBridge::dequeuePacket() {
   if (_queue_count == 0) return;
+  
+  // Clear the dequeued packet structure to free memory and prevent stale data
+  QueuedPacket& dequeued = _packet_queue[_queue_head];
+  memset(&dequeued, 0, sizeof(QueuedPacket));
+  dequeued.has_raw_data = false; // Explicitly set after memset
   
   _queue_head = (_queue_head + 1) % MAX_QUEUE_SIZE;
   _queue_count--;
