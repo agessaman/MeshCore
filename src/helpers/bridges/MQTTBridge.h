@@ -131,6 +131,15 @@ private:
   // Configuration validation state
   bool _config_valid;
   
+  // Throttle logging for disconnected broker messages
+  unsigned long _last_no_broker_log;
+  static const unsigned long NO_BROKER_LOG_INTERVAL = 30000; // Log every 30 seconds max
+  
+  // Throttle logging for analyzer client disconnected messages
+  unsigned long _last_analyzer_us_log;
+  unsigned long _last_analyzer_eu_log;
+  static const unsigned long ANALYZER_LOG_INTERVAL = 30000; // Log every 30 seconds max
+  
   // Internal methods
   void connectToBrokers();
   void processPacketQueue();
