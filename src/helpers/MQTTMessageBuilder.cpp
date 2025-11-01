@@ -14,9 +14,16 @@ int MQTTMessageBuilder::buildStatusMessage(
   const char* status,
   const char* timestamp,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  int battery_mv,
+  int uptime_secs,
+  int errors,
+  int queue_len,
+  int noise_floor,
+  int tx_air_secs,
+  int rx_air_secs
 ) {
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(768);  // Increased size to accommodate stats
   JsonObject root = doc.to<JsonObject>();
   
   root["status"] = status;
@@ -27,6 +34,34 @@ int MQTTMessageBuilder::buildStatusMessage(
   root["firmware_version"] = firmware_version;
   root["radio"] = radio;
   root["client_version"] = client_version;
+  
+  // Add stats object if any stats are provided
+  if (battery_mv >= 0 || uptime_secs >= 0 || errors >= 0 || queue_len >= 0 || 
+      noise_floor > -999 || tx_air_secs >= 0 || rx_air_secs >= 0) {
+    JsonObject stats = root.createNestedObject("stats");
+    
+    if (battery_mv >= 0) {
+      stats["battery_mv"] = battery_mv;
+    }
+    if (uptime_secs >= 0) {
+      stats["uptime_secs"] = uptime_secs;
+    }
+    if (errors >= 0) {
+      stats["errors"] = errors;
+    }
+    if (queue_len >= 0) {
+      stats["queue_len"] = queue_len;
+    }
+    if (noise_floor > -999) {
+      stats["noise_floor"] = noise_floor;
+    }
+    if (tx_air_secs >= 0) {
+      stats["tx_air_secs"] = tx_air_secs;
+    }
+    if (rx_air_secs >= 0) {
+      stats["rx_air_secs"] = rx_air_secs;
+    }
+  }
   
   size_t len = serializeJson(root, buffer, buffer_size);
   return (len > 0 && len < buffer_size) ? len : 0;

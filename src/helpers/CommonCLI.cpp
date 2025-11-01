@@ -467,7 +467,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
               } else if (memcmp(config, "mqtt.tx", 7) == 0) {
                 sprintf(reply, "> %s", _prefs->mqtt_tx_enabled ? "on" : "off");
               } else if (memcmp(config, "mqtt.interval", 13) == 0) {
-                sprintf(reply, "> %d", (uint32_t)_prefs->mqtt_status_interval);
+                // Display interval in minutes (rounded)
+                uint32_t minutes = (_prefs->mqtt_status_interval + 29999) / 60000; // Round up
+                sprintf(reply, "> %u minutes (%lu ms)", minutes, _prefs->mqtt_status_interval);
               } else if (memcmp(config, "mqtt.server", 11) == 0) {
                 sprintf(reply, "> %s", _prefs->mqtt_server);
               } else if (memcmp(config, "mqtt.port", 9) == 0) {
@@ -710,14 +712,16 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 _prefs->mqtt_tx_enabled = memcmp(&config[8], "on", 2) == 0;
                 savePrefs();
                 strcpy(reply, "OK");
-              } else if (memcmp(config, "mqtt.interval ", 15) == 0) {
-                uint32_t interval = _atoi(&config[15]);
-                if (interval >= 1000 && interval <= 3600000) { // 1 second to 1 hour
-                  _prefs->mqtt_status_interval = interval;
+              } else if (memcmp(config, "mqtt.interval ", 14) == 0) {
+                uint32_t minutes = _atoi(&config[14]);
+                if (minutes >= 1 && minutes <= 60) { // 1 minute to 60 minutes
+                  _prefs->mqtt_status_interval = minutes * 60000; // Convert minutes to milliseconds
                   savePrefs();
-                  strcpy(reply, "OK");
+                  // Restart bridge to pick up new interval value
+                  _callbacks->restartBridge();
+                  sprintf(reply, "OK - interval set to %u minutes (%lu ms), bridge restarted", minutes, _prefs->mqtt_status_interval);
                 } else {
-                  strcpy(reply, "Error: interval must be between 1000-3600000 ms");
+                  strcpy(reply, "Error: interval must be between 1-60 minutes");
                 }
               } else if (memcmp(config, "wifi.ssid ", 10) == 0) {
                 StrHelper::strncpy(_prefs->wifi_ssid, &config[10], sizeof(_prefs->wifi_ssid));

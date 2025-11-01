@@ -47,7 +47,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
               _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
               _analyzer_us_enabled(false), _analyzer_eu_enabled(false), _identity(identity),
               _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr), _config_valid(false),
-              _last_no_broker_log(0) {
+              _last_no_broker_log(0), _dispatcher(nullptr), _radio(nullptr), _board(nullptr), _ms(nullptr) {
   
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -140,7 +140,26 @@ void MQTTBridge::begin() {
   _packets_enabled = _prefs->mqtt_packets_enabled;
   _raw_enabled = _prefs->mqtt_raw_enabled;
   _tx_enabled = _prefs->mqtt_tx_enabled;
-  _status_interval = _prefs->mqtt_status_interval;
+  // Set status interval to 5 minutes (300000 ms), or use preference if set and valid
+  // Sanity check: interval should be between 1 second (1000ms) and 1 hour (3600000ms)
+  // This field may be uninitialized if preferences were saved before this field was added
+  if (_prefs->mqtt_status_interval >= 1000 && _prefs->mqtt_status_interval <= 3600000) {
+    _status_interval = _prefs->mqtt_status_interval;
+    MQTT_DEBUG_PRINTLN("Using preference status interval: %lu ms", _status_interval);
+  } else {
+    // Invalid or uninitialized value - fix it in preferences and use default
+    if (_prefs->mqtt_status_interval > 0 && _prefs->mqtt_status_interval != 300000) {
+      MQTT_DEBUG_PRINTLN("Invalid preference status interval: %lu ms (fixing to default 300000 ms)", 
+                         _prefs->mqtt_status_interval);
+    }
+    _prefs->mqtt_status_interval = 300000; // Fix the preference value
+    _status_interval = 300000; // 5 minutes default
+    // Note: We don't save preferences here as that should be done by the caller if needed
+    // This ensures the correct value is used for this session
+  }
+  
+  MQTT_DEBUG_PRINTLN("Status publishing: enabled=%s, interval=%lu ms", 
+                     _status_enabled ? "true" : "false", _status_interval);
   
   MQTT_DEBUG_PRINTLN("Origin: %s, IATA: %s", _origin, _iata);
   MQTT_DEBUG_PRINTLN("Device ID: %s", _device_id);
@@ -325,16 +344,37 @@ void MQTTBridge::loop() {
     syncTimeWithNTP();
   }
   
-  // Publish status updates
-  if (_status_enabled && millis() - _last_status_publish > _status_interval) {
-    publishStatus();
-    _last_status_publish = millis();
+  // Publish status updates (handle millis() overflow correctly)
+  if (_status_enabled) {
+    unsigned long now = millis();
+    unsigned long elapsed = (now >= _last_status_publish) ? 
+                           (now - _last_status_publish) : 
+                           (ULONG_MAX - _last_status_publish + now + 1);
+    
+    if (elapsed >= _status_interval) {
+      MQTT_DEBUG_PRINTLN("Status publish timer expired (elapsed: %lu ms, interval: %lu ms)", elapsed, _status_interval);
+      if (publishStatus()) {
+        _last_status_publish = now;  // Only update timer on successful publication
+        MQTT_DEBUG_PRINTLN("Status published successfully, next publish in %lu ms", _status_interval);
+      } else {
+        MQTT_DEBUG_PRINTLN("Status publish failed, will retry next loop");
+        // If publication failed (no brokers connected), don't update timer so we retry next loop
+      }
+    }
   }
   
   // Memory monitoring (every 5 minutes)
   static unsigned long last_memory_log = 0;
   if (millis() - last_memory_log > 300000) { // 5 minutes
     logMemoryStatus();
+    // Debug: Log status timer state when memory check happens
+    if (_status_enabled) {
+      unsigned long elapsed = (millis() >= _last_status_publish) ? 
+                             (millis() - _last_status_publish) : 
+                             (ULONG_MAX - _last_status_publish + millis() + 1);
+      MQTT_DEBUG_PRINTLN("Memory check: Status timer - elapsed: %lu ms, interval: %lu ms, next: %lu ms", 
+                         elapsed, _status_interval, _status_interval - elapsed);
+    }
     last_memory_log = millis();
   }
   
@@ -538,11 +578,22 @@ void MQTTBridge::processPacketQueue() {
   }
 }
 
-void MQTTBridge::publishStatus() {
-  if (!isAnyBrokerConnected() || !_config_valid) return;
+bool MQTTBridge::publishStatus() {
+  // Check if we have any valid destinations (custom brokers or analyzer servers)
+  bool has_custom_brokers = isAnyBrokerConnected() && _config_valid;
+  bool has_analyzer_servers = (_analyzer_us_enabled && _analyzer_us_client && _analyzer_us_client->connected()) ||
+                               (_analyzer_eu_enabled && _analyzer_eu_client && _analyzer_eu_client->connected());
   
-  // Status messages are smaller, but use consistent buffer size
-  char json_buffer[512];
+  MQTT_DEBUG_PRINTLN("publishStatus() called - custom_brokers: %s, analyzer_servers: %s", 
+                     has_custom_brokers ? "yes" : "no", has_analyzer_servers ? "yes" : "no");
+  
+  if (!has_custom_brokers && !has_analyzer_servers) {
+    MQTT_DEBUG_PRINTLN("No destinations available for status publish");
+    return false;  // No destinations available
+  }
+  
+  // Status messages with stats can be larger (~400-500 bytes), so increase buffer size
+  char json_buffer[768];  // Increased from 512 to accommodate stats object
   char origin_id[65];
   char timestamp[32];
   char radio_info[64];
@@ -567,7 +618,30 @@ void MQTTBridge::publishStatus() {
   char client_version[64];
   snprintf(client_version, sizeof(client_version), "meshcore-custom-repeater/%s", _build_date);
   
-  // Build status message
+  // Collect stats on-demand if sources are available
+  int battery_mv = -1;
+  int uptime_secs = -1;
+  int errors = -1;
+  int noise_floor = -999;
+  int tx_air_secs = -1;
+  int rx_air_secs = -1;
+  
+  if (_board) {
+    battery_mv = _board->getBattMilliVolts();
+  }
+  if (_ms) {
+    uptime_secs = _ms->getMillis() / 1000;
+  }
+  if (_dispatcher) {
+    errors = _dispatcher->getErrFlags();
+    tx_air_secs = _dispatcher->getTotalAirTime() / 1000;
+    rx_air_secs = _dispatcher->getReceiveAirTime() / 1000;
+  }
+  if (_radio) {
+    noise_floor = (int16_t)_radio->getNoiseFloor();
+  }
+  
+  // Build status message with stats
   int len = MQTTMessageBuilder::buildStatusMessage(
     _origin,
     origin_id,
@@ -578,30 +652,70 @@ void MQTTBridge::publishStatus() {
     "online",
     timestamp,
     json_buffer,
-    sizeof(json_buffer)
+    sizeof(json_buffer),
+    battery_mv,
+    uptime_secs,
+    errors,
+    _queue_count,  // Use current queue length
+    noise_floor,
+    tx_air_secs,
+    rx_air_secs
   );
   
           if (len > 0) {
-            // Publish to all connected brokers
-            for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
-              if (_brokers[i].enabled && _brokers[i].connected) {
-                char topic[128];
-                snprintf(topic, sizeof(topic), "meshcore/%s/%s/status", _iata, _device_id);
-                MQTT_DEBUG_PRINTLN("Publishing status to topic: %s", topic);
-                
-                // Set broker for this connection (PsychicMqttClient uses URI format)
-                char broker_uri[128];
-                snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
-                _mqtt_client->setServer(broker_uri);
-                _mqtt_client->publish(topic, 1, true, json_buffer, strlen(json_buffer)); // qos=1, retained=true
+            bool published = false;
+            
+            // Publish to all connected custom brokers
+            if (_config_valid) {
+              for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
+                if (_brokers[i].enabled && _brokers[i].connected) {
+                  char topic[128];
+                  snprintf(topic, sizeof(topic), "meshcore/%s/%s/status", _iata, _device_id);
+                  MQTT_DEBUG_PRINTLN("Publishing status to topic: %s", topic);
+                  
+                  // Set broker for this connection (PsychicMqttClient uses URI format)
+                  char broker_uri[128];
+                  snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s:%d", _brokers[i].host, _brokers[i].port);
+                  _mqtt_client->setServer(broker_uri);
+                  if (_mqtt_client->publish(topic, 1, true, json_buffer, strlen(json_buffer)) > 0) {
+                    published = true;
+                  }
+                }
               }
             }
             
-            // Also publish to Let's Mesh Analyzer servers
-            char analyzer_topic[128];
-            snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/status", _iata, _device_id);
-            publishToAnalyzerServers(analyzer_topic, json_buffer, true);
+            // Always publish to Let's Mesh Analyzer servers if enabled and connected
+            if (has_analyzer_servers) {
+              char analyzer_topic[128];
+              snprintf(analyzer_topic, sizeof(analyzer_topic), "meshcore/%s/%s/status", _iata, _device_id);
+              
+              // Try to publish to analyzer servers
+              bool analyzer_published = false;
+              if (_analyzer_us_enabled && _analyzer_us_client && _analyzer_us_client->connected()) {
+                _analyzer_us_client->publish(analyzer_topic, 1, true, json_buffer, strlen(json_buffer));
+                analyzer_published = true;
+                MQTT_DEBUG_PRINTLN("Published status to US analyzer server");
+              }
+              if (_analyzer_eu_enabled && _analyzer_eu_client && _analyzer_eu_client->connected()) {
+                _analyzer_eu_client->publish(analyzer_topic, 1, true, json_buffer, strlen(json_buffer));
+                analyzer_published = true;
+                MQTT_DEBUG_PRINTLN("Published status to EU analyzer server");
+              }
+              
+              if (analyzer_published) {
+                published = true;
+              }
+            }
+            
+            // Return true if we successfully published to at least one destination
+            if (published) {
+              MQTT_DEBUG_PRINTLN("Status published successfully");
+              return true;
+            }
           }
+          
+          MQTT_DEBUG_PRINTLN("Status publish failed - no destinations or build failed");
+          return false;  // Failed to build or publish message
 }
 
 void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx, 
@@ -1102,7 +1216,8 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
   snprintf(status_topic, sizeof(status_topic), "meshcore/%s/%s/status", _iata, _device_id);
   
   // Build proper status message using MQTTMessageBuilder
-  char json_buffer[512];
+  // Status messages with stats can be larger (~400-500 bytes)
+  char json_buffer[768];  // Increased from 512 to accommodate stats object
   char origin_id[65];
   char timestamp[32];
   char radio_info[64];
@@ -1127,7 +1242,30 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
   char client_version[64];
   snprintf(client_version, sizeof(client_version), "meshcore-custom-repeater/%s", _build_date);
   
-  // Build status message using MQTTMessageBuilder
+  // Collect stats on-demand if sources are available
+  int battery_mv = -1;
+  int uptime_secs = -1;
+  int errors = -1;
+  int noise_floor = -999;
+  int tx_air_secs = -1;
+  int rx_air_secs = -1;
+  
+  if (_board) {
+    battery_mv = _board->getBattMilliVolts();
+  }
+  if (_ms) {
+    uptime_secs = _ms->getMillis() / 1000;
+  }
+  if (_dispatcher) {
+    errors = _dispatcher->getErrFlags();
+    tx_air_secs = _dispatcher->getTotalAirTime() / 1000;
+    rx_air_secs = _dispatcher->getReceiveAirTime() / 1000;
+  }
+  if (_radio) {
+    noise_floor = (int16_t)_radio->getNoiseFloor();
+  }
+  
+  // Build status message using MQTTMessageBuilder with stats
   int len = MQTTMessageBuilder::buildStatusMessage(
     _origin,
     origin_id,
@@ -1138,7 +1276,14 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
     "online",
     timestamp,
     json_buffer,
-    sizeof(json_buffer)
+    sizeof(json_buffer),
+    battery_mv,
+    uptime_secs,
+    errors,
+    _queue_count,  // Use current queue length
+    noise_floor,
+    tx_air_secs,
+    rx_air_secs
   );
   
   if (len > 0) {
@@ -1180,6 +1325,14 @@ int MQTTBridge::getConnectedBrokers() const {
 
 int MQTTBridge::getQueueSize() const {
   return _queue_count;
+}
+
+void MQTTBridge::setStatsSources(mesh::Dispatcher* dispatcher, mesh::Radio* radio, 
+                                  mesh::MainBoard* board, mesh::MillisecondClock* ms) {
+  _dispatcher = dispatcher;
+  _radio = radio;
+  _board = board;
+  _ms = ms;
 }
 
 void MQTTBridge::syncTimeWithNTP() {

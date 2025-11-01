@@ -765,6 +765,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
     // Set build date
     bridge.setBuildDate(getBuildDate());
     
+#ifdef WITH_MQTT_BRIDGE
+    // Set stats sources for automatic stats collection (optional - can be done in custom initialization)
+    // This enables stats to be included in status messages automatically
+    // this (Mesh*) inherits from Dispatcher, so it can be passed as Dispatcher*
+    bridge.setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#endif
+    
     bridge.begin();
   }
 #endif

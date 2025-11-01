@@ -140,10 +140,16 @@ private:
   unsigned long _last_analyzer_eu_log;
   static const unsigned long ANALYZER_LOG_INTERVAL = 30000; // Log every 30 seconds max
   
+  // Optional pointers for collecting stats internally (set by mesh if available)
+  mesh::Dispatcher* _dispatcher;  // For air times and errors
+  mesh::Radio* _radio;             // For noise floor
+  mesh::MainBoard* _board;         // For battery voltage
+  mesh::MillisecondClock* _ms;    // For uptime
+  
   // Internal methods
   void connectToBrokers();
   void processPacketQueue();
-  void publishStatus();
+  bool publishStatus();  // Returns true if status was successfully published
   void publishPacket(mesh::Packet* packet, bool is_tx, 
                      const uint8_t* raw_data = nullptr, int raw_len = 0, 
                      float snr = 0.0f, float rssi = 0.0f);
@@ -329,6 +335,18 @@ public:
    * @return Number of queued packets
    */
   int getQueueSize() const;
+
+  /**
+   * Set optional pointers for stats collection.
+   * If these are set, stats will be collected automatically when publishing status.
+   *
+   * @param dispatcher Dispatcher (or Mesh*) for air times and errors
+   * @param radio Radio for noise floor
+   * @param board MainBoard for battery voltage
+   * @param ms MillisecondClock for uptime
+   */
+  void setStatsSources(mesh::Dispatcher* dispatcher, mesh::Radio* radio, 
+                       mesh::MainBoard* board, mesh::MillisecondClock* ms);
 
 private:
   /**
