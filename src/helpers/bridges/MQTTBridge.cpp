@@ -46,7 +46,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
               _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false),
               _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
               _analyzer_us_enabled(false), _analyzer_eu_enabled(false), _identity(identity),
-              _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr), _config_valid(false) {
+              _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr), _config_valid(false),
+              _last_no_broker_log(0) {
   
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -86,6 +87,11 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   for (int i = 0; i < MAX_QUEUE_SIZE; i++) {
     _packet_queue[i].has_raw_data = false;
   }
+  
+  // Initialize throttle log timers
+  _last_no_broker_log = 0;
+  _last_analyzer_us_log = 0;
+  _last_analyzer_eu_log = 0;
   
   // Set default broker configuration
   setBrokerDefaults();
@@ -485,12 +491,20 @@ void MQTTBridge::processPacketQueue() {
   
   if (!has_connected_brokers) {
     if (_queue_count > 0) {
-      MQTT_DEBUG_PRINTLN("Queue has %d packets but no brokers connected", _queue_count);
+      // Only log this message periodically to avoid spam (every 30 seconds max)
+      unsigned long now = millis();
+      if (now - _last_no_broker_log > NO_BROKER_LOG_INTERVAL) {
+        MQTT_DEBUG_PRINTLN("Queue has %d packets but no brokers connected", _queue_count);
+        _last_no_broker_log = now;
+      }
     }
     return;
   }
   
-  MQTT_DEBUG_PRINTLN("Processing packet queue - count: %d", _queue_count);
+  // Reset the log timer when brokers are connected
+  _last_no_broker_log = 0;
+  
+  // MQTT_DEBUG_PRINTLN("Processing packet queue - count: %d", _queue_count);
   
   // Process up to MAX_QUEUE_SIZE packets per loop to keep up with packet arrival rate
   int processed = 0;
@@ -635,6 +649,15 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
     if (_config_valid) {
       for (int i = 0; i < MAX_MQTT_BROKERS_COUNT; i++) {
         if (_brokers[i].enabled && _brokers[i].connected) {
+          // Double-check that the client is actually connected before publishing
+          // This prevents race conditions where onConnect fires but connection isn't ready yet
+          if (!_mqtt_client || !_mqtt_client->connected()) {
+            // Connection state is out of sync - mark broker as disconnected
+            _brokers[i].connected = false;
+            _active_brokers--;
+            continue;
+          }
+          
           char topic[128];
           snprintf(topic, sizeof(topic), "meshcore/%s/%s/packets", _iata, _device_id);
           // MQTT_DEBUG_PRINTLN("Publishing packet to topic: %s", topic);
@@ -1028,13 +1051,33 @@ void MQTTBridge::setupAnalyzerClients() {
 
 void MQTTBridge::publishToAnalyzerClient(PsychicMqttClient* client, const char* topic, const char* payload, bool retained) {
   if (!client) {
-    MQTT_DEBUG_PRINTLN("PsychicMqttClient is null");
-    return;
+    return; // Don't log null client - this is expected if analyzer is disabled
   }
   
   if (!client->connected()) {
-    MQTT_DEBUG_PRINTLN("PsychicMqttClient not connected - skipping publish to topic: %s", topic);
+    // Throttle log spam - only log periodically for each analyzer server
+    unsigned long now = millis();
+    bool should_log = false;
+    
+    if (client == _analyzer_us_client && (now - _last_analyzer_us_log > ANALYZER_LOG_INTERVAL)) {
+      should_log = true;
+      _last_analyzer_us_log = now;
+    } else if (client == _analyzer_eu_client && (now - _last_analyzer_eu_log > ANALYZER_LOG_INTERVAL)) {
+      should_log = true;
+      _last_analyzer_eu_log = now;
+    }
+    
+    if (should_log) {
+      MQTT_DEBUG_PRINTLN("PsychicMqttClient not connected - skipping publish to topic: %s", topic);
+    }
     return;
+  }
+  
+  // Reset log timer when connected
+  if (client == _analyzer_us_client) {
+    _last_analyzer_us_log = 0;
+  } else if (client == _analyzer_eu_client) {
+    _last_analyzer_eu_log = 0;
   }
   
   MQTT_DEBUG_PRINTLN("Publishing to analyzer client - topic: %s, payload length: %d, retained: %s", 
