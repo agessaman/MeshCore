@@ -117,8 +117,8 @@ private:
   // Let's Mesh Analyzer support
   bool _analyzer_us_enabled;
   bool _analyzer_eu_enabled;
-  char _auth_token_us[512]; // JWT token for US server authentication
-  char _auth_token_eu[512]; // JWT token for EU server authentication
+  char _auth_token_us[768]; // JWT token for US server authentication (increased for owner/client fields)
+  char _auth_token_eu[768]; // JWT token for EU server authentication (increased for owner/client fields)
   char _analyzer_username[70]; // Username in format v1_{UPPERCASE_PUBLIC_KEY}
   
   // Device identity for JWT token creation

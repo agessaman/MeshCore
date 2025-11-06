@@ -104,17 +104,12 @@ struct MQTTPrefs {
   uint16_t mqtt_port;       // MQTT server port
   char mqtt_username[32];   // MQTT username
   char mqtt_password[64];   // MQTT password
-=======
->>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
   
   // Let's Mesh Analyzer settings
   uint8_t mqtt_analyzer_us_enabled; // Enable US analyzer server
   uint8_t mqtt_analyzer_eu_enabled; // Enable EU analyzer server
-<<<<<<< HEAD
   char mqtt_owner_public_key[65]; // Owner public key (hex string, same length as repeater public key)
   char mqtt_email[64]; // Owner email address for matching nodes with owners
-=======
->>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
 };
 #endif
 

@@ -128,6 +128,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
         // Let's Mesh Analyzer settings
         file.read((uint8_t *)&_prefs->mqtt_analyzer_us_enabled, sizeof(_prefs->mqtt_analyzer_us_enabled)); // 344
         file.read((uint8_t *)&_prefs->mqtt_analyzer_eu_enabled, sizeof(_prefs->mqtt_analyzer_eu_enabled)); // 345
+        file.read((uint8_t *)&_prefs->mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key)); // 346
     // 209
 >>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
 
@@ -260,6 +261,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
         // Let's Mesh Analyzer settings
         file.write((uint8_t *)&_prefs->mqtt_analyzer_us_enabled, sizeof(_prefs->mqtt_analyzer_us_enabled)); // 344
         file.write((uint8_t *)&_prefs->mqtt_analyzer_eu_enabled, sizeof(_prefs->mqtt_analyzer_eu_enabled)); // 345
+        file.write((uint8_t *)&_prefs->mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key)); // 346
     // 209
 >>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
 
@@ -490,6 +492,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 sprintf(reply, "> %s", _prefs->mqtt_analyzer_us_enabled ? "on" : "off");
               } else if (memcmp(config, "mqtt.analyzer.eu", 17) == 0) {
                 sprintf(reply, "> %s", _prefs->mqtt_analyzer_eu_enabled ? "on" : "off");
+              } else if (memcmp(config, "mqtt.owner", 10) == 0) {
+                if (_prefs->mqtt_owner_public_key[0] != '\0') {
+                  sprintf(reply, "> %s", _prefs->mqtt_owner_public_key);
+                } else {
+                  strcpy(reply, "> (not set)");
+                }
               } else if (memcmp(config, "mqtt.config.valid", 17) == 0) {
                 // Check if MQTT configuration is valid using static method
                 bool valid = MQTTBridge::isConfigValid(_prefs);
@@ -773,6 +781,31 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 _prefs->mqtt_analyzer_eu_enabled = memcmp(&config[17], "on", 2) == 0;
                 savePrefs();
                 strcpy(reply, "OK");
+              } else if (memcmp(config, "mqtt.owner ", 11) == 0) {
+                // Validate that it's a valid hex string of the correct length (64 hex chars = 32 bytes)
+                const char* owner_key = &config[11];
+                int key_len = strlen(owner_key);
+                if (key_len == 64) {
+                  // Validate hex characters
+                  bool valid = true;
+                  for (int i = 0; i < key_len; i++) {
+                    if (!((owner_key[i] >= '0' && owner_key[i] <= '9') ||
+                          (owner_key[i] >= 'A' && owner_key[i] <= 'F') ||
+                          (owner_key[i] >= 'a' && owner_key[i] <= 'f'))) {
+                      valid = false;
+                      break;
+                    }
+                  }
+                  if (valid) {
+                    StrHelper::strncpy(_prefs->mqtt_owner_public_key, owner_key, sizeof(_prefs->mqtt_owner_public_key));
+                    savePrefs();
+                    strcpy(reply, "OK");
+                  } else {
+                    strcpy(reply, "Error: invalid hex characters in public key");
+                  }
+                } else {
+                  strcpy(reply, "Error: public key must be 64 hex characters (32 bytes)");
+                }
 #endif
       } else {
         sprintf(reply, "unknown config: %s", config);

@@ -999,12 +999,35 @@ bool MQTTBridge::createAuthToken() {
   bool us_token_created = false;
   bool eu_token_created = false;
   
+  // Get current time for expiration tracking
+  unsigned long current_time = time(nullptr);
+  unsigned long expires_in = 86400; // 24 hours
+  
+  // Prepare owner public key (if set) - convert to uppercase hex
+  const char* owner_key = nullptr;
+  char owner_key_uppercase[65];
+  if (_prefs->mqtt_owner_public_key[0] != '\0') {
+    // Copy and convert to uppercase
+    strncpy(owner_key_uppercase, _prefs->mqtt_owner_public_key, sizeof(owner_key_uppercase) - 1);
+    owner_key_uppercase[sizeof(owner_key_uppercase) - 1] = '\0';
+    for (int i = 0; owner_key_uppercase[i]; i++) {
+      owner_key_uppercase[i] = toupper(owner_key_uppercase[i]);
+    }
+    owner_key = owner_key_uppercase;
+    MQTT_DEBUG_PRINTLN("Using owner public key: %s", owner_key);
+  }
+  
+  // Build client version string (same format as used in status messages)
+  char client_version[64];
+  snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
+  
   // Create JWT token for US server
   if (_analyzer_us_enabled) {
     MQTT_DEBUG_PRINTLN("Creating JWT token for US server...");
     if (JWTHelper::createAuthToken(
         *_identity, "mqtt-us-v1.letsmesh.net", 
-        0, 86400, _auth_token_us, sizeof(_auth_token_us))) {
+        0, expires_in, _auth_token_us, sizeof(_auth_token_us),
+        owner_key, client_version)) {
       MQTT_DEBUG_PRINTLN("Created auth token for US server");
       us_token_created = true;
     } else {
@@ -1017,7 +1040,8 @@ bool MQTTBridge::createAuthToken() {
     MQTT_DEBUG_PRINTLN("Creating JWT token for EU server...");
     if (JWTHelper::createAuthToken(
         *_identity, "mqtt-eu-v1.letsmesh.net", 
-        0, 86400, _auth_token_eu, sizeof(_auth_token_eu))) {
+        0, expires_in, _auth_token_eu, sizeof(_auth_token_eu),
+        owner_key, client_version)) {
       MQTT_DEBUG_PRINTLN("Created auth token for EU server");
       eu_token_created = true;
     } else {
@@ -1302,9 +1326,199 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
 }
 
 void MQTTBridge::maintainAnalyzerConnections() {
+<<<<<<< HEAD
   // PsychicMqttClient handles connection maintenance and reconnection automatically
   // No manual maintenance needed - the library manages this internally
   // Connection state changes are handled via the onConnect/onDisconnect callbacks
+=======
+  if (!_identity) {
+    return;
+  }
+  
+  unsigned long current_time = time(nullptr);
+  // If time is not synced (time() returns 0 or very small value), skip expiration checks
+  // Tokens will still work but we can't track expiration properly
+  // If expiration time was set before time sync, it will be a small value, so we'll renew
+  bool time_synced = (current_time >= 1000000000); // After year 2001
+  
+  const unsigned long RENEWAL_BUFFER = 3600; // Renew tokens 1 hour before expiration
+  const unsigned long RENEWAL_THROTTLE_MS = 60000; // Don't attempt renewal more than once per minute
+  
+  unsigned long now_millis = millis();
+  
+  // Check and renew US server token if needed
+  if (_analyzer_us_enabled && _analyzer_us_client) {
+    // Check if token is expired or will expire soon
+    // If time wasn't synced when token was created, expiration time will be invalid, so renew
+    bool token_needs_renewal = (_token_us_expires_at == 0) || 
+                               !time_synced ||
+                               !(_token_us_expires_at >= 1000000000) || // Expiration time invalid
+                               (time_synced && current_time >= _token_us_expires_at) ||
+                               (time_synced && current_time >= (_token_us_expires_at - RENEWAL_BUFFER));
+    
+    // Throttle renewal attempts - don't try more than once per minute to avoid blocking
+    bool can_attempt_renewal = (now_millis - _last_token_renewal_attempt_us) >= RENEWAL_THROTTLE_MS;
+    
+    // Check if client is disconnected and needs reconnection with new token
+    bool needs_reconnect = !_analyzer_us_client->connected();
+    
+    if (token_needs_renewal && can_attempt_renewal) {
+      _last_token_renewal_attempt_us = now_millis;
+      MQTT_DEBUG_PRINTLN("US token expired or expiring soon (expires_at: %lu, current: %lu), renewing...", 
+                         _token_us_expires_at, current_time);
+      
+      // Prepare owner public key (if set) - convert to uppercase hex
+      const char* owner_key = nullptr;
+      char owner_key_uppercase[65];
+      if (_prefs->mqtt_owner_public_key[0] != '\0') {
+        // Copy and convert to uppercase
+        strncpy(owner_key_uppercase, _prefs->mqtt_owner_public_key, sizeof(owner_key_uppercase) - 1);
+        owner_key_uppercase[sizeof(owner_key_uppercase) - 1] = '\0';
+        for (int i = 0; owner_key_uppercase[i]; i++) {
+          owner_key_uppercase[i] = toupper(owner_key_uppercase[i]);
+        }
+        owner_key = owner_key_uppercase;
+      }
+      
+      // Build client version string (same format as used in status messages)
+      char client_version[64];
+      snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
+      
+      // Renew the token
+      if (JWTHelper::createAuthToken(
+          *_identity, "mqtt-us-v1.letsmesh.net", 
+          0, 86400, _auth_token_us, sizeof(_auth_token_us),
+          owner_key, client_version)) {
+        unsigned long expires_in = 86400; // 24 hours
+        _token_us_expires_at = current_time + expires_in;
+        MQTT_DEBUG_PRINTLN("US token renewed, new expiration: %lu", _token_us_expires_at);
+        
+        // Update client credentials with new token
+        _analyzer_us_client->setCredentials(_analyzer_username, _auth_token_us);
+        
+        // Reconnect to apply new token (whether currently connected or not)
+        // If connected, disconnect first to ensure new token is used
+        if (_analyzer_us_client->connected()) {
+          MQTT_DEBUG_PRINTLN("Disconnecting US server to apply new token...");
+          _analyzer_us_client->disconnect();
+        }
+        MQTT_DEBUG_PRINTLN("Reconnecting to US server with renewed token...");
+        _last_reconnect_attempt_us = now_millis; // Update reconnect timestamp to throttle subsequent attempts
+        _analyzer_us_client->connect();
+      } else {
+        MQTT_DEBUG_PRINTLN("Failed to renew US token");
+        _token_us_expires_at = 0;
+      }
+    } else if (needs_reconnect) {
+      // Token is still valid but connection is lost - reconnect with existing token
+      // Throttle reconnection attempts to avoid spamming
+      unsigned long reconnect_elapsed = (now_millis >= _last_reconnect_attempt_us) ?
+                                      (now_millis - _last_reconnect_attempt_us) :
+                                      (ULONG_MAX - _last_reconnect_attempt_us + now_millis + 1);
+      if (reconnect_elapsed >= RECONNECT_THROTTLE_MS) {
+        _last_reconnect_attempt_us = now_millis;
+        MQTT_DEBUG_PRINTLN("US server disconnected but token still valid, reconnecting...");
+        _analyzer_us_client->connect();
+      } else {
+        // Throttled - only log periodically to avoid spam (every 5 minutes max)
+        static unsigned long last_throttle_log_us = 0;
+        if (now_millis - last_throttle_log_us > 300000) {
+          MQTT_DEBUG_PRINTLN("US server reconnection throttled (last attempt %lu ms ago, need %lu ms)", 
+                            reconnect_elapsed, RECONNECT_THROTTLE_MS);
+          last_throttle_log_us = now_millis;
+        }
+      }
+    }
+  }
+  
+  // Check and renew EU server token if needed
+  if (_analyzer_eu_enabled && _analyzer_eu_client) {
+    // Check if token is expired or will expire soon
+    // If time wasn't synced when token was created, expiration time will be invalid, so renew
+    bool token_needs_renewal = (_token_eu_expires_at == 0) || 
+                               !time_synced ||
+                               !(_token_eu_expires_at >= 1000000000) || // Expiration time invalid
+                               (time_synced && current_time >= _token_eu_expires_at) ||
+                               (time_synced && current_time >= (_token_eu_expires_at - RENEWAL_BUFFER));
+    
+    // Throttle renewal attempts - don't try more than once per minute to avoid blocking
+    bool can_attempt_renewal = (now_millis - _last_token_renewal_attempt_eu) >= RENEWAL_THROTTLE_MS;
+    
+    // Check if client is disconnected and needs reconnection with new token
+    bool needs_reconnect = !_analyzer_eu_client->connected();
+    
+    if (token_needs_renewal && can_attempt_renewal) {
+      _last_token_renewal_attempt_eu = now_millis;
+      MQTT_DEBUG_PRINTLN("EU token expired or expiring soon (expires_at: %lu, current: %lu), renewing...", 
+                         _token_eu_expires_at, current_time);
+      
+      // Prepare owner public key (if set) - convert to uppercase hex
+      const char* owner_key = nullptr;
+      char owner_key_uppercase[65];
+      if (_prefs->mqtt_owner_public_key[0] != '\0') {
+        // Copy and convert to uppercase
+        strncpy(owner_key_uppercase, _prefs->mqtt_owner_public_key, sizeof(owner_key_uppercase) - 1);
+        owner_key_uppercase[sizeof(owner_key_uppercase) - 1] = '\0';
+        for (int i = 0; owner_key_uppercase[i]; i++) {
+          owner_key_uppercase[i] = toupper(owner_key_uppercase[i]);
+        }
+        owner_key = owner_key_uppercase;
+      }
+      
+      // Build client version string (same format as used in status messages)
+      char client_version[64];
+      snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
+      
+      // Renew the token
+      if (JWTHelper::createAuthToken(
+          *_identity, "mqtt-eu-v1.letsmesh.net", 
+          0, 86400, _auth_token_eu, sizeof(_auth_token_eu),
+          owner_key, client_version)) {
+        unsigned long expires_in = 86400; // 24 hours
+        _token_eu_expires_at = current_time + expires_in;
+        MQTT_DEBUG_PRINTLN("EU token renewed, new expiration: %lu", _token_eu_expires_at);
+        
+        // Update client credentials with new token
+        _analyzer_eu_client->setCredentials(_analyzer_username, _auth_token_eu);
+        
+        // Reconnect to apply new token (whether currently connected or not)
+        // If connected, disconnect first to ensure new token is used
+        if (_analyzer_eu_client->connected()) {
+          MQTT_DEBUG_PRINTLN("Disconnecting EU server to apply new token...");
+          _analyzer_eu_client->disconnect();
+        }
+        MQTT_DEBUG_PRINTLN("Reconnecting to EU server with renewed token...");
+        _last_reconnect_attempt_eu = now_millis; // Update reconnect timestamp to throttle subsequent attempts
+        _analyzer_eu_client->connect();
+      } else {
+        MQTT_DEBUG_PRINTLN("Failed to renew EU token");
+        _token_eu_expires_at = 0;
+      }
+    } else if (needs_reconnect) {
+      // Token is still valid but connection is lost - reconnect with existing token
+      // Throttle reconnection attempts to avoid spamming
+      unsigned long reconnect_elapsed = (now_millis >= _last_reconnect_attempt_eu) ?
+                                      (now_millis - _last_reconnect_attempt_eu) :
+                                      (ULONG_MAX - _last_reconnect_attempt_eu + now_millis + 1);
+      if (reconnect_elapsed >= RECONNECT_THROTTLE_MS) {
+        _last_reconnect_attempt_eu = now_millis;
+        MQTT_DEBUG_PRINTLN("EU server disconnected but token still valid, reconnecting...");
+        _analyzer_eu_client->connect();
+      } else {
+        // Throttled - only log periodically to avoid spam (every 5 minutes max)
+        static unsigned long last_throttle_log_eu = 0;
+        if (now_millis - last_throttle_log_eu > 300000) {
+          MQTT_DEBUG_PRINTLN("EU server reconnection throttled (last attempt %lu ms ago, need %lu ms)", 
+                            reconnect_elapsed, RECONNECT_THROTTLE_MS);
+          last_throttle_log_eu = now_millis;
+        }
+      }
+    }
+  }
+  
+  // Note: PsychicMqttClient handles automatic reconnection internally,
+  // but we need to ensure tokens are renewed before reconnection attempts
+>>>>>>> 1ebe417c (Enhance CommonCLI and JWTHelper for MQTT owner public key support)
 }
 
 void MQTTBridge::setMessageTypes(bool status, bool packets, bool raw) {

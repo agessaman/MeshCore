@@ -756,6 +756,18 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
+
+  // Ensure analyzer servers are enabled by default (in case no prefs were loaded)
+  if (_prefs.mqtt_analyzer_us_enabled == 0 && _prefs.mqtt_analyzer_eu_enabled == 0) {
+    _prefs.mqtt_analyzer_us_enabled = 1; // enabled
+    _prefs.mqtt_analyzer_eu_enabled = 1; // enabled
+    MESH_DEBUG_PRINTLN("Setting analyzer servers to enabled by default");
+  }
+  
+  // Set MQTT origin to actual device name (not build-time ADVERT_NAME)
+  StrHelper::strncpy(_prefs.mqtt_origin, _prefs.node_name, sizeof(_prefs.mqtt_origin));
+  MESH_DEBUG_PRINTLN("MQTT origin set to device name: %s", _prefs.mqtt_origin);
+
   acl.load(_fs);
   // TODO: key_store.begin();
   region_map.load(_fs);

@@ -20,6 +20,8 @@ public:
    * @param expiresIn Expiration time in seconds (0 for no expiration)
    * @param token Buffer to store the resulting token
    * @param tokenSize Size of the token buffer
+   * @param owner Optional owner public key in hex format (nullptr if not set)
+   * @param client Optional client string (nullptr if not set)
    * @return true if token was created successfully
    */
   static bool createAuthToken(
@@ -28,7 +30,9 @@ public:
     unsigned long issuedAt = 0,
     unsigned long expiresIn = 0,
     char* token = nullptr,
-    size_t tokenSize = 0
+    size_t tokenSize = 0,
+    const char* owner = nullptr,
+    const char* client = nullptr
   );
 
 private:
@@ -61,6 +65,8 @@ private:
    * @param expiresIn Expiration time in seconds (0 for no expiration)
    * @param output Output buffer
    * @param outputSize Size of output buffer
+   * @param owner Optional owner public key in hex format (nullptr if not set)
+   * @param client Optional client string (nullptr if not set)
    * @return Length of payload, or 0 on error
    */
   static size_t createPayload(
@@ -69,7 +75,9 @@ private:
     unsigned long issuedAt,
     unsigned long expiresIn,
     char* output,
-    size_t outputSize
+    size_t outputSize,
+    const char* owner = nullptr,
+    const char* client = nullptr
   );
   
 };

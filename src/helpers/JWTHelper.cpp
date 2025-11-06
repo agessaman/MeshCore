@@ -14,7 +14,9 @@ bool JWTHelper::createAuthToken(
   unsigned long issuedAt,
   unsigned long expiresIn,
   char* token,
-  size_t tokenSize
+  size_t tokenSize,
+  const char* owner,
+  const char* client
 ) {
   Serial.printf("JWTHelper: Starting JWT creation for audience: %s\n", audience);
   
@@ -52,7 +54,7 @@ bool JWTHelper::createAuthToken(
   
   // Create payload with HEX public key (not base64!)
   char payload[512];
-  size_t payloadLen = createPayload(publicKeyHex, audience, issuedAt, expiresIn, payload, sizeof(payload));
+  size_t payloadLen = createPayload(publicKeyHex, audience, issuedAt, expiresIn, payload, sizeof(payload), owner, client);
   if (payloadLen == 0) {
     Serial.printf("JWTHelper: Failed to create payload\n");
     return false;
@@ -219,11 +221,19 @@ size_t JWTHelper::createPayload(
   unsigned long issuedAt,
   unsigned long expiresIn,
   char* output,
-  size_t outputSize
+  size_t outputSize,
+  const char* owner,
+  const char* client
 ) {
   Serial.printf("JWTHelper: createPayload called with outputSize: %d\n", (int)outputSize);
   Serial.printf("JWTHelper: publicKey: %s, audience: %s, issuedAt: %lu, expiresIn: %lu\n", 
                 publicKey, audience, issuedAt, expiresIn);
+  if (owner) {
+    Serial.printf("JWTHelper: owner: %s\n", owner);
+  }
+  if (client) {
+    Serial.printf("JWTHelper: client: %s\n", client);
+  }
   
   // Create JWT payload
   DynamicJsonDocument doc(512);
@@ -233,6 +243,16 @@ size_t JWTHelper::createPayload(
   
   if (expiresIn > 0) {
     doc["exp"] = issuedAt + expiresIn;
+  }
+  
+  // Add optional owner field if provided
+  if (owner && strlen(owner) > 0) {
+    doc["owner"] = owner;
+  }
+  
+  // Add optional client field if provided
+  if (client && strlen(client) > 0) {
+    doc["client"] = client;
   }
   
   // Use temporary buffer for JSON
