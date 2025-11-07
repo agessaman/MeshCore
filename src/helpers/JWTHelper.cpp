@@ -16,7 +16,8 @@ bool JWTHelper::createAuthToken(
   char* token,
   size_t tokenSize,
   const char* owner,
-  const char* client
+  const char* client,
+  const char* email
 ) {
   Serial.printf("JWTHelper: Starting JWT creation for audience: %s\n", audience);
   
@@ -54,7 +55,7 @@ bool JWTHelper::createAuthToken(
   
   // Create payload with HEX public key (not base64!)
   char payload[512];
-  size_t payloadLen = createPayload(publicKeyHex, audience, issuedAt, expiresIn, payload, sizeof(payload), owner, client);
+  size_t payloadLen = createPayload(publicKeyHex, audience, issuedAt, expiresIn, payload, sizeof(payload), owner, client, email);
   if (payloadLen == 0) {
     Serial.printf("JWTHelper: Failed to create payload\n");
     return false;
@@ -223,7 +224,8 @@ size_t JWTHelper::createPayload(
   char* output,
   size_t outputSize,
   const char* owner,
-  const char* client
+  const char* client,
+  const char* email
 ) {
   Serial.printf("JWTHelper: createPayload called with outputSize: %d\n", (int)outputSize);
   Serial.printf("JWTHelper: publicKey: %s, audience: %s, issuedAt: %lu, expiresIn: %lu\n", 
@@ -233,6 +235,9 @@ size_t JWTHelper::createPayload(
   }
   if (client) {
     Serial.printf("JWTHelper: client: %s\n", client);
+  }
+  if (email) {
+    Serial.printf("JWTHelper: email: %s\n", email);
   }
   
   // Create JWT payload
@@ -253,6 +258,11 @@ size_t JWTHelper::createPayload(
   // Add optional client field if provided
   if (client && strlen(client) > 0) {
     doc["client"] = client;
+  }
+  
+  // Add optional email field if provided
+  if (email && strlen(email) > 0) {
+    doc["email"] = email;
   }
   
   // Use temporary buffer for JSON

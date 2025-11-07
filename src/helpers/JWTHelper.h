@@ -22,6 +22,7 @@ public:
    * @param tokenSize Size of the token buffer
    * @param owner Optional owner public key in hex format (nullptr if not set)
    * @param client Optional client string (nullptr if not set)
+   * @param email Optional email address (nullptr if not set)
    * @return true if token was created successfully
    */
   static bool createAuthToken(
@@ -32,7 +33,8 @@ public:
     char* token = nullptr,
     size_t tokenSize = 0,
     const char* owner = nullptr,
-    const char* client = nullptr
+    const char* client = nullptr,
+    const char* email = nullptr
   );
 
 private:
@@ -67,6 +69,7 @@ private:
    * @param outputSize Size of output buffer
    * @param owner Optional owner public key in hex format (nullptr if not set)
    * @param client Optional client string (nullptr if not set)
+   * @param email Optional email address (nullptr if not set)
    * @return Length of payload, or 0 on error
    */
   static size_t createPayload(
@@ -77,7 +80,8 @@ private:
     char* output,
     size_t outputSize,
     const char* owner = nullptr,
-    const char* client = nullptr
+    const char* client = nullptr,
+    const char* email = nullptr
   );
   
 };

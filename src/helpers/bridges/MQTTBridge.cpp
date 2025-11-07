@@ -1021,13 +1021,20 @@ bool MQTTBridge::createAuthToken() {
   char client_version[64];
   snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
   
+  // Get email from preferences (if set)
+  const char* email = nullptr;
+  if (_prefs->mqtt_email[0] != '\0') {
+    email = _prefs->mqtt_email;
+    MQTT_DEBUG_PRINTLN("Using email: %s", email);
+  }
+  
   // Create JWT token for US server
   if (_analyzer_us_enabled) {
     MQTT_DEBUG_PRINTLN("Creating JWT token for US server...");
     if (JWTHelper::createAuthToken(
         *_identity, "mqtt-us-v1.letsmesh.net", 
         0, expires_in, _auth_token_us, sizeof(_auth_token_us),
-        owner_key, client_version)) {
+        owner_key, client_version, email)) {
       MQTT_DEBUG_PRINTLN("Created auth token for US server");
       us_token_created = true;
     } else {
@@ -1041,7 +1048,7 @@ bool MQTTBridge::createAuthToken() {
     if (JWTHelper::createAuthToken(
         *_identity, "mqtt-eu-v1.letsmesh.net", 
         0, expires_in, _auth_token_eu, sizeof(_auth_token_eu),
-        owner_key, client_version)) {
+        owner_key, client_version, email)) {
       MQTT_DEBUG_PRINTLN("Created auth token for EU server");
       eu_token_created = true;
     } else {
@@ -1384,11 +1391,17 @@ void MQTTBridge::maintainAnalyzerConnections() {
       char client_version[64];
       snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
       
+      // Get email from preferences (if set)
+      const char* email = nullptr;
+      if (_prefs->mqtt_email[0] != '\0') {
+        email = _prefs->mqtt_email;
+      }
+      
       // Renew the token
       if (JWTHelper::createAuthToken(
           *_identity, "mqtt-us-v1.letsmesh.net", 
           0, 86400, _auth_token_us, sizeof(_auth_token_us),
-          owner_key, client_version)) {
+          owner_key, client_version, email)) {
         unsigned long expires_in = 86400; // 24 hours
         _token_us_expires_at = current_time + expires_in;
         MQTT_DEBUG_PRINTLN("US token renewed, new expiration: %lu", _token_us_expires_at);
@@ -1469,11 +1482,17 @@ void MQTTBridge::maintainAnalyzerConnections() {
       char client_version[64];
       snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
       
+      // Get email from preferences (if set)
+      const char* email = nullptr;
+      if (_prefs->mqtt_email[0] != '\0') {
+        email = _prefs->mqtt_email;
+      }
+      
       // Renew the token
       if (JWTHelper::createAuthToken(
           *_identity, "mqtt-eu-v1.letsmesh.net", 
           0, 86400, _auth_token_eu, sizeof(_auth_token_eu),
-          owner_key, client_version)) {
+          owner_key, client_version, email)) {
         unsigned long expires_in = 86400; // 24 hours
         _token_eu_expires_at = current_time + expires_in;
         MQTT_DEBUG_PRINTLN("EU token renewed, new expiration: %lu", _token_eu_expires_at);
