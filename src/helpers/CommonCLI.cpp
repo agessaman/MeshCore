@@ -747,12 +747,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 StrHelper::strncpy(_prefs->wifi_password, &config[9], sizeof(_prefs->wifi_password));
                 savePrefs();
                 strcpy(reply, "OK");
-              } else if (memcmp(config, "timezone ", 10) == 0) {
-                StrHelper::strncpy(_prefs->timezone_string, &config[10], sizeof(_prefs->timezone_string));
+              } else if (memcmp(config, "timezone ", 9) == 0) {
+                StrHelper::strncpy(_prefs->timezone_string, &config[9], sizeof(_prefs->timezone_string));
                 savePrefs();
                 strcpy(reply, "OK");
-              } else if (memcmp(config, "timezone.offset ", 17) == 0) {
-                int8_t offset = _atoi(&config[17]);
+              } else if (memcmp(config, "timezone.offset ", 16) == 0) {
+                int8_t offset = _atoi(&config[16]);
                 if (offset >= -12 && offset <= 14) {
                   _prefs->timezone_offset = offset;
                   savePrefs();
