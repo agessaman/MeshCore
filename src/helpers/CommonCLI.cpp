@@ -129,6 +129,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
         file.read((uint8_t *)&_prefs->mqtt_analyzer_us_enabled, sizeof(_prefs->mqtt_analyzer_us_enabled)); // 344
         file.read((uint8_t *)&_prefs->mqtt_analyzer_eu_enabled, sizeof(_prefs->mqtt_analyzer_eu_enabled)); // 345
         file.read((uint8_t *)&_prefs->mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key)); // 346
+        file.read((uint8_t *)&_prefs->mqtt_email, sizeof(_prefs->mqtt_email)); // 347
     // 209
 >>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
 
@@ -262,6 +263,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
         file.write((uint8_t *)&_prefs->mqtt_analyzer_us_enabled, sizeof(_prefs->mqtt_analyzer_us_enabled)); // 344
         file.write((uint8_t *)&_prefs->mqtt_analyzer_eu_enabled, sizeof(_prefs->mqtt_analyzer_eu_enabled)); // 345
         file.write((uint8_t *)&_prefs->mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key)); // 346
+        file.write((uint8_t *)&_prefs->mqtt_email, sizeof(_prefs->mqtt_email)); // 347
     // 209
 >>>>>>> 6f42dc3 (Implement Let's Mesh Analyzer integration in MQTT Bridge)
 
@@ -495,6 +497,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
               } else if (memcmp(config, "mqtt.owner", 10) == 0) {
                 if (_prefs->mqtt_owner_public_key[0] != '\0') {
                   sprintf(reply, "> %s", _prefs->mqtt_owner_public_key);
+                } else {
+                  strcpy(reply, "> (not set)");
+                }
+              } else if (memcmp(config, "mqtt.email", 10) == 0) {
+                if (_prefs->mqtt_email[0] != '\0') {
+                  sprintf(reply, "> %s", _prefs->mqtt_email);
                 } else {
                   strcpy(reply, "> (not set)");
                 }
@@ -806,6 +814,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 } else {
                   strcpy(reply, "Error: public key must be 64 hex characters (32 bytes)");
                 }
+              } else if (memcmp(config, "mqtt.email ", 11) == 0) {
+                StrHelper::strncpy(_prefs->mqtt_email, &config[11], sizeof(_prefs->mqtt_email));
+                savePrefs();
+                strcpy(reply, "OK");
 #endif
       } else {
         sprintf(reply, "unknown config: %s", config);
