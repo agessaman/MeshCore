@@ -1345,6 +1345,7 @@ void MQTTBridge::maintainAnalyzerConnections() {
   
   const unsigned long RENEWAL_BUFFER = 3600; // Renew tokens 1 hour before expiration
   const unsigned long RENEWAL_THROTTLE_MS = 60000; // Don't attempt renewal more than once per minute
+  const unsigned long RECONNECT_THROTTLE_MS = 60000; // Don't attempt reconnection more than once per minute
   
   unsigned long now_millis = millis();
   
@@ -1532,7 +1533,6 @@ void MQTTBridge::maintainAnalyzerConnections() {
   
   // Note: PsychicMqttClient handles automatic reconnection internally,
   // but we need to ensure tokens are renewed before reconnection attempts
->>>>>>> 1ebe417c (Enhance CommonCLI and JWTHelper for MQTT owner public key support)
 }
 
 void MQTTBridge::setMessageTypes(bool status, bool packets, bool raw) {
