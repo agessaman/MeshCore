@@ -223,10 +223,6 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
       file.write(pad, to_write);
       remaining -= to_write;
     }
-<<<<<<< HEAD
-=======
-    // MQTT settings
-    file.write((uint8_t *)&_prefs->mqtt_origin, sizeof(_prefs->mqtt_origin));                         // 162
     file.write((uint8_t *)&_prefs->mqtt_iata, sizeof(_prefs->mqtt_iata));                           // 194
         file.write((uint8_t *)&_prefs->mqtt_status_enabled, sizeof(_prefs->mqtt_status_enabled));         // 202
         file.write((uint8_t *)&_prefs->mqtt_packets_enabled, sizeof(_prefs->mqtt_packets_enabled));       // 203
