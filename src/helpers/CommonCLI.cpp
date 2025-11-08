@@ -254,8 +254,6 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
         file.write((uint8_t *)&_prefs->mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key)); // 346
         file.write((uint8_t *)&_prefs->mqtt_email, sizeof(_prefs->mqtt_email)); // 347
     // 209
-=======
->>>>>>> 3633002 (Refactor MQTT preferences handling in CommonCLI)
 
     file.close();
   }
