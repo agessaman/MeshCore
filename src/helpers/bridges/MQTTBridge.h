@@ -121,6 +121,17 @@ private:
   char _auth_token_eu[768]; // JWT token for EU server authentication (increased for owner/client fields)
   char _analyzer_username[70]; // Username in format v1_{UPPERCASE_PUBLIC_KEY}
   
+  // Token expiration tracking
+  unsigned long _token_us_expires_at;
+  unsigned long _token_eu_expires_at;
+  unsigned long _last_token_renewal_attempt_us;
+  unsigned long _last_token_renewal_attempt_eu;
+  unsigned long _last_reconnect_attempt_us;
+  unsigned long _last_reconnect_attempt_eu;
+  
+  // Status publish retry tracking
+  unsigned long _last_status_retry;
+  
   // Device identity for JWT token creation
   mesh::LocalIdentity *_identity;
   

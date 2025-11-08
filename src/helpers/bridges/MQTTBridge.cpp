@@ -723,7 +723,6 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 float snr, float rssi) {
   if (!packet) return;
   
-<<<<<<< HEAD
   // Size-adaptive buffer: estimate needed size based on packet size
   // Most packets are <100 bytes (need ~400 byte JSON), large packets need ~1500 bytes
   int packet_size = packet->getRawLength();
