@@ -42,7 +42,7 @@ static bool isWiFiConfigValid(const NodePrefs* prefs) {
 MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
     : BridgeBase(prefs, mgr, rtc), _mqtt_client(nullptr),
       _active_brokers(0), _queue_head(0), _queue_tail(0), _queue_count(0),
-      _last_status_publish(0), _status_interval(300000), // 5 minutes default
+      _last_status_publish(0), _last_status_retry(0), _status_interval(300000), // 5 minutes default
               _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false),
               _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
               _analyzer_us_enabled(false), _analyzer_eu_enabled(false), _identity(identity),
@@ -351,14 +351,29 @@ void MQTTBridge::loop() {
                            (now - _last_status_publish) : 
                            (ULONG_MAX - _last_status_publish + now + 1);
     
-    if (elapsed >= _status_interval) {
+    // Check if enough time has passed since last successful publish
+    bool should_publish = (elapsed >= _status_interval);
+    
+    // If interval hasn't passed, check if we should retry after a failed publish
+    // Only check retry if _last_status_retry != 0 (meaning we had a failed publish)
+    if (!should_publish && _last_status_retry != 0) {
+      unsigned long retry_elapsed = (now >= _last_status_retry) ?
+                                   (now - _last_status_retry) :
+                                   (ULONG_MAX - _last_status_retry + now + 1);
+      // Retry if enough time has passed since last retry attempt
+      should_publish = (retry_elapsed >= STATUS_RETRY_INTERVAL);
+    }
+    
+    if (should_publish) {
       MQTT_DEBUG_PRINTLN("Status publish timer expired (elapsed: %lu ms, interval: %lu ms)", elapsed, _status_interval);
+      _last_status_retry = now;  // Update retry timestamp
       if (publishStatus()) {
         _last_status_publish = now;  // Only update timer on successful publication
+        _last_status_retry = 0;  // Reset retry timer on success (0 = no retry needed)
         MQTT_DEBUG_PRINTLN("Status published successfully, next publish in %lu ms", _status_interval);
       } else {
-        MQTT_DEBUG_PRINTLN("Status publish failed, will retry next loop");
-        // If publication failed (no brokers connected), don't update timer so we retry next loop
+        MQTT_DEBUG_PRINTLN("Status publish failed, will retry in %lu ms", STATUS_RETRY_INTERVAL);
+        // Retry timer (_last_status_retry) already updated above
       }
     }
   }

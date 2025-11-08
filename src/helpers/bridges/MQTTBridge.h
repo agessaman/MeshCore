@@ -130,7 +130,8 @@ private:
   unsigned long _last_reconnect_attempt_eu;
   
   // Status publish retry tracking
-  unsigned long _last_status_retry;
+  unsigned long _last_status_retry;  // Track last retry attempt (separate from successful publish)
+  static const unsigned long STATUS_RETRY_INTERVAL = 30000; // Retry every 30 seconds if failed
   
   // Device identity for JWT token creation
   mesh::LocalIdentity *_identity;
