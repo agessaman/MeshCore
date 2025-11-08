@@ -1333,11 +1333,6 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
 }
 
 void MQTTBridge::maintainAnalyzerConnections() {
-<<<<<<< HEAD
-  // PsychicMqttClient handles connection maintenance and reconnection automatically
-  // No manual maintenance needed - the library manages this internally
-  // Connection state changes are handled via the onConnect/onDisconnect callbacks
-=======
   if (!_identity) {
     return;
   }
