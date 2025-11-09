@@ -173,6 +173,7 @@ private:
   void syncTimeWithNTP();
   Timezone* createTimezoneFromString(const char* tz_string);
   bool isMQTTConfigValid();
+  bool isIATAValid() const;  // Check if IATA code is configured
   
 public:
   /**

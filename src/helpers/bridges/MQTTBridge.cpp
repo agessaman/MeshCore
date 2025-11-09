@@ -482,6 +482,14 @@ bool MQTTBridge::isMQTTConfigValid() {
   return true;
 }
 
+bool MQTTBridge::isIATAValid() const {
+  // Check if IATA code is configured (not empty, not default "XXX")
+  if (strlen(_iata) == 0 || strcmp(_iata, "XXX") == 0) {
+    return false;
+  }
+  return true;
+}
+
 void MQTTBridge::connectToBrokers() {
   // Check if MQTT configuration is valid before attempting connection
   if (!_config_valid) {
@@ -594,6 +602,18 @@ void MQTTBridge::processPacketQueue() {
 }
 
 bool MQTTBridge::publishStatus() {
+  // Check if IATA is configured before attempting to publish
+  if (!isIATAValid()) {
+    static unsigned long last_iata_warning = 0;
+    unsigned long now = millis();
+    // Only log this warning every 5 minutes to avoid spam
+    if (now - last_iata_warning > 300000) {
+      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish status - IATA code not configured (current: '%s'). Please set mqtt.iata via CLI.", _iata);
+      last_iata_warning = now;
+    }
+    return false;
+  }
+  
   // Check if we have any valid destinations (custom brokers or analyzer servers)
   bool has_custom_brokers = isAnyBrokerConnected() && _config_valid;
   bool has_analyzer_servers = (_analyzer_us_enabled && _analyzer_us_client && _analyzer_us_client->connected()) ||
@@ -738,6 +758,18 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 float snr, float rssi) {
   if (!packet) return;
   
+  // Check if IATA is configured before attempting to publish
+  if (!isIATAValid()) {
+    static unsigned long last_iata_warning = 0;
+    unsigned long now = millis();
+    // Only log this warning every 5 minutes to avoid spam
+    if (now - last_iata_warning > 300000) {
+      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish packet - IATA code not configured (current: '%s'). Please set mqtt.iata via CLI.", _iata);
+      last_iata_warning = now;
+    }
+    return;
+  }
+  
   // Size-adaptive buffer: estimate needed size based on packet size
   // Most packets are <100 bytes (need ~400 byte JSON), large packets need ~1500 bytes
   int packet_size = packet->getRawLength();
@@ -814,6 +846,18 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
 
 void MQTTBridge::publishRaw(mesh::Packet* packet) {
   if (!packet) return;
+  
+  // Check if IATA is configured before attempting to publish
+  if (!isIATAValid()) {
+    static unsigned long last_iata_warning = 0;
+    unsigned long now = millis();
+    // Only log this warning every 5 minutes to avoid spam
+    if (now - last_iata_warning > 300000) {
+      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish raw packet - IATA code not configured (current: '%s'). Please set mqtt.iata via CLI.", _iata);
+      last_iata_warning = now;
+    }
+    return;
+  }
   
   // Large packets need larger buffer for raw JSON too
   char json_buffer[2048];
@@ -1253,6 +1297,18 @@ void MQTTBridge::publishToAnalyzerClient(PsychicMqttClient* client, const char* 
 
 void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const char* server_name) {
   if (!client || !client->connected()) {
+    return;
+  }
+  
+  // Check if IATA is configured before attempting to publish
+  if (!isIATAValid()) {
+    static unsigned long last_iata_warning = 0;
+    unsigned long now = millis();
+    // Only log this warning every 5 minutes to avoid spam
+    if (now - last_iata_warning > 300000) {
+      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish status to analyzer - IATA code not configured (current: '%s'). Please set mqtt.iata via CLI.", _iata);
+      last_iata_warning = now;
+    }
     return;
   }
   
