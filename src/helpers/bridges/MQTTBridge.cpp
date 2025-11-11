@@ -4,6 +4,10 @@
 #include <WiFiUdp.h>
 #include <Timezone.h>
 
+#ifdef ESP_PLATFORM
+#include <esp_wifi.h>
+#endif
+
 // Using ESP32's built-in certificate bundle
 
 // Helper function to strip quotes from strings (both single and double quotes)
@@ -181,6 +185,21 @@ void MQTTBridge::begin() {
   if (WiFi.status() == WL_CONNECTED) {
     MQTT_DEBUG_PRINTLN("WiFi connected! IP: %s", WiFi.localIP().toString().c_str());
     
+    // Configure WiFi power management for efficient operation
+    #ifdef ESP_PLATFORM
+    // Enable WiFi power save mode to reduce power consumption
+    esp_err_t ps_result = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    if (ps_result == ESP_OK) {
+      MQTT_DEBUG_PRINTLN("WiFi power save mode enabled");
+    } else {
+      MQTT_DEBUG_PRINTLN("Failed to enable WiFi power save mode: %d", ps_result);
+    }
+    
+    // Set WiFi TX power to reasonable level for MQTT connectivity
+    WiFi.setTxPower(WIFI_POWER_11dBm);
+    MQTT_DEBUG_PRINTLN("WiFi TX power set to 11dBm");
+    #endif
+    
     // Sync time with NTP
     syncTimeWithNTP();
   } else {
@@ -346,34 +365,48 @@ void MQTTBridge::loop() {
   
   // Publish status updates (handle millis() overflow correctly)
   if (_status_enabled) {
-    unsigned long now = millis();
-    unsigned long elapsed = (now >= _last_status_publish) ? 
-                           (now - _last_status_publish) : 
-                           (ULONG_MAX - _last_status_publish + now + 1);
+    // Check if we have any destinations available before attempting to publish
+    bool has_custom_brokers = isAnyBrokerConnected() && _config_valid;
+    bool has_analyzer_servers = (_analyzer_us_enabled && _analyzer_us_client && _analyzer_us_client->connected()) ||
+                               (_analyzer_eu_enabled && _analyzer_eu_client && _analyzer_eu_client->connected());
+    bool has_destinations = has_custom_brokers || has_analyzer_servers;
     
-    // Check if enough time has passed since last successful publish
-    bool should_publish = (elapsed >= _status_interval);
-    
-    // If interval hasn't passed, check if we should retry after a failed publish
-    // Only check retry if _last_status_retry != 0 (meaning we had a failed publish)
-    if (!should_publish && _last_status_retry != 0) {
-      unsigned long retry_elapsed = (now >= _last_status_retry) ?
-                                   (now - _last_status_retry) :
-                                   (ULONG_MAX - _last_status_retry + now + 1);
-      // Retry if enough time has passed since last retry attempt
-      should_publish = (retry_elapsed >= STATUS_RETRY_INTERVAL);
-    }
-    
-    if (should_publish) {
-      MQTT_DEBUG_PRINTLN("Status publish timer expired (elapsed: %lu ms, interval: %lu ms)", elapsed, _status_interval);
-      _last_status_retry = now;  // Update retry timestamp
-      if (publishStatus()) {
-        _last_status_publish = now;  // Only update timer on successful publication
-        _last_status_retry = 0;  // Reset retry timer on success (0 = no retry needed)
-        MQTT_DEBUG_PRINTLN("Status published successfully, next publish in %lu ms", _status_interval);
-      } else {
-        MQTT_DEBUG_PRINTLN("Status publish failed, will retry in %lu ms", STATUS_RETRY_INTERVAL);
-        // Retry timer (_last_status_retry) already updated above
+    // Only attempt to publish if we have destinations available
+    if (has_destinations) {
+      unsigned long now = millis();
+      unsigned long elapsed = (now >= _last_status_publish) ? 
+                             (now - _last_status_publish) : 
+                             (ULONG_MAX - _last_status_publish + now + 1);
+      
+      // Check if enough time has passed since last successful publish
+      bool should_publish = (elapsed >= _status_interval);
+      
+      // If interval hasn't passed, check if we should retry after a failed publish
+      // Only check retry if _last_status_retry != 0 (meaning we had a failed publish)
+      if (!should_publish && _last_status_retry != 0) {
+        unsigned long retry_elapsed = (now >= _last_status_retry) ?
+                                     (now - _last_status_retry) :
+                                     (ULONG_MAX - _last_status_retry + now + 1);
+        // Retry if enough time has passed since last retry attempt
+        should_publish = (retry_elapsed >= STATUS_RETRY_INTERVAL);
+      }
+      
+      if (should_publish) {
+        MQTT_DEBUG_PRINTLN("Status publish timer expired (elapsed: %lu ms, interval: %lu ms)", elapsed, _status_interval);
+        _last_status_retry = now;  // Update retry timestamp
+        if (publishStatus()) {
+          _last_status_publish = now;  // Only update timer on successful publication
+          _last_status_retry = 0;  // Reset retry timer on success (0 = no retry needed)
+          MQTT_DEBUG_PRINTLN("Status published successfully, next publish in %lu ms", _status_interval);
+        } else {
+          MQTT_DEBUG_PRINTLN("Status publish failed, will retry in %lu ms", STATUS_RETRY_INTERVAL);
+          // Retry timer (_last_status_retry) already updated above
+        }
+      }
+    } else {
+      // No destinations available - reset retry timer to avoid spam
+      if (_last_status_retry != 0) {
+        _last_status_retry = 0;
       }
     }
   }
