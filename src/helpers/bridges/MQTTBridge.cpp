@@ -684,7 +684,7 @@ bool MQTTBridge::publishStatus() {
   
   // Build client version string
   char client_version[64];
-  snprintf(client_version, sizeof(client_version), "meshcore-custom-repeater/%s", _build_date);
+  snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
   
   // Collect stats on-demand if sources are available
   int battery_mv = -1;
@@ -1110,7 +1110,7 @@ bool MQTTBridge::createAuthToken() {
   
   // Build client version string (same format as used in status messages)
   char client_version[64];
-  snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
+  snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
   
   // Get email from preferences (if set)
   const char* email = nullptr;
@@ -1374,7 +1374,7 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
   
   // Build client version string
   char client_version[64];
-  snprintf(client_version, sizeof(client_version), "meshcore-custom-repeater/%s", _build_date);
+  snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
   
   // Collect stats on-demand if sources are available
   int battery_mv = -1;
@@ -1488,7 +1488,7 @@ void MQTTBridge::maintainAnalyzerConnections() {
       
       // Build client version string (same format as used in status messages)
       char client_version[64];
-      snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
+      snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
       
       // Get email from preferences (if set)
       const char* email = nullptr;
@@ -1579,7 +1579,7 @@ void MQTTBridge::maintainAnalyzerConnections() {
       
       // Build client version string (same format as used in status messages)
       char client_version[64];
-      snprintf(client_version, sizeof(client_version), "meshcoretomqtt/%s", _build_date);
+      snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
       
       // Get email from preferences (if set)
       const char* email = nullptr;
