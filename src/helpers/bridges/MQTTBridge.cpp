@@ -684,7 +684,7 @@ bool MQTTBridge::publishStatus() {
   
   // Build client version string
   char client_version[64];
-  snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
+  getClientVersion(client_version, sizeof(client_version));
   
   // Collect stats on-demand if sources are available
   int battery_mv = -1;
@@ -1110,7 +1110,7 @@ bool MQTTBridge::createAuthToken() {
   
   // Build client version string (same format as used in status messages)
   char client_version[64];
-  snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
+  getClientVersion(client_version, sizeof(client_version));
   
   // Get email from preferences (if set)
   const char* email = nullptr;
@@ -1374,7 +1374,7 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
   
   // Build client version string
   char client_version[64];
-  snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
+  getClientVersion(client_version, sizeof(client_version));
   
   // Collect stats on-demand if sources are available
   int battery_mv = -1;
@@ -1488,7 +1488,7 @@ void MQTTBridge::maintainAnalyzerConnections() {
       
       // Build client version string (same format as used in status messages)
       char client_version[64];
-      snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
+      getClientVersion(client_version, sizeof(client_version));
       
       // Get email from preferences (if set)
       const char* email = nullptr;
@@ -1577,9 +1577,9 @@ void MQTTBridge::maintainAnalyzerConnections() {
         owner_key = owner_key_uppercase;
       }
       
-      // Build client version string (same format as used in status messages)
+      // Build client version string
       char client_version[64];
-      snprintf(client_version, sizeof(client_version), "meshcore/%s", _firmware_version);
+      getClientVersion(client_version, sizeof(client_version));
       
       // Get email from preferences (if set)
       const char* email = nullptr;
@@ -1876,6 +1876,14 @@ Timezone* MQTTBridge::createTimezoneFromString(const char* tz_string) {
     MQTT_DEBUG_PRINTLN("Unknown timezone: %s", tz_string);
     return nullptr;
   }
+}
+
+void MQTTBridge::getClientVersion(char* buffer, size_t buffer_size) const {
+  if (!buffer || buffer_size == 0) {
+    return;
+  }
+  // Generate client version string in format "meshcore/{firmware_version}"
+  snprintf(buffer, buffer_size, "meshcore/%s", _firmware_version);
 }
 
 void MQTTBridge::logMemoryStatus() {

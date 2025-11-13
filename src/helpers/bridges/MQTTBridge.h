@@ -363,6 +363,15 @@ public:
 
 private:
   /**
+   * Generate client version string in format "meshcore/{firmware_version}"
+   * Memory-efficient: writes to provided buffer, no dynamic allocation
+   *
+   * @param buffer Buffer to write the client version string to
+   * @param buffer_size Size of the buffer (must be at least 64 bytes)
+   */
+  void getClientVersion(char* buffer, size_t buffer_size) const;
+
+  /**
    * Log memory status for debugging
    */
   void logMemoryStatus();
