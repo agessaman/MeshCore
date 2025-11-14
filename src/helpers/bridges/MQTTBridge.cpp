@@ -8,8 +8,6 @@
 #include <esp_wifi.h>
 #endif
 
-// Using ESP32's built-in certificate bundle
-
 // Helper function to strip quotes from strings (both single and double quotes)
 static void stripQuotes(char* str, size_t max_len) {
   if (!str || max_len == 0) return;
@@ -145,8 +143,6 @@ void MQTTBridge::begin() {
   _raw_enabled = _prefs->mqtt_raw_enabled;
   _tx_enabled = _prefs->mqtt_tx_enabled;
   // Set status interval to 5 minutes (300000 ms), or use preference if set and valid
-  // Sanity check: interval should be between 1 second (1000ms) and 1 hour (3600000ms)
-  // This field may be uninitialized if preferences were saved before this field was added
   if (_prefs->mqtt_status_interval >= 1000 && _prefs->mqtt_status_interval <= 3600000) {
     _status_interval = _prefs->mqtt_status_interval;
     MQTT_DEBUG_PRINTLN("Using preference status interval: %lu ms", _status_interval);
@@ -1757,7 +1753,6 @@ void MQTTBridge::syncTimeWithNTP() {
 
 Timezone* MQTTBridge::createTimezoneFromString(const char* tz_string) {
   // Create Timezone objects for common IANA timezone strings
-  // Using TimeChangeRule definitions for proper DST handling
   
   // North America
   if (strcmp(tz_string, "America/Los_Angeles") == 0 || strcmp(tz_string, "America/Vancouver") == 0) {

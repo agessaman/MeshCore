@@ -164,7 +164,6 @@ size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* o
     return 0;
   }
   
-  // Use ESP32's built-in mbedTLS base64 encoding
   size_t outlen = 0;
   int ret = mbedtls_base64_encode((unsigned char*)output, outputSize - 1, &outlen, input, inputLen);
   
