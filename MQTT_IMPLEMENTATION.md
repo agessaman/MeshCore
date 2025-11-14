@@ -80,12 +80,12 @@ To build the MQTT bridge firmware:
 
 ### Heltec V3
 ```bash
-pio run -e Heltec_v3_repeater_bridge_mqtt
+pio run -e Heltec_v3_repeater_observer_mqtt
 ```
 
 ### Station G2
 ```bash
-pio run -e Station_G2_repeater_bridge_mqtt
+pio run -e Station_G2_repeater_observer_mqtt
 ```
 
 ### Custom MQTT Server Configuration
@@ -93,7 +93,7 @@ pio run -e Station_G2_repeater_bridge_mqtt
 You can configure a custom MQTT server using build flags in `platformio.ini`:
 
 ```ini
-[env:Heltec_v3_repeater_bridge_mqtt]
+[env:Heltec_v3_repeater_observer_mqtt]
 build_flags =
   ${Heltec_lora32_v3.build_flags}
   -D WITH_MQTT_BRIDGE=1
