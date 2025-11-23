@@ -849,6 +849,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         strcpy(reply, "OK");
       } else if (memcmp(config, "mqtt.iata ", 10) == 0) {
         StrHelper::strncpy(_prefs->mqtt_iata, &config[10], sizeof(_prefs->mqtt_iata));
+        // Convert IATA code to uppercase (IATA codes are conventionally uppercase)
+        for (int i = 0; _prefs->mqtt_iata[i]; i++) {
+          _prefs->mqtt_iata[i] = toupper(_prefs->mqtt_iata[i]);
+        }
         savePrefs();
         strcpy(reply, "OK");
       } else if (memcmp(config, "mqtt.status ", 12) == 0) {

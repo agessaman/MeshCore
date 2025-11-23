@@ -137,6 +137,11 @@ void MQTTBridge::begin() {
   stripQuotes(_iata, sizeof(_iata));
   MQTT_DEBUG_PRINTLN("IATA after stripping: '%s'", _iata);
   
+  // Convert IATA code to uppercase (IATA codes are conventionally uppercase)
+  for (int i = 0; _iata[i]; i++) {
+    _iata[i] = toupper(_iata[i]);
+  }
+  
   // Update enabled flags from preferences
   _status_enabled = _prefs->mqtt_status_enabled;
   _packets_enabled = _prefs->mqtt_packets_enabled;
@@ -1038,6 +1043,10 @@ void MQTTBridge::setOrigin(const char* origin) {
 void MQTTBridge::setIATA(const char* iata) {
   strncpy(_iata, iata, sizeof(_iata) - 1);
   _iata[sizeof(_iata) - 1] = '\0';
+  // Convert IATA code to uppercase (IATA codes are conventionally uppercase)
+  for (int i = 0; _iata[i]; i++) {
+    _iata[i] = toupper(_iata[i]);
+  }
 }
 
 void MQTTBridge::setDeviceID(const char* device_id) {
