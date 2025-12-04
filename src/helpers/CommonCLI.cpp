@@ -223,33 +223,6 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
       file.write(pad, to_write);
       remaining -= to_write;
     }
-    file.write((uint8_t *)&_prefs->mqtt_iata, sizeof(_prefs->mqtt_iata));                           // 194
-        file.write((uint8_t *)&_prefs->mqtt_status_enabled, sizeof(_prefs->mqtt_status_enabled));         // 202
-        file.write((uint8_t *)&_prefs->mqtt_packets_enabled, sizeof(_prefs->mqtt_packets_enabled));       // 203
-        file.write((uint8_t *)&_prefs->mqtt_raw_enabled, sizeof(_prefs->mqtt_raw_enabled));               // 204
-        file.write((uint8_t *)&_prefs->mqtt_tx_enabled, sizeof(_prefs->mqtt_tx_enabled));                 // 205
-        file.write((uint8_t *)&_prefs->mqtt_status_interval, sizeof(_prefs->mqtt_status_interval));     // 206
-    
-    // WiFi settings
-    file.write((uint8_t *)&_prefs->wifi_ssid, sizeof(_prefs->wifi_ssid));                             // 209
-    file.write((uint8_t *)&_prefs->wifi_password, sizeof(_prefs->wifi_password));                    // 241
-    
-        // Timezone settings
-        file.write((uint8_t *)&_prefs->timezone_string, sizeof(_prefs->timezone_string));                // 305
-        file.write((uint8_t *)&_prefs->timezone_offset, sizeof(_prefs->timezone_offset));                // 337
-        
-        // MQTT server settings
-        file.write((uint8_t *)&_prefs->mqtt_server, sizeof(_prefs->mqtt_server));                        // 340
-        file.write((uint8_t *)&_prefs->mqtt_port, sizeof(_prefs->mqtt_port));                            // 341
-        file.write((uint8_t *)&_prefs->mqtt_username, sizeof(_prefs->mqtt_username));                    // 342
-        file.write((uint8_t *)&_prefs->mqtt_password, sizeof(_prefs->mqtt_password));                    // 343
-        
-        // Let's Mesh Analyzer settings
-        file.write((uint8_t *)&_prefs->mqtt_analyzer_us_enabled, sizeof(_prefs->mqtt_analyzer_us_enabled)); // 344
-        file.write((uint8_t *)&_prefs->mqtt_analyzer_eu_enabled, sizeof(_prefs->mqtt_analyzer_eu_enabled)); // 345
-        file.write((uint8_t *)&_prefs->mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key)); // 346
-        file.write((uint8_t *)&_prefs->mqtt_email, sizeof(_prefs->mqtt_email)); // 347
-    // 209
 
     file.close();
   }
