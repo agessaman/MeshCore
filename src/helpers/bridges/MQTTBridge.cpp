@@ -199,9 +199,14 @@ void MQTTBridge::begin() {
       MQTT_DEBUG_PRINTLN("Failed to enable WiFi power save mode: %d", ps_result);
     }
     
-    // Set WiFi TX power to reasonable level for MQTT connectivity
+    // Set WiFi TX power - use build flag if defined, otherwise default to 11dBm
+    #ifdef MQTT_WIFI_TX_POWER
+    WiFi.setTxPower(MQTT_WIFI_TX_POWER);
+    MQTT_DEBUG_PRINTLN("WiFi TX power set via build flag (MQTT_WIFI_TX_POWER)");
+    #else
     WiFi.setTxPower(WIFI_POWER_11dBm);
-    MQTT_DEBUG_PRINTLN("WiFi TX power set to 11dBm");
+    MQTT_DEBUG_PRINTLN("WiFi TX power set to 11dBm (default)");
+    #endif
     #endif
     
     // Sync time with NTP

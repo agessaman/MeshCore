@@ -108,6 +108,10 @@ build_flags =
 - `MQTT_PORT` - MQTT broker port (default: 1883)
 - `MQTT_USERNAME` - MQTT username
 - `MQTT_PASSWORD` - MQTT password
+- `MQTT_WIFI_TX_POWER` - WiFi TX power level (default: `WIFI_POWER_11dBm`)
+  - Available values: `WIFI_POWER_19_5dBm`, `WIFI_POWER_19dBm`, `WIFI_POWER_18_5dBm`, `WIFI_POWER_17_5dBm`, `WIFI_POWER_15dBm`, `WIFI_POWER_13dBm`, `WIFI_POWER_11dBm`, `WIFI_POWER_8_5dBm`, `WIFI_POWER_7dBm`, `WIFI_POWER_5dBm`, `WIFI_POWER_2dBm`, `WIFI_POWER_MINUS_1dBm`
+  - Example: `-D MQTT_WIFI_TX_POWER=WIFI_POWER_19_5dBm` for maximum power
+  - **Note**: These power levels are appropriate for ESP32 and ESP32-S3. ESP32-C3 and ESP32-C6 may have different maximum power capabilities. If an invalid constant is used for your chip, the compiler will report an error. Check your specific ESP32 variant's datasheet for maximum supported TX power.
 
 ## Default Configuration
 
