@@ -176,6 +176,11 @@ void MQTTBridge::begin() {
   // Initialize WiFi
   MQTT_DEBUG_PRINTLN("Starting WiFi...");
   WiFi.mode(WIFI_STA);
+  
+  // Enable automatic reconnection - ESP32 will handle reconnection automatically
+  WiFi.setAutoReconnect(true);
+  WiFi.setAutoConnect(true);
+  
   WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
   
   // Wait for WiFi connection
@@ -191,12 +196,24 @@ void MQTTBridge::begin() {
     
     // Configure WiFi power management for efficient operation
     #ifdef ESP_PLATFORM
-    // Enable WiFi power save mode to reduce power consumption
-    esp_err_t ps_result = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
-    if (ps_result == ESP_OK) {
-      MQTT_DEBUG_PRINTLN("WiFi power save mode enabled");
+    // Set WiFi power save mode from preferences (0=min, 1=none, 2=max)
+    wifi_ps_type_t ps_mode;
+    uint8_t ps_pref = _prefs->wifi_power_save;
+    if (ps_pref == 1) {
+      ps_mode = WIFI_PS_NONE;
+    } else if (ps_pref == 2) {
+      ps_mode = WIFI_PS_MAX_MODEM;
     } else {
-      MQTT_DEBUG_PRINTLN("Failed to enable WiFi power save mode: %d", ps_result);
+      ps_mode = WIFI_PS_MIN_MODEM; // Default to min (0) if invalid or unset
+    }
+    
+    esp_err_t ps_result = esp_wifi_set_ps(ps_mode);
+    if (ps_result == ESP_OK) {
+      const char* ps_name = (ps_mode == WIFI_PS_NONE) ? "none" : 
+                           (ps_mode == WIFI_PS_MAX_MODEM) ? "max" : "min";
+      MQTT_DEBUG_PRINTLN("WiFi power save mode set to: %s", ps_name);
+    } else {
+      MQTT_DEBUG_PRINTLN("Failed to set WiFi power save mode: %d", ps_result);
     }
     
     // Set WiFi TX power - use build flag if defined, otherwise default to 11dBm
@@ -212,8 +229,9 @@ void MQTTBridge::begin() {
     // Sync time with NTP
     syncTimeWithNTP();
   } else {
-    MQTT_DEBUG_PRINTLN("WiFi connection failed!");
-    return;
+    MQTT_DEBUG_PRINTLN("WiFi connection failed! Auto-reconnect enabled, will retry automatically");
+    // Don't return here - allow MQTT bridge to initialize even if WiFi isn't connected yet
+    // Auto-reconnect will handle reconnection in the background
   }
   
   // Initialize PsychicMqttClient
@@ -374,6 +392,19 @@ bool MQTTBridge::isReady() const {
 void MQTTBridge::loop() {
   if (!_initialized) return;
   
+  // WiFi auto-reconnect is handled by ESP32, just check status periodically
+  // If WiFi reconnects, MQTT clients will automatically reconnect via their own logic
+  static unsigned long last_wifi_check = 0;
+  if (millis() - last_wifi_check > 30000) { // Check every 30 seconds
+    if (WiFi.status() == WL_CONNECTED) {
+      // WiFi is connected - MQTT reconnection logic will handle broker connections
+    } else {
+      // WiFi disconnected - auto-reconnect is enabled, will reconnect automatically
+      // No action needed, ESP32 handles it
+    }
+    last_wifi_check = millis();
+  }
+  
   // Maintain broker connections
   connectToBrokers();
   
@@ -386,7 +417,7 @@ void MQTTBridge::loop() {
   // Periodic configuration check (throttled to avoid spam)
   checkConfigurationMismatch();
   
-  // Periodic NTP sync (every hour)
+  // Periodic NTP sync (every hour) - only when connected
   if (WiFi.status() == WL_CONNECTED && millis() - _last_ntp_sync > 3600000) {
     syncTimeWithNTP();
   }

@@ -60,6 +60,7 @@ struct NodePrefs { // persisted to file
   // WiFi settings
   char wifi_ssid[32];       // WiFi SSID
   char wifi_password[64];  // WiFi password
+  uint8_t wifi_power_save; // WiFi power save mode: 0=min, 1=none, 2=max (default: 0=min)
   
   // Timezone settings
   char timezone_string[32]; // Timezone string (e.g., "America/Los_Angeles")
@@ -93,6 +94,7 @@ struct MQTTPrefs {
   // WiFi settings
   char wifi_ssid[32];       // WiFi SSID
   char wifi_password[64];  // WiFi password
+  uint8_t wifi_power_save; // WiFi power save mode: 0=min, 1=none, 2=max (default: 0=min)
   
   // Timezone settings
   char timezone_string[32]; // Timezone string (e.g., "America/Los_Angeles")

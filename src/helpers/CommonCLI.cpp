@@ -3,6 +3,10 @@
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
 #include <RTClib.h>
+#ifdef ESP_PLATFORM
+#include <WiFi.h>
+#include <esp_wifi.h>
+#endif
 #ifdef WITH_MQTT_BRIDGE
 #include "bridges/MQTTBridge.h"
 
@@ -248,6 +252,7 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_status_interval = 300000; // 5 minutes default
   prefs->mqtt_analyzer_us_enabled = 1; // enabled by default
   prefs->mqtt_analyzer_eu_enabled = 1; // enabled by default
+  prefs->wifi_power_save = 0; // Default to WIFI_PS_MIN_MODEM (0=min)
   // String fields are already zero-initialized by memset
 }
 
@@ -255,7 +260,8 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
   // Initialize with defaults first
   setMQTTPrefsDefaults(&_mqtt_prefs);
   
-  if (fs->exists("/mqtt_prefs")) {
+  bool file_existed = fs->exists("/mqtt_prefs");
+  if (file_existed) {
     // Load from separate MQTT prefs file
 #if defined(RP2040_PLATFORM)
     File file = fs->open("/mqtt_prefs", "r");
@@ -355,6 +361,7 @@ void CommonCLI::syncMQTTPrefsToNodePrefs() {
   _prefs->mqtt_status_interval = _mqtt_prefs.mqtt_status_interval;
   StrHelper::strncpy(_prefs->wifi_ssid, _mqtt_prefs.wifi_ssid, sizeof(_prefs->wifi_ssid));
   StrHelper::strncpy(_prefs->wifi_password, _mqtt_prefs.wifi_password, sizeof(_prefs->wifi_password));
+  _prefs->wifi_power_save = _mqtt_prefs.wifi_power_save;
   StrHelper::strncpy(_prefs->timezone_string, _mqtt_prefs.timezone_string, sizeof(_prefs->timezone_string));
   _prefs->timezone_offset = _mqtt_prefs.timezone_offset;
   StrHelper::strncpy(_prefs->mqtt_server, _mqtt_prefs.mqtt_server, sizeof(_prefs->mqtt_server));
@@ -379,6 +386,7 @@ void CommonCLI::syncNodePrefsToMQTTPrefs() {
   _mqtt_prefs.mqtt_status_interval = _prefs->mqtt_status_interval;
   StrHelper::strncpy(_mqtt_prefs.wifi_ssid, _prefs->wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
   StrHelper::strncpy(_mqtt_prefs.wifi_password, _prefs->wifi_password, sizeof(_mqtt_prefs.wifi_password));
+  _mqtt_prefs.wifi_power_save = _prefs->wifi_power_save;
   StrHelper::strncpy(_mqtt_prefs.timezone_string, _prefs->timezone_string, sizeof(_mqtt_prefs.timezone_string));
   _mqtt_prefs.timezone_offset = _prefs->timezone_offset;
   StrHelper::strncpy(_mqtt_prefs.mqtt_server, _prefs->mqtt_server, sizeof(_mqtt_prefs.mqtt_server));
@@ -602,6 +610,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 sprintf(reply, "> %s", _prefs->wifi_ssid);
               } else if (memcmp(config, "wifi.pwd", 8) == 0) {
                 sprintf(reply, "> %s", _prefs->wifi_password);
+              } else if (memcmp(config, "wifi.powersave", 14) == 0) {
+                uint8_t ps = _prefs->wifi_power_save;
+                const char* ps_name = (ps == 1) ? "none" : (ps == 2) ? "max" : "min";
+                sprintf(reply, "> %s", ps_name);
               } else if (memcmp(config, "timezone", 8) == 0) {
                 sprintf(reply, "> %s", _prefs->timezone_string);
               } else if (memcmp(config, "timezone.offset", 15) == 0) {
@@ -866,6 +878,48 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 StrHelper::strncpy(_prefs->wifi_password, &config[9], sizeof(_prefs->wifi_password));
                 savePrefs();
                 strcpy(reply, "OK");
+              } else if (memcmp(config, "wifi.powersave ", 15) == 0) {
+                const char* value = &config[15];
+                uint8_t ps_value;
+                bool valid = false;
+                if (memcmp(value, "min", 3) == 0 && (value[3] == 0 || value[3] == ' ')) {
+                  ps_value = 0;
+                  valid = true;
+                } else if (memcmp(value, "none", 4) == 0 && (value[4] == 0 || value[4] == ' ')) {
+                  ps_value = 1;
+                  valid = true;
+                } else if (memcmp(value, "max", 3) == 0 && (value[3] == 0 || value[3] == ' ')) {
+                  ps_value = 2;
+                  valid = true;
+                }
+                
+                if (!valid) {
+                  strcpy(reply, "Error: must be none, min, or max");
+                } else {
+                  _prefs->wifi_power_save = ps_value;
+                  savePrefs();
+                  
+                  // Apply immediately if WiFi is connected
+                  #ifdef ESP_PLATFORM
+                  if (WiFi.status() == WL_CONNECTED) {
+                    wifi_ps_type_t ps_mode = (ps_value == 1) ? WIFI_PS_NONE : 
+                                            (ps_value == 2) ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
+                    esp_err_t ps_result = esp_wifi_set_ps(ps_mode);
+                    if (ps_result == ESP_OK) {
+                      const char* ps_name = (ps_value == 1) ? "none" : (ps_value == 2) ? "max" : "min";
+                      sprintf(reply, "OK - power save set to %s", ps_name);
+                    } else {
+                      sprintf(reply, "OK - saved, but failed to apply: %d", ps_result);
+                    }
+                  } else {
+                    const char* ps_name = (ps_value == 1) ? "none" : (ps_value == 2) ? "max" : "min";
+                    sprintf(reply, "OK - saved as %s (will apply on next WiFi connection)", ps_name);
+                  }
+                  #else
+                  const char* ps_name = (ps_value == 1) ? "none" : (ps_value == 2) ? "max" : "min";
+                  sprintf(reply, "OK - saved as %s", ps_name);
+                  #endif
+                }
               } else if (memcmp(config, "timezone ", 9) == 0) {
                 StrHelper::strncpy(_prefs->timezone_string, &config[9], sizeof(_prefs->timezone_string));
                 savePrefs();
