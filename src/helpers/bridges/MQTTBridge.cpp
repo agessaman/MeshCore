@@ -181,6 +181,32 @@ void MQTTBridge::begin() {
   WiFi.setAutoReconnect(true);
   WiFi.setAutoConnect(true);
   
+  // Set up WiFi event handlers for better diagnostics and immediate disconnection detection
+  #ifdef ESP_PLATFORM
+  WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+    switch(event) {
+      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        // Log disconnection event - reason code access varies by ESP32 Arduino version
+        // Just log the event; detailed reason tracking happens in loop() monitoring
+        MQTT_DEBUG_PRINTLN("WiFi event: DISCONNECTED");
+        // Auto-reconnect is enabled, but we'll also monitor in loop() for active reconnection
+        break;
+      case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+        MQTT_DEBUG_PRINTLN("WiFi event: CONNECTED to AP");
+        break;
+      case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+        MQTT_DEBUG_PRINTLN("WiFi event: GOT_IP - %s", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+        break;
+      case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+        MQTT_DEBUG_PRINTLN("WiFi event: LOST_IP");
+        break;
+      default:
+        // Other events not critical for our use case
+        break;
+    }
+  });
+  #endif
+  
   WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
   
   // Wait for WiFi connection
@@ -392,17 +418,58 @@ bool MQTTBridge::isReady() const {
 void MQTTBridge::loop() {
   if (!_initialized) return;
   
-  // WiFi auto-reconnect is handled by ESP32, just check status periodically
-  // If WiFi reconnects, MQTT clients will automatically reconnect via their own logic
+  // Actively monitor and manage WiFi connection
   static unsigned long last_wifi_check = 0;
-  if (millis() - last_wifi_check > 30000) { // Check every 30 seconds
-    if (WiFi.status() == WL_CONNECTED) {
-      // WiFi is connected - MQTT reconnection logic will handle broker connections
+  static unsigned long last_wifi_reconnect_attempt = 0;
+  static wl_status_t last_wifi_status = WL_DISCONNECTED;
+  static unsigned long wifi_disconnected_time = 0;
+  
+  unsigned long now = millis();
+  wl_status_t current_wifi_status = WiFi.status();
+  
+  // Check WiFi status every 10 seconds for faster detection
+  if (now - last_wifi_check > 10000) {
+    last_wifi_check = now;
+    
+    if (current_wifi_status == WL_CONNECTED) {
+      if (last_wifi_status != WL_CONNECTED) {
+        // WiFi just reconnected
+        MQTT_DEBUG_PRINTLN("WiFi reconnected! IP: %s", WiFi.localIP().toString().c_str());
+        wifi_disconnected_time = 0;
+      }
+      last_wifi_status = WL_CONNECTED;
     } else {
-      // WiFi disconnected - auto-reconnect is enabled, will reconnect automatically
-      // No action needed, ESP32 handles it
+      // WiFi is disconnected
+      if (last_wifi_status == WL_CONNECTED) {
+        // WiFi just disconnected
+        MQTT_DEBUG_PRINTLN("WiFi disconnected! Status: %d", current_wifi_status);
+        wifi_disconnected_time = now;
+      } else if (wifi_disconnected_time > 0) {
+        // WiFi has been disconnected for a while
+        unsigned long disconnected_duration = now - wifi_disconnected_time;
+        
+        // Try to force reconnection if disconnected for more than 30 seconds
+        // and we haven't tried in the last 30 seconds
+        if (disconnected_duration > 30000 && (now - last_wifi_reconnect_attempt) > 30000) {
+          MQTT_DEBUG_PRINTLN("WiFi still disconnected after %lu ms, attempting manual reconnect...", disconnected_duration);
+          last_wifi_reconnect_attempt = now;
+          
+          // Force reconnection attempt
+          WiFi.disconnect();
+          delay(100);
+          WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
+          MQTT_DEBUG_PRINTLN("WiFi.begin() called - waiting for connection...");
+        } else if (disconnected_duration > 60000) {
+          // Log every minute if still disconnected
+          static unsigned long last_disconnect_log = 0;
+          if (now - last_disconnect_log > 60000) {
+            MQTT_DEBUG_PRINTLN("WiFi disconnected for %lu seconds, status: %d", disconnected_duration / 1000, current_wifi_status);
+            last_disconnect_log = now;
+          }
+        }
+      }
+      last_wifi_status = current_wifi_status;
     }
-    last_wifi_check = millis();
   }
   
   // Maintain broker connections
@@ -476,11 +543,13 @@ void MQTTBridge::loop() {
     logMemoryStatus();
     // Debug: Log status timer state when memory check happens
     if (_status_enabled) {
-      unsigned long elapsed = (millis() >= _last_status_publish) ? 
-                             (millis() - _last_status_publish) : 
-                             (ULONG_MAX - _last_status_publish + millis() + 1);
+      unsigned long now = millis();
+      unsigned long elapsed = (now >= _last_status_publish) ? 
+                             (now - _last_status_publish) : 
+                             (ULONG_MAX - _last_status_publish + now + 1);
+      unsigned long next_publish = (elapsed < _status_interval) ? (_status_interval - elapsed) : 0;
       MQTT_DEBUG_PRINTLN("Memory check: Status timer - elapsed: %lu ms, interval: %lu ms, next: %lu ms", 
-                         elapsed, _status_interval, _status_interval - elapsed);
+                         elapsed, _status_interval, next_publish);
     }
     last_memory_log = millis();
   }
@@ -1500,6 +1569,19 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
 
 void MQTTBridge::maintainAnalyzerConnections() {
   if (!_identity) {
+    return;
+  }
+  
+  // Check WiFi status first - don't attempt MQTT reconnection if WiFi is disconnected
+  if (WiFi.status() != WL_CONNECTED) {
+    // WiFi is not connected - skip MQTT reconnection attempts
+    // WiFi auto-reconnect will handle WiFi, then we can reconnect MQTT
+    static unsigned long last_wifi_warning = 0;
+    unsigned long now = millis();
+    if (now - last_wifi_warning > 300000) { // Log every 5 minutes max
+      MQTT_DEBUG_PRINTLN("Skipping MQTT reconnection - WiFi not connected");
+      last_wifi_warning = now;
+    }
     return;
   }
   

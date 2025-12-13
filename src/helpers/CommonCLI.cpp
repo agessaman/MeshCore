@@ -610,6 +610,22 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 sprintf(reply, "> %s", _prefs->wifi_ssid);
               } else if (memcmp(config, "wifi.pwd", 8) == 0) {
                 sprintf(reply, "> %s", _prefs->wifi_password);
+              } else if (memcmp(config, "wifi.status", 11) == 0) {
+                wl_status_t status = WiFi.status();
+                const char* status_str;
+                switch(status) {
+                  case WL_CONNECTED: status_str = "connected"; break;
+                  case WL_NO_SSID_AVAIL: status_str = "no_ssid"; break;
+                  case WL_CONNECT_FAILED: status_str = "connect_failed"; break;
+                  case WL_CONNECTION_LOST: status_str = "connection_lost"; break;
+                  case WL_DISCONNECTED: status_str = "disconnected"; break;
+                  default: status_str = "unknown"; break;
+                }
+                if (status == WL_CONNECTED) {
+                  sprintf(reply, "> %s, IP: %s, RSSI: %d dBm", status_str, WiFi.localIP().toString().c_str(), WiFi.RSSI());
+                } else {
+                  sprintf(reply, "> %s (code: %d)", status_str, status);
+                }
               } else if (memcmp(config, "wifi.powersave", 14) == 0) {
                 uint8_t ps = _prefs->wifi_power_save;
                 const char* ps_name = (ps == 1) ? "none" : (ps == 2) ? "max" : "min";
