@@ -77,6 +77,11 @@ struct NodePrefs { // persisted to file
   uint8_t mqtt_analyzer_eu_enabled; // Enable EU analyzer server
   char mqtt_owner_public_key[65]; // Owner public key (hex string, same length as repeater public key)
   char mqtt_email[64]; // Owner email address for matching nodes with owners
+  
+  // Remote serial commands via MQTT
+  uint8_t mqtt_remote_enabled;      // Enable remote control (default: 0 = off)
+  uint8_t mqtt_use_acl;             // Use ACL admin list (default: 1 = on)
+  char mqtt_admin_public_key[65];   // Admin public key (PUB_KEY_SIZE * 2 hex chars + null terminator)
 };
 
 #ifdef WITH_MQTT_BRIDGE
@@ -111,6 +116,11 @@ struct MQTTPrefs {
   uint8_t mqtt_analyzer_eu_enabled; // Enable EU analyzer server
   char mqtt_owner_public_key[65]; // Owner public key (hex string, same length as repeater public key)
   char mqtt_email[64]; // Owner email address for matching nodes with owners
+  
+  // Remote serial commands via MQTT
+  uint8_t mqtt_remote_enabled;        // Enable remote control (default: 0 = off)
+  uint8_t mqtt_use_acl;               // Use ACL admin list (default: 1 = on)
+  char mqtt_admin_public_key[65];     // Admin public key (64 hex chars + null terminator)
 };
 #endif
 

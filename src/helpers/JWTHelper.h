@@ -37,7 +37,32 @@ public:
     const char* email = nullptr
   );
 
-private:
+  /**
+   * Verify a JWT token and extract information
+   * 
+   * @param token JWT token string (header.payload.signature format)
+   * @param expected_public_key Expected public key for verification (NULL if checking against ACL)
+   * @param key_len Length of expected public key
+   * @param extracted_public_key Output buffer for extracted public key from token
+   * @param extracted_key_size Size of extracted_public_key buffer
+   * @param extracted_nonce Output buffer for extracted nonce from token
+   * @param nonce_size Size of extracted_nonce buffer
+   * @param issued_at Output: issued at timestamp
+   * @param expires_at Output: expiration timestamp
+   * @return true if token is valid and signature verifies
+   */
+  static bool verifyToken(
+    const char* token,
+    const uint8_t* expected_public_key,
+    size_t key_len,
+    char* extracted_public_key,
+    size_t extracted_key_size,
+    char* extracted_nonce,
+    size_t nonce_size,
+    unsigned long* issued_at,
+    unsigned long* expires_at
+  );
+
   /**
    * Base64 URL encode data
    * 
@@ -48,6 +73,18 @@ private:
    * @return Length of encoded data, or 0 on error
    */
   static size_t base64UrlEncode(const uint8_t* input, size_t inputLen, char* output, size_t outputSize);
+
+  /**
+   * Base64 URL decode data
+   * 
+   * @param input Input base64url encoded string
+   * @param output Output buffer
+   * @param outputSize Size of output buffer
+   * @return Length of decoded data, or 0 on error
+   */
+  static size_t base64UrlDecode(const char* input, uint8_t* output, size_t outputSize);
+
+private:
   
   /**
    * Create JWT header

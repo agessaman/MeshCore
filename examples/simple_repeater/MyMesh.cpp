@@ -681,6 +681,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       , bridge(&_prefs, _mgr, &rtc)
 #elif defined(WITH_MQTT_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc, &self_id)
+      , _acl_callbacks(&acl)
+      , _command_executor(&_cli)
 #endif
 {
   last_millis = 0;
@@ -795,6 +797,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
     // This enables stats to be included in status messages automatically
     // this (Mesh*) inherits from Dispatcher, so it can be passed as Dispatcher*
     bridge.setStatsSources(this, _radio, _cli.getBoard(), _ms);
+    
+    // Set ACL and command executor callbacks for remote commands
+    // Initialize callbacks (they reference acl and _cli which are already initialized)
+    _acl_callbacks = MyMeshACLCallbacks(&acl);
+    _command_executor = MyMeshCommandExecutor(&_cli);
+    bridge.setACLCallbacks(&_acl_callbacks);
+    bridge.setCommandExecutor(&_command_executor);
 #endif
     
     bridge.begin();

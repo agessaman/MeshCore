@@ -3,6 +3,10 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
+#include <ArduinoJson.h>
+#include "ed_25519.h"
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef ESP_PLATFORM
 #include <esp_wifi.h>
@@ -49,7 +53,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
               _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
               _analyzer_us_enabled(false), _analyzer_eu_enabled(false), _identity(identity),
               _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr), _config_valid(false),
-              _last_no_broker_log(0), _last_config_warning(0), _dispatcher(nullptr), _radio(nullptr), _board(nullptr), _ms(nullptr) {
+              _last_no_broker_log(0), _last_config_warning(0), _dispatcher(nullptr), _radio(nullptr), _board(nullptr), _ms(nullptr),
+              _acl_callbacks(nullptr), _command_executor(nullptr), _current_command_nonce{0} {
   
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -58,6 +63,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   strncpy(_firmware_version, "unknown", sizeof(_firmware_version) - 1);
   strncpy(_board_model, "unknown", sizeof(_board_model) - 1);
   strncpy(_build_date, "unknown", sizeof(_build_date) - 1);
+  _command_topic[0] = '\0';
+  _response_topic[0] = '\0';
   _status_enabled = true;
   _packets_enabled = true;
   _raw_enabled = false;
@@ -147,6 +154,9 @@ void MQTTBridge::begin() {
   _packets_enabled = _prefs->mqtt_packets_enabled;
   _raw_enabled = _prefs->mqtt_raw_enabled;
   _tx_enabled = _prefs->mqtt_tx_enabled;
+  
+  // Setup remote command subscription if enabled (will be called again when clients connect)
+  // Note: Subscription will be set up when clients actually connect via setupCommandSubscription()
   // Set status interval to 5 minutes (300000 ms), or use preference if set and valid
   if (_prefs->mqtt_status_interval >= 1000 && _prefs->mqtt_status_interval <= 3600000) {
     _status_interval = _prefs->mqtt_status_interval;
@@ -276,6 +286,10 @@ void MQTTBridge::begin() {
         break;
       }
     }
+    // Setup command subscription when connected
+    if (_prefs->mqtt_remote_enabled) {
+      setupCommandSubscription();
+    }
   });
   
   _mqtt_client->onDisconnect([this](bool sessionPresent) {
@@ -287,6 +301,30 @@ void MQTTBridge::begin() {
         _active_brokers--;
         MQTT_DEBUG_PRINTLN("Broker %d marked as disconnected", i);
         break;
+      }
+    }
+  });
+  
+  // Set up message callback for remote commands
+  _mqtt_client->onMessage([this](char* topic, char* payload, int length, int qos, bool retain) {
+    MQTT_DEBUG_PRINTLN("onMessage callback (main): topic=%s, payload=%p, length=%d, qos=%d, retain=%d", 
+                       topic ? topic : "(null)", payload, length, qos, retain);
+    // Check if this is a command topic (only if remote control is enabled and topic is set)
+    if (_prefs->mqtt_remote_enabled && _command_topic[0] != '\0' && strcmp(topic, _command_topic) == 0) {
+      if (!payload || length <= 0) {
+        MQTT_DEBUG_PRINTLN("Received empty payload on command topic: payload=%p, length=%d", payload, length);
+        return;
+      }
+      // Make a copy of the payload since it might not be null-terminated
+      char* payload_copy = (char*)malloc(length + 1);
+      if (payload_copy) {
+        memcpy(payload_copy, payload, length);
+        payload_copy[length] = '\0';
+        MQTT_DEBUG_PRINTLN("Received command message, length: %d, payload: %.100s", length, payload_copy);
+        onCommandMessage(topic, (uint8_t*)payload_copy, length);
+        free(payload_copy);
+      } else {
+        MQTT_DEBUG_PRINTLN("Failed to allocate memory for payload copy");
       }
     }
   });
@@ -1261,8 +1299,18 @@ bool MQTTBridge::createAuthToken() {
         owner_key, client_version, email)) {
       MQTT_DEBUG_PRINTLN("Created auth token for US server");
       us_token_created = true;
+      // Set expiration time if time is synced, otherwise set to 0 to indicate it needs to be set later
+      bool time_synced = (current_time >= 1000000000); // After year 2001
+      if (time_synced) {
+        _token_us_expires_at = current_time + expires_in;
+        MQTT_DEBUG_PRINTLN("US token expiration set to: %lu", _token_us_expires_at);
+      } else {
+        _token_us_expires_at = 0; // Will be set properly after time sync
+        MQTT_DEBUG_PRINTLN("US token created, expiration will be set after time sync");
+      }
     } else {
       MQTT_DEBUG_PRINTLN("Failed to create auth token for US server");
+      _token_us_expires_at = 0;
     }
   }
   
@@ -1275,8 +1323,18 @@ bool MQTTBridge::createAuthToken() {
         owner_key, client_version, email)) {
       MQTT_DEBUG_PRINTLN("Created auth token for EU server");
       eu_token_created = true;
+      // Set expiration time if time is synced, otherwise set to 0 to indicate it needs to be set later
+      bool time_synced = (current_time >= 1000000000); // After year 2001
+      if (time_synced) {
+        _token_eu_expires_at = current_time + expires_in;
+        MQTT_DEBUG_PRINTLN("EU token expiration set to: %lu", _token_eu_expires_at);
+      } else {
+        _token_eu_expires_at = 0; // Will be set properly after time sync
+        MQTT_DEBUG_PRINTLN("EU token created, expiration will be set after time sync");
+      }
     } else {
       MQTT_DEBUG_PRINTLN("Failed to create auth token for EU server");
+      _token_eu_expires_at = 0;
     }
   }
   
@@ -1354,10 +1412,49 @@ void MQTTBridge::setupAnalyzerClients() {
       MQTT_DEBUG_PRINTLN("Connected to Let's Mesh US server, session present: %s", sessionPresent ? "true" : "false");
       // Publish status message when connected
       publishStatusToAnalyzerClient(_analyzer_us_client, "mqtt-us-v1.letsmesh.net");
+      // Setup command subscription when connected
+      if (_prefs->mqtt_remote_enabled) {
+        setupCommandSubscription();
+      }
     });
 
     _analyzer_us_client->onDisconnect([this](bool sessionPresent) {
       MQTT_DEBUG_PRINTLN("Disconnected from Let's Mesh US server, session present: %s", sessionPresent ? "true" : "false");
+    });
+    
+    // Set up message callback for remote commands
+    _analyzer_us_client->onMessage([this](char* topic, char* payload, int length, int qos, bool retain) {
+      MQTT_DEBUG_PRINTLN("onMessage callback (US): topic=%s, payload=%p, length=%d, qos=%d, retain=%d", 
+                         topic ? topic : "(null)", payload, length, qos, retain);
+      
+      // If length is 0 but payload pointer is non-null, try using strlen() - maybe it's null-terminated
+      if (payload && length == 0) {
+        int str_len = strlen(payload);
+        if (str_len > 0) {
+          MQTT_DEBUG_PRINTLN("Payload is null-terminated string, actual length=%d: %.100s", str_len, payload);
+          length = str_len;
+        }
+      }
+      
+      if (payload && length > 0) {
+        MQTT_DEBUG_PRINTLN("onMessage (US) payload preview: %.50s", payload);
+      }
+      if (_prefs->mqtt_remote_enabled && _command_topic[0] != '\0' && strcmp(topic, _command_topic) == 0) {
+        if (!payload || length <= 0) {
+          MQTT_DEBUG_PRINTLN("Received empty payload on command topic (US): payload=%p, length=%d", payload, length);
+          return;
+        }
+        char* payload_copy = (char*)malloc(length + 1);
+        if (payload_copy) {
+          memcpy(payload_copy, payload, length);
+          payload_copy[length] = '\0';
+          MQTT_DEBUG_PRINTLN("Received command message (US), length: %d, payload: %.100s", length, payload_copy);
+          onCommandMessage(topic, (uint8_t*)payload_copy, length);
+          free(payload_copy);
+        } else {
+          MQTT_DEBUG_PRINTLN("Failed to allocate memory for payload copy (US)");
+        }
+      }
     });
 
             _analyzer_us_client->onError([this](esp_mqtt_error_codes error) {
@@ -1398,10 +1495,49 @@ void MQTTBridge::setupAnalyzerClients() {
       MQTT_DEBUG_PRINTLN("Connected to Let's Mesh EU server, session present: %s", sessionPresent ? "true" : "false");
       // Publish status message when connected
       publishStatusToAnalyzerClient(_analyzer_eu_client, "mqtt-eu-v1.letsmesh.net");
+      // Setup command subscription when connected
+      if (_prefs->mqtt_remote_enabled) {
+        setupCommandSubscription();
+      }
     });
 
     _analyzer_eu_client->onDisconnect([this](bool sessionPresent) {
       MQTT_DEBUG_PRINTLN("Disconnected from Let's Mesh EU server, session present: %s", sessionPresent ? "true" : "false");
+    });
+    
+    // Set up message callback for remote commands
+    _analyzer_eu_client->onMessage([this](char* topic, char* payload, int length, int qos, bool retain) {
+      MQTT_DEBUG_PRINTLN("onMessage callback (EU): topic=%s, payload=%p, length=%d, qos=%d, retain=%d", 
+                         topic ? topic : "(null)", payload, length, qos, retain);
+      
+      // If length is 0 but payload pointer is non-null, try using strlen() - maybe it's null-terminated
+      if (payload && length == 0) {
+        int str_len = strlen(payload);
+        if (str_len > 0) {
+          MQTT_DEBUG_PRINTLN("Payload is null-terminated string, actual length=%d: %.100s", str_len, payload);
+          length = str_len;
+        }
+      }
+      
+      if (payload && length > 0) {
+        MQTT_DEBUG_PRINTLN("onMessage (EU) payload preview: %.50s", payload);
+      }
+      if (_prefs->mqtt_remote_enabled && _command_topic[0] != '\0' && strcmp(topic, _command_topic) == 0) {
+        if (!payload || length <= 0) {
+          MQTT_DEBUG_PRINTLN("Received empty payload on command topic (EU): payload=%p, length=%d", payload, length);
+          return;
+        }
+        char* payload_copy = (char*)malloc(length + 1);
+        if (payload_copy) {
+          memcpy(payload_copy, payload, length);
+          payload_copy[length] = '\0';
+          MQTT_DEBUG_PRINTLN("Received command message (EU), length: %d, payload: %.100s", length, payload_copy);
+          onCommandMessage(topic, (uint8_t*)payload_copy, length);
+          free(payload_copy);
+        } else {
+          MQTT_DEBUG_PRINTLN("Failed to allocate memory for payload copy (EU)");
+        }
+      }
     });
 
             _analyzer_eu_client->onError([this](esp_mqtt_error_codes error) {
@@ -1696,15 +1832,27 @@ void MQTTBridge::maintainAnalyzerConnections() {
         // Update client credentials with new token
         _analyzer_us_client->setCredentials(_analyzer_username, _auth_token_us);
         
-        // Reconnect to apply new token (whether currently connected or not)
-        // If connected, disconnect first to ensure new token is used
-        if (_analyzer_us_client->connected()) {
-          MQTT_DEBUG_PRINTLN("Disconnecting US server to apply new token...");
-          _analyzer_us_client->disconnect();
+        // Only reconnect if currently disconnected - if already connected, the new token
+        // will be used on the next connection (when current one drops or expires)
+        // This avoids unnecessary disconnections for proactive token renewals
+        if (!_analyzer_us_client->connected()) {
+          MQTT_DEBUG_PRINTLN("Reconnecting to US server with renewed token...");
+          _last_reconnect_attempt_us = now_millis; // Update reconnect timestamp to throttle subsequent attempts
+          _analyzer_us_client->connect();
+        } else {
+          // Token renewed but already connected - new token will be used on next reconnect
+          // Only force reconnect if token is actually expired (not just within renewal buffer)
+          if (current_time >= _token_us_expires_at) {
+            MQTT_DEBUG_PRINTLN("Disconnecting US server to apply expired token...");
+            _analyzer_us_client->disconnect();
+            MQTT_DEBUG_PRINTLN("Reconnecting to US server with renewed token...");
+            _last_reconnect_attempt_us = now_millis;
+            _analyzer_us_client->connect();
+          } else {
+            MQTT_DEBUG_PRINTLN("US token renewed proactively (expires in %lu seconds), keeping existing connection", 
+                               _token_us_expires_at - current_time);
+          }
         }
-        MQTT_DEBUG_PRINTLN("Reconnecting to US server with renewed token...");
-        _last_reconnect_attempt_us = now_millis; // Update reconnect timestamp to throttle subsequent attempts
-        _analyzer_us_client->connect();
       } else {
         MQTT_DEBUG_PRINTLN("Failed to renew US token");
         _token_us_expires_at = 0;
@@ -1801,15 +1949,27 @@ void MQTTBridge::maintainAnalyzerConnections() {
         // Update client credentials with new token
         _analyzer_eu_client->setCredentials(_analyzer_username, _auth_token_eu);
         
-        // Reconnect to apply new token (whether currently connected or not)
-        // If connected, disconnect first to ensure new token is used
-        if (_analyzer_eu_client->connected()) {
-          MQTT_DEBUG_PRINTLN("Disconnecting EU server to apply new token...");
-          _analyzer_eu_client->disconnect();
+        // Only reconnect if currently disconnected - if already connected, the new token
+        // will be used on the next connection (when current one drops or expires)
+        // This avoids unnecessary disconnections for proactive token renewals
+        if (!_analyzer_eu_client->connected()) {
+          MQTT_DEBUG_PRINTLN("Reconnecting to EU server with renewed token...");
+          _last_reconnect_attempt_eu = now_millis; // Update reconnect timestamp to throttle subsequent attempts
+          _analyzer_eu_client->connect();
+        } else {
+          // Token renewed but already connected - new token will be used on next reconnect
+          // Only force reconnect if token is actually expired (not just within renewal buffer)
+          if (current_time >= _token_eu_expires_at) {
+            MQTT_DEBUG_PRINTLN("Disconnecting EU server to apply expired token...");
+            _analyzer_eu_client->disconnect();
+            MQTT_DEBUG_PRINTLN("Reconnecting to EU server with renewed token...");
+            _last_reconnect_attempt_eu = now_millis;
+            _analyzer_eu_client->connect();
+          } else {
+            MQTT_DEBUG_PRINTLN("EU token renewed proactively (expires in %lu seconds), keeping existing connection", 
+                               _token_eu_expires_at - current_time);
+          }
         }
-        MQTT_DEBUG_PRINTLN("Reconnecting to EU server with renewed token...");
-        _last_reconnect_attempt_eu = now_millis; // Update reconnect timestamp to throttle subsequent attempts
-        _analyzer_eu_client->connect();
       } else {
         MQTT_DEBUG_PRINTLN("Failed to renew EU token");
         _token_eu_expires_at = 0;
@@ -2092,8 +2252,10 @@ void MQTTBridge::getClientVersion(char* buffer, size_t buffer_size) const {
   if (!buffer || buffer_size == 0) {
     return;
   }
+  // TODO: REVERT BEFORE PUBLISHING - Temporary test value for testing interface
   // Generate client version string in format "meshcore/{firmware_version}"
-  snprintf(buffer, buffer_size, "meshcore/%s", _firmware_version);
+  // snprintf(buffer, buffer_size, "meshcore/%s", _firmware_version);
+  snprintf(buffer, buffer_size, "meshcoretomqtt/1.0.7");
 }
 
 void MQTTBridge::logMemoryStatus() {
@@ -2105,6 +2267,551 @@ void MQTTBridge::logMemoryStatus() {
   MQTT_DEBUG_PRINTLN("Free PSRAM: %d bytes", ESP.getFreePsram());
   MQTT_DEBUG_PRINTLN("Queue size: %d/%d packets", _queue_count, MAX_QUEUE_SIZE);
   MQTT_DEBUG_PRINTLN("===================");
+}
+
+void MQTTBridge::setACLCallbacks(MQTTBridgeACLCallbacks* callbacks) {
+  _acl_callbacks = callbacks;
+}
+
+void MQTTBridge::setCommandExecutor(MQTTBridgeCommandExecutor* executor) {
+  _command_executor = executor;
+}
+
+bool MQTTBridge::isTimeValid() {
+  unsigned long current_time = time(nullptr);
+  // Check if time is synced (after year 2001, reasonable for embedded devices)
+  return (current_time >= 1000000000);
+}
+
+bool MQTTBridge::isAuthorized(const uint8_t* pubkey, size_t key_len) {
+  // Access through _prefs (NodePrefs*) which is synced from MQTTPrefs
+  if (!_prefs->mqtt_remote_enabled) {
+    return false;  // Remote control disabled
+  }
+  
+  if (_prefs->mqtt_use_acl) {
+    // Check if ACL is available on this device
+    if (!_acl_callbacks || !_acl_callbacks->hasACL()) {
+      MQTT_DEBUG_PRINTLN("ACL not available on this device variant");
+      return false;  // ACL not available
+    }
+    // Check ACL admin list - only PERM_ACL_ADMIN users are authorized
+    // Read/write and read-only users are NOT authorized
+    if (_acl_callbacks->isPublicKeyAdmin(pubkey, key_len)) {
+      return true;
+    }
+    return false;
+  } else {
+    // Check against configured admin key
+    if (_prefs->mqtt_admin_public_key[0] == '\0') {
+      return false;  // No admin key configured
+    }
+    
+    // Convert hex string to bytes and compare full public key
+    uint8_t admin_key[PUB_KEY_SIZE];
+    if (mesh::Utils::fromHex(admin_key, PUB_KEY_SIZE, _prefs->mqtt_admin_public_key)) {
+      return (memcmp(pubkey, admin_key, PUB_KEY_SIZE) == 0);
+    }
+    return false;
+  }
+}
+
+void MQTTBridge::setupCommandSubscription() {
+  // Validate IATA configuration first
+  if (!isIATAValid()) {
+    MQTT_DEBUG_PRINTLN("Cannot subscribe to remote commands: IATA not configured");
+    _prefs->mqtt_remote_enabled = 0;  // Auto-disable remote control
+    return;  // Skip subscription setup
+  }
+  
+  // Build command and response topics
+  snprintf(_command_topic, sizeof(_command_topic), "meshcore/%s/%s/serial/commands", _iata, _device_id);
+  snprintf(_response_topic, sizeof(_response_topic), "meshcore/%s/%s/serial/responses", _iata, _device_id);
+  
+  MQTT_DEBUG_PRINTLN("Setting up remote command subscription: %s", _command_topic);
+  
+  // Subscribe to command topic on all connected brokers
+  // Custom MQTT broker
+  if (_config_valid && _mqtt_client && _mqtt_client->connected()) {
+    _mqtt_client->subscribe(_command_topic, 1);
+    MQTT_DEBUG_PRINTLN("Subscribed to command topic on custom broker");
+  }
+  
+  // Analyzer US server
+  if (_analyzer_us_enabled && _analyzer_us_client && _analyzer_us_client->connected()) {
+    _analyzer_us_client->subscribe(_command_topic, 1);
+    MQTT_DEBUG_PRINTLN("Subscribed to command topic on US analyzer server");
+  }
+  
+  // Analyzer EU server
+  if (_analyzer_eu_enabled && _analyzer_eu_client && _analyzer_eu_client->connected()) {
+    _analyzer_eu_client->subscribe(_command_topic, 1);
+    MQTT_DEBUG_PRINTLN("Subscribed to command topic on EU analyzer server");
+  }
+}
+
+void MQTTBridge::onCommandMessage(char* topic, uint8_t* payload, unsigned int length) {
+  if (!_prefs->mqtt_remote_enabled) {
+    return;  // Remote control disabled
+  }
+  
+  // Validate payload
+  if (!payload || length == 0) {
+    publishErrorResponse("Empty message payload");
+    return;
+  }
+  
+  // Validate time synchronization
+  if (!isTimeValid()) {
+    publishErrorResponse("System time not synchronized - cannot verify JWT expiration");
+    return;
+  }
+  
+  // The payload is a JWT token string, not a JSON object
+  // The JWT payload contains the command
+  const char* token = (const char*)payload;
+  
+  // Guard against processing the same command multiple times (e.g., from both US and EU servers)
+  // We'll extract the nonce from the JWT payload to use as a unique identifier
+  // First, quickly decode just the payload to get the nonce
+  const char* first_dot_check = strchr(token, '.');
+  const char* second_dot_check = first_dot_check ? strchr(first_dot_check + 1, '.') : nullptr;
+  
+  if (!first_dot_check || !second_dot_check) {
+    publishErrorResponse("Invalid JWT token format");
+    return;
+  }
+  
+  // Extract payload part for nonce extraction
+  size_t payload_len_check = second_dot_check - first_dot_check - 1;
+  if (payload_len_check == 0 || payload_len_check >= 512) {
+    publishErrorResponse("Invalid JWT token format");
+    return;
+  }
+  
+  // Decode payload to extract nonce for duplicate detection
+  char* payload_b64_check = (char*)malloc(payload_len_check + 1);
+  if (!payload_b64_check) {
+    publishErrorResponse("Memory allocation failed");
+    return;
+  }
+  memcpy(payload_b64_check, first_dot_check + 1, payload_len_check);
+  payload_b64_check[payload_len_check] = '\0';
+  
+  uint8_t* payload_buffer_check = (uint8_t*)malloc(512);
+  if (!payload_buffer_check) {
+    free(payload_b64_check);
+    publishErrorResponse("Memory allocation failed");
+    return;
+  }
+  
+  size_t decoded_len_check = JWTHelper::base64UrlDecode(payload_b64_check, payload_buffer_check, 512);
+  free(payload_b64_check);
+  if (decoded_len_check == 0) {
+    free(payload_buffer_check);
+    publishErrorResponse("Invalid JWT token format");
+    return;
+  }
+  
+  // Parse JSON to extract nonce - use full size since we'll reuse it for command extraction
+  DynamicJsonDocument doc_check(512); // Full size document for reuse
+  DeserializationError error_check = deserializeJson(doc_check, (const char*)payload_buffer_check, decoded_len_check);
+  if (error_check) {
+    free(payload_buffer_check);
+    publishErrorResponse("Invalid JWT token payload");
+    return;
+  }
+  
+  // Extract nonce for duplicate detection
+  const char* nonce_check = doc_check.containsKey("nonce") ? doc_check["nonce"].as<const char*>() : nullptr;
+  char nonce_id[65] = {0}; // Use nonce as unique identifier, or fallback to full token hash
+  if (nonce_check && strlen(nonce_check) > 0) {
+    strncpy(nonce_id, nonce_check, sizeof(nonce_id) - 1);
+  } else {
+    // Fallback: use first 64 chars of token signature as identifier
+    size_t sig_start = second_dot_check - token + 1;
+    size_t id_len = strlen(token) - sig_start;
+    if (id_len > 64) id_len = 64;
+    memcpy(nonce_id, token + sig_start, id_len);
+  }
+  nonce_id[sizeof(nonce_id) - 1] = '\0';
+  
+  // Check for duplicates using nonce-based identifier
+  static char last_processed_nonce[65] = {0};
+  static unsigned long last_processed_time = 0;
+  unsigned long now = millis();
+  
+  // Check if this is the same command we just processed (within last 5 seconds)
+  if (now - last_processed_time < 5000) {
+    if (strcmp(nonce_id, last_processed_nonce) == 0) {
+      MQTT_DEBUG_PRINTLN("Ignoring duplicate command message (nonce: %.32s)", nonce_id);
+      return;  // Already processed this command (silently ignore duplicates)
+    }
+  }
+  
+  // Store this nonce for duplicate detection
+  strncpy(last_processed_nonce, nonce_id, sizeof(last_processed_nonce) - 1);
+  last_processed_nonce[sizeof(last_processed_nonce) - 1] = '\0';
+  last_processed_time = now;
+  
+  // Reuse the already-decoded payload buffer and JSON document for command extraction
+  // We already decoded it above for duplicate detection, so reuse it
+  DynamicJsonDocument& payload_doc = doc_check; // Reuse the same document
+  uint8_t* payload_buffer = payload_buffer_check; // Reuse the same buffer (don't free it yet)
+  size_t decoded_len = decoded_len_check; // Reuse the same length
+  
+  // Extract command from JWT payload
+  if (!payload_doc.containsKey("command")) {
+    free(payload_buffer);
+    publishErrorResponse("Missing command in JWT payload");
+    return;
+  }
+  
+  const char* command = payload_doc["command"];
+  if (!command || strlen(command) == 0) {
+    free(payload_buffer);
+    publishErrorResponse("Invalid command in JWT payload");
+    return;
+  }
+  
+  // Copy command to buffer for later use
+  char extracted_command[256];
+  strncpy(extracted_command, command, sizeof(extracted_command) - 1);
+  extracted_command[sizeof(extracted_command) - 1] = '\0';
+  command = extracted_command;
+  
+  // Extract nonce from JWT payload if present
+  const char* nonce = payload_doc.containsKey("nonce") ? payload_doc["nonce"].as<const char*>() : nullptr;
+  
+  // Free temporary buffer now that we've extracted what we need
+  // Note: payload_doc will be automatically freed when it goes out of scope
+  free(payload_buffer);
+  
+  // Now verify the JWT token signature
+  char extracted_public_key[65];
+  char extracted_nonce[33];
+  unsigned long issued_at = 0;
+  unsigned long expires_at = 0;
+  
+  if (!JWTHelper::verifyToken(token, nullptr, 0, extracted_public_key, sizeof(extracted_public_key),
+                              extracted_nonce, sizeof(extracted_nonce), &issued_at, &expires_at)) {
+    publishErrorResponse("Invalid JWT token signature");
+    return;
+  }
+  
+  // Check replay protection - use nonce from JWT payload if available, otherwise from token verification
+  const char* nonce_to_check = nonce;
+  if (!nonce_to_check || nonce_to_check[0] == '\0') {
+    nonce_to_check = (extracted_nonce[0] != '\0') ? extracted_nonce : nullptr;
+  }
+  if (nonce_to_check && nonce_to_check[0] != '\0') {
+    if (_nonce_tracker.isNonceUsed(nonce_to_check)) {
+      publishErrorResponse("Nonce already used - possible replay attack");
+      return;
+    }
+  }
+  
+  // Convert extracted public key to bytes
+  uint8_t pubkey_bytes[PUB_KEY_SIZE];
+  if (!mesh::Utils::fromHex(pubkey_bytes, PUB_KEY_SIZE, extracted_public_key)) {
+    publishErrorResponse("Invalid public key format in token");
+    return;
+  }
+  
+  // Rate limiting check
+  if (_rate_limiter.isRateLimited(pubkey_bytes)) {
+    publishErrorResponse("Rate limit exceeded - too many commands");
+    return;
+  }
+  
+  // Command blacklist check
+  if (_command_blacklist.isCommandBlacklisted(command)) {
+    publishErrorResponse("Command not allowed via remote execution");
+    return;
+  }
+  
+  // Prevent dangerous commands that could cause hangs or resets
+  if (strncmp(command, "reboot", 6) == 0) {
+    publishErrorResponse("Reboot command not allowed via remote execution");
+    return;
+  }
+  
+  // Authorization check
+  if (!isAuthorized(pubkey_bytes, PUB_KEY_SIZE)) {
+    if (_prefs->mqtt_use_acl) {
+      publishErrorResponse("Unauthorized: public key not in ACL admin list");
+    } else {
+      publishErrorResponse("Unauthorized: public key mismatch");
+    }
+    return;
+  }
+  
+  // Store nonce for response (as request_id)
+  if (nonce_to_check && nonce_to_check[0] != '\0') {
+    strncpy(_current_command_nonce, nonce_to_check, sizeof(_current_command_nonce) - 1);
+    _current_command_nonce[sizeof(_current_command_nonce) - 1] = '\0';
+    // Add nonce to tracker for replay protection
+    _nonce_tracker.addNonce(nonce_to_check);
+  } else {
+    _current_command_nonce[0] = '\0';
+  }
+  
+  // Execute command with timeout protection
+  if (!_command_executor) {
+    publishErrorResponse("Command executor not available");
+    return;
+  }
+  
+  char response[256];
+  response[0] = '\0';
+  
+  // Note: We can't actually interrupt a blocking command execution,
+  // but we can at least log if it takes too long and prevent publishing
+  // a response if it exceeds the timeout
+  unsigned long start = millis();
+  
+#ifdef ESP_PLATFORM
+  // Feed watchdog before command execution to prevent reset during long operations
+  yield();  // This feeds the watchdog on ESP32
+#endif
+  
+  _command_executor->handleCommand(0, command, response);  // sender_timestamp=0 for remote
+  
+#ifdef ESP_PLATFORM
+  // Feed watchdog after command execution
+  yield();
+#endif
+  
+  unsigned long elapsed = millis() - start;
+  
+  if (elapsed > COMMAND_EXECUTION_TIMEOUT_MS) {
+    publishErrorResponse("Command execution timeout");
+    return;
+  }
+  
+  // Log single summary line for successful command execution
+  MQTT_DEBUG_PRINTLN("MQTT: Remote command executed: %s", command);
+  
+  // Publish signed response (JWT token format)
+  publishSignedResponse(command, response, true);
+}
+
+void MQTTBridge::publishErrorResponse(const char* error_msg) {
+  publishSignedResponse("", error_msg, false);
+}
+
+void MQTTBridge::publishSignedResponse(const char* command, const char* response, bool success) {
+  if (!_identity) {
+    MQTT_DEBUG_PRINTLN("MQTT: Cannot sign response: identity not available");
+    return;
+  }
+  
+  // Response must be a JWT token (header.payload.signature), not a JSON object
+  // Format matches incoming commands: base64url(header).base64url(payload).hex(signature)
+  
+  // Use heap allocation for large buffers to avoid stack overflow
+  // Create JWT header: {"alg":"Ed25519","typ":"JWT"}
+  char* header_b64 = (char*)malloc(128);
+  if (!header_b64) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to allocate header_b64");
+    return;
+  }
+  
+  StaticJsonDocument<256> header_doc;
+  header_doc["alg"] = "Ed25519";
+  header_doc["typ"] = "JWT";
+  char* header_json = (char*)malloc(256);
+  if (!header_json) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to allocate header_json");
+    free(header_b64);
+    return;
+  }
+  
+  size_t header_json_len = serializeJson(header_doc, header_json, 256);
+  if (header_json_len == 0 || header_json_len >= 256) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to serialize header JSON");
+    free(header_json);
+    free(header_b64);
+    return;
+  }
+  size_t header_len = JWTHelper::base64UrlEncode((uint8_t*)header_json, header_json_len, header_b64, 128);
+  free(header_json);  // Free immediately after use
+  if (header_len == 0) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to encode header");
+    free(header_b64);
+    return;
+  }
+  header_b64[header_len] = '\0';
+  
+  // Create JWT payload with response data
+  // Fields per spec: publicKey, command, request_id, success, response, iat, exp
+  StaticJsonDocument<512> payload_doc;
+  
+  // Get current time for iat/exp
+  unsigned long current_time = time(nullptr);
+  if (current_time == 0) {
+    current_time = millis() / 1000;  // Fallback to millis if time not synced
+  }
+  
+  // Set fields in spec order
+  payload_doc["publicKey"] = _device_id;  // Device's public key in hex (64 hex chars, uppercase)
+  if (command && command[0] != '\0') {
+    payload_doc["command"] = command;
+  }
+  payload_doc["request_id"] = _current_command_nonce[0] != '\0' ? _current_command_nonce : "";
+  payload_doc["success"] = success;
+  payload_doc["response"] = response ? response : "";
+  payload_doc["iat"] = current_time;
+  payload_doc["exp"] = current_time + 60;  // Expires in 60 seconds (as per spec)
+  
+  char* payload_json = (char*)malloc(512);
+  if (!payload_json) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to allocate payload_json");
+    free(header_b64);
+    return;
+  }
+  
+  size_t payload_json_len = serializeJson(payload_doc, payload_json, 512);
+  if (payload_json_len == 0 || payload_json_len >= 512) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to serialize payload JSON");
+    free(payload_json);
+    free(header_b64);
+    return;
+  }
+  
+  char* payload_b64 = (char*)malloc(512);
+  if (!payload_b64) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to allocate payload_b64");
+    free(payload_json);
+    free(header_b64);
+    return;
+  }
+  
+  size_t payload_len = JWTHelper::base64UrlEncode((uint8_t*)payload_json, payload_json_len, payload_b64, 512);
+  free(payload_json);  // Free immediately after use
+  if (payload_len == 0) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to encode payload");
+    free(payload_b64);
+    free(header_b64);
+    return;
+  }
+  payload_b64[payload_len] = '\0';
+  
+  // Create signing input: header.payload (base64url encoded parts joined with '.')
+  // This is what gets signed for JWT tokens
+  size_t signing_input_len = header_len + 1 + payload_len;
+  if (signing_input_len >= 1024) {
+    MQTT_DEBUG_PRINTLN("MQTT: Signing input too large: %u", signing_input_len);
+    free(payload_b64);
+    free(header_b64);
+    return;
+  }
+  
+  char* signing_input = (char*)malloc(signing_input_len + 1);
+  if (!signing_input) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to allocate signing_input");
+    free(payload_b64);
+    free(header_b64);
+    return;
+  }
+  
+  memcpy(signing_input, header_b64, header_len);
+  signing_input[header_len] = '.';
+  memcpy(signing_input + header_len + 1, payload_b64, payload_len);
+  signing_input[signing_input_len] = '\0';
+  
+  // Sign with device's private key using meshcore's LocalIdentity::sign() method
+  uint8_t signature[64];
+  
+#ifdef ESP_PLATFORM
+  yield();  // Feed watchdog before signing
+#endif
+  
+  // Sign the JWT signing input: header.payload (base64url encoded parts)
+  // Use LocalIdentity::sign() which is the meshcore wrapper for ed25519_sign()
+  _identity->sign(signature, (const uint8_t*)signing_input, signing_input_len);
+  
+  // Verify the signature locally to ensure it's valid before publishing
+  // Use Identity::verify() which is the meshcore wrapper for ed25519_verify()
+  bool verify_result = _identity->verify(signature, (const uint8_t*)signing_input, signing_input_len);
+  if (!verify_result) {
+    MQTT_DEBUG_PRINTLN("MQTT: ERROR: Local signature verification failed!");
+    free(signing_input);
+    free(payload_b64);
+    free(header_b64);
+    return;
+  }
+  
+#ifdef ESP_PLATFORM
+  yield();  // Feed watchdog after signing
+#endif
+  
+  // Convert signature to hex encoding (matching incoming command format and meshcore-decoder expectation)
+  // Note: This is non-standard JWT (RFC 7519 requires base64url), but matches the format used
+  // by meshcore-decoder and incoming command JWTs for consistency
+  char sig_hex[129];
+  mesh::Utils::toHex(sig_hex, signature, 64);
+  // Convert to uppercase to match incoming command format
+  for (int i = 0; sig_hex[i]; i++) {
+    sig_hex[i] = toupper(sig_hex[i]);
+  }
+  sig_hex[128] = '\0';
+  
+  // Create final JWT token: header.payload.signature (header/payload base64url, signature hex)
+  // Format matches incoming command JWTs for consistency
+  size_t token_len = header_len + 1 + payload_len + 1 + 128;  // header.payload.signature (128 hex chars)
+  if (token_len >= 1024) {
+    MQTT_DEBUG_PRINTLN("MQTT: JWT token too large: %u", token_len);
+    free(signing_input);
+    free(payload_b64);
+    free(header_b64);
+    return;
+  }
+  
+  char* jwt_token = (char*)malloc(token_len + 1);
+  if (!jwt_token) {
+    MQTT_DEBUG_PRINTLN("MQTT: Failed to allocate jwt_token");
+    free(signing_input);
+    free(payload_b64);
+    free(header_b64);
+    return;
+  }
+  
+  memcpy(jwt_token, header_b64, header_len);
+  jwt_token[header_len] = '.';
+  memcpy(jwt_token + header_len + 1, payload_b64, payload_len);
+  jwt_token[header_len + 1 + payload_len] = '.';
+  memcpy(jwt_token + header_len + 1 + payload_len + 1, sig_hex, 128);  // 128 hex chars
+  jwt_token[token_len] = '\0';
+  
+  // Free buffers we no longer need
+  free(signing_input);
+  free(payload_b64);
+  free(header_b64);
+  
+#ifdef ESP_PLATFORM
+  yield();  // Feed watchdog before publishing
+#endif
+
+  // Publish JWT token to response topic on all connected brokers
+  if (_config_valid && _mqtt_client && _mqtt_client->connected()) {
+    _mqtt_client->publish(_response_topic, 1, false, jwt_token, strlen(jwt_token));
+  }
+  
+  if (_analyzer_us_enabled && _analyzer_us_client && _analyzer_us_client->connected()) {
+    _analyzer_us_client->publish(_response_topic, 1, false, jwt_token, strlen(jwt_token));
+  }
+  
+  if (_analyzer_eu_enabled && _analyzer_eu_client && _analyzer_eu_client->connected()) {
+    _analyzer_eu_client->publish(_response_topic, 1, false, jwt_token, strlen(jwt_token));
+  }
+  
+  // Free JWT token after publishing
+  free(jwt_token);
+  
+#ifdef ESP_PLATFORM
+  yield();  // Feed watchdog after publishing
+#endif
 }
 
 #endif

@@ -36,6 +36,26 @@ static uint32_t _atoi(const char* sp) {
   return n;
 }
 
+// Validate public key hex string (PUB_KEY_SIZE * 2 hex characters = PUB_KEY_SIZE bytes)
+static bool isValidPublicKeyHex(const char* key_hex) {
+  if (!key_hex) {
+    return false;
+  }
+  int key_len = strlen(key_hex);
+  if (key_len != PUB_KEY_SIZE * 2) {
+    return false;
+  }
+  // Validate hex characters
+  for (int i = 0; i < key_len; i++) {
+    if (!((key_hex[i] >= '0' && key_hex[i] <= '9') ||
+          (key_hex[i] >= 'A' && key_hex[i] <= 'F') ||
+          (key_hex[i] >= 'a' && key_hex[i] <= 'f'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs");   // new filename
@@ -253,6 +273,9 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_analyzer_us_enabled = 1; // enabled by default
   prefs->mqtt_analyzer_eu_enabled = 1; // enabled by default
   prefs->wifi_power_save = 0; // Default to WIFI_PS_MIN_MODEM (0=min)
+  prefs->mqtt_remote_enabled = 0;      // Off by default
+  prefs->mqtt_use_acl = 1;              // Use ACL by default
+  prefs->mqtt_admin_public_key[0] = '\0'; // Empty by default
   // String fields are already zero-initialized by memset
 }
 
@@ -372,6 +395,9 @@ void CommonCLI::syncMQTTPrefsToNodePrefs() {
   _prefs->mqtt_analyzer_eu_enabled = _mqtt_prefs.mqtt_analyzer_eu_enabled;
   StrHelper::strncpy(_prefs->mqtt_owner_public_key, _mqtt_prefs.mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key));
   StrHelper::strncpy(_prefs->mqtt_email, _mqtt_prefs.mqtt_email, sizeof(_prefs->mqtt_email));
+  _prefs->mqtt_remote_enabled = _mqtt_prefs.mqtt_remote_enabled;
+  _prefs->mqtt_use_acl = _mqtt_prefs.mqtt_use_acl;
+  StrHelper::strncpy(_prefs->mqtt_admin_public_key, _mqtt_prefs.mqtt_admin_public_key, sizeof(_prefs->mqtt_admin_public_key));
 }
 
 void CommonCLI::syncNodePrefsToMQTTPrefs() {
@@ -397,6 +423,9 @@ void CommonCLI::syncNodePrefsToMQTTPrefs() {
   _mqtt_prefs.mqtt_analyzer_eu_enabled = _prefs->mqtt_analyzer_eu_enabled;
   StrHelper::strncpy(_mqtt_prefs.mqtt_owner_public_key, _prefs->mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
   StrHelper::strncpy(_mqtt_prefs.mqtt_email, _prefs->mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+  _mqtt_prefs.mqtt_remote_enabled = _prefs->mqtt_remote_enabled;
+  _mqtt_prefs.mqtt_use_acl = _prefs->mqtt_use_acl;
+  StrHelper::strncpy(_mqtt_prefs.mqtt_admin_public_key, _prefs->mqtt_admin_public_key, sizeof(_mqtt_prefs.mqtt_admin_public_key));
 }
 #endif
 
@@ -653,6 +682,17 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
               } else if (memcmp(config, "mqtt.config.valid", 17) == 0) {
                 bool valid = MQTTBridge::isConfigValid(_prefs);
                 sprintf(reply, "> %s", valid ? "valid" : "invalid");
+              } else if (memcmp(config, "mqtt.remote", 11) == 0) {
+                sprintf(reply, "> %s", _prefs->mqtt_remote_enabled ? "on" : "off");
+              } else if (memcmp(config, "mqtt.useacl", 11) == 0) {
+                sprintf(reply, "> %s", _prefs->mqtt_use_acl ? "on" : "off");
+              } else if (sender_timestamp == 0 && memcmp(config, "mqtt.admin", 10) == 0) {
+                // Only from serial command line (not remote)
+                if (_prefs->mqtt_admin_public_key[0] != '\0') {
+                  sprintf(reply, "> %s", _prefs->mqtt_admin_public_key);
+                } else {
+                  strcpy(reply, "> (not set)");
+                }
 #endif
       } else {
         sprintf(reply, "??: %s", config);
@@ -979,27 +1019,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 savePrefs();
                 strcpy(reply, "OK");
               } else if (memcmp(config, "mqtt.owner ", 11) == 0) {
-                // Validate that it's a valid hex string of the correct length (64 hex chars = 32 bytes)
+                // Validate that it's a valid hex string of the correct length (PUB_KEY_SIZE * 2 hex chars = PUB_KEY_SIZE bytes)
                 const char* owner_key = &config[11];
-                int key_len = strlen(owner_key);
-                if (key_len == 64) {
-                  // Validate hex characters
-                  bool valid = true;
-                  for (int i = 0; i < key_len; i++) {
-                    if (!((owner_key[i] >= '0' && owner_key[i] <= '9') ||
-                          (owner_key[i] >= 'A' && owner_key[i] <= 'F') ||
-                          (owner_key[i] >= 'a' && owner_key[i] <= 'f'))) {
-                      valid = false;
-                      break;
-                    }
-                  }
-                  if (valid) {
-                    StrHelper::strncpy(_prefs->mqtt_owner_public_key, owner_key, sizeof(_prefs->mqtt_owner_public_key));
-                    savePrefs();
-                    strcpy(reply, "OK");
-                  } else {
-                    strcpy(reply, "Error: invalid hex characters in public key");
-                  }
+                if (isValidPublicKeyHex(owner_key)) {
+                  StrHelper::strncpy(_prefs->mqtt_owner_public_key, owner_key, sizeof(_prefs->mqtt_owner_public_key));
+                  savePrefs();
+                  strcpy(reply, "OK");
                 } else {
                   strcpy(reply, "Error: public key must be 64 hex characters (32 bytes)");
                 }
@@ -1007,6 +1032,35 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 StrHelper::strncpy(_prefs->mqtt_email, &config[11], sizeof(_prefs->mqtt_email));
                 savePrefs();
                 strcpy(reply, "OK");
+              } else if (memcmp(config, "mqtt.remote ", 12) == 0) {
+                _prefs->mqtt_remote_enabled = memcmp(&config[12], "on", 2) == 0;
+                syncNodePrefsToMQTTPrefs();  // Sync any changes before saving
+                savePrefs();  // This will call _callbacks->savePrefs() which saves both files
+                strcpy(reply, "OK");
+              } else if (memcmp(config, "mqtt.useacl ", 12) == 0) {
+                _prefs->mqtt_use_acl = memcmp(&config[12], "on", 2) == 0;
+                syncNodePrefsToMQTTPrefs();  // Sync any changes before saving
+                savePrefs();  // This will call _callbacks->savePrefs() which saves both files
+                strcpy(reply, "OK");
+              } else if (memcmp(config, "mqtt.admin ", 11) == 0) {
+                const char* admin_key = &config[11];
+                if (strcmp(admin_key, "0") == 0) {
+                  // Clear the admin key
+                  _prefs->mqtt_admin_public_key[0] = '\0';
+                  syncNodePrefsToMQTTPrefs();  // Sync any changes before saving
+                  savePrefs();  // This will call _callbacks->savePrefs() which saves both files
+                  strcpy(reply, "OK - admin key cleared");
+                } else {
+                  // Validate that it's a valid hex string of the correct length (PUB_KEY_SIZE * 2 hex chars = PUB_KEY_SIZE bytes)
+                  if (isValidPublicKeyHex(admin_key)) {
+                    StrHelper::strncpy(_prefs->mqtt_admin_public_key, admin_key, sizeof(_prefs->mqtt_admin_public_key));
+                    syncNodePrefsToMQTTPrefs();  // Sync any changes before saving
+                    savePrefs();  // This will call _callbacks->savePrefs() which saves both files
+                    strcpy(reply, "OK");
+                  } else {
+                    strcpy(reply, "Error: public key must be 64 hex characters (32 bytes)");
+                  }
+                }
 #endif
       } else {
         sprintf(reply, "unknown config: %s", config);

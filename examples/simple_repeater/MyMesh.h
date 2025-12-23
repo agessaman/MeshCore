@@ -82,6 +82,28 @@ struct NeighbourInfo {
 
 #define PACKET_LOG_FILE  "/packet_log"
 
+#ifdef WITH_MQTT_BRIDGE
+class MyMeshACLCallbacks : public MQTTBridgeACLCallbacks {
+  ClientACL* _acl;
+public:
+  MyMeshACLCallbacks(ClientACL* acl) : _acl(acl) {}
+  bool hasACL() override { return true; }
+  bool isPublicKeyAdmin(const uint8_t* pubkey, size_t key_len) override {
+    ClientInfo* client = _acl->getClient(pubkey, key_len);
+    return client != NULL && client->isAdmin();
+  }
+};
+
+class MyMeshCommandExecutor : public MQTTBridgeCommandExecutor {
+  CommonCLI* _cli;
+public:
+  MyMeshCommandExecutor(CommonCLI* cli) : _cli(cli) {}
+  void handleCommand(uint32_t sender_timestamp, const char* command, char* reply) override {
+    _cli->handleCommand(sender_timestamp, command, reply);
+  }
+};
+#endif
+
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FILESYSTEM* _fs;
   uint32_t last_millis;
@@ -115,6 +137,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   ESPNowBridge bridge;
 #elif defined(WITH_MQTT_BRIDGE)
   MQTTBridge bridge;
+  MyMeshACLCallbacks _acl_callbacks;
+  MyMeshCommandExecutor _command_executor;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
