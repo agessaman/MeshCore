@@ -29,6 +29,12 @@ void setup() {
 
   board.begin();
 
+#if defined(MESH_DEBUG) && defined(NRF52_PLATFORM)
+  // give some extra time for serial to settle so
+  // boot debug messages can be seen on terminal
+  delay(5000);
+#endif
+
   // For power saving
   lastActive = millis(); // mark last active time since boot
 
@@ -42,6 +48,7 @@ void setup() {
 #endif
 
   if (!radio_init()) {
+    MESH_DEBUG_PRINTLN("Radio init failed!");
     halt();
   }
 
