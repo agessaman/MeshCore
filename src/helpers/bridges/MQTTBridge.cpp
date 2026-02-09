@@ -1134,10 +1134,12 @@ void MQTTBridge::ensureMainMqttClient() {
 #ifdef ESP_PLATFORM
 void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   const unsigned long CRITICAL_CHECK_INTERVAL_MS = 60000;   // Sample heap at most every 60s
-  const unsigned long PRESSURE_WINDOW_MS = 180000;           // Recover if under pressure for 3 min
+  const unsigned long PRESSURE_WINDOW_CRITICAL_MS = 180000;  // Recover if critical pressure for 3 min
+  const unsigned long PRESSURE_WINDOW_MODERATE_MS = 300000; // Recover if moderate pressure for 5 min
   const unsigned long RECOVERY_THROTTLE_MS = 300000;         // 5 min between recovery runs
   const unsigned long CRITICAL_LOG_INTERVAL_MS = 900000;     // Log CRITICAL/WARNING/client count at most every 15 min
-  const size_t PRESSURE_THRESHOLD = 58000;                   // max_alloc below this = under pressure
+  const size_t PRESSURE_THRESHOLD_CRITICAL = 58000;           // max_alloc below this = critical (3 min window)
+  const size_t PRESSURE_THRESHOLD_MODERATE = 70000;          // max_alloc below this = under pressure (clear when >= this)
 
   unsigned long now = millis();
   if (now - _last_critical_check_run < CRITICAL_CHECK_INTERVAL_MS) {
@@ -1156,8 +1158,8 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   agentLogHeap("MQTTBridge.cpp:runCriticalMemoryCheckAndRecovery", "critical_memory_check", "H1_H4", free_h, max_alloc, internal_f, spiram_f);
   #endif
 
-  // Pressure timer: track how long max_alloc has been below threshold
-  if (max_alloc >= PRESSURE_THRESHOLD) {
+  // Pressure timer: track how long max_alloc has been below moderate threshold
+  if (max_alloc >= PRESSURE_THRESHOLD_MODERATE) {
     _fragmentation_pressure_since = 0;
   } else {
     if (_fragmentation_pressure_since == 0) {
@@ -1180,13 +1182,16 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
     MQTT_DEBUG_PRINTLN("MQTT clients active: %d (main=%d us=%d eu=%d)", n_main + n_us + n_eu, n_main, n_us, n_eu);
   }
 
-  // Dedicated recovery timer: recover if under pressure for PRESSURE_WINDOW_MS and throttle passed
+  // Dedicated recovery: critical (<58k) recovers after 3 min; moderate (58k–70k) after 5 min
+  unsigned long required_window_ms = (max_alloc < PRESSURE_THRESHOLD_CRITICAL)
+      ? PRESSURE_WINDOW_CRITICAL_MS
+      : PRESSURE_WINDOW_MODERATE_MS;
   if (_fragmentation_pressure_since != 0 &&
-      (now - _fragmentation_pressure_since) >= PRESSURE_WINDOW_MS &&
+      (now - _fragmentation_pressure_since) >= required_window_ms &&
       (now - _last_fragmentation_recovery) >= RECOVERY_THROTTLE_MS) {
     _last_fragmentation_recovery = now;
     _fragmentation_pressure_since = 0;
-    MQTT_DEBUG_PRINTLN("Fragmentation recovery: recreating MQTT clients (max_alloc=%d, pressure 3 min)", (int)max_alloc);
+    MQTT_DEBUG_PRINTLN("Fragmentation recovery: recreating MQTT clients (max_alloc=%d, pressure %lu min)", (int)max_alloc, (unsigned long)(required_window_ms / 60000));
     recreateMqttClientsForFragmentationRecovery();
   }
 }
@@ -1227,6 +1232,9 @@ void MQTTBridge::recreateMqttClientsForFragmentationRecovery() {
   _cached_has_brokers = false;
   _cached_has_analyzer_servers = false;
   setupAnalyzerServers();
+  // Recreate analyzer client objects (we just set them to nullptr above; setupAnalyzerServers
+  // only calls setupAnalyzerClients when enabled flags change, so we must call it explicitly).
+  setupAnalyzerClients();
 }
 
 void MQTTBridge::connectToBrokers() {
