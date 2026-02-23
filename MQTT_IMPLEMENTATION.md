@@ -17,21 +17,28 @@ set wifi.ssid YourWiFiNetwork
 set wifi.pwd YourWiFiPassword
 ```
 
+If you wish to upload to the MeshCore Analyzer, also `set mqtt.iata XXX` to a valid IATA airport code
+
 **3. Reboot to Connect to WiFi**
 ```bash
 reboot
 ```
 
-**4. Verify Configuration**
+**4. Toggle bridge.source to rx**
+```bash
+set bridge.source rx
+```
+
+**5. Verify Configuration**
 ```bash
 get wifi.ssid
 get bridge.enabled
+get bridge.source
 get mqtt.origin
 get mqtt.iata
 ```
-If you wish to change mqtt.iata, use `set mqtt.iata XXX`
 
-**5. Restart Bridge (if needed)**
+**6. Restart Bridge (if needed)**
 ```bash
 # Option A: Toggle bridge off then on
 set bridge.enabled off
