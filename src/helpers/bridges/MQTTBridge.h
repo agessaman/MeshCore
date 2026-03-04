@@ -111,6 +111,8 @@ private:
   QueueHandle_t _packet_queue_handle;
   TaskHandle_t _mqtt_task_handle;
   SemaphoreHandle_t _raw_data_mutex;  // Mutex for raw radio data
+  wifi_event_id_t _wifi_event_id;
+  bool _wifi_event_registered;
   // PSRAM-backed task stack (plan §3); TCB kept in internal RAM
   StackType_t* _mqtt_task_stack;     // nullptr if using dynamic task creation
   StaticTask_t _mqtt_task_tcb;

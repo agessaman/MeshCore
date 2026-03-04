@@ -137,16 +137,19 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
               _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false),
               _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
               _analyzer_us_enabled(false), _analyzer_eu_enabled(false), _identity(identity),
+              _token_us_expires_at(0), _token_eu_expires_at(0),
               _analyzer_us_client(nullptr), _analyzer_eu_client(nullptr), _config_valid(false),
               _cached_has_brokers(false), _cached_has_analyzer_servers(false),
               _last_memory_check(0), _skipped_publishes(0), _last_fragmentation_recovery(0),
               _fragmentation_pressure_since(0), _last_critical_check_run(0),
+              _last_token_renewal_attempt_us(0), _last_token_renewal_attempt_eu(0),
+              _last_reconnect_attempt_us(0), _last_reconnect_attempt_eu(0),
               _last_no_broker_log(0), _last_config_warning(0), _dispatcher(nullptr), _radio(nullptr), _board(nullptr), _ms(nullptr),
               _last_wifi_check(0), _last_wifi_status(WL_DISCONNECTED), _wifi_status_initialized(false),
               _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
               _main_broker_reconnect_backoff_attempt(0), _analyzer_us_reconnect_backoff_attempt(0), _analyzer_eu_reconnect_backoff_attempt(0)
 #ifdef ESP_PLATFORM
-              , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr), _raw_data_mutex(nullptr), _mqtt_task_stack(nullptr), _packet_queue_storage(nullptr)
+              , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr), _raw_data_mutex(nullptr), _wifi_event_id(0), _wifi_event_registered(false), _mqtt_task_stack(nullptr), _packet_queue_storage(nullptr)
 #else
               , _queue_head(0), _queue_tail(0)
 #endif
@@ -200,14 +203,9 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _last_analyzer_us_log = 0;
   _last_analyzer_eu_log = 0;
   
-  // JWT token buffers: allocate in PSRAM when available (plan §2)
-  _auth_token_us = (char*)psram_malloc(AUTH_TOKEN_SIZE);
-  _auth_token_eu = (char*)psram_malloc(AUTH_TOKEN_SIZE);
-  if (_auth_token_us) _auth_token_us[0] = '\0';
-  if (_auth_token_eu) _auth_token_eu[0] = '\0';
-  
-  // Raw radio buffer in PSRAM when available (plan §6)
-  _last_raw_data = (uint8_t*)psram_malloc(LAST_RAW_DATA_SIZE);
+  _auth_token_us = nullptr;
+  _auth_token_eu = nullptr;
+  _last_raw_data = nullptr;
   
   // Set default broker configuration
   setBrokerDefaults();
@@ -253,6 +251,26 @@ void MQTTBridge::begin() {
     MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - WiFi credentials not configured");
     return;
   }
+
+  // Allocate long-lived buffers on each begin() so restartBridge() is safe.
+  if (_auth_token_us == nullptr) {
+    _auth_token_us = (char*)psram_malloc(AUTH_TOKEN_SIZE);
+  }
+  if (_auth_token_eu == nullptr) {
+    _auth_token_eu = (char*)psram_malloc(AUTH_TOKEN_SIZE);
+  }
+  if (_last_raw_data == nullptr) {
+    _last_raw_data = (uint8_t*)psram_malloc(LAST_RAW_DATA_SIZE);
+  }
+  if (_auth_token_us) _auth_token_us[0] = '\0';
+  if (_auth_token_eu) _auth_token_eu[0] = '\0';
+  _last_raw_len = 0;
+  _token_us_expires_at = 0;
+  _token_eu_expires_at = 0;
+  _last_token_renewal_attempt_us = 0;
+  _last_token_renewal_attempt_eu = 0;
+  _last_reconnect_attempt_us = 0;
+  _last_reconnect_attempt_eu = 0;
   
   // Validate custom MQTT broker configuration (optional)
   _config_valid = isMQTTConfigValid();
@@ -330,6 +348,8 @@ void MQTTBridge::begin() {
     MQTT_DEBUG_PRINTLN("Failed to create raw data mutex!");
     vQueueDelete(_packet_queue_handle);
     _packet_queue_handle = nullptr;
+    psram_free(_packet_queue_storage);
+    _packet_queue_storage = nullptr;
     return;
   }
   
@@ -475,6 +495,10 @@ void MQTTBridge::end() {
     // Give task time to clean up
     vTaskDelay(pdMS_TO_TICKS(100));
   }
+  if (_wifi_event_registered) {
+    WiFi.removeEvent(_wifi_event_id);
+    _wifi_event_registered = false;
+  }
   // Free PSRAM task stack (plan §3)
   psram_free(_mqtt_task_stack);
   _mqtt_task_stack = nullptr;
@@ -495,6 +519,18 @@ void MQTTBridge::end() {
   if (_raw_data_mutex != nullptr) {
     vSemaphoreDelete(_raw_data_mutex);
     _raw_data_mutex = nullptr;
+  }
+
+  // Disconnect analyzer clients
+  if (_analyzer_us_client) {
+    _analyzer_us_client->disconnect();
+    delete _analyzer_us_client;
+    _analyzer_us_client = nullptr;
+  }
+  if (_analyzer_eu_client) {
+    _analyzer_eu_client->disconnect();
+    delete _analyzer_eu_client;
+    _analyzer_eu_client = nullptr;
   }
   #else
   // Disconnect from all brokers (main client only exists when _config_valid)
@@ -576,7 +612,7 @@ void MQTTBridge::initializeWiFiInTask() {
   WiFi.setAutoConnect(true);
   
   // Set up WiFi event handlers for better diagnostics and immediate disconnection detection
-  WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+  _wifi_event_id = WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
     switch(event) {
       case ARDUINO_EVENT_WIFI_STA_GOT_IP:
         MQTT_DEBUG_PRINTLN("WiFi connected: %s", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
@@ -589,6 +625,7 @@ void MQTTBridge::initializeWiFiInTask() {
         break;
     }
   });
+  _wifi_event_registered = true;
   
   WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
   
