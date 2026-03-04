@@ -138,7 +138,7 @@ size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* o
 
 size_t JWTHelper::createHeader(char* output, size_t outputSize) {
   // Create JWT header: {"alg":"Ed25519","typ":"JWT"}
-  DynamicJsonDocument doc(256);
+  StaticJsonDocument<128> doc;
   doc["alg"] = "Ed25519";
   doc["typ"] = "JWT";
   
@@ -163,7 +163,7 @@ size_t JWTHelper::createPayload(
   const char* email
 ) {
   // Create JWT payload
-  DynamicJsonDocument doc(512);
+  StaticJsonDocument<384> doc;
   doc["publicKey"] = publicKey;
   doc["aud"] = audience;
   doc["iat"] = issuedAt;
@@ -195,4 +195,3 @@ size_t JWTHelper::createPayload(
   
   return base64UrlEncode((uint8_t*)jsonBuffer, len, output, outputSize);
 }
-
