@@ -1731,7 +1731,8 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   }
   #endif
   
-  // JSON buffer: prefer PSRAM to reduce stack (plan §4); fallback to stack if allocation fails
+  // JSON buffer: use PSRAM to avoid large stack allocations on constrained targets.
+  // If allocation fails, skip publish to preserve system stability.
   static const size_t PUBLISH_JSON_BUFFER_SIZE = 2048;
   char* json_buffer_psram = (char*)psram_malloc(PUBLISH_JSON_BUFFER_SIZE);
   if (json_buffer_psram == nullptr) {
@@ -1868,7 +1869,8 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
     return;
   }
   
-  // JSON buffer: prefer PSRAM (plan §4); fallback to stack if allocation fails
+  // JSON buffer: use PSRAM to avoid large stack allocations on constrained targets.
+  // If allocation fails, skip publish to preserve system stability.
   char* json_buffer_psram = (char*)psram_malloc(2048);
   if (json_buffer_psram == nullptr) {
     _skipped_publishes++;
