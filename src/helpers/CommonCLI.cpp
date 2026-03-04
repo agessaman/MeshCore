@@ -390,7 +390,11 @@ void CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
   File file = fs->open("/mqtt_prefs", "w", true);
 #endif
   if (file) {
-    file.write((uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
+    size_t bytes_written = file.write((uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
+    if (bytes_written != sizeof(_mqtt_prefs)) {
+      MESH_DEBUG_PRINTLN("Failed to write /mqtt_prefs completely (wrote %u/%u bytes)",
+                         (unsigned)bytes_written, (unsigned)sizeof(_mqtt_prefs));
+    }
     file.close();
   }
 }
