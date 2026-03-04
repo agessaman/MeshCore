@@ -38,6 +38,10 @@ static bool isWiFiConfigValid(const NodePrefs* prefs) {
   if (strlen(prefs->wifi_ssid) == 0) {
     return false;
   }
+  // Reject placeholder values used in defaults/examples
+  if (strcmp(prefs->wifi_ssid, "ssid_here") == 0 || strcmp(prefs->wifi_ssid, "ssid") == 0) {
+    return false;
+  }
   
   // WiFi password can be empty for open networks, so we don't check it
   
@@ -176,15 +180,18 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   // Override with build flags if defined
 #ifdef MQTT_SERVER
   strncpy(_prefs->mqtt_server, MQTT_SERVER, sizeof(_prefs->mqtt_server) - 1);
+  _prefs->mqtt_server[sizeof(_prefs->mqtt_server) - 1] = '\0';
 #endif
 #ifdef MQTT_PORT
   _prefs->mqtt_port = MQTT_PORT;
 #endif
 #ifdef MQTT_USERNAME
   strncpy(_prefs->mqtt_username, MQTT_USERNAME, sizeof(_prefs->mqtt_username) - 1);
+  _prefs->mqtt_username[sizeof(_prefs->mqtt_username) - 1] = '\0';
 #endif
 #ifdef MQTT_PASSWORD
   strncpy(_prefs->mqtt_password, MQTT_PASSWORD, sizeof(_prefs->mqtt_password) - 1);
+  _prefs->mqtt_password[sizeof(_prefs->mqtt_password) - 1] = '\0';
 #endif
   
   // Initialize packet queue (FreeRTOS queue will be created in begin())
@@ -2089,10 +2096,16 @@ void MQTTBridge::setBroker(int broker_index, const char* host, uint16_t port,
   if (broker_index < 0 || broker_index >= MAX_MQTT_BROKERS_COUNT) return;
   
   MQTTBroker& broker = _brokers[broker_index];
+  if (host == nullptr) host = "";
+  if (username == nullptr) username = "";
+  if (password == nullptr) password = "";
   strncpy(broker.host, host, sizeof(broker.host) - 1);
+  broker.host[sizeof(broker.host) - 1] = '\0';
   broker.port = port;
   strncpy(broker.username, username, sizeof(broker.username) - 1);
+  broker.username[sizeof(broker.username) - 1] = '\0';
   strncpy(broker.password, password, sizeof(broker.password) - 1);
+  broker.password[sizeof(broker.password) - 1] = '\0';
   broker.enabled = enabled;
   broker.connected = false;
   broker.reconnect_interval = 5000;
