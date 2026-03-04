@@ -92,7 +92,8 @@ private:
   
   // Packet queue for offline scenarios
   struct QueuedPacket {
-    mesh::Packet* packet;
+    uint8_t packet_data[MAX_TRANS_UNIT + 1];
+    uint16_t packet_len;
     unsigned long timestamp;
     bool is_tx;
     // Store raw radio data with each packet to avoid it being overwritten

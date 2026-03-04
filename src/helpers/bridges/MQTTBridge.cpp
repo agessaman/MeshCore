@@ -479,13 +479,10 @@ void MQTTBridge::end() {
   psram_free(_mqtt_task_stack);
   _mqtt_task_stack = nullptr;
   
-  // Clean up queued packets from FreeRTOS queue
-  // NOTE: Do NOT free queued.packet - the Dispatcher owns those packets.
-  // We just discard our references to them.
+  // Clean up queued packet snapshots from FreeRTOS queue.
   if (_packet_queue_handle != nullptr) {
     QueuedPacket queued;
     while (xQueueReceive(_packet_queue_handle, &queued, 0) == pdTRUE) {
-      queued.packet = nullptr;
       _queue_count--;
     }
     vQueueDelete(_packet_queue_handle);
@@ -522,12 +519,9 @@ void MQTTBridge::end() {
     _analyzer_eu_client = nullptr;
   }
   
-  // Clean up queued packet references
-  // NOTE: Do NOT free the packets - the Dispatcher owns those packets.
-  // We just discard our references to them.
+  // Clean up queued packet snapshots
   for (int i = 0; i < _queue_count; i++) {
     int index = (_queue_head + i) % MAX_QUEUE_SIZE;
-    _packet_queue[index].packet = nullptr;
     memset(&_packet_queue[index], 0, sizeof(QueuedPacket));
   }
   
@@ -1370,21 +1364,20 @@ void MQTTBridge::processPacketQueue() {
       break;  // No more packets
     }
     
-    // Publish packet (use stored raw data if available)
-    publishPacket(queued.packet, queued.is_tx, 
-                  queued.has_raw_data ? queued.raw_data : nullptr,
-                  queued.has_raw_data ? queued.raw_len : 0,
-                  queued.has_raw_data ? queued.snr : 0.0f,
-                  queued.has_raw_data ? queued.rssi : 0.0f);
-    
-    // Publish raw if enabled
-    if (_raw_enabled) {
-      publishRaw(queued.packet);
+    mesh::Packet snapshot;
+    if (queued.packet_len > 0 && snapshot.readFrom(queued.packet_data, queued.packet_len)) {
+      // Publish packet (use stored raw data if available)
+      publishPacket(&snapshot, queued.is_tx,
+                    queued.has_raw_data ? queued.raw_data : nullptr,
+                    queued.has_raw_data ? queued.raw_len : 0,
+                    queued.has_raw_data ? queued.snr : 0.0f,
+                    queued.has_raw_data ? queued.rssi : 0.0f);
+
+      // Publish raw if enabled
+      if (_raw_enabled) {
+        publishRaw(&snapshot);
+      }
     }
-    
-    // NOTE: Do NOT free the packet here - the Dispatcher owns and frees it after logRx() returns.
-    // The MQTT bridge only stores a pointer to read from; it does not own the packet.
-    queued.packet = nullptr;
     
     _queue_count--;
     processed++;
@@ -1426,18 +1419,18 @@ void MQTTBridge::processPacketQueue() {
     
     QueuedPacket& queued = _packet_queue[_queue_head];
     
-    publishPacket(queued.packet, queued.is_tx, 
-                  queued.has_raw_data ? queued.raw_data : nullptr,
-                  queued.has_raw_data ? queued.raw_len : 0,
-                  queued.has_raw_data ? queued.snr : 0.0f,
-                  queued.has_raw_data ? queued.rssi : 0.0f);
-    
-    if (_raw_enabled) {
-      publishRaw(queued.packet);
+    mesh::Packet snapshot;
+    if (queued.packet_len > 0 && snapshot.readFrom(queued.packet_data, queued.packet_len)) {
+      publishPacket(&snapshot, queued.is_tx,
+                    queued.has_raw_data ? queued.raw_data : nullptr,
+                    queued.has_raw_data ? queued.raw_len : 0,
+                    queued.has_raw_data ? queued.snr : 0.0f,
+                    queued.has_raw_data ? queued.rssi : 0.0f);
+
+      if (_raw_enabled) {
+        publishRaw(&snapshot);
+      }
     }
-    
-    // NOTE: Do NOT free the packet here - the Dispatcher owns and frees it after logRx() returns.
-    queued.packet = nullptr;
     
     dequeuePacket();
     processed++;
@@ -1933,6 +1926,9 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
 }
 
 void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
+  if (!packet) {
+    return;
+  }
   #ifdef ESP_PLATFORM
   // Use FreeRTOS queue for thread-safe operation
   if (_packet_queue_handle == nullptr) {
@@ -1942,7 +1938,10 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   QueuedPacket queued;
   memset(&queued, 0, sizeof(QueuedPacket));
   
-  queued.packet = packet;
+  queued.packet_len = packet->writeTo(queued.packet_data);
+  if (queued.packet_len == 0 || queued.packet_len > sizeof(queued.packet_data)) {
+    return;
+  }
   queued.timestamp = millis();
   queued.is_tx = is_tx;
   queued.has_raw_data = false;
@@ -1971,9 +1970,7 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
     // Queue full - try to remove oldest packet
     QueuedPacket oldest;
     if (xQueueReceive(_packet_queue_handle, &oldest, 0) == pdTRUE) {
-      // NOTE: Do NOT free oldest.packet - the Dispatcher owns and frees it.
-      // We just drop our reference to it.
-      MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet reference");
+      MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet snapshot");
       // Now try to send again
       if (xQueueSend(_packet_queue_handle, &queued, 0) != pdTRUE) {
         MQTT_DEBUG_PRINTLN("Failed to queue packet after dropping oldest");
@@ -1992,17 +1989,17 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   // Non-ESP32: Use circular buffer
   if (_queue_count >= MAX_QUEUE_SIZE) {
     QueuedPacket& oldest = _packet_queue[_queue_head];
-    // NOTE: Do NOT free oldest.packet - the Dispatcher owns and frees it.
-    // We just drop our reference to it.
-    MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet reference (queue size: %d)", _queue_count);
-    oldest.packet = nullptr;
+    MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet snapshot (queue size: %d)", _queue_count);
     dequeuePacket();
   }
   
   QueuedPacket& queued = _packet_queue[_queue_tail];
   memset(&queued, 0, sizeof(QueuedPacket));
   
-  queued.packet = packet;
+  queued.packet_len = packet->writeTo(queued.packet_data);
+  if (queued.packet_len == 0 || queued.packet_len > sizeof(queued.packet_data)) {
+    return;
+  }
   queued.timestamp = millis();
   queued.is_tx = is_tx;
   queued.has_raw_data = false;
@@ -3173,4 +3170,3 @@ void MQTTBridge::logMemoryStatus() {
 }
 
 #endif
-
