@@ -1097,9 +1097,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 savePrefs();
                 strcpy(reply, "OK");
               } else if (memcmp(config, "timezone.offset ", 16) == 0) {
-                int offset = atoi(&config[16]);
-                if (offset >= -12 && offset <= 14) {
-                  _prefs->timezone_offset = (int8_t)offset;
+                const char* offset_str = &config[16];
+                char* endptr = nullptr;
+                long parsed = strtol(offset_str, &endptr, 10);
+                if (endptr == offset_str || (endptr != nullptr && *endptr != '\0')) {
+                  strcpy(reply, "Error: timezone offset must be an integer");
+                } else if (parsed >= -12 && parsed <= 14) {
+                  _prefs->timezone_offset = (int8_t)parsed;
                   savePrefs();
                   strcpy(reply, "OK");
                 } else {
