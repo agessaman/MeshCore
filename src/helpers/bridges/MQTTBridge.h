@@ -93,12 +93,11 @@ private:
   // Packet queue for offline scenarios
   struct QueuedPacket {
     uint8_t packet_data[MAX_TRANS_UNIT + 1];
-    uint16_t packet_len;
-    unsigned long timestamp;
+    uint8_t packet_len;
     bool is_tx;
     // Store raw radio data with each packet to avoid it being overwritten
     uint8_t raw_data[256];
-    int raw_len;
+    uint16_t raw_len;
     float snr;
     float rssi;
     bool has_raw_data;

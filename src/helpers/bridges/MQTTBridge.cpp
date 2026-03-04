@@ -1974,7 +1974,6 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   if (queued.packet_len == 0 || queued.packet_len > sizeof(queued.packet_data)) {
     return;
   }
-  queued.timestamp = millis();
   queued.is_tx = is_tx;
   queued.has_raw_data = false;
   
@@ -2032,7 +2031,6 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   if (queued.packet_len == 0 || queued.packet_len > sizeof(queued.packet_data)) {
     return;
   }
-  queued.timestamp = millis();
   queued.is_tx = is_tx;
   queued.has_raw_data = false;
   
