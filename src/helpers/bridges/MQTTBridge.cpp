@@ -1727,18 +1727,12 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   // JSON buffer: prefer PSRAM to reduce stack (plan §4); fallback to stack if allocation fails
   static const size_t PUBLISH_JSON_BUFFER_SIZE = 2048;
   char* json_buffer_psram = (char*)psram_malloc(PUBLISH_JSON_BUFFER_SIZE);
-  char json_buffer_stack[1024];
-  char json_buffer_large_stack[2048];
-  int packet_size = packet->getRawLength();
-  char* active_buffer;
-  size_t active_buffer_size;
-  if (json_buffer_psram != nullptr) {
-    active_buffer = json_buffer_psram;
-    active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
-  } else {
-    active_buffer = (packet_size > 200) ? json_buffer_large_stack : json_buffer_stack;
-    active_buffer_size = (packet_size > 200) ? 2048 : 1024;
+  if (json_buffer_psram == nullptr) {
+    _skipped_publishes++;
+    return;
   }
+  char* active_buffer = json_buffer_psram;
+  size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   char origin_id[65];
   
   // Use actual device ID
@@ -1869,18 +1863,12 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
   
   // JSON buffer: prefer PSRAM (plan §4); fallback to stack if allocation fails
   char* json_buffer_psram = (char*)psram_malloc(2048);
-  char json_buffer_stack[1024];
-  char json_buffer_large_stack[2048];
-  int packet_size = packet->getRawLength();
-  char* active_buffer;
-  size_t active_buffer_size;
-  if (json_buffer_psram != nullptr) {
-    active_buffer = json_buffer_psram;
-    active_buffer_size = 2048;
-  } else {
-    active_buffer = (packet_size > 200) ? json_buffer_large_stack : json_buffer_stack;
-    active_buffer_size = (packet_size > 200) ? 2048 : 1024;
+  if (json_buffer_psram == nullptr) {
+    _skipped_publishes++;
+    return;
   }
+  char* active_buffer = json_buffer_psram;
+  size_t active_buffer_size = 2048;
   char origin_id[65];
   
   // Use actual device ID
