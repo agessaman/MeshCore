@@ -65,6 +65,13 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   loadMQTTPrefs(fs);
   // Sync MQTT prefs to NodePrefs so existing code (like MQTTBridge) can access them
   syncMQTTPrefsToNodePrefs();
+  // Fresh-install fallback: default mqtt.origin to node_name when mqtt_prefs has no origin yet.
+  // This preserves explicit user-configured mqtt.origin values.
+  if (_prefs->mqtt_origin[0] == '\0' && _prefs->node_name[0] != '\0') {
+    StrHelper::strncpy(_prefs->mqtt_origin, _prefs->node_name, sizeof(_prefs->mqtt_origin));
+    syncNodePrefsToMQTTPrefs();
+    saveMQTTPrefs(fs);
+  }
   
   // For MQTT bridge, migrate bridge.source to RX (logRx) only on fresh installs or upgrades
   // This ensures new users get the correct default, but respects existing user choices
