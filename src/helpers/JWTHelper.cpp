@@ -166,7 +166,7 @@ size_t JWTHelper::createPayload(
   const char* email
 ) {
   // Create JWT payload
-  StaticJsonDocument<384> doc;
+  StaticJsonDocument<512> doc;
   doc["publicKey"] = publicKey;
   doc["aud"] = audience;
   doc["iat"] = issuedAt;
