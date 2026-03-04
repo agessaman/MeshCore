@@ -141,6 +141,9 @@ size_t JWTHelper::createHeader(char* output, size_t outputSize) {
   StaticJsonDocument<128> doc;
   doc["alg"] = "Ed25519";
   doc["typ"] = "JWT";
+  if (doc.overflowed()) {
+    return 0;
+  }
   
   char jsonBuffer[256];
   size_t len = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
@@ -185,6 +188,9 @@ size_t JWTHelper::createPayload(
   // Add optional email field if provided
   if (email && strlen(email) > 0) {
     doc["email"] = email;
+  }
+  if (doc.overflowed()) {
+    return 0;
   }
   
   char jsonBuffer[512];
