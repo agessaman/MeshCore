@@ -30,6 +30,9 @@ void KissModem::begin() {
   _rx_active = false;
   _has_pending_tx = false;
   _tx_state = TX_IDLE;
+#ifdef LORA_TX_POWER
+  _config.tx_power = (uint8_t)LORA_TX_POWER;
+#endif
 }
 
 void KissModem::writeByte(uint8_t b) {
@@ -447,8 +450,14 @@ void KissModem::handleSetTxPower(const uint8_t* data, uint16_t len) {
     return;
   }
 
-  _config.tx_power = data[0];
-  _setTxPowerCallback(data[0]);
+  int8_t power = (int8_t)data[0];
+#ifdef MAX_LORA_TX_POWER
+  /* Clamp to safe range for this hardware (e.g. 33 dBm module max 9 dBm input). */
+  if (power < -9) power = -9;
+  if (power > MAX_LORA_TX_POWER) power = MAX_LORA_TX_POWER;
+#endif
+  _config.tx_power = (uint8_t)power;
+  _setTxPowerCallback((uint8_t)power);
   writeHardwareFrame(HW_RESP_OK, nullptr, 0);
 }
 
