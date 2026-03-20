@@ -27,6 +27,7 @@ struct NodePrefs { // persisted to file
   int8_t tx_power_dbm;
   uint8_t disable_fwd;
   uint8_t advert_interval;       // minutes / 2
+  uint8_t rx_boosted_gain;       // power settings (file offset 79)
   uint8_t flood_advert_interval; // hours
   float rx_delay_base;
   float tx_delay_factor;
@@ -162,6 +163,10 @@ public:
 
   virtual int getQueueSize() {
     return 0; // no op by default
+  };
+
+  virtual void setRxBoostedGain(bool enable) {
+    // no op by default
   };
 };
 
