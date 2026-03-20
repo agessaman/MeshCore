@@ -14,7 +14,7 @@ public:
       board.getBattMilliVolts(),
       ms.getMillis() / 1000,
       err_flags,
-      mgr->getOutboundTotal()
+      mgr->getOutboundCount(0xFFFFFFFF)
     );
   }
 

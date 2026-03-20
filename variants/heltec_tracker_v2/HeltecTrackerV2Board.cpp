@@ -6,7 +6,19 @@ void HeltecTrackerV2Board::begin() {
     pinMode(PIN_ADC_CTRL, OUTPUT);
     digitalWrite(PIN_ADC_CTRL, LOW); // Initially inactive
 
-    loRaFEMControl.init();
+    // Set up digital GPIO registers before releasing RTC hold. The hold latches
+    // the pad state including function select, so register writes accumulate
+    // without affecting the pad. On hold release, all changes apply atomically
+    // (IO MUX switches to digital GPIO with output already HIGH — no glitch).
+    pinMode(P_LORA_PA_POWER, OUTPUT);
+    digitalWrite(P_LORA_PA_POWER,HIGH);
+    rtc_gpio_hold_dis((gpio_num_t)P_LORA_PA_POWER);
+
+    pinMode(P_LORA_PA_EN, OUTPUT);
+    digitalWrite(P_LORA_PA_EN,HIGH);
+    rtc_gpio_hold_dis((gpio_num_t)P_LORA_PA_EN);
+    pinMode(P_LORA_PA_TX_EN, OUTPUT);
+    digitalWrite(P_LORA_PA_TX_EN,LOW);
 
     esp_reset_reason_t reason = esp_reset_reason();
     if (reason != ESP_RST_DEEPSLEEP) {
@@ -48,13 +60,16 @@ void HeltecTrackerV2Board::begin() {
   }
 
   void HeltecTrackerV2Board::onBeforeTransmit(void) {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
-    loRaFEMControl.setTxModeEnable();
+    // GPIO46 is a strapping pin - only drive it when actively transmitting
+    pinMode(P_LORA_PA_TX_EN, OUTPUT);
+    digitalWrite(P_LORA_PA_TX_EN, HIGH);   // CPS=1: Enable full PA mode
+    digitalWrite(P_LORA_TX_LED, HIGH);
   }
 
   void HeltecTrackerV2Board::onAfterTransmit(void) {
-    digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED off
-    loRaFEMControl.setRxModeEnable();
+    digitalWrite(P_LORA_PA_TX_EN, LOW);
+    pinMode(P_LORA_PA_TX_EN, INPUT);       // Release strapping pin
+    digitalWrite(P_LORA_TX_LED, LOW);
   }
 
   void HeltecTrackerV2Board::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
@@ -66,8 +81,11 @@ void HeltecTrackerV2Board::begin() {
 
     rtc_gpio_hold_en((gpio_num_t)P_LORA_NSS);
 
-    loRaFEMControl.setRxModeEnableWhenMCUSleep();//It also needs to be enabled in receive mode
-    rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_POWER);  // keep FEM power enabled during deep sleep
+    // Hold GC1109 FEM pins during sleep for RX wake capability
+    // State: CSD=1, CTX=0 (DIO2), CPS=X -> Receive LNA mode
+    rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_POWER);   // VFEM_Ctrl - keep LDO powered
+    rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_EN);      // CSD=1 - chip enabled
+    // Note: GPIO46 (CPS) is NOT an RTC GPIO, cannot hold - but CPS is don't care for RX
 
     if (pin_wake_btn < 0) {
       esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);  // wake up on: recv LoRa packet
