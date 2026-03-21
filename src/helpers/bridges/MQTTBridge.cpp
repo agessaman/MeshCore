@@ -11,6 +11,7 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <mbedtls/platform.h>
 #endif
 
 // Helper function to strip quotes from strings (both single and double quotes)
@@ -57,6 +58,17 @@ static void* psram_malloc(size_t size) {
   return p;
 #else
   return malloc(size);
+#endif
+}
+
+static void* psram_calloc(size_t n, size_t size) {
+  if (n == 0 || size == 0) return nullptr;
+#if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
+  void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
+  if (p != nullptr) return p;
+  return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL);
+#else
+  return calloc(n, size);
 #endif
 }
 
@@ -107,7 +119,10 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const NodePref
   char slot_info[3][48];
   for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
     const MQTTSlot& slot = b->_slots[i];
-    if (!slot.enabled) {
+    if (!slot.enabled && slot.preset) {
+      // Configured but disabled (e.g., no PSRAM, slot limit reached)
+      snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (inactive)", i + 1, slot.preset->name);
+    } else if (!slot.enabled) {
       snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: none", i + 1);
     } else if (slot.preset) {
       snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (%s)", i + 1,
@@ -139,7 +154,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
     : BridgeBase(prefs, mgr, rtc),
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
-      _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false),
+      _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(MAX_MQTT_SLOTS),
       _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
       _identity(identity),
       _cached_has_connected_slots(false),
@@ -240,6 +255,16 @@ void MQTTBridge::begin() {
   #else
   MQTT_DEBUG_PRINTLN("PSRAM: not configured for this board (no BOARD_HAS_PSRAM)");
   #endif
+
+  // Limit active slots based on available memory.
+  // Each WSS/TLS connection needs ~40KB for mbedTLS buffers.
+  // Without PSRAM, 3 concurrent connections would exhaust internal heap.
+  #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
+  _max_active_slots = psramFound() ? MAX_MQTT_SLOTS : 2;
+  #else
+  _max_active_slots = 2;
+  #endif
+  MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
   // Check if WiFi credentials are configured first
   if (!isWiFiConfigValid(_prefs)) {
@@ -575,10 +600,25 @@ void MQTTBridge::mqttTaskLoop() {
     // This avoids wasted TLS handshakes that get rejected due to bad token times.
     if (_ntp_synced && !_slots_setup_done) {
       _slots_setup_done = true;
-      MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots...");
+
+      // Redirect mbedTLS allocations to PSRAM to save ~40KB internal heap per TLS connection.
+      // This is critical when running 3 concurrent WSS connections.
+      #if defined(BOARD_HAS_PSRAM)
+      mbedtls_platform_set_calloc_free(psram_calloc, psram_free);
+      MQTT_DEBUG_PRINTLN("mbedTLS allocator redirected to PSRAM");
+      #endif
+
+      MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots (max %d active)...", _max_active_slots);
+      int active_count = 0;
       for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
         if (_slots[i].enabled) {
+          if (active_count >= _max_active_slots) {
+            MQTT_DEBUG_PRINTLN("Slot %d skipped: max active slots (%d) reached (no PSRAM)", i, _max_active_slots);
+            _slots[i].enabled = false;  // Disable so other loops skip it
+            continue;
+          }
           setupSlot(i);
+          active_count++;
           // Stagger connections: 5s between slots to avoid simultaneous TLS handshakes
           // which compete for ~40KB internal heap each
           if (i < MAX_MQTT_SLOTS - 1) {
@@ -1260,9 +1300,15 @@ void MQTTBridge::loop() {
   // Deferred slot setup after NTP sync (non-ESP32 path)
   if (_ntp_synced && !_slots_setup_done) {
     _slots_setup_done = true;
+    int active_count = 0;
     for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
       if (_slots[i].enabled) {
+        if (active_count >= _max_active_slots) {
+          _slots[i].enabled = false;
+          continue;
+        }
         setupSlot(i);
+        active_count++;
       }
     }
   }

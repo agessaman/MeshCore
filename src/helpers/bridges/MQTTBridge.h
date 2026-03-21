@@ -139,6 +139,7 @@ private:
   bool _ntp_synced;
   bool _ntp_sync_pending;  // Flag to trigger NTP sync from loop() instead of event handler
   bool _slots_setup_done;  // Deferred: slots set up after NTP sync
+  int _max_active_slots;   // Runtime limit: 3 with PSRAM, 2 without
 
   // Timezone handling
   Timezone* _timezone;
