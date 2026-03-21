@@ -116,7 +116,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
 #ifdef WITH_MQTT_BRIDGE
-  MQTTBridge bridge;
+  MQTTBridge* bridge;
 #endif
 
   void addPost(ClientInfo* client, const char* postData);

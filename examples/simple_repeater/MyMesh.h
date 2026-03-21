@@ -120,7 +120,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #elif defined(WITH_ESPNOW_BRIDGE)
   ESPNowBridge bridge;
 #elif defined(WITH_MQTT_BRIDGE)
-  MQTTBridge bridge;
+  MQTTBridge* bridge;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
@@ -224,47 +224,53 @@ public:
 
 #if defined(WITH_BRIDGE)
   void setBridgeState(bool enable) override {
-    if (enable == bridge.isRunning()) return;
+    if (!bridge) {
+#ifdef WITH_MQTT_BRIDGE
+      bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+#endif
+      if (!bridge) return;
+    }
+    if (enable == bridge->isRunning()) return;
     if (enable)
     {
       // Set device metadata before starting bridge (same as in begin())
       char device_id[65];
       mesh::LocalIdentity self_id = getSelfId();
       mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
-      bridge.setDeviceID(device_id);
-      bridge.setFirmwareVersion(getFirmwareVer());
-      bridge.setBoardModel(_cli.getBoard()->getManufacturerName());
-      bridge.setBuildDate(getBuildDate());
+      bridge->setDeviceID(device_id);
+      bridge->setFirmwareVersion(getFirmwareVer());
+      bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+      bridge->setBuildDate(getBuildDate());
 #ifdef WITH_MQTT_BRIDGE
-      bridge.setStatsSources(this, _radio, _cli.getBoard(), _ms);
+      bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
 #endif
-      bridge.begin();
+      bridge->begin();
     }
-    else 
+    else
     {
-      bridge.end();
+      bridge->end();
     }
   }
 
   void restartBridge() override {
-    if (!bridge.isRunning()) return;
-    bridge.end();
+    if (!bridge || !bridge->isRunning()) return;
+    bridge->end();
     // Set device metadata before restarting bridge (same as in begin())
     char device_id[65];
     mesh::LocalIdentity self_id = getSelfId();
     mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
-    bridge.setDeviceID(device_id);
-    bridge.setFirmwareVersion(getFirmwareVer());
-    bridge.setBoardModel(_cli.getBoard()->getManufacturerName());
-    bridge.setBuildDate(getBuildDate());
+    bridge->setDeviceID(device_id);
+    bridge->setFirmwareVersion(getFirmwareVer());
+    bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+    bridge->setBuildDate(getBuildDate());
 #ifdef WITH_MQTT_BRIDGE
-    bridge.setStatsSources(this, _radio, _cli.getBoard(), _ms);
+    bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
 #endif
-    bridge.begin();
+    bridge->begin();
   }
 
   int getQueueSize() override {
-    return bridge.getQueueSize();
+    return bridge ? bridge->getQueueSize() : 0;
   }
 #endif
 

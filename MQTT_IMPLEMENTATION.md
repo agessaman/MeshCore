@@ -90,6 +90,12 @@ The MQTT bridge uses a slot-based architecture with up to 3 concurrent connectio
 - Slot 2: `analyzer-eu`
 - Slot 3: `none`
 
+**Memory Limits:**
+- With PSRAM: All 3 slots can be active simultaneously
+- Without PSRAM: Maximum 2 active slots (each WSS/TLS connection requires ~40KB internal heap)
+- If more slots are configured than the device supports, excess slots show as `(inactive)` in `get mqtt.status`
+- Slot configurations are preserved in preferences — moving firmware to a PSRAM device activates all slots
+
 ### Files
 
 #### Core Implementation
@@ -338,12 +344,13 @@ Minimal raw packet data for map integration.
 ## Key Features
 
 ### Slot-Based Preset System
-- Up to 3 concurrent MQTT connections
+- Up to 3 concurrent MQTT connections (with PSRAM), 2 without PSRAM
 - Built-in presets for LetsMesh Analyzer (US/EU) and MeshMapper
 - Custom broker support with username/password auth
 - JWT (Ed25519) authentication for preset brokers
 - Automatic reconnection with exponential backoff per slot
 - JWT token buffers only allocated for JWT-auth slots (memory efficient)
+- Deferred construction: MQTTBridge is heap-allocated in `begin()` to avoid ESP32 static init crashes
 
 ### Raw Radio Data Capture
 - Captures actual raw radio transmission data (including radio headers)

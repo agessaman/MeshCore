@@ -496,7 +496,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_enabled) {
     // Store raw radio data for MQTT messages
-    bridge.storeRawRadioData(raw, len, snr, rssi);
+    if (bridge) bridge->storeRawRadioData(raw, len, snr, rssi);
   }
 #endif
 }
@@ -504,7 +504,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 1) {
-    bridge.onPacketReceived(pkt);
+    if (bridge) bridge->onPacketReceived(pkt);
   }
 #endif
 
@@ -530,7 +530,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 0) {
-    bridge.sendPacket(pkt);
+    if (bridge) bridge->sendPacket(pkt);
   }
 #endif
 
@@ -883,7 +883,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #elif defined(WITH_ESPNOW_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
 #elif defined(WITH_MQTT_BRIDGE)
-      , bridge(&_prefs, _mgr, &rtc, &self_id)
+      , bridge(nullptr)
 #endif
 {
   last_millis = 0;
@@ -984,30 +984,34 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
 #if defined(WITH_BRIDGE)
   if (_prefs.bridge_enabled) {
-    // Set device public key for MQTT topics
-    char device_id[65];
-    mesh::LocalIdentity self_id = getSelfId();
-    mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
-    MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
-    bridge.setDeviceID(device_id);
-    
-    // Set firmware version
-    bridge.setFirmwareVersion(getFirmwareVer());
-    
-    // Set board model
-    bridge.setBoardModel(_cli.getBoard()->getManufacturerName());
-    
-    // Set build date
-    bridge.setBuildDate(getBuildDate());
-    
 #ifdef WITH_MQTT_BRIDGE
-    // Set stats sources for automatic stats collection (optional - can be done in custom initialization)
-    // This enables stats to be included in status messages automatically
-    // this (Mesh*) inherits from Dispatcher, so it can be passed as Dispatcher*
-    bridge.setStatsSources(this, _radio, _cli.getBoard(), _ms);
+    // Defer construction to avoid static init crashes on ESP32 classic
+    bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
 #endif
-    
-    bridge.begin();
+    if (bridge) {
+      // Set device public key for MQTT topics
+      char device_id[65];
+      mesh::LocalIdentity self_id = getSelfId();
+      mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+      MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
+      bridge->setDeviceID(device_id);
+
+      // Set firmware version
+      bridge->setFirmwareVersion(getFirmwareVer());
+
+      // Set board model
+      bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+
+      // Set build date
+      bridge->setBuildDate(getBuildDate());
+
+#ifdef WITH_MQTT_BRIDGE
+      // Set stats sources for automatic stats collection
+      bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#endif
+
+      bridge->begin();
+    }
   }
 #endif
 
@@ -1433,7 +1437,7 @@ void MyMesh::loop() {
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
-  if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
+  if (bridge && bridge->isRunning()) return true;  // bridge needs WiFi radio, can't sleep
 #endif
   return _mgr->getOutboundCount(0xFFFFFFFF) > 0;
 }

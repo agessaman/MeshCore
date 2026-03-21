@@ -210,7 +210,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #ifdef WITH_MQTT_BRIDGE
   if (_prefs.bridge_enabled) {
     // Store raw radio data for MQTT messages (same as repeater)
-    bridge.storeRawRadioData(raw, len, snr, rssi);
+    if (bridge) bridge->storeRawRadioData(raw, len, snr, rssi);
   }
 #endif
 }
@@ -219,7 +219,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_MQTT_BRIDGE
   if (_prefs.bridge_enabled && _prefs.bridge_pkt_src == 1) {
     // Log received packets to MQTT (same as repeater)
-    bridge.onPacketReceived(pkt);
+    if (bridge) bridge->onPacketReceived(pkt);
   }
 #endif
 
@@ -245,7 +245,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef WITH_MQTT_BRIDGE
   if (_prefs.bridge_enabled && _prefs.bridge_pkt_src == 0) {
     // Log transmitted packets to MQTT (same as repeater)
-    bridge.sendPacket(pkt);
+    if (bridge) bridge->sendPacket(pkt);
   }
 #endif
 
@@ -618,7 +618,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
       _cli(board, rtc, sensors, acl, &_prefs, this), telemetry(MAX_PACKET_PAYLOAD - 4)
 #ifdef WITH_MQTT_BRIDGE
-      , bridge(&_prefs, _mgr, &rtc, &self_id)
+      , bridge(nullptr)
 #endif
 {
   last_millis = 0;
@@ -718,26 +718,30 @@ void MyMesh::begin(FILESYSTEM *fs) {
   MESH_DEBUG_PRINTLN("MQTT origin set to device name: %s", _prefs.mqtt_origin);
 
   if (_prefs.bridge_enabled) {
-    // Set device public key for MQTT topics (same as repeater)
-    char device_id[65];
-    mesh::LocalIdentity self_id = getSelfId();
-    mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
-    MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
-    bridge.setDeviceID(device_id);
-    
-    // Set firmware version (same as repeater)
-    bridge.setFirmwareVersion(getFirmwareVer());
-    
-    // Set board model (same as repeater)
-    bridge.setBoardModel(_cli.getBoard()->getManufacturerName());
-    
-    // Set build date (same as repeater)
-    bridge.setBuildDate(getBuildDate());
-    
-    // Set stats sources for automatic stats collection (same as repeater)
-    bridge.setStatsSources(this, _radio, _cli.getBoard(), _ms);
-    
-    bridge.begin();
+    // Defer construction to avoid static init crashes on ESP32 classic
+    bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+    if (bridge) {
+      // Set device public key for MQTT topics
+      char device_id[65];
+      mesh::LocalIdentity self_id = getSelfId();
+      mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+      MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
+      bridge->setDeviceID(device_id);
+
+      // Set firmware version
+      bridge->setFirmwareVersion(getFirmwareVer());
+
+      // Set board model
+      bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+
+      // Set build date
+      bridge->setBuildDate(getBuildDate());
+
+      // Set stats sources for automatic stats collection
+      bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+
+      bridge->begin();
+    }
   }
 #endif
 }
