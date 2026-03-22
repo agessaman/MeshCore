@@ -90,10 +90,38 @@ struct NodePrefs { // persisted to file
   char mqtt_owner_public_key[65]; // Owner public key (hex string, same length as repeater public key)
   char mqtt_email[64]; // Owner email address for matching nodes with owners
 
+  // Per-slot extended fields
+  char mqtt_slot_token[3][48];    // Per-slot token (e.g., MeshRank account token)
+  char mqtt_slot_topic[3][96];    // Per-slot custom topic template (custom preset only)
+
   uint8_t loop_detect;
 };
 
 #ifdef WITH_MQTT_BRIDGE
+// Old MQTT preferences layout (pre-slot firmware) — used only for migration detection
+struct OldMQTTPrefs {
+  char mqtt_origin[32];
+  char mqtt_iata[8];
+  uint8_t mqtt_status_enabled;
+  uint8_t mqtt_packets_enabled;
+  uint8_t mqtt_raw_enabled;
+  uint8_t mqtt_tx_enabled;
+  uint32_t mqtt_status_interval;
+  char wifi_ssid[32];
+  char wifi_password[64];
+  uint8_t wifi_power_save;
+  char timezone_string[32];
+  int8_t timezone_offset;
+  char mqtt_server[64];
+  uint16_t mqtt_port;
+  char mqtt_username[32];
+  char mqtt_password[64];
+  uint8_t mqtt_analyzer_us_enabled;
+  uint8_t mqtt_analyzer_eu_enabled;
+  char mqtt_owner_public_key[65];
+  char mqtt_email[64];
+};
+
 // MQTT preferences stored in separate file to avoid conflicts with upstream NodePrefs changes
 struct MQTTPrefs {
   // MQTT settings
@@ -127,15 +155,20 @@ struct MQTTPrefs {
   char mqtt_owner_public_key[65]; // Owner public key (hex string)
   char mqtt_email[64]; // Owner email address
 
-  // --- Legacy fields for migration detection ---
-  // These are read during loadMQTTPrefs to detect old-format prefs and auto-migrate.
-  // After migration they are zeroed out and not used again.
+  // --- Legacy fields (vestigial, kept for binary compatibility) ---
+  // Migration now uses OldMQTTPrefs struct. These fields are unused but must remain
+  // to preserve byte offsets for devices that already saved a new-format /mqtt_prefs file.
   uint8_t _legacy_analyzer_us_enabled;
   uint8_t _legacy_analyzer_eu_enabled;
   char _legacy_mqtt_server[64];
   uint16_t _legacy_mqtt_port;
   char _legacy_mqtt_username[32];
   char _legacy_mqtt_password[64];
+
+  // --- New fields (appended at end for migration safety) ---
+  // When loading an older/smaller prefs file, these stay zeroed from setMQTTPrefsDefaults().
+  char mqtt_slot_token[3][48];    // Per-slot token (e.g., MeshRank account token)
+  char mqtt_slot_topic[3][96];    // Per-slot custom topic template (custom preset only)
 };
 #endif
 
@@ -171,6 +204,11 @@ public:
 
   virtual void restartBridge() {
     // no op by default
+  };
+
+  virtual void restartBridgeSlot(int slot) {
+    // Default: fall back to full restart
+    restartBridge();
   };
 
   virtual int getQueueSize() {

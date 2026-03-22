@@ -309,7 +309,7 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
 void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
   // Initialize with defaults first
   setMQTTPrefsDefaults(&_mqtt_prefs);
-  
+
   bool file_existed = fs->exists("/mqtt_prefs");
   if (file_existed) {
     // Load from separate MQTT prefs file
@@ -319,119 +319,82 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
     File file = fs->open("/mqtt_prefs");
 #endif
     if (file) {
-      // Verify file size is correct before reading
-      if (file.size() >= sizeof(_mqtt_prefs)) {
-        size_t bytes_read = file.read((uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
-        if (bytes_read != sizeof(_mqtt_prefs)) {
-          // File read incomplete - reinitialize to defaults
+      size_t file_size = file.size();
+
+      // Detect old (pre-slot) format by file size.
+      // Old MQTTPrefs was ~472 bytes (no slot fields). New is ~1464 bytes.
+      // If the file is smaller than the new struct but close to OldMQTTPrefs size,
+      // read it with the old layout and migrate.
+      if (file_size > 0 && file_size <= sizeof(OldMQTTPrefs)) {
+        OldMQTTPrefs old_prefs;
+        memset(&old_prefs, 0, sizeof(old_prefs));
+        size_t bytes_read = file.read((uint8_t *)&old_prefs, file_size < sizeof(old_prefs) ? file_size : sizeof(old_prefs));
+        file.close();
+
+        if (bytes_read > 0) {
+          MESH_DEBUG_PRINTLN("MQTT: Migrating old-format prefs to slot-based layout");
+
+          // Copy common fields (identical layout at start of both structs)
+          memcpy(_mqtt_prefs.mqtt_origin, old_prefs.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
+          memcpy(_mqtt_prefs.mqtt_iata, old_prefs.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
+          _mqtt_prefs.mqtt_status_enabled = old_prefs.mqtt_status_enabled;
+          _mqtt_prefs.mqtt_packets_enabled = old_prefs.mqtt_packets_enabled;
+          _mqtt_prefs.mqtt_raw_enabled = old_prefs.mqtt_raw_enabled;
+          _mqtt_prefs.mqtt_tx_enabled = old_prefs.mqtt_tx_enabled;
+          _mqtt_prefs.mqtt_status_interval = old_prefs.mqtt_status_interval;
+          memcpy(_mqtt_prefs.wifi_ssid, old_prefs.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
+          memcpy(_mqtt_prefs.wifi_password, old_prefs.wifi_password, sizeof(_mqtt_prefs.wifi_password));
+          _mqtt_prefs.wifi_power_save = old_prefs.wifi_power_save;
+          memcpy(_mqtt_prefs.timezone_string, old_prefs.timezone_string, sizeof(_mqtt_prefs.timezone_string));
+          _mqtt_prefs.timezone_offset = old_prefs.timezone_offset;
+
+          // Migrate shared auth fields
+          memcpy(_mqtt_prefs.mqtt_owner_public_key, old_prefs.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
+          memcpy(_mqtt_prefs.mqtt_email, old_prefs.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+
+          // Migrate analyzer presets to slots
+          if (old_prefs.mqtt_analyzer_us_enabled == 1) {
+            strncpy(_mqtt_prefs.mqtt_slot_preset[0], "analyzer-us", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
+          } else {
+            strncpy(_mqtt_prefs.mqtt_slot_preset[0], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
+          }
+          if (old_prefs.mqtt_analyzer_eu_enabled == 1) {
+            strncpy(_mqtt_prefs.mqtt_slot_preset[1], "analyzer-eu", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
+          } else {
+            strncpy(_mqtt_prefs.mqtt_slot_preset[1], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
+          }
+
+          // Migrate custom server to slot 3
+          if (old_prefs.mqtt_server[0] != '\0' && old_prefs.mqtt_port > 0) {
+            strncpy(_mqtt_prefs.mqtt_slot_preset[2], "custom", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
+            strncpy(_mqtt_prefs.mqtt_slot_host[2], old_prefs.mqtt_server, sizeof(_mqtt_prefs.mqtt_slot_host[2]) - 1);
+            _mqtt_prefs.mqtt_slot_port[2] = old_prefs.mqtt_port;
+            strncpy(_mqtt_prefs.mqtt_slot_username[2], old_prefs.mqtt_username, sizeof(_mqtt_prefs.mqtt_slot_username[2]) - 1);
+            strncpy(_mqtt_prefs.mqtt_slot_password[2], old_prefs.mqtt_password, sizeof(_mqtt_prefs.mqtt_slot_password[2]) - 1);
+          } else {
+            strncpy(_mqtt_prefs.mqtt_slot_preset[2], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
+          }
+
+          // Save migrated prefs in new format
+          saveMQTTPrefs(fs);
+        }
+      } else if (file_size > 0) {
+        // New-format file: read directly (migration-safe for growing struct)
+        size_t bytes_to_read = file_size < sizeof(_mqtt_prefs) ? file_size : sizeof(_mqtt_prefs);
+        size_t bytes_read = file.read((uint8_t *)&_mqtt_prefs, bytes_to_read);
+        file.close();
+        if (bytes_read != bytes_to_read) {
           setMQTTPrefsDefaults(&_mqtt_prefs);
         }
       } else {
-        // File too small - reinitialize to defaults
+        file.close();
         setMQTTPrefsDefaults(&_mqtt_prefs);
-      }
-      file.close();
-
-      // Migration: check if legacy fields have data but new slot fields are empty
-      bool slots_empty = (_mqtt_prefs.mqtt_slot_preset[0][0] == '\0' &&
-                          _mqtt_prefs.mqtt_slot_preset[1][0] == '\0' &&
-                          _mqtt_prefs.mqtt_slot_preset[2][0] == '\0');
-      bool has_legacy = (_mqtt_prefs._legacy_analyzer_us_enabled != 0 ||
-                         _mqtt_prefs._legacy_analyzer_eu_enabled != 0 ||
-                         _mqtt_prefs._legacy_mqtt_server[0] != '\0');
-      if (slots_empty && has_legacy) {
-        MESH_DEBUG_PRINTLN("MQTT: Migrating legacy prefs to slot-based presets");
-        // Migrate analyzer US
-        if (_mqtt_prefs._legacy_analyzer_us_enabled == 1) {
-          strncpy(_mqtt_prefs.mqtt_slot_preset[0], "analyzer-us", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
-          _mqtt_prefs.mqtt_slot_preset[0][sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1] = '\0';
-        } else {
-          strncpy(_mqtt_prefs.mqtt_slot_preset[0], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
-          _mqtt_prefs.mqtt_slot_preset[0][sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1] = '\0';
-        }
-        // Migrate analyzer EU
-        if (_mqtt_prefs._legacy_analyzer_eu_enabled == 1) {
-          strncpy(_mqtt_prefs.mqtt_slot_preset[1], "analyzer-eu", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
-          _mqtt_prefs.mqtt_slot_preset[1][sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1] = '\0';
-        } else {
-          strncpy(_mqtt_prefs.mqtt_slot_preset[1], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
-          _mqtt_prefs.mqtt_slot_preset[1][sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1] = '\0';
-        }
-        // Migrate custom server to slot 3
-        if (_mqtt_prefs._legacy_mqtt_server[0] != '\0' && _mqtt_prefs._legacy_mqtt_port > 0) {
-          strncpy(_mqtt_prefs.mqtt_slot_preset[2], "custom", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
-          _mqtt_prefs.mqtt_slot_preset[2][sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1] = '\0';
-          strncpy(_mqtt_prefs.mqtt_slot_host[2], _mqtt_prefs._legacy_mqtt_server, sizeof(_mqtt_prefs.mqtt_slot_host[2]) - 1);
-          _mqtt_prefs.mqtt_slot_host[2][sizeof(_mqtt_prefs.mqtt_slot_host[2]) - 1] = '\0';
-          _mqtt_prefs.mqtt_slot_port[2] = _mqtt_prefs._legacy_mqtt_port;
-          strncpy(_mqtt_prefs.mqtt_slot_username[2], _mqtt_prefs._legacy_mqtt_username, sizeof(_mqtt_prefs.mqtt_slot_username[2]) - 1);
-          _mqtt_prefs.mqtt_slot_username[2][sizeof(_mqtt_prefs.mqtt_slot_username[2]) - 1] = '\0';
-          strncpy(_mqtt_prefs.mqtt_slot_password[2], _mqtt_prefs._legacy_mqtt_password, sizeof(_mqtt_prefs.mqtt_slot_password[2]) - 1);
-          _mqtt_prefs.mqtt_slot_password[2][sizeof(_mqtt_prefs.mqtt_slot_password[2]) - 1] = '\0';
-        } else {
-          strncpy(_mqtt_prefs.mqtt_slot_preset[2], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
-          _mqtt_prefs.mqtt_slot_preset[2][sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1] = '\0';
-        }
-        // Clear legacy fields
-        _mqtt_prefs._legacy_analyzer_us_enabled = 0;
-        _mqtt_prefs._legacy_analyzer_eu_enabled = 0;
-        memset(_mqtt_prefs._legacy_mqtt_server, 0, sizeof(_mqtt_prefs._legacy_mqtt_server));
-        _mqtt_prefs._legacy_mqtt_port = 0;
-        memset(_mqtt_prefs._legacy_mqtt_username, 0, sizeof(_mqtt_prefs._legacy_mqtt_username));
-        memset(_mqtt_prefs._legacy_mqtt_password, 0, sizeof(_mqtt_prefs._legacy_mqtt_password));
-        // Save migrated prefs
-        saveMQTTPrefs(fs);
       }
     }
   } else {
-    // Migration: Try to read from old /com_prefs file if it exists
-    // This handles the case where MQTT settings were previously stored in /com_prefs
-    if (fs->exists("/com_prefs")) {
-#if defined(RP2040_PLATFORM)
-      File file = fs->open("/com_prefs", "r");
-#else
-      File file = fs->open("/com_prefs");
-#endif
-      if (file) {
-        // Skip to MQTT section (after advert_loc_policy at offset 161)
-        // Calculate offset: we need to skip everything up to and including advert_loc_policy
-        size_t offset_to_mqtt = 
-          sizeof(_prefs->airtime_factor) + sizeof(_prefs->node_name) + 4 + // pad
-          sizeof(_prefs->node_lat) + sizeof(_prefs->node_lon) +
-          sizeof(_prefs->password) + sizeof(_prefs->freq) +
-          sizeof(_prefs->tx_power_dbm) + sizeof(_prefs->disable_fwd) +
-          sizeof(_prefs->advert_interval) + sizeof(_prefs->rx_boosted_gain) +
-          sizeof(_prefs->rx_delay_base) + sizeof(_prefs->tx_delay_factor) +
-          sizeof(_prefs->guest_password) + sizeof(_prefs->direct_tx_delay_factor) + 4 + // pad
-          sizeof(_prefs->sf) + sizeof(_prefs->cr) +
-          sizeof(_prefs->allow_read_only) + sizeof(_prefs->multi_acks) +
-          sizeof(_prefs->bw) + sizeof(_prefs->agc_reset_interval) + 3 + // pad
-          sizeof(_prefs->flood_max) + sizeof(_prefs->flood_advert_interval) +
-          sizeof(_prefs->interference_threshold) + sizeof(_prefs->bridge_enabled) +
-          sizeof(_prefs->bridge_delay) + sizeof(_prefs->bridge_pkt_src) +
-          sizeof(_prefs->bridge_baud) + sizeof(_prefs->bridge_channel) +
-          sizeof(_prefs->bridge_secret) + 4 + // pad
-          sizeof(_prefs->gps_enabled) + sizeof(_prefs->gps_interval) +
-          sizeof(_prefs->advert_loc_policy);
-        
-        // Check if file is large enough and seek succeeded
-        if (file.size() >= offset_to_mqtt + sizeof(_mqtt_prefs)) {
-          if (file.seek(offset_to_mqtt)) {
-            size_t bytes_read = file.read((uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
-            if (bytes_read == sizeof(_mqtt_prefs)) {
-              // Successfully migrated - save to new location for future use
-              file.close();
-              saveMQTTPrefs(fs);
-              return; // Migration successful
-            }
-          }
-        }
-        file.close();
-        // Migration failed - defaults already set, just return
-        return;
-      }
-    }
-    // No file exists and migration didn't happen - defaults already set
+    // No /mqtt_prefs file — defaults already set
+    // (Legacy /com_prefs migration removed: the old offset-based approach was fragile
+    // and the pre-MQTT firmware never wrote MQTT fields to /com_prefs anyway.)
   }
 }
 
@@ -472,6 +435,8 @@ void CommonCLI::syncMQTTPrefsToNodePrefs() {
     _prefs->mqtt_slot_port[i] = _mqtt_prefs.mqtt_slot_port[i];
     StrHelper::strncpy(_prefs->mqtt_slot_username[i], _mqtt_prefs.mqtt_slot_username[i], sizeof(_prefs->mqtt_slot_username[i]));
     StrHelper::strncpy(_prefs->mqtt_slot_password[i], _mqtt_prefs.mqtt_slot_password[i], sizeof(_prefs->mqtt_slot_password[i]));
+    StrHelper::strncpy(_prefs->mqtt_slot_token[i], _mqtt_prefs.mqtt_slot_token[i], sizeof(_prefs->mqtt_slot_token[i]));
+    StrHelper::strncpy(_prefs->mqtt_slot_topic[i], _mqtt_prefs.mqtt_slot_topic[i], sizeof(_prefs->mqtt_slot_topic[i]));
   }
   StrHelper::strncpy(_prefs->mqtt_owner_public_key, _mqtt_prefs.mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key));
   StrHelper::strncpy(_prefs->mqtt_email, _mqtt_prefs.mqtt_email, sizeof(_prefs->mqtt_email));
@@ -499,6 +464,8 @@ void CommonCLI::syncNodePrefsToMQTTPrefs() {
     _mqtt_prefs.mqtt_slot_port[i] = _prefs->mqtt_slot_port[i];
     StrHelper::strncpy(_mqtt_prefs.mqtt_slot_username[i], _prefs->mqtt_slot_username[i], sizeof(_mqtt_prefs.mqtt_slot_username[i]));
     StrHelper::strncpy(_mqtt_prefs.mqtt_slot_password[i], _prefs->mqtt_slot_password[i], sizeof(_mqtt_prefs.mqtt_slot_password[i]));
+    StrHelper::strncpy(_mqtt_prefs.mqtt_slot_token[i], _prefs->mqtt_slot_token[i], sizeof(_mqtt_prefs.mqtt_slot_token[i]));
+    StrHelper::strncpy(_mqtt_prefs.mqtt_slot_topic[i], _prefs->mqtt_slot_topic[i], sizeof(_mqtt_prefs.mqtt_slot_topic[i]));
   }
   StrHelper::strncpy(_mqtt_prefs.mqtt_owner_public_key, _prefs->mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
   StrHelper::strncpy(_mqtt_prefs.mqtt_email, _prefs->mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
@@ -759,6 +726,18 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           sprintf(reply, "> %s", _prefs->mqtt_slot_username[slot]);
         } else if (memcmp(subcmd, "password", 8) == 0) {
           sprintf(reply, "> %s", _prefs->mqtt_slot_password[slot]);
+        } else if (memcmp(subcmd, "token", 5) == 0) {
+          if (_prefs->mqtt_slot_token[slot][0] != '\0') {
+            sprintf(reply, "> %s", _prefs->mqtt_slot_token[slot]);
+          } else {
+            strcpy(reply, "> (not set)");
+          }
+        } else if (memcmp(subcmd, "topic", 5) == 0) {
+          if (_prefs->mqtt_slot_topic[slot][0] != '\0') {
+            sprintf(reply, "> %s", _prefs->mqtt_slot_topic[slot]);
+          } else {
+            strcpy(reply, "> (default: meshcore/{iata}/{device}/{type})");
+          }
         } else {
           sprintf(reply, "??: %s", config);
         }
@@ -1126,6 +1105,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           _prefs->mqtt_iata[i] = toupper(_prefs->mqtt_iata[i]);
         }
         savePrefs();
+        _callbacks->restartBridge();
         strcpy(reply, "OK");
       } else if (memcmp(config, "mqtt.status ", 12) == 0) {
         _prefs->mqtt_status_enabled = memcmp(&config[12], "on", 2) == 0;
@@ -1230,10 +1210,19 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                       strcmp(preset_name, MQTT_PRESET_NONE) == 0) {
                     StrHelper::strncpy(_prefs->mqtt_slot_preset[slot], preset_name, sizeof(_prefs->mqtt_slot_preset[slot]));
                     savePrefs();
-                    _callbacks->restartBridge();
-                    sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
+                    _callbacks->restartBridgeSlot(slot);
+                    // Check if the slot has everything it needs to connect
+                    const MQTTPresetDef* p = findMQTTPreset(preset_name);
+                    if (p && p->topic_style == MQTT_TOPIC_MESHRANK && _prefs->mqtt_slot_token[slot][0] == '\0') {
+                      sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt%d.token <your_token>' to connect)", slot + 1, preset_name, slot + 1);
+                    } else if (p && p->topic_style == MQTT_TOPIC_MESHCORE &&
+                               (strlen(_prefs->mqtt_iata) == 0 || strcmp(_prefs->mqtt_iata, "XXX") == 0)) {
+                      sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt.iata <airport_code>' to publish)", slot + 1, preset_name);
+                    } else {
+                      sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
+                    }
                   } else {
-                    strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, custom, none");
+                    strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, custom, none");
                   }
                 } else if (memcmp(subcmd, "server ", 7) == 0) {
                   StrHelper::strncpy(_prefs->mqtt_slot_host[slot], &subcmd[7], sizeof(_prefs->mqtt_slot_host[slot]));
@@ -1256,6 +1245,20 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                   StrHelper::strncpy(_prefs->mqtt_slot_password[slot], &subcmd[9], sizeof(_prefs->mqtt_slot_password[slot]));
                   savePrefs();
                   strcpy(reply, "OK");
+                } else if (memcmp(subcmd, "token ", 6) == 0) {
+                  StrHelper::strncpy(_prefs->mqtt_slot_token[slot], &subcmd[6], sizeof(_prefs->mqtt_slot_token[slot]));
+                  savePrefs();
+                  _callbacks->restartBridgeSlot(slot);
+                  sprintf(reply, "OK - slot %d token set", slot + 1);
+                } else if (memcmp(subcmd, "topic ", 6) == 0) {
+                  if (strcmp(_prefs->mqtt_slot_preset[slot], "custom") != 0) {
+                    sprintf(reply, "Error: topic template only applies to custom preset slots");
+                  } else {
+                    StrHelper::strncpy(_prefs->mqtt_slot_topic[slot], &subcmd[6], sizeof(_prefs->mqtt_slot_topic[slot]));
+                    savePrefs();
+                    _callbacks->restartBridgeSlot(slot);
+                    sprintf(reply, "OK - slot %d topic: %s", slot + 1, _prefs->mqtt_slot_topic[slot]);
+                  }
                 } else {
                   sprintf(reply, "unknown config: %s", config);
                 }

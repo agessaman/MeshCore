@@ -141,6 +141,9 @@ private:
   bool _slots_setup_done;  // Deferred: slots set up after NTP sync
   int _max_active_slots;   // Runtime limit: 3 with PSRAM, 2 without
 
+  // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
+  volatile bool _slot_reconfigure_pending[MAX_MQTT_SLOTS];
+
   // Timezone handling
   Timezone* _timezone;
 
@@ -190,6 +193,11 @@ private:
   mesh::MainBoard* _board;         // For battery voltage
   mesh::MillisecondClock* _ms;    // For uptime
 
+  // Topic building
+  enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW };
+  bool buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size);
+  bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
+
   // Internal methods - slot management
   void setupSlot(int index);           // Create/destroy client for a slot based on its preset
   void teardownSlot(int index);        // Disconnect and free slot resources
@@ -226,6 +234,7 @@ private:
   Timezone* createTimezoneFromString(const char* tz_string);
   void checkConfigurationMismatch();
   bool isIATAValid() const;
+  bool isSlotReady(int index, char* reason_buf = nullptr, size_t reason_size = 0) const;
 
   void optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_large_buffer = false);
   void getClientVersion(char* buffer, size_t buffer_size) const;
@@ -249,6 +258,7 @@ public:
    * @param preset_name Preset name: "analyzer-us", "analyzer-eu", "meshmapper", "custom", "none"
    */
   void setSlotPreset(int slot_index, const char* preset_name);
+  void applySlotPreset(int slot_index, const char* preset_name);
 
   /**
    * Configure custom broker settings for a slot. Only applies when the

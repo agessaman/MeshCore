@@ -82,6 +82,7 @@ The MQTT bridge uses a slot-based architecture with up to 3 concurrent connectio
 | `analyzer-us` | mqtt-us-v1.letsmesh.net:443 | JWT (Ed25519) | WSS |
 | `analyzer-eu` | mqtt-eu-v1.letsmesh.net:443 | JWT (Ed25519) | WSS |
 | `meshmapper` | mqtt.meshmapper.cc:443 | JWT (Ed25519) | WSS |
+| `meshrank` | meshrank.net:8883 | None (token in topic) | MQTT over TLS |
 | `custom` | User-configured | Username/Password | MQTT or WSS |
 | `none` | (disabled) | — | — |
 
@@ -166,19 +167,32 @@ Each slot (1-3) supports the following commands:
 - `get mqttN.port` - Get custom server port for slot N
 - `get mqttN.username` - Get custom username for slot N
 - `get mqttN.password` - Get custom password for slot N
+- `get mqttN.token` - Get per-slot token (e.g., MeshRank account token)
+- `get mqttN.topic` - Get custom topic template for slot N
 
 #### Set Commands
 - `set mqtt1.preset analyzer-us` - Set slot 1 to LetsMesh Analyzer US
 - `set mqtt1.preset analyzer-eu` - Set slot 1 to LetsMesh Analyzer EU
 - `set mqtt1.preset meshmapper` - Set slot 1 to MeshMapper
+- `set mqtt1.preset meshrank` - Set slot 1 to MeshRank (requires token)
 - `set mqtt1.preset custom` - Set slot 1 to custom broker (configure server/port/username/password)
 - `set mqtt1.preset none` - Disable slot 1
 - `set mqttN.server <hostname>` - Set custom server hostname for slot N
 - `set mqttN.port <port>` - Set custom server port for slot N (1-65535)
 - `set mqttN.username <username>` - Set custom username for slot N
 - `set mqttN.password <password>` - Set custom password for slot N
+- `set mqttN.token <token>` - Set per-slot token (required for MeshRank preset)
+- `set mqttN.topic <template>` - Set custom topic template (custom preset only, see below)
 
 **Note:** Custom server/port/username/password settings only apply when the slot's preset is `custom`.
+
+#### Example: Configure MeshRank on Slot 3
+```bash
+set mqtt3.preset meshrank
+set mqtt3.token FE1B34242C5938C39225310081FD6718
+```
+
+The token is generated on the MeshRank website and is tied to your account. MeshRank only receives packet data (no status or raw messages).
 
 #### Example: Configure MeshMapper on Slot 3
 ```bash
@@ -193,6 +207,29 @@ set mqtt3.port 1883
 set mqtt3.username your-username
 set mqtt3.password your-password
 ```
+
+#### Example: Custom Broker with Custom Topic Template
+```bash
+set mqtt3.preset custom
+set mqtt3.server my-broker.local
+set mqtt3.port 1883
+set mqtt3.topic mynetwork/{device}/{type}
+```
+
+### Custom Topic Templates
+
+When a slot's preset is `custom`, you can define a custom topic template using placeholders:
+
+| Placeholder | Value | Example |
+|-------------|-------|---------|
+| `{iata}` | IATA airport code | `SEA` |
+| `{device}` | Device public key (64 hex chars) | `CC5D3CFD...` |
+| `{token}` | Per-slot token from `mqttN.token` | `FE1B3424...` |
+| `{type}` | Message type | `status`, `packets`, or `raw` |
+
+If no custom topic is set, custom slots default to: `meshcore/{iata}/{device}/{type}`
+
+**Note:** Topic templates only apply to `custom` preset slots. Built-in presets (analyzer-us, analyzer-eu, meshmapper, meshrank) always use their hardcoded topic format.
 
 ### MQTT Shared Commands
 
@@ -345,9 +382,10 @@ Minimal raw packet data for map integration.
 
 ### Slot-Based Preset System
 - Up to 3 concurrent MQTT connections (with PSRAM), 2 without PSRAM
-- Built-in presets for LetsMesh Analyzer (US/EU) and MeshMapper
-- Custom broker support with username/password auth
-- JWT (Ed25519) authentication for preset brokers
+- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, and MeshRank
+- Custom broker support with username/password auth and custom topic templates
+- JWT (Ed25519) authentication for preset brokers, token-in-topic for MeshRank
+- WSS (WebSocket Secure) and direct MQTT over TLS transport
 - Automatic reconnection with exponential backoff per slot
 - JWT token buffers only allocated for JWT-auth slots (memory efficient)
 - Deferred construction: MQTTBridge is heap-allocated in `begin()` to avoid ESP32 static init crashes

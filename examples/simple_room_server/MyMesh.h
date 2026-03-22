@@ -213,4 +213,59 @@ public:
   void clearStats() override;
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
+
+#if defined(WITH_BRIDGE)
+  void setBridgeState(bool enable) override {
+    if (!bridge) {
+#ifdef WITH_MQTT_BRIDGE
+      bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+#endif
+      if (!bridge) return;
+    }
+    if (enable == bridge->isRunning()) return;
+    if (enable)
+    {
+      char device_id[65];
+      mesh::LocalIdentity self_id = getSelfId();
+      mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+      bridge->setDeviceID(device_id);
+      bridge->setFirmwareVersion(getFirmwareVer());
+      bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+      bridge->setBuildDate(getBuildDate());
+#ifdef WITH_MQTT_BRIDGE
+      bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#endif
+      bridge->begin();
+    }
+    else
+    {
+      bridge->end();
+    }
+  }
+
+  void restartBridge() override {
+    if (!bridge || !bridge->isRunning()) return;
+    bridge->end();
+    char device_id[65];
+    mesh::LocalIdentity self_id = getSelfId();
+    mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+    bridge->setDeviceID(device_id);
+    bridge->setFirmwareVersion(getFirmwareVer());
+    bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+    bridge->setBuildDate(getBuildDate());
+#ifdef WITH_MQTT_BRIDGE
+    bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#endif
+    bridge->begin();
+  }
+
+  void restartBridgeSlot(int slot) override {
+    if (!bridge || !bridge->isRunning()) return;
+    bridge->setSlotPreset(slot, _prefs.mqtt_slot_preset[slot]);
+  }
+
+  int getQueueSize() override {
+    return bridge ? bridge->getQueueSize() : 0;
+  }
+#endif
 };

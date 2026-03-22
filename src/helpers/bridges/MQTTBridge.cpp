@@ -124,6 +124,9 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const NodePref
       snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (inactive)", i + 1, slot.preset->name);
     } else if (!slot.enabled) {
       snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: none", i + 1);
+    } else if (!b->isSlotReady(i)) {
+      const char* name = slot.preset ? slot.preset->name : "custom";
+      snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (not ready)", i + 1, name);
     } else if (slot.preset) {
       snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (%s)", i + 1,
                slot.preset->name,
@@ -198,6 +201,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
     _slots[i].last_reconnect_attempt = 0;
     _slots[i].last_log_time = 0;
     _slots[i].port = 1883;
+    _slot_reconfigure_pending[i] = false;
   }
 
   // Initialize JWT username
@@ -445,8 +449,6 @@ void MQTTBridge::end() {
   if (_mqtt_task_handle != nullptr) {
     vTaskDelete(_mqtt_task_handle);
     _mqtt_task_handle = nullptr;
-    // Give task time to clean up
-    vTaskDelay(pdMS_TO_TICKS(100));
   }
   // Free PSRAM task stack
   psram_free(_mqtt_task_stack);
@@ -617,6 +619,11 @@ void MQTTBridge::mqttTaskLoop() {
             _slots[i].enabled = false;  // Disable so other loops skip it
             continue;
           }
+          char reason[80];
+          if (!isSlotReady(i, reason, sizeof(reason))) {
+            MQTT_DEBUG_PRINTLN("Slot %d not ready — run '%s' to connect", i, reason);
+            continue;
+          }
           setupSlot(i);
           active_count++;
           // Stagger connections: 5s between slots to avoid simultaneous TLS handshakes
@@ -625,6 +632,15 @@ void MQTTBridge::mqttTaskLoop() {
             vTaskDelay(pdMS_TO_TICKS(5000));
           }
         }
+      }
+    }
+
+    // Process pending slot reconfigures (queued from CLI on Core 1)
+    for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
+      if (_slot_reconfigure_pending[i]) {
+        _slot_reconfigure_pending[i] = false;
+        MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for slot %d (preset: %s)", i, _prefs->mqtt_slot_preset[i]);
+        applySlotPreset(i, _prefs->mqtt_slot_preset[i]);
       }
     }
 
@@ -1026,25 +1042,95 @@ bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool 
   return published;
 }
 
+// ---------------------------------------------------------------------------
+// Topic building - resolves the correct topic for a given slot and message type.
+// Presets use hardcoded topic logic; custom slots support user-defined templates.
+// ---------------------------------------------------------------------------
+bool MQTTBridge::substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size) {
+  const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
+  const char* token = _prefs->mqtt_slot_token[slot_index];
+
+  size_t out = 0;
+  const char* p = tmpl;
+  while (*p && out < buf_size - 1) {
+    if (*p == '{') {
+      if (strncmp(p, "{iata}", 6) == 0) {
+        size_t len = strlen(_iata);
+        if (out + len >= buf_size) return false;
+        memcpy(buf + out, _iata, len);
+        out += len;
+        p += 6;
+      } else if (strncmp(p, "{device}", 8) == 0) {
+        size_t len = strlen(_device_id);
+        if (out + len >= buf_size) return false;
+        memcpy(buf + out, _device_id, len);
+        out += len;
+        p += 8;
+      } else if (strncmp(p, "{token}", 7) == 0) {
+        size_t len = strlen(token);
+        if (out + len >= buf_size) return false;
+        memcpy(buf + out, token, len);
+        out += len;
+        p += 7;
+      } else if (strncmp(p, "{type}", 6) == 0) {
+        size_t len = strlen(type_str);
+        if (out + len >= buf_size) return false;
+        memcpy(buf + out, type_str, len);
+        out += len;
+        p += 6;
+      } else {
+        buf[out++] = *p++;
+      }
+    } else {
+      buf[out++] = *p++;
+    }
+  }
+  buf[out] = '\0';
+  return out > 0;
+}
+
+bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size) {
+  if (index < 0 || index >= MAX_MQTT_SLOTS) return false;
+  const MQTTSlot& slot = _slots[index];
+
+  // Preset slots: use hardcoded topic logic
+  if (slot.preset) {
+    if (slot.preset->topic_style == MQTT_TOPIC_MESHRANK) {
+      // MeshRank: packets only, uses per-slot token in topic path
+      if (type != MSG_PACKETS) return false;
+      const char* token = _prefs->mqtt_slot_token[index];
+      if (!token || token[0] == '\0') return false;
+      snprintf(topic_buf, buf_size, "meshrank/uplink/%s/%s/packets", token, _device_id);
+      return true;
+    }
+    // MQTT_TOPIC_MESHCORE (default for all other presets)
+    if (!isIATAValid()) return false;
+    const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
+    snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
+    return true;
+  }
+
+  // Custom slots: use topic template if set, otherwise default meshcore format
+  if (_prefs->mqtt_slot_topic[index][0] != '\0') {
+    return substituteTopicTemplate(_prefs->mqtt_slot_topic[index], type, index, topic_buf, buf_size);
+  }
+  // Default: meshcore format
+  if (!isIATAValid()) return false;
+  const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
+  snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
+  return true;
+}
+
 void MQTTBridge::publishStatusToSlot(int index) {
   if (index < 0 || index >= MAX_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
   if (!slot.client || !slot.connected) return;
 
-  // Check if IATA is configured before attempting to publish
-  if (!isIATAValid()) {
-    static unsigned long last_iata_warning = 0;
-    unsigned long now = millis();
-    if (now - last_iata_warning > 300000) {
-      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish status to slot %d - IATA code not configured (current: '%s')", index, _iata);
-      last_iata_warning = now;
-    }
-    return;
-  }
-
-  // Create status message
+  // Build per-slot topic (handles IATA check for meshcore, token check for meshrank)
   char status_topic[128];
-  snprintf(status_topic, sizeof(status_topic), "meshcore/%s/%s/status", _iata, _device_id);
+  if (!buildTopicForSlot(index, MSG_STATUS, status_topic, sizeof(status_topic))) {
+    return;  // Slot doesn't support status (e.g., meshrank) or missing required config
+  }
 
   static const size_t STATUS_JSON_SIZE = 768;
   char* json_buffer = (char*)psram_malloc(STATUS_JSON_SIZE);
@@ -1130,6 +1216,23 @@ bool MQTTBridge::isAnySlotConnected() {
 
 void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   if (slot_index < 0 || slot_index >= MAX_MQTT_SLOTS) return;
+
+  // On ESP32, teardown/setup involves TLS and must run on the MQTT task (Core 0).
+  // Set a flag so the MQTT task picks it up on its next loop iteration.
+  #ifdef ESP_PLATFORM
+  if (_mqtt_task_handle != nullptr) {
+    _slot_reconfigure_pending[slot_index] = true;
+    MQTT_DEBUG_PRINTLN("Slot %d reconfigure queued (preset: %s)", slot_index, preset_name);
+    return;
+  }
+  #endif
+
+  // Non-ESP32 or bridge not yet started: apply directly
+  applySlotPreset(slot_index, preset_name);
+}
+
+void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
+  if (slot_index < 0 || slot_index >= MAX_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[slot_index];
 
   teardownSlot(slot_index);
@@ -1155,6 +1258,11 @@ void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
     slot.enabled = true;
     slot.preset = preset;
     if (_initialized) {
+      char reason[80];
+      if (!isSlotReady(slot_index, reason, sizeof(reason))) {
+        MQTT_DEBUG_PRINTLN("Slot %d (%s) not ready — run '%s' to connect", slot_index, preset_name, reason);
+        return;
+      }
       setupSlot(slot_index);
     }
   }
@@ -1278,6 +1386,35 @@ bool MQTTBridge::isIATAValid() const {
   return true;
 }
 
+bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) const {
+  if (index < 0 || index >= MAX_MQTT_SLOTS) return false;
+  const MQTTSlot& slot = _slots[index];
+
+  if (!slot.enabled) return true;  // disabled slots are "ready" (nothing to do)
+
+  if (slot.preset) {
+    if (slot.preset->topic_style == MQTT_TOPIC_MESHRANK) {
+      if (_prefs->mqtt_slot_token[index][0] == '\0') {
+        if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.token <your_token>", index + 1);
+        return false;
+      }
+    } else if (slot.preset->topic_style == MQTT_TOPIC_MESHCORE) {
+      if (!isIATAValid()) {
+        if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt.iata <airport_code>");
+        return false;
+      }
+    }
+  } else {
+    // Custom slot without a topic template uses meshcore format, needs IATA
+    if (_prefs->mqtt_slot_topic[index][0] == '\0' && !isIATAValid()) {
+      if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt.iata <airport_code> or set mqtt%d.topic <template>", index + 1);
+      return false;
+    }
+  }
+
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // loop() - non-ESP32 main loop (ESP32 uses mqttTaskLoop via FreeRTOS task)
 // ---------------------------------------------------------------------------
@@ -1307,9 +1444,20 @@ void MQTTBridge::loop() {
           _slots[i].enabled = false;
           continue;
         }
+        if (!isSlotReady(i)) {
+          continue;
+        }
         setupSlot(i);
         active_count++;
       }
+    }
+  }
+
+  // Process pending slot reconfigures
+  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
+    if (_slot_reconfigure_pending[i]) {
+      _slot_reconfigure_pending[i] = false;
+      applySlotPreset(i, _prefs->mqtt_slot_preset[i]);
     }
   }
 
@@ -1560,17 +1708,6 @@ void MQTTBridge::processPacketQueue() {
 // ---------------------------------------------------------------------------
 
 bool MQTTBridge::publishStatus() {
-  // Check if IATA is configured before attempting to publish
-  if (!isIATAValid()) {
-    static unsigned long last_iata_warning = 0;
-    unsigned long now = millis();
-    if (now - last_iata_warning > 300000) {
-      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish status - IATA code not configured (current: '%s'). Please set mqtt.iata via CLI.", _iata);
-      last_iata_warning = now;
-    }
-    return false;
-  }
-
   if (!_cached_has_connected_slots) {
     return false;
   }
@@ -1631,13 +1768,23 @@ bool MQTTBridge::publishStatus() {
   );
 
   if (len > 0) {
+    bool published = false;
+    bool any_slot_wants_status = false;
     char topic[128];
-    snprintf(topic, sizeof(topic), "meshcore/%s/%s/status", _iata, _device_id);
-
-    bool published = publishToAllSlots(topic, json_buffer, true);
-
-    if (published) {
-      MQTT_DEBUG_PRINTLN("Status published");
+    for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
+      if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+        if (buildTopicForSlot(i, MSG_STATUS, topic, sizeof(topic))) {
+          any_slot_wants_status = true;
+          if (publishToSlot(i, topic, json_buffer, true)) {
+            published = true;
+          }
+        }
+      }
+    }
+    // If no connected slot accepts status topics (e.g. meshrank is packets-only),
+    // treat as success to avoid infinite retry loops
+    if (published || !any_slot_wants_status) {
+      if (published) MQTT_DEBUG_PRINTLN("Status published");
       psram_free(json_buffer);
       return true;
     }
@@ -1651,17 +1798,6 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 const uint8_t* raw_data, int raw_len,
                                 float snr, float rssi) {
   if (!packet) return;
-
-  // Check if IATA is configured before attempting to publish
-  if (!isIATAValid()) {
-    static unsigned long last_iata_warning = 0;
-    unsigned long now = millis();
-    if (now - last_iata_warning > 300000) {
-      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish packet - IATA code not configured (current: '%s'). Please set mqtt.iata via CLI.", _iata);
-      last_iata_warning = now;
-    }
-    return;
-  }
 
   // Memory pressure check: Skip publishes when heap is severely fragmented
   #ifdef ESP32
@@ -1721,8 +1857,13 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
 
   if (len > 0) {
     char topic[128];
-    snprintf(topic, sizeof(topic), "meshcore/%s/%s/packets", _iata, _device_id);
-    publishToAllSlots(topic, active_buffer, false);
+    for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
+      if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+        if (buildTopicForSlot(i, MSG_PACKETS, topic, sizeof(topic))) {
+          publishToSlot(i, topic, active_buffer, false);
+        }
+      }
+    }
   } else {
     uint8_t packet_type = packet->getPayloadType();
     if (packet_type == 4 || packet_type == 9) {
@@ -1734,16 +1875,6 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
 
 void MQTTBridge::publishRaw(mesh::Packet* packet) {
   if (!packet) return;
-
-  if (!isIATAValid()) {
-    static unsigned long last_iata_warning = 0;
-    unsigned long now = millis();
-    if (now - last_iata_warning > 300000) {
-      MQTT_DEBUG_PRINTLN("MQTT: Cannot publish raw packet - IATA code not configured (current: '%s'). Please set mqtt.iata via CLI.", _iata);
-      last_iata_warning = now;
-    }
-    return;
-  }
 
   // JSON buffer: prefer PSRAM; fallback to stack if allocation fails
   char* json_buffer_psram = (char*)psram_malloc(2048);
@@ -1770,8 +1901,13 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
 
   if (len > 0) {
     char topic[128];
-    snprintf(topic, sizeof(topic), "meshcore/%s/%s/raw", _iata, _device_id);
-    publishToAllSlots(topic, active_buffer, false);
+    for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
+      if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+        if (buildTopicForSlot(i, MSG_RAW, topic, sizeof(topic))) {
+          publishToSlot(i, topic, active_buffer, false);
+        }
+      }
+    }
   }
   psram_free(json_buffer_psram);
 }
@@ -1884,7 +2020,7 @@ void MQTTBridge::dequeuePacket() {
 void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi) {
   if (len > 0 && len <= LAST_RAW_DATA_SIZE && _last_raw_data) {
     #ifdef ESP_PLATFORM
-    if (_raw_data_mutex != nullptr && xSemaphoreTake(_raw_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (_raw_data_mutex != nullptr && xSemaphoreTake(_raw_data_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
       memcpy(_last_raw_data, raw_data, len);
       _last_raw_len = len;
       _last_snr = snr;

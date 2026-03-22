@@ -8,12 +8,18 @@ enum MQTTAuthType : uint8_t {
   MQTT_AUTH_JWT         // Ed25519-signed JWT (device identity)
 };
 
+enum MQTTTopicStyle : uint8_t {
+  MQTT_TOPIC_MESHCORE,   // meshcore/{iata}/{device_id}/{status|packets|raw}
+  MQTT_TOPIC_MESHRANK,   // meshrank/uplink/{token}/{device_id}/packets (packets only)
+};
+
 struct MQTTPresetDef {
-  const char* name;           // Preset identifier: "analyzer-us", "analyzer-eu", "meshmapper"
-  const char* server_url;     // Full URL including scheme: "wss://host:port/path" or "mqtt://host:port"
-  const char* jwt_audience;   // JWT audience field (only for MQTT_AUTH_JWT)
+  const char* name;           // Preset identifier: "analyzer-us", "analyzer-eu", "meshmapper", "meshrank"
+  const char* server_url;     // Full URL including scheme: "wss://host:port/path" or "mqtts://host:port"
+  const char* jwt_audience;   // JWT audience field (only for MQTT_AUTH_JWT, nullptr otherwise)
   const char* ca_cert;        // PEM CA certificate (nullptr to skip cert pinning)
   MQTTAuthType auth_type;
+  MQTTTopicStyle topic_style;
 };
 
 // Google Trust Services - GTS Root R4 (used by LetsMesh Analyzer)
@@ -75,13 +81,14 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 3;
+static const int MQTT_PRESET_COUNT = 4;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
-  { "analyzer-us", "wss://mqtt-us-v1.letsmesh.net:443/mqtt", "mqtt-us-v1.letsmesh.net", GTS_ROOT_R4, MQTT_AUTH_JWT },
-  { "analyzer-eu", "wss://mqtt-eu-v1.letsmesh.net:443/mqtt", "mqtt-eu-v1.letsmesh.net", GTS_ROOT_R4, MQTT_AUTH_JWT },
-  { "meshmapper",  "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",      ISRG_ROOT_X1, MQTT_AUTH_JWT },
+  { "analyzer-us", "wss://mqtt-us-v1.letsmesh.net:443/mqtt", "mqtt-us-v1.letsmesh.net", GTS_ROOT_R4, MQTT_AUTH_JWT, MQTT_TOPIC_MESHCORE },
+  { "analyzer-eu", "wss://mqtt-eu-v1.letsmesh.net:443/mqtt", "mqtt-eu-v1.letsmesh.net", GTS_ROOT_R4, MQTT_AUTH_JWT, MQTT_TOPIC_MESHCORE },
+  { "meshmapper",  "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",      ISRG_ROOT_X1, MQTT_AUTH_JWT, MQTT_TOPIC_MESHCORE },
+  { "meshrank",    "mqtts://meshrank.net:8883",               nullptr,                   ISRG_ROOT_X1, MQTT_AUTH_NONE, MQTT_TOPIC_MESHRANK },
 };
 
 // Find a preset by name, returns nullptr if not found

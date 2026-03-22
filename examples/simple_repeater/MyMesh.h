@@ -269,6 +269,11 @@ public:
     bridge->begin();
   }
 
+  void restartBridgeSlot(int slot) override {
+    if (!bridge || !bridge->isRunning()) return;
+    bridge->setSlotPreset(slot, _prefs.mqtt_slot_preset[slot]);
+  }
+
   int getQueueSize() override {
     return bridge ? bridge->getQueueSize() : 0;
   }
