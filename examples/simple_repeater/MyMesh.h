@@ -72,11 +72,11 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "15 Feb 2026"
+  #define FIRMWARE_BUILD_DATE   "20 Mar 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.13.0"
+  #define FIRMWARE_VERSION   "v1.14.1"
 #endif
 
 #define FIRMWARE_ROLE "repeater"
@@ -133,6 +133,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   mesh::Packet* createSelfAdvert();
 
   File openAppend(const char* fname);
+  bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
 
 protected:
   float getAirtimeBudgetFactor() const override {
@@ -269,4 +270,8 @@ public:
 
   // To check if there is pending work
   bool hasPendingWork() const;
+
+#if defined(USE_SX1262) || defined(USE_SX1268)
+  void setRxBoostedGain(bool enable) override;
+#endif
 };

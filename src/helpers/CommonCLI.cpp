@@ -3,6 +3,10 @@
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
 #include <RTClib.h>
+
+#ifndef BRIDGE_MAX_BAUD
+#define BRIDGE_MAX_BAUD 115200
+#endif
 #ifdef ESP_PLATFORM
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -104,7 +108,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->tx_power_dbm, sizeof(_prefs->tx_power_dbm));        // 76
     file.read((uint8_t *)&_prefs->disable_fwd, sizeof(_prefs->disable_fwd));          // 77
     file.read((uint8_t *)&_prefs->advert_interval, sizeof(_prefs->advert_interval));  // 78
-    file.read((uint8_t *)pad, 1);                                                     // 79  was 'unused'
+    file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));  // 79
     file.read((uint8_t *)&_prefs->rx_delay_base, sizeof(_prefs->rx_delay_base));      // 80
     file.read((uint8_t *)&_prefs->tx_delay_factor, sizeof(_prefs->tx_delay_factor));  // 84
     file.read((uint8_t *)&_prefs->guest_password[0], sizeof(_prefs->guest_password)); // 88
@@ -117,7 +121,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->bw, sizeof(_prefs->bw));                                         // 116
     file.read((uint8_t *)&_prefs->agc_reset_interval, sizeof(_prefs->agc_reset_interval));         // 120
     file.read((uint8_t *)&_prefs->path_hash_mode, sizeof(_prefs->path_hash_mode));                 // 121
-    file.read(pad, 2);                                                                             // 122
+    file.read((uint8_t *)&_prefs->loop_detect, sizeof(_prefs->loop_detect));                       // 122
+    file.read(pad, 1);                                                                             // 123
     file.read((uint8_t *)&_prefs->flood_max, sizeof(_prefs->flood_max));                           // 124
     file.read((uint8_t *)&_prefs->flood_advert_interval, sizeof(_prefs->flood_advert_interval));   // 125
     file.read((uint8_t *)&_prefs->interference_threshold, sizeof(_prefs->interference_threshold)); // 126
@@ -176,18 +181,21 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->multi_acks = constrain(_prefs->multi_acks, 0, 1);
     _prefs->adc_multiplier = constrain(_prefs->adc_multiplier, 0.0f, 10.0f);
     _prefs->path_hash_mode = constrain(_prefs->path_hash_mode, 0, 2);   // NOTE: mode 3 reserved for future
+    _prefs->loop_detect = constrain(_prefs->loop_detect, 0, 3);          // LOOP_DETECT_OFF..LOOP_DETECT_STRICT
 
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->bridge_delay = constrain(_prefs->bridge_delay, 0, 10000);
     _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
-    _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, 115200);
+    _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, BRIDGE_MAX_BAUD);
     _prefs->bridge_channel = constrain(_prefs->bridge_channel, 0, 14);
 
     _prefs->powersaving_enabled = constrain(_prefs->powersaving_enabled, 0, 1);
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
+
+    _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
 
     file.close();
   }
@@ -216,7 +224,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->tx_power_dbm, sizeof(_prefs->tx_power_dbm));        // 76
     file.write((uint8_t *)&_prefs->disable_fwd, sizeof(_prefs->disable_fwd));          // 77
     file.write((uint8_t *)&_prefs->advert_interval, sizeof(_prefs->advert_interval));  // 78
-    file.write((uint8_t *)pad, 1);                                                     // 79  was 'unused'
+    file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));  // 79
     file.write((uint8_t *)&_prefs->rx_delay_base, sizeof(_prefs->rx_delay_base));      // 80
     file.write((uint8_t *)&_prefs->tx_delay_factor, sizeof(_prefs->tx_delay_factor));  // 84
     file.write((uint8_t *)&_prefs->guest_password[0], sizeof(_prefs->guest_password)); // 88
@@ -229,7 +237,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->bw, sizeof(_prefs->bw));                                         // 116
     file.write((uint8_t *)&_prefs->agc_reset_interval, sizeof(_prefs->agc_reset_interval));         // 120
     file.write((uint8_t *)&_prefs->path_hash_mode, sizeof(_prefs->path_hash_mode));                 // 121
-    file.write(pad, 2);                                                                             // 122
+    file.write((uint8_t *)&_prefs->loop_detect, sizeof(_prefs->loop_detect));                       // 122
+    file.write(pad, 1);                                                                             // 123
     file.write((uint8_t *)&_prefs->flood_max, sizeof(_prefs->flood_max));                           // 124
     file.write((uint8_t *)&_prefs->flood_advert_interval, sizeof(_prefs->flood_advert_interval));   // 125
     file.write((uint8_t *)&_prefs->interference_threshold, sizeof(_prefs->interference_threshold)); // 126
@@ -345,7 +354,7 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
           sizeof(_prefs->node_lat) + sizeof(_prefs->node_lon) +
           sizeof(_prefs->password) + sizeof(_prefs->freq) +
           sizeof(_prefs->tx_power_dbm) + sizeof(_prefs->disable_fwd) +
-          sizeof(_prefs->advert_interval) + 1 + // pad
+          sizeof(_prefs->advert_interval) + sizeof(_prefs->rx_boosted_gain) +
           sizeof(_prefs->rx_delay_base) + sizeof(_prefs->tx_delay_factor) +
           sizeof(_prefs->guest_password) + sizeof(_prefs->direct_tx_delay_factor) + 4 + // pad
           sizeof(_prefs->sf) + sizeof(_prefs->cr) +
@@ -478,12 +487,18 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 }
 
 void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, char* reply) {
-    if (memcmp(command, "reboot", 6) == 0) {
+    if (memcmp(command, "poweroff", 8) == 0 || memcmp(command, "shutdown", 8) == 0) {
+      _board->powerOff();  // doesn't return
+    } else if (memcmp(command, "reboot", 6) == 0) {
       _board->reboot();  // doesn't return
     } else if (memcmp(command, "clkreboot", 9) == 0) {
       // Reset clock
       getRTCClock()->setCurrentTime(1715770351);  // 15 May 2024, 8:50pm
       _board->reboot();  // doesn't return
+     } else if (memcmp(command, "advert.zerohop", 14) == 0 && (command[14] == 0 || command[14] == ' ')) {
+      // send zerohop advert
+      _callbacks->sendSelfAdvertisement(1500, false);  // longer delay, give CLI response time to be sent first
+      strcpy(reply, "OK - zerohop advert sent");
     } else if (memcmp(command, "advert", 6) == 0) {
       // send flood advert
       _callbacks->sendSelfAdvertisement(1500, true);  // longer delay, give CLI response time to be sent first
@@ -595,6 +610,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lat));
       } else if (memcmp(config, "lon", 3) == 0) {
         sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lon));
+#if defined(USE_SX1262) || defined(USE_SX1268)
+      } else if (memcmp(config, "radio.rxgain", 12) == 0) {
+        sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
+#endif
       } else if (memcmp(config, "radio", 5) == 0) {
         char freq[16], bw[16];
         strcpy(freq, StrHelper::ftoa(_prefs->freq));
@@ -619,6 +638,16 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         *reply = 0;  // set null terminator
       } else if (memcmp(config, "path.hash.mode", 14) == 0) {
         sprintf(reply, "> %d", (uint32_t)_prefs->path_hash_mode);
+      } else if (memcmp(config, "loop.detect", 11) == 0) {
+        if (_prefs->loop_detect == LOOP_DETECT_OFF) {
+          strcpy(reply, "> off");
+        } else if (_prefs->loop_detect == LOOP_DETECT_MINIMAL) {
+          strcpy(reply, "> minimal");
+        } else if (_prefs->loop_detect == LOOP_DETECT_MODERATE) {
+          strcpy(reply, "> moderate");
+        } else {
+          strcpy(reply, "> strict");
+        }
       } else if (memcmp(config, "tx", 2) == 0 && (config[2] == 0 || config[2] == ' ')) {
         sprintf(reply, "> %d", (int32_t) _prefs->tx_power_dbm);
       } else if (memcmp(config, "freq", 4) == 0) {
@@ -873,6 +902,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         _prefs->disable_fwd = memcmp(&config[7], "off", 3) == 0;
         savePrefs();
         strcpy(reply, _prefs->disable_fwd ? "OK - repeat is now OFF" : "OK - repeat is now ON");
+#if defined(USE_SX1262) || defined(USE_SX1268)
+      } else if (memcmp(config, "radio.rxgain ", 13) == 0) {
+        _prefs->rx_boosted_gain = memcmp(&config[13], "on", 2) == 0;
+        strcpy(reply, "OK");
+        savePrefs();
+        _callbacks->setRxBoostedGain(_prefs->rx_boosted_gain);
+#endif
       } else if (memcmp(config, "radio ", 6) == 0) {
         strcpy(tmp, &config[6]);
         const char *parts[4];
@@ -954,6 +990,26 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           strcpy(reply, "OK");
         } else {
           strcpy(reply, "Error, must be 0,1, or 2");
+        }
+      } else if (memcmp(config, "loop.detect ", 12) == 0) {
+        config += 12;
+        uint8_t mode;
+        if (memcmp(config, "off", 3) == 0) {
+          mode = LOOP_DETECT_OFF;
+        } else if (memcmp(config, "minimal", 7) == 0) {
+          mode = LOOP_DETECT_MINIMAL;
+        } else if (memcmp(config, "moderate", 8) == 0) {
+          mode = LOOP_DETECT_MODERATE;
+        } else if (memcmp(config, "strict", 6) == 0) {
+          mode = LOOP_DETECT_STRICT;
+        } else {
+          mode = 0xFF;
+          strcpy(reply, "Error, must be: off, minimal, moderate, or strict");
+        }
+        if (mode != 0xFF) {
+          _prefs->loop_detect = mode;
+          savePrefs();
+          strcpy(reply, "OK");
         }
       } else if (memcmp(config, "tx ", 3) == 0) {
         _prefs->tx_power_dbm = atoi(&config[3]);
