@@ -2211,7 +2211,7 @@ void MQTTBridge::syncTimeWithNTP() {
 
   bool ntp_ok = false;
   unsigned long epochTime = 0;
-  const unsigned long kMinValidEpoch = 1704067200;  // 2024-01-01 00:00:00 UTC
+  const unsigned long kMinValidEpoch = 1767225600;  // 2026-01-01 00:00:00 UTC
 
   _ntp_client.begin();
   const int kMaxNtpRetries = 3;
@@ -2260,8 +2260,24 @@ void MQTTBridge::syncTimeWithNTP() {
 
     MQTT_DEBUG_PRINTLN("Time synced: %lu", epochTime);
 
-    // Note: Slot setup (including token creation) is deferred until after NTP sync
-    // via _slots_setup_done flag in the main loop, so no token fixup needed here.
+    // If slots are already set up and the time jumped significantly (e.g., SNTP
+    // initially returned stale RTC time, then a later sync corrected it), tear down
+    // and re-setup all JWT-authenticated slots so they get fresh tokens.
+    if (_slots_setup_done && was_ntp_synced) {
+      unsigned long current_time = (unsigned long)time(nullptr);
+      for (int i = 0; i < _max_active_slots; i++) {
+        if (_slots[i].enabled && _slots[i].preset &&
+            _slots[i].preset->auth_type == MQTT_AUTH_JWT) {
+          // Check if the slot's token was created with a stale time
+          // (token_expires_at would be far in the past relative to current time)
+          if (_slots[i].token_expires_at > 0 && current_time > _slots[i].token_expires_at) {
+            MQTT_DEBUG_PRINTLN("Slot %d token stale after time correction, re-creating", i);
+            teardownSlot(i);
+            setupSlot(i);
+          }
+        }
+      }
+    }
 
     // Set timezone from string (with DST support) - only if changed
     static char last_timezone[64] = "";
