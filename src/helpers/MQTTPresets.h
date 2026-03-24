@@ -22,6 +22,7 @@ struct MQTTPresetDef {
   MQTTTopicStyle topic_style;
   unsigned long token_lifetime; // JWT token lifetime in seconds (0 = use default 86400)
   bool allow_retain;            // Whether the broker allows the MQTT retain flag
+  uint16_t keepalive;           // MQTT keepalive in seconds (0 = library default 120s)
 };
 
 // Google Trust Services - GTS Root R4 (used by LetsMesh Analyzer)
@@ -83,15 +84,16 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 5;
+static const int MQTT_PRESET_COUNT = 6;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
-  { "analyzer-us", "wss://mqtt-us-v1.letsmesh.net:443/mqtt", "mqtt-us-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,   true },
-  { "analyzer-eu", "wss://mqtt-eu-v1.letsmesh.net:443/mqtt", "mqtt-eu-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,   true },
-  { "meshmapper",  "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",      ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,   true },
-  { "meshrank",    "mqtts://meshrank.net:8883",               nullptr,                   ISRG_ROOT_X1, MQTT_AUTH_NONE, MQTT_TOPIC_MESHRANK, 0,   false },
-  { "waev",        "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",           GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 3300, false },
+  { "analyzer-us",   "wss://mqtt-us-v1.letsmesh.net:443/mqtt", "mqtt-us-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
+  { "analyzer-eu",   "wss://mqtt-eu-v1.letsmesh.net:443/mqtt", "mqtt-eu-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
+  { "meshmapper",    "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",      ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
+  { "meshrank",      "mqtts://meshrank.net:8883",               nullptr,                   ISRG_ROOT_X1, MQTT_AUTH_NONE, MQTT_TOPIC_MESHRANK, 0,    false, 0 },
+  { "waev",          "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",           GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 3300, false, 55 },
+  { "cascadiamesh",  "mqtt://cascadiamesh.ddns.net:1883",       nullptr,                   nullptr,      MQTT_AUTH_NONE, MQTT_TOPIC_MESHCORE, 0,    true,  0 },
 };
 
 // Find a preset by name, returns nullptr if not found

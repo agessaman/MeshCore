@@ -1222,7 +1222,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                       sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
                     }
                   } else {
-                    strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, custom, none");
+                    strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, cascadiamesh, custom, none");
                   }
                 } else if (memcmp(subcmd, "server ", 7) == 0) {
                   StrHelper::strncpy(_prefs->mqtt_slot_host[slot], &subcmd[7], sizeof(_prefs->mqtt_slot_host[slot]));

@@ -602,6 +602,15 @@ void MQTTBridge::mqttTaskLoop() {
       syncTimeWithNTP();
     }
 
+    // Retry NTP every 30s if initial sync failed (slots can't start without valid time)
+    if (!_ntp_synced && WiFi.status() == WL_CONNECTED) {
+      static unsigned long last_ntp_retry = 0;
+      if (now - last_ntp_retry >= 30000) {
+        last_ntp_retry = now;
+        syncTimeWithNTP();
+      }
+    }
+
     // Deferred slot setup: wait until NTP is synced so JWT tokens get valid timestamps.
     // This avoids wasted TLS handshakes that get rejected due to bad token times.
     if (_ntp_synced && !_slots_setup_done) {
@@ -772,6 +781,9 @@ void MQTTBridge::setupSlot(int index) {
 
   slot.client = new PsychicMqttClient();
   slot.client->setAutoReconnect(false);  // We handle reconnect with our own backoff logic
+  if (slot.preset && slot.preset->keepalive > 0) {
+    slot.client->setKeepAlive(slot.preset->keepalive);
+  }
   optimizeMqttClientConfig(slot.client, slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT);
 
   // Callbacks (capture index by value)
@@ -930,7 +942,6 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
 
       if (createSlotAuthToken(index)) {
         MQTT_DEBUG_PRINTLN("Slot %d token renewed", index);
-        slot.client->setCredentials(_jwt_username, slot.auth_token);
 
         const unsigned long DISCONNECT_THRESHOLD = 60;
         bool old_token_expired_or_imminent = !time_synced ||
@@ -939,16 +950,15 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
                                             (time_synced && old_token_expires_at >= 1000000000 &&
                                              current_time >= (old_token_expires_at - DISCONNECT_THRESHOLD));
 
-        if (old_token_expired_or_imminent && slot.client->connected()) {
-          slot.client->disconnect();
-          #ifdef ESP_PLATFORM
-          vTaskDelay(pdMS_TO_TICKS(1000 + index * 2000)); // stagger reconnects after token renewal
-          #endif
-          slot.last_reconnect_attempt = millis();
-          slot.client->connect();
-        } else if (!slot.client->connected()) {
-          slot.last_reconnect_attempt = now_millis;
-          slot.client->connect();
+        if (old_token_expired_or_imminent || !slot.client->connected()) {
+          // Clean teardown+setup ensures fresh TLS state and credentials
+          MQTT_DEBUG_PRINTLN("Slot %d token renewal: reconnecting with fresh client", index);
+          teardownSlot(index);
+          setupSlot(index);
+          reconnect_attempted = true;
+        } else {
+          // Token renewed but old one still valid — just update credentials for next reconnect
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
         }
       } else {
         MQTT_DEBUG_PRINTLN("Slot %d token renewal failed", index);
@@ -969,6 +979,13 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       slot.last_reconnect_attempt = now_millis;
       reconnect_attempted = true;
       MQTT_DEBUG_PRINTLN("Slot %d circuit breaker probe (attempting single reconnect after %lu ms)", index, probe_elapsed);
+      // Refresh JWT token before reconnecting (it may have expired while tripped)
+      if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) {
+        if (createSlotAuthToken(index)) {
+          MQTT_DEBUG_PRINTLN("Slot %d token refreshed before circuit breaker probe", index);
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
+        }
+      }
       slot.client->connect();
       // If the connect callback fires and sets slot.connected = true,
       // the next maintenance cycle will clear the circuit breaker via the
@@ -1000,6 +1017,13 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       }
       MQTT_DEBUG_PRINTLN("Slot %d reconnecting (backoff level %d, failures at max: %d)", index, slot.reconnect_backoff, slot.max_backoff_failures);
       reconnect_attempted = true;
+      // Refresh JWT token before reconnecting (it may have expired during backoff)
+      if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) {
+        if (createSlotAuthToken(index)) {
+          MQTT_DEBUG_PRINTLN("Slot %d token refreshed before reconnect", index);
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
+        }
+      }
       slot.client->connect();
     }
   }
