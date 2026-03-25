@@ -979,17 +979,19 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       slot.last_reconnect_attempt = now_millis;
       reconnect_attempted = true;
       MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms)", index + 1, probe_elapsed);
-      // Refresh JWT token before reconnecting (it may have expired while tripped)
       if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) {
-        if (createSlotAuthToken(index)) {
-          MQTT_DEBUG_PRINTLN("MQTT%d token refreshed before circuit breaker probe", index + 1);
-          slot.client->setCredentials(_jwt_username, slot.auth_token);
-        }
+        // JWT slots: full teardown+setup for fresh TLS state and credentials
+        // Preserve circuit breaker state across teardown
+        bool saved_tripped = slot.circuit_breaker_tripped;
+        teardownSlot(index);
+        setupSlot(index);
+        _slots[index].circuit_breaker_tripped = saved_tripped;
+        _slots[index].last_reconnect_attempt = now_millis;
+      } else {
+        slot.client->connect();
       }
-      slot.client->connect();
       // If the connect callback fires and sets slot.connected = true,
-      // the next maintenance cycle will clear the circuit breaker via the
-      // existing slot.reconnect_backoff = 0 / circuit_breaker reset logic
+      // it will clear circuit_breaker_tripped via the onConnect handler
     }
   }
 
@@ -1017,14 +1019,21 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       }
       MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures);
       reconnect_attempted = true;
-      // Refresh JWT token before reconnecting (it may have expired during backoff)
       if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) {
-        if (createSlotAuthToken(index)) {
-          MQTT_DEBUG_PRINTLN("MQTT%d token refreshed before reconnect", index + 1);
-          slot.client->setCredentials(_jwt_username, slot.auth_token);
-        }
+        // JWT slots: full teardown+setup for fresh TLS state and credentials
+        // Preserve backoff state across teardown (which resets it to 0)
+        uint8_t saved_backoff = slot.reconnect_backoff;
+        uint8_t saved_failures = slot.max_backoff_failures;
+        MQTT_DEBUG_PRINTLN("MQTT%d teardown+setup for clean JWT reconnect", index + 1);
+        teardownSlot(index);
+        setupSlot(index);
+        _slots[index].reconnect_backoff = saved_backoff;
+        _slots[index].max_backoff_failures = saved_failures;
+        _slots[index].last_reconnect_attempt = now_millis;
+      } else {
+        // Non-JWT slots: lightweight reconnect on existing client
+        slot.client->connect();
       }
-      slot.client->connect();
     }
   }
 }
