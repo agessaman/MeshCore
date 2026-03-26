@@ -4,6 +4,7 @@
 #include <helpers/IdentityStore.h>
 #include <helpers/SensorManager.h>
 #include <helpers/ClientACL.h>
+#include <helpers/MQTTPresets.h>  // For MAX_MQTT_SLOTS (used in NodePrefs struct layout)
 
 #if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
 #define WITH_BRIDGE
@@ -77,22 +78,22 @@ struct NodePrefs { // persisted to file
   char timezone_string[32]; // Timezone string (e.g., "America/Los_Angeles")
   int8_t timezone_offset;   // Timezone offset in hours (-12 to +14) - fallback
   
-  // MQTT slot presets (3 slots, each can be a preset name or "custom"/"none")
-  char mqtt_slot_preset[3][24]; // e.g. "analyzer-us", "meshmapper", "custom", "none"
+  // MQTT slot presets (up to MAX_MQTT_SLOTS, each can be a preset name or "custom"/"none")
+  char mqtt_slot_preset[MAX_MQTT_SLOTS][24]; // e.g. "analyzer-us", "meshmapper", "custom", "none"
 
   // Per-slot custom broker settings (only used when slot preset is "custom")
-  char mqtt_slot_host[3][64];
-  uint16_t mqtt_slot_port[3];
-  char mqtt_slot_username[3][32];
-  char mqtt_slot_password[3][64];
+  char mqtt_slot_host[MAX_MQTT_SLOTS][64];
+  uint16_t mqtt_slot_port[MAX_MQTT_SLOTS];
+  char mqtt_slot_username[MAX_MQTT_SLOTS][32];
+  char mqtt_slot_password[MAX_MQTT_SLOTS][64];
 
   // Shared MQTT authentication
   char mqtt_owner_public_key[65]; // Owner public key (hex string, same length as repeater public key)
   char mqtt_email[64]; // Owner email address for matching nodes with owners
 
   // Per-slot extended fields
-  char mqtt_slot_token[3][48];    // Per-slot token (e.g., MeshRank account token)
-  char mqtt_slot_topic[3][96];    // Per-slot custom topic template (custom preset only)
+  char mqtt_slot_token[MAX_MQTT_SLOTS][48];    // Per-slot token (e.g., MeshRank account token)
+  char mqtt_slot_topic[MAX_MQTT_SLOTS][96];    // Per-slot custom topic template (custom preset only)
 
   uint8_t loop_detect;
 };
@@ -142,22 +143,22 @@ struct MQTTPrefs {
   char timezone_string[32]; // Timezone string (e.g., "America/Los_Angeles")
   int8_t timezone_offset;   // Timezone offset in hours (-12 to +14) - fallback
 
-  // Slot presets (3 slots)
-  char mqtt_slot_preset[3][24]; // e.g. "analyzer-us", "meshmapper", "custom", "none"
+  // Slot presets (up to MAX_MQTT_SLOTS)
+  char mqtt_slot_preset[MAX_MQTT_SLOTS][24]; // e.g. "analyzer-us", "meshmapper", "custom", "none"
 
   // Per-slot custom broker settings (only used when preset is "custom")
-  char mqtt_slot_host[3][64];
-  uint16_t mqtt_slot_port[3];
-  char mqtt_slot_username[3][32];
-  char mqtt_slot_password[3][64];
+  char mqtt_slot_host[MAX_MQTT_SLOTS][64];
+  uint16_t mqtt_slot_port[MAX_MQTT_SLOTS];
+  char mqtt_slot_username[MAX_MQTT_SLOTS][32];
+  char mqtt_slot_password[MAX_MQTT_SLOTS][64];
 
   // Shared authentication
   char mqtt_owner_public_key[65]; // Owner public key (hex string)
   char mqtt_email[64]; // Owner email address
 
   // --- Legacy fields (vestigial, kept for binary compatibility) ---
-  // Migration now uses OldMQTTPrefs struct. These fields are unused but must remain
-  // to preserve byte offsets for devices that already saved a new-format /mqtt_prefs file.
+  // Migration now uses OldMQTTPrefs/ThreeSlotMQTTPrefs structs. These fields are unused
+  // but must remain to preserve byte offsets for devices that already saved a new-format /mqtt_prefs file.
   uint8_t _legacy_analyzer_us_enabled;
   uint8_t _legacy_analyzer_eu_enabled;
   char _legacy_mqtt_server[64];
@@ -166,9 +167,41 @@ struct MQTTPrefs {
   char _legacy_mqtt_password[64];
 
   // --- New fields (appended at end for migration safety) ---
-  // When loading an older/smaller prefs file, these stay zeroed from setMQTTPrefsDefaults().
-  char mqtt_slot_token[3][48];    // Per-slot token (e.g., MeshRank account token)
-  char mqtt_slot_topic[3][96];    // Per-slot custom topic template (custom preset only)
+  char mqtt_slot_token[MAX_MQTT_SLOTS][48];    // Per-slot token (e.g., MeshRank account token)
+  char mqtt_slot_topic[MAX_MQTT_SLOTS][96];    // Per-slot custom topic template (custom preset only)
+};
+
+// 3-slot MQTTPrefs layout — used for migrating from 3-slot to 6-slot format.
+// Changing array sizes from [3] to [6] shifts all field offsets, so raw file.read()
+// into the new struct would corrupt data. This struct preserves the old binary layout.
+struct ThreeSlotMQTTPrefs {
+  char mqtt_origin[32];
+  char mqtt_iata[8];
+  uint8_t mqtt_status_enabled;
+  uint8_t mqtt_packets_enabled;
+  uint8_t mqtt_raw_enabled;
+  uint8_t mqtt_tx_enabled;
+  uint32_t mqtt_status_interval;
+  char wifi_ssid[32];
+  char wifi_password[64];
+  uint8_t wifi_power_save;
+  char timezone_string[32];
+  int8_t timezone_offset;
+  char mqtt_slot_preset[3][24];
+  char mqtt_slot_host[3][64];
+  uint16_t mqtt_slot_port[3];
+  char mqtt_slot_username[3][32];
+  char mqtt_slot_password[3][64];
+  char mqtt_owner_public_key[65];
+  char mqtt_email[64];
+  uint8_t _legacy_analyzer_us_enabled;
+  uint8_t _legacy_analyzer_eu_enabled;
+  char _legacy_mqtt_server[64];
+  uint16_t _legacy_mqtt_port;
+  char _legacy_mqtt_username[32];
+  char _legacy_mqtt_password[64];
+  char mqtt_slot_token[3][48];
+  char mqtt_slot_topic[3][96];
 };
 #endif
 

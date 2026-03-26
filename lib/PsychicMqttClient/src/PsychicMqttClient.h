@@ -302,6 +302,16 @@ public:
     void connect();
 
     /**
+     * @brief Reconnects a previously started MQTT client.
+     *
+     * Uses esp_mqtt_client_reconnect() which is the correct API for
+     * re-initiating a connection on an already-started client, especially
+     * when auto-reconnect is disabled. Updates config before reconnecting
+     * so credential changes (e.g., refreshed JWT tokens) take effect.
+     */
+    void reconnect();
+
+    /**
      * @brief Disconnects the MQTT client from the server.
      * This call might be blocking until the client is stopped cleanly
      */

@@ -115,31 +115,8 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const NodePref
   }
   MQTTBridge* b = s_mqtt_bridge_instance;
 
-  // Build per-slot status strings
-  char slot_info[3][48];
-  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
-    const MQTTSlot& slot = b->_slots[i];
-    if (!slot.enabled && slot.preset) {
-      // Configured but disabled (e.g., no PSRAM, slot limit reached)
-      snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (inactive)", i + 1, slot.preset->name);
-    } else if (!slot.enabled) {
-      snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: none", i + 1);
-    } else if (!b->isSlotReady(i)) {
-      const char* name = slot.preset ? slot.preset->name : "custom";
-      snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (not ready)", i + 1, name);
-    } else if (slot.preset) {
-      const char* state = slot.connected ? "connected" :
-                          slot.circuit_breaker_tripped ? "failed" : "disconnected";
-      snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: %s (%s)", i + 1,
-               slot.preset->name, state);
-    } else {
-      // Custom broker
-      const char* state = slot.connected ? "connected" :
-                          slot.circuit_breaker_tripped ? "failed" : "disconnected";
-      snprintf(slot_info[i], sizeof(slot_info[i]), "slot%d: custom (%s)", i + 1, state);
-    }
-  }
-
+  // Build per-slot status strings (compact format to fit 160-byte reply buffer)
+  // Only show configured slots, skip "none" slots
   int q = 0;
 #ifdef ESP_PLATFORM
   if (b->_packet_queue_handle != nullptr) {
@@ -148,8 +125,34 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const NodePref
 #else
   q = b->_queue_count;
 #endif
-  snprintf(buf, bufsize, "> msgs: %s, %s, %s, %s, queue: %d",
-           msgs, slot_info[0], slot_info[1], slot_info[2], q);
+
+  int pos = snprintf(buf, bufsize, "> msgs: %s", msgs);
+  for (int i = 0; i < MAX_MQTT_SLOTS && pos < (int)bufsize - 1; i++) {
+    const MQTTSlot& slot = b->_slots[i];
+    const char* name = nullptr;
+    const char* state = nullptr;
+
+    if (!slot.enabled && slot.preset) {
+      name = slot.preset->name;
+      state = "inactive";
+    } else if (!slot.enabled) {
+      continue;  // Skip unconfigured slots
+    } else if (!b->isSlotReady(i)) {
+      name = slot.preset ? slot.preset->name : "custom";
+      state = "wait";
+    } else if (slot.connected) {
+      name = slot.preset ? slot.preset->name : "custom";
+      state = "ok";
+    } else if (slot.circuit_breaker_tripped) {
+      name = slot.preset ? slot.preset->name : "custom";
+      state = "fail";
+    } else {
+      name = slot.preset ? slot.preset->name : "custom";
+      state = "disc";
+    }
+    pos += snprintf(buf + pos, bufsize - pos, ", %d: %s (%s)", i + 1, name, state);
+  }
+  snprintf(buf + pos, bufsize - pos, ", q:%d", q);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,9 +269,10 @@ void MQTTBridge::begin() {
 
   // Limit active slots based on available memory.
   // Each WSS/TLS connection needs ~40KB for mbedTLS buffers.
-  // Without PSRAM, 3 concurrent connections would exhaust internal heap.
+  // Without PSRAM, even 3 concurrent connections would exhaust internal heap.
+  // With PSRAM, cap at 5 for safety (6 configurable but 5 active max).
   #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  _max_active_slots = psramFound() ? MAX_MQTT_SLOTS : 2;
+  _max_active_slots = psramFound() ? 5 : 2;
   #else
   _max_active_slots = 2;
   #endif
@@ -459,12 +463,10 @@ void MQTTBridge::end() {
   _mqtt_task_stack = nullptr;
 
   // Clean up queued packets from FreeRTOS queue
-  // NOTE: Do NOT free queued.packet - the Dispatcher owns those packets.
-  // We just discard our references to them.
+  // Packets are value-copied in the queue, so no external pointers to clean up.
   if (_packet_queue_handle != nullptr) {
     QueuedPacket queued;
     while (xQueueReceive(_packet_queue_handle, &queued, 0) == pdTRUE) {
-      queued.packet = nullptr;
       _queue_count--;
     }
     vQueueDelete(_packet_queue_handle);
@@ -480,11 +482,9 @@ void MQTTBridge::end() {
   }
   #else
   // Clean up queued packet references
-  // NOTE: Do NOT free the packets - the Dispatcher owns those packets.
-  // We just discard our references to them.
+  // Packets are value-copied in the queue, so no external pointers to clean up.
   for (int i = 0; i < _queue_count; i++) {
     int index = (_queue_head + i) % MAX_QUEUE_SIZE;
-    _packet_queue[index].packet = nullptr;
     memset(&_packet_queue[index], 0, sizeof(QueuedPacket));
   }
 
@@ -1039,21 +1039,20 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
                                 current_time < slot.token_expires_at &&
                                 (slot.token_expires_at - current_time) > 120; // >2 min remaining
 
-        if (token_still_valid) {
+        if (token_still_valid && slot.reconnect_backoff <= 2) {
           // Lightweight reconnect — reuse existing client but refresh JWT for fresh iat
-          // (brokers like waev enforce iat freshness ±10 min, so stale iat = rejected)
           if (createSlotAuthToken(index)) {
             slot.client->setCredentials(_jwt_username, slot.auth_token);
             MQTT_DEBUG_PRINTLN("MQTT%d lightweight reconnect (fresh token, expires in %lu sec)", index + 1, slot.token_expires_at - (unsigned long)time(nullptr));
           } else {
             MQTT_DEBUG_PRINTLN("MQTT%d lightweight reconnect (token refresh failed, using existing)", index + 1);
           }
-          slot.client->connect();
+          slot.client->reconnect();
         } else {
-          // Token expired or near expiry — full teardown for fresh TLS + new token
+          // Full teardown: token expired/near expiry, or lightweight reconnect failed (backoff 3+)
           uint8_t saved_backoff = slot.reconnect_backoff;
           uint8_t saved_failures = slot.max_backoff_failures;
-          MQTT_DEBUG_PRINTLN("MQTT%d token expired/near expiry, full teardown+setup for reconnect", index + 1);
+          MQTT_DEBUG_PRINTLN("MQTT%d full teardown+setup for reconnect (backoff %d)", index + 1, saved_backoff);
           teardownSlot(index);
           setupSlot(index);
           _slots[index].reconnect_backoff = saved_backoff;
@@ -1061,8 +1060,21 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           _slots[index].last_reconnect_attempt = now_millis;
         }
       } else {
-        // Non-JWT slots: lightweight reconnect on existing client
-        slot.client->connect();
+        // Non-JWT slots
+        if (slot.reconnect_backoff <= 2) {
+          // Lightweight reconnect on existing client
+          slot.client->reconnect();
+        } else {
+          // Full teardown after lightweight reconnect failed (backoff 3+)
+          uint8_t saved_backoff = slot.reconnect_backoff;
+          uint8_t saved_failures = slot.max_backoff_failures;
+          MQTT_DEBUG_PRINTLN("MQTT%d full teardown+setup for reconnect (backoff %d)", index + 1, saved_backoff);
+          teardownSlot(index);
+          setupSlot(index);
+          _slots[index].reconnect_backoff = saved_backoff;
+          _slots[index].max_backoff_failures = saved_failures;
+          _slots[index].last_reconnect_attempt = now_millis;
+        }
       }
     }
   }
@@ -1732,11 +1744,11 @@ void MQTTBridge::processPacketQueue() {
 
   _last_no_broker_log = 0;
 
-  // Process up to 1 packet per call to maintain responsiveness
+  // Adaptive drain: burst-process when queue has backlog, gentle otherwise
   int processed = 0;
-  int max_per_loop = 1;
+  int max_per_loop = (_queue_count > 5) ? 5 : 1;
   unsigned long loop_start_time = millis();
-  const unsigned long MAX_PROCESSING_TIME_MS = 30;
+  const unsigned long MAX_PROCESSING_TIME_MS = (_queue_count > 5) ? 100 : 30;
 
   while (processed < max_per_loop) {
     unsigned long elapsed = millis() - loop_start_time;
@@ -1751,7 +1763,7 @@ void MQTTBridge::processPacketQueue() {
     }
 
     // Publish packet (use stored raw data if available)
-    publishPacket(queued.packet, queued.is_tx,
+    publishPacket(&queued.packet_copy, queued.is_tx,
                   queued.has_raw_data ? queued.raw_data : nullptr,
                   queued.has_raw_data ? queued.raw_len : 0,
                   queued.has_raw_data ? queued.snr : 0.0f,
@@ -1759,11 +1771,8 @@ void MQTTBridge::processPacketQueue() {
 
     // Publish raw if enabled
     if (_raw_enabled) {
-      publishRaw(queued.packet);
+      publishRaw(&queued.packet_copy);
     }
-
-    // NOTE: Do NOT free the packet here - the Dispatcher owns and frees it after logRx() returns.
-    queued.packet = nullptr;
 
     _queue_count--;
     processed++;
@@ -1789,10 +1798,11 @@ void MQTTBridge::processPacketQueue() {
 
   _last_no_broker_log = 0;
 
+  // Adaptive drain: burst-process when queue has backlog, gentle otherwise
   int processed = 0;
-  int max_per_loop = 1;
+  int max_per_loop = (_queue_count > 5) ? 5 : 1;
   unsigned long loop_start_time = millis();
-  const unsigned long MAX_PROCESSING_TIME_MS = 30;
+  const unsigned long MAX_PROCESSING_TIME_MS = (_queue_count > 5) ? 100 : 30;
 
   while (_queue_count > 0 && processed < max_per_loop) {
     unsigned long elapsed = millis() - loop_start_time;
@@ -1802,18 +1812,15 @@ void MQTTBridge::processPacketQueue() {
 
     QueuedPacket& queued = _packet_queue[_queue_head];
 
-    publishPacket(queued.packet, queued.is_tx,
+    publishPacket(&queued.packet_copy, queued.is_tx,
                   queued.has_raw_data ? queued.raw_data : nullptr,
                   queued.has_raw_data ? queued.raw_len : 0,
                   queued.has_raw_data ? queued.snr : 0.0f,
                   queued.has_raw_data ? queued.rssi : 0.0f);
 
     if (_raw_enabled) {
-      publishRaw(queued.packet);
+      publishRaw(&queued.packet_copy);
     }
-
-    // NOTE: Do NOT free the packet here - the Dispatcher owns and frees it after logRx() returns.
-    queued.packet = nullptr;
 
     dequeuePacket();
     processed++;
@@ -2045,7 +2052,7 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   QueuedPacket queued;
   memset(&queued, 0, sizeof(QueuedPacket));
 
-  queued.packet = packet;
+  queued.packet_copy = *packet;  // full value copy — safe from Dispatcher free
   queued.timestamp = millis();
   queued.is_tx = is_tx;
   queued.has_raw_data = false;
@@ -2088,15 +2095,14 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   // Non-ESP32: Use circular buffer
   if (_queue_count >= MAX_QUEUE_SIZE) {
     QueuedPacket& oldest = _packet_queue[_queue_head];
-    MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet reference (queue size: %d)", _queue_count);
-    oldest.packet = nullptr;
+    MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet (queue size: %d)", _queue_count);
     dequeuePacket();
   }
 
   QueuedPacket& queued = _packet_queue[_queue_tail];
   memset(&queued, 0, sizeof(QueuedPacket));
 
-  queued.packet = packet;
+  queued.packet_copy = *packet;  // full value copy — safe from Dispatcher free
   queued.timestamp = millis();
   queued.is_tx = is_tx;
   queued.has_raw_data = false;

@@ -311,6 +311,19 @@ void PsychicMqttClient::connect()
     ESP_LOGI(TAG, "MQTT client started.");
 }
 
+void PsychicMqttClient::reconnect()
+{
+    if (_client == nullptr)
+    {
+        ESP_LOGW(TAG, "MQTT client not initialized, cannot reconnect.");
+        return;
+    }
+    // Update config in case credentials changed (e.g., refreshed JWT token)
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_set_config(_client, &_mqtt_cfg));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_reconnect(_client));
+    ESP_LOGI(TAG, "MQTT client reconnect requested.");
+}
+
 void PsychicMqttClient::disconnect()
 {
     if (_client == nullptr)

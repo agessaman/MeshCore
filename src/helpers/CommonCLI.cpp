@@ -291,13 +291,15 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_raw_enabled = 0;       // disabled by default
   prefs->mqtt_tx_enabled = 0;        // disabled by default (RX only)
   prefs->mqtt_status_interval = 300000; // 5 minutes default
-  // Slot presets: analyzer-us and analyzer-eu enabled by default, slot 3 = none
+  // Slot presets: analyzer-us and analyzer-eu enabled by default, rest = none
   strncpy(prefs->mqtt_slot_preset[0], "analyzer-us", sizeof(prefs->mqtt_slot_preset[0]) - 1);
   prefs->mqtt_slot_preset[0][sizeof(prefs->mqtt_slot_preset[0]) - 1] = '\0';
   strncpy(prefs->mqtt_slot_preset[1], "analyzer-eu", sizeof(prefs->mqtt_slot_preset[1]) - 1);
   prefs->mqtt_slot_preset[1][sizeof(prefs->mqtt_slot_preset[1]) - 1] = '\0';
-  strncpy(prefs->mqtt_slot_preset[2], "none", sizeof(prefs->mqtt_slot_preset[2]) - 1);
-  prefs->mqtt_slot_preset[2][sizeof(prefs->mqtt_slot_preset[2]) - 1] = '\0';
+  for (int i = 2; i < MAX_MQTT_SLOTS; i++) {
+    strncpy(prefs->mqtt_slot_preset[i], "none", sizeof(prefs->mqtt_slot_preset[i]) - 1);
+    prefs->mqtt_slot_preset[i][sizeof(prefs->mqtt_slot_preset[i]) - 1] = '\0';
+  }
   #ifdef MQTT_WIFI_POWER_SAVE_DEFAULT
   prefs->wifi_power_save = MQTT_WIFI_POWER_SAVE_DEFAULT; // 0=min, 1=none, 2=max
   #else
@@ -378,8 +380,54 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
           // Save migrated prefs in new format
           saveMQTTPrefs(fs);
         }
+      } else if (file_size > 0 && file_size <= sizeof(ThreeSlotMQTTPrefs)) {
+        // 3-slot format → 6-slot migration
+        // Array sizes changed from [3] to [6], shifting all field offsets.
+        // Read into old layout struct and field-copy to new layout.
+        ThreeSlotMQTTPrefs old3;
+        memset(&old3, 0, sizeof(old3));
+        size_t bytes_to_read = file_size < sizeof(old3) ? file_size : sizeof(old3);
+        size_t bytes_read = file.read((uint8_t *)&old3, bytes_to_read);
+        file.close();
+
+        if (bytes_read > 0) {
+          MESH_DEBUG_PRINTLN("MQTT: Migrating 3-slot prefs to 6-slot layout");
+
+          // Copy non-slot fields (identical layout)
+          memcpy(_mqtt_prefs.mqtt_origin, old3.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
+          memcpy(_mqtt_prefs.mqtt_iata, old3.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
+          _mqtt_prefs.mqtt_status_enabled = old3.mqtt_status_enabled;
+          _mqtt_prefs.mqtt_packets_enabled = old3.mqtt_packets_enabled;
+          _mqtt_prefs.mqtt_raw_enabled = old3.mqtt_raw_enabled;
+          _mqtt_prefs.mqtt_tx_enabled = old3.mqtt_tx_enabled;
+          _mqtt_prefs.mqtt_status_interval = old3.mqtt_status_interval;
+          memcpy(_mqtt_prefs.wifi_ssid, old3.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
+          memcpy(_mqtt_prefs.wifi_password, old3.wifi_password, sizeof(_mqtt_prefs.wifi_password));
+          _mqtt_prefs.wifi_power_save = old3.wifi_power_save;
+          memcpy(_mqtt_prefs.timezone_string, old3.timezone_string, sizeof(_mqtt_prefs.timezone_string));
+          _mqtt_prefs.timezone_offset = old3.timezone_offset;
+
+          // Copy slot fields for indices 0-2 from old layout
+          for (int i = 0; i < 3; i++) {
+            memcpy(_mqtt_prefs.mqtt_slot_preset[i], old3.mqtt_slot_preset[i], sizeof(_mqtt_prefs.mqtt_slot_preset[i]));
+            memcpy(_mqtt_prefs.mqtt_slot_host[i], old3.mqtt_slot_host[i], sizeof(_mqtt_prefs.mqtt_slot_host[i]));
+            _mqtt_prefs.mqtt_slot_port[i] = old3.mqtt_slot_port[i];
+            memcpy(_mqtt_prefs.mqtt_slot_username[i], old3.mqtt_slot_username[i], sizeof(_mqtt_prefs.mqtt_slot_username[i]));
+            memcpy(_mqtt_prefs.mqtt_slot_password[i], old3.mqtt_slot_password[i], sizeof(_mqtt_prefs.mqtt_slot_password[i]));
+            memcpy(_mqtt_prefs.mqtt_slot_token[i], old3.mqtt_slot_token[i], sizeof(_mqtt_prefs.mqtt_slot_token[i]));
+            memcpy(_mqtt_prefs.mqtt_slot_topic[i], old3.mqtt_slot_topic[i], sizeof(_mqtt_prefs.mqtt_slot_topic[i]));
+          }
+          // Slots 3-5 keep defaults ("none") from setMQTTPrefsDefaults()
+
+          // Copy shared auth fields
+          memcpy(_mqtt_prefs.mqtt_owner_public_key, old3.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
+          memcpy(_mqtt_prefs.mqtt_email, old3.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+
+          // Save migrated prefs in new 6-slot format
+          saveMQTTPrefs(fs);
+        }
       } else if (file_size > 0) {
-        // New-format file: read directly (migration-safe for growing struct)
+        // 6-slot format: read directly
         size_t bytes_to_read = file_size < sizeof(_mqtt_prefs) ? file_size : sizeof(_mqtt_prefs);
         size_t bytes_read = file.read((uint8_t *)&_mqtt_prefs, bytes_to_read);
         file.close();
@@ -429,7 +477,7 @@ void CommonCLI::syncMQTTPrefsToNodePrefs() {
   StrHelper::strncpy(_prefs->timezone_string, _mqtt_prefs.timezone_string, sizeof(_prefs->timezone_string));
   _prefs->timezone_offset = _mqtt_prefs.timezone_offset;
   // Slot-based fields
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
     StrHelper::strncpy(_prefs->mqtt_slot_preset[i], _mqtt_prefs.mqtt_slot_preset[i], sizeof(_prefs->mqtt_slot_preset[i]));
     StrHelper::strncpy(_prefs->mqtt_slot_host[i], _mqtt_prefs.mqtt_slot_host[i], sizeof(_prefs->mqtt_slot_host[i]));
     _prefs->mqtt_slot_port[i] = _mqtt_prefs.mqtt_slot_port[i];
@@ -458,7 +506,7 @@ void CommonCLI::syncNodePrefsToMQTTPrefs() {
   StrHelper::strncpy(_mqtt_prefs.timezone_string, _prefs->timezone_string, sizeof(_mqtt_prefs.timezone_string));
   _mqtt_prefs.timezone_offset = _prefs->timezone_offset;
   // Slot-based fields
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
     StrHelper::strncpy(_mqtt_prefs.mqtt_slot_preset[i], _prefs->mqtt_slot_preset[i], sizeof(_mqtt_prefs.mqtt_slot_preset[i]));
     StrHelper::strncpy(_mqtt_prefs.mqtt_slot_host[i], _prefs->mqtt_slot_host[i], sizeof(_mqtt_prefs.mqtt_slot_host[i]));
     _mqtt_prefs.mqtt_slot_port[i] = _prefs->mqtt_slot_port[i];
@@ -712,9 +760,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         uint32_t minutes = (_prefs->mqtt_status_interval + 29999) / 60000; // Round up
         sprintf(reply, "> %u minutes (%lu ms)", minutes, _prefs->mqtt_status_interval);
       } else if (config[0] == 'm' && config[1] == 'q' && config[2] == 't' && config[3] == 't' &&
-                 config[4] >= '1' && config[4] <= '3' && config[5] == '.') {
+                 config[4] >= '1' && config[4] <= ('0' + MAX_MQTT_SLOTS) && config[5] == '.') {
         // Slot-based commands: get mqtt1.preset, get mqtt1.server, etc.
-        int slot = config[4] - '1'; // 0-2
+        int slot = config[4] - '1'; // 0-5
         const char* subcmd = &config[6];
         if (memcmp(subcmd, "preset", 6) == 0) {
           sprintf(reply, "> %s", _prefs->mqtt_slot_preset[slot]);
@@ -1198,9 +1246,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                   strcpy(reply, "Error: timezone offset must be between -12 and +14");
                 }
               } else if (config[0] == 'm' && config[1] == 'q' && config[2] == 't' && config[3] == 't' &&
-                         config[4] >= '1' && config[4] <= '3' && config[5] == '.') {
+                         config[4] >= '1' && config[4] <= ('0' + MAX_MQTT_SLOTS) && config[5] == '.') {
                 // Slot-based commands: set mqtt1.preset <name>, set mqtt1.server <host>, etc.
-                int slot = config[4] - '1'; // 0-2
+                int slot = config[4] - '1'; // 0-5
                 const char* subcmd = &config[6];
                 if (memcmp(subcmd, "preset ", 7) == 0) {
                   const char* preset_name = &subcmd[7];
@@ -1208,18 +1256,32 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                   if (findMQTTPreset(preset_name) != nullptr ||
                       strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0 ||
                       strcmp(preset_name, MQTT_PRESET_NONE) == 0) {
-                    StrHelper::strncpy(_prefs->mqtt_slot_preset[slot], preset_name, sizeof(_prefs->mqtt_slot_preset[slot]));
-                    savePrefs();
-                    _callbacks->restartBridgeSlot(slot);
-                    // Check if the slot has everything it needs to connect
-                    const MQTTPresetDef* p = findMQTTPreset(preset_name);
-                    if (p && p->topic_style == MQTT_TOPIC_MESHRANK && _prefs->mqtt_slot_token[slot][0] == '\0') {
-                      sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt%d.token <your_token>' to connect)", slot + 1, preset_name, slot + 1);
-                    } else if (p && p->topic_style == MQTT_TOPIC_MESHCORE &&
-                               (strlen(_prefs->mqtt_iata) == 0 || strcmp(_prefs->mqtt_iata, "XXX") == 0)) {
-                      sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt.iata <airport_code>' to publish)", slot + 1, preset_name);
+                    // Reject duplicate presets (except "none" and "custom")
+                    int dup_slot = -1;
+                    if (findMQTTPreset(preset_name) != nullptr) {
+                      for (int s = 0; s < MAX_MQTT_SLOTS; s++) {
+                        if (s != slot && strcmp(_prefs->mqtt_slot_preset[s], preset_name) == 0) {
+                          dup_slot = s;
+                          break;
+                        }
+                      }
+                    }
+                    if (dup_slot >= 0) {
+                      sprintf(reply, "Error: preset '%s' is already assigned to slot %d", preset_name, dup_slot + 1);
                     } else {
-                      sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
+                      StrHelper::strncpy(_prefs->mqtt_slot_preset[slot], preset_name, sizeof(_prefs->mqtt_slot_preset[slot]));
+                      savePrefs();
+                      _callbacks->restartBridgeSlot(slot);
+                      // Check if the slot has everything it needs to connect
+                      const MQTTPresetDef* p = findMQTTPreset(preset_name);
+                      if (p && p->topic_style == MQTT_TOPIC_MESHRANK && _prefs->mqtt_slot_token[slot][0] == '\0') {
+                        sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt%d.token <your_token>' to connect)", slot + 1, preset_name, slot + 1);
+                      } else if (p && p->topic_style == MQTT_TOPIC_MESHCORE &&
+                                 (strlen(_prefs->mqtt_iata) == 0 || strcmp(_prefs->mqtt_iata, "XXX") == 0)) {
+                        sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt.iata <airport_code>' to publish)", slot + 1, preset_name);
+                      } else {
+                        sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
+                      }
                     }
                   } else {
                     strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, cascadiamesh, custom, none");

@@ -1,5 +1,8 @@
 #pragma once
 
+// Maximum number of configurable MQTT connection slots (available to all builds for struct layout)
+static const int MAX_MQTT_SLOTS = 6;
+
 #ifdef WITH_MQTT_BRIDGE
 
 enum MQTTAuthType : uint8_t {
@@ -106,9 +109,6 @@ static const MQTTPresetDef* findMQTTPreset(const char* name) {
   }
   return nullptr;
 }
-
-// Maximum number of concurrent MQTT connection slots
-static const int MAX_MQTT_SLOTS = 3;
 
 // Slot preset name constants
 static const char MQTT_PRESET_NONE[] = "none";

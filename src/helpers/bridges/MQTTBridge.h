@@ -38,8 +38,8 @@
  * uplink packet data to multiple MQTT brokers for monitoring and analysis.
  *
  * Features:
- * - Up to 3 configurable MQTT connection slots
- * - Built-in presets for LetsMesh Analyzer (US/EU) and MeshMapper
+ * - Up to 6 configurable MQTT connection slots (5 active with PSRAM, 2 without)
+ * - Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, CascadiaMesh
  * - Custom broker support with username/password auth
  * - JWT authentication with Ed25519 device signing
  * - Automatic reconnection with exponential backoff
@@ -101,8 +101,11 @@ private:
   unsigned long _status_interval;
 
   // Packet queue for offline scenarios
+  // NOTE: We store a full copy of the packet (not a pointer) because the
+  // Dispatcher frees packets back to the static pool immediately after logRx()
+  // returns. Storing only a pointer would be a use-after-free.
   struct QueuedPacket {
-    mesh::Packet* packet;
+    mesh::Packet packet_copy;  // ~258 bytes, full value copy
     unsigned long timestamp;
     bool is_tx;
     // Store raw radio data with each packet to avoid it being overwritten
@@ -113,7 +116,11 @@ private:
     bool has_raw_data;
   };
 
+  #if defined(BOARD_HAS_PSRAM)
+  static const int MAX_QUEUE_SIZE = 50;
+  #else
   static const int MAX_QUEUE_SIZE = 10;
+  #endif
 
   // FreeRTOS queue for thread-safe packet queuing
   #ifdef ESP_PLATFORM
@@ -141,7 +148,7 @@ private:
   bool _ntp_synced;
   bool _ntp_sync_pending;  // Flag to trigger NTP sync from loop() instead of event handler
   bool _slots_setup_done;  // Deferred: slots set up after NTP sync
-  int _max_active_slots;   // Runtime limit: 3 with PSRAM, 2 without
+  int _max_active_slots;   // Runtime limit: 5 with PSRAM, 2 without
 
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
   volatile bool _slot_reconfigure_pending[MAX_MQTT_SLOTS];
