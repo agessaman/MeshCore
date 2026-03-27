@@ -327,10 +327,15 @@ void MQTTBridge::begin() {
     if (preset_name[0] != '\0' && strcmp(preset_name, MQTT_PRESET_NONE) != 0) {
       if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
         // Custom broker: copy host/port/username/password from prefs
-        _slots[i].enabled = true;
         _slots[i].preset = nullptr;
         strncpy(_slots[i].host, _prefs->mqtt_slot_host[i], sizeof(_slots[i].host) - 1);
         _slots[i].host[sizeof(_slots[i].host) - 1] = '\0';
+        if (strlen(_slots[i].host) == 0) {
+          MQTT_DEBUG_PRINTLN("MQTT%d: custom preset has no server configured, disabling", i + 1);
+          _slots[i].enabled = false;
+          continue;
+        }
+        _slots[i].enabled = true;
         _slots[i].port = _prefs->mqtt_slot_port[i];
         strncpy(_slots[i].username, _prefs->mqtt_slot_username[i], sizeof(_slots[i].username) - 1);
         _slots[i].username[sizeof(_slots[i].username) - 1] = '\0';
@@ -807,7 +812,13 @@ void MQTTBridge::setupSlot(int index) {
     updateCachedConnectionStatus();
   });
   slot.client->onError([this, index](esp_mqtt_error_codes error) {
-    MQTT_DEBUG_PRINTLN("MQTT%d error: %d", index + 1, error.esp_tls_last_esp_err);
+    if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
+      MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
+        index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
+        error.esp_transport_sock_errno, error.error_type);
+    } else {
+      MQTT_DEBUG_PRINTLN("MQTT%d error: type=%d", index + 1, error.error_type);
+    }
   });
 
   if (slot.preset) {
@@ -850,6 +861,14 @@ void MQTTBridge::setupSlot(int index) {
       snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s://%s:%d", proto, slot.host, slot.port);
     }
     slot.client->setServer(slot.broker_uri);
+
+    // Custom TLS/WSS slots need the system CA cert bundle for server verification
+    bool needs_tls = (strncmp(slot.broker_uri, "mqtts://", 8) == 0 ||
+                      strncmp(slot.broker_uri, "wss://", 6) == 0);
+    if (needs_tls) {
+      slot.client->attachArduinoCACertBundle(true);
+    }
+
     if (strlen(slot.username) > 0) {
       slot.client->setCredentials(slot.username, slot.password);
     }
