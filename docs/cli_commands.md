@@ -106,6 +106,13 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+### Discover zero hop neighbors
+
+**Usage:** 
+- `discover.neighbors`
+
+---
+
 ## Statistics
 
 ### Clear Stats
@@ -237,6 +244,22 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Note:** Requires reboot to apply
 **Serial Only:** `set freq <frequency>`
+
+---
+
+#### View or change this node's rx boosted gain mode (SX12xx only, v1.14.1+)
+**Usage:**
+- `get radio.rxgain`
+- `set radio.rxgain <state>`
+
+**Parameters:**
+  - `state`: `on`|`off`
+
+**Default:** `on`
+
+**Temporary Note:** If you upgraded from an older version to 1.14.1 without erasing flash, this setting is `off` because of [#2118](https://github.com/meshcore-dev/MeshCore/issues/2118)
+
+---
 
 ### System
 
@@ -477,7 +500,29 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+#### View or change the duty cycle limit
+**Usage:**
+- `get dutycycle`
+- `set dutycycle <value>`
+
+**Parameters:**
+- `value`: Duty cycle percentage (1-100)
+
+**Default:** `50%` (equivalent to airtime factor 1.0)
+
+**Examples:**
+- `set dutycycle 100` — no duty cycle limit
+- `set dutycycle 50` — 50% duty cycle (default)
+- `set dutycycle 10` — 10% duty cycle
+- `set dutycycle 1` — 1% duty cycle (strictest EU requirement)
+
+> **Note:** Added in firmware v1.15.0
+
+---
+
 #### View or change the airtime factor (duty cycle limit)
+> **Deprecated** as of firmware v1.15.0. Use [`get/set dutycycle`](#view-or-change-the-duty-cycle-limit) instead.
+
 **Usage:**
 - `get af`
 - `set af <value>`
@@ -487,8 +532,8 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
   - `af = 1` → ~50% duty
   - `af = 2` → ~33% duty
   - `af = 3` → ~25% duty
-  - `af = 9` → ~10% duty  
-  Yyou are responsible for choosing a value that is appropriate for your jurisdiction and channel plan (for example EU 868 Mhz 10% duty cycle regulation).
+  - `af = 9` → ~10% duty
+  You are responsible for choosing a value that is appropriate for your jurisdiction and channel plan (for example EU 868 Mhz 10% duty cycle regulation).
 
 **Default:** `1.0`
 
