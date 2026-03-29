@@ -15,10 +15,10 @@ Use one of the observer build targets (e.g., `heltec_v4_repeater_observer_mqtt`)
 If this is a fresh flash or full erase, configure your radio parameters first. These must match other nodes in your mesh:
 
 ```bash
-set freq 906.0
-set sf 12
+set freq 910.525
+set sf 7
 set cr 5
-set bw 250
+set bw 62.5
 set tx 22
 ```
 
