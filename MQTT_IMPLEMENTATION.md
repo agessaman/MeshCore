@@ -148,6 +148,33 @@ pio run -e heltec_v4_repeater_observer_mqtt
 pio run -e Station_G2_repeater_observer_mqtt
 ```
 
+### Partition Table Changes — Merged Firmware Required
+
+Some MQTT observer builds use a non-default partition table to accommodate the larger firmware size (MQTT libraries, TLS, cert bundle, etc.). **When a board's partition table changes, you must flash the merged firmware (`*-merged.bin`) the first time** so the new partition layout and bootloader are written together. After that initial flash, standard OTA or non-merged updates will work normally.
+
+| Environment | Partition Table | Flash Size | App Slot Size | Notes |
+|-------------|----------------|------------|---------------|-------|
+| `LilyGo_T3S3_sx1262_repeater_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | Changed from default (1.25 MB) |
+| `LilyGo_T3S3_sx1262_room_server_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | Changed from default (1.25 MB) |
+| `Station_G2_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+| `Station_G2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+
+**How to flash the merged firmware:**
+
+You can flash the merged firmware using either the web flasher or the command line:
+
+- **Web flasher (recommended):** Use the [MeshCore Web Flasher](https://flasher.meshcore.co.uk/) to flash the `*-merged.bin` file directly from your browser — no tools to install.
+- **Command line:**
+  ```bash
+  # Build the merged binary
+  pio run -t mergebin -e LilyGo_T3S3_sx1262_repeater_observer_mqtt
+
+  # Flash at offset 0x0 (overwrites bootloader + partition table)
+  esptool.py write_flash 0x0 .pio/build/LilyGo_T3S3_sx1262_repeater_observer_mqtt/firmware-merged.bin
+  ```
+
+> **Note:** Flashing the merged firmware will erase Bluetooth pairings but preserves device configuration stored in NVS. After the first merged flash, subsequent updates can use OTA or the standard non-merged binary.
+
 ### Build Flags
 - `WITH_MQTT_BRIDGE=1` - Enable MQTT bridge (required)
 - `WITH_SNMP=1` - Enable SNMP agent (optional, see [MQTT_SNMP.md](MQTT_SNMP.md))

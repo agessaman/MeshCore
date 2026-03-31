@@ -184,7 +184,7 @@ def main():
     try:
         cert_source = env.GetProjectOption("board_ssl_cert_source")
 
-        if (cert_source == "mozilla" or cert_source == "adafruit"):
+        if (cert_source == "mozilla" or cert_source == "adafruit" or cert_source == "adafruit-full"):
             download_cacert_file(cert_source)
             bundle.add_from_file(os.path.join(certs_dir, "cacert.pem"))
         elif (cert_source == "folder"):
@@ -192,6 +192,22 @@ def main():
     except ValueError:
         critical('Invalid configuration option: use \'board_ssl_cert_source\' parameter in platformio.ini' )
         raise InputError('Invalid certificate')
+
+    # Also include any extra .pem/.der files in the certs directory (excluding
+    # the downloaded cacert.pem bundle).  This allows adding root CAs that have
+    # been removed from upstream trust stores but are still needed by ESP-IDF's
+    # cert bundle verification (e.g. GlobalSign Root CA R1 for GTS cross-signs).
+    if os.path.isdir(certs_dir):
+        for file_name in sorted(os.listdir(certs_dir)):
+            if file_name == 'cacert.pem':
+                continue
+            file_path = os.path.join(certs_dir, file_name)
+            if os.path.isfile(file_path) and (file_name.endswith('.pem') or file_name.endswith('.der')):
+                try:
+                    bundle.add_from_file(file_path)
+                    status('Added extra certificate from %s' % file_name)
+                except Exception as e:
+                    critical('Skipping %s: %s' % (file_name, str(e)))
 
     status('Successfully added %d certificates in total' % len(bundle.certificates))
 

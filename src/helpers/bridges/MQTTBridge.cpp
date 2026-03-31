@@ -51,6 +51,16 @@ static bool isWiFiConfigValid(const NodePrefs* prefs) {
 
 #ifdef WITH_MQTT_BRIDGE
 
+// Optional embedded CA bundle symbols produced by board_build.embed_files.
+// Weak linkage keeps non-bundle builds linkable and allows runtime fallback.
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_src_certs_x509_crt_bundle_bin_start") __attribute__((weak));
+extern const uint8_t rootca_crt_bundle_end[] asm("_binary_src_certs_x509_crt_bundle_bin_end") __attribute__((weak));
+
+// Track whether the global cert bundle has been loaded into s_crt_bundle.
+// Loading must happen exactly once to avoid a use-after-free race when multiple
+// TLS slots are set up in sequence (each connect() launches an async task).
+static bool s_ca_bundle_loaded = false;
+
 // PSRAM-aware allocation: prefer PSRAM on ESP32 when BOARD_HAS_PSRAM, fallback to internal heap or malloc.
 // Use psram_free() for any pointer returned by psram_malloc().
 static void* psram_malloc(size_t size) {
@@ -870,14 +880,45 @@ void MQTTBridge::setupSlot(int index) {
     }
   } else {
     // Custom broker slot — build persistent URI
-    // If host already has a scheme (mqtt://, mqtts://, ws://, wss://), use as-is with port.
+    // If host already has a scheme (mqtt://, mqtts://, ws://, wss://), preserve the full URI
+    // (including optional path/query) and only inject :port when the authority has no explicit port.
     // Otherwise, infer protocol from port number.
     bool has_scheme = (strncmp(slot.host, "mqtt://", 7) == 0 ||
                        strncmp(slot.host, "mqtts://", 8) == 0 ||
                        strncmp(slot.host, "ws://", 5) == 0 ||
                        strncmp(slot.host, "wss://", 6) == 0);
     if (has_scheme) {
-      snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s:%d", slot.host, slot.port);
+      const char* authority = strstr(slot.host, "://");
+      authority = authority ? authority + 3 : slot.host;
+      const char* path = strchr(authority, '/');
+      const char* authority_end = path ? path : slot.host + strlen(slot.host);
+      bool has_explicit_port = false;
+
+      // Detect host:port in URI authority (IPv6 literals in [addr]:port are supported).
+      if (authority < authority_end) {
+        if (*authority == '[') {
+          const char* close = (const char*)memchr(authority, ']', authority_end - authority);
+          if (close && (close + 1) < authority_end && *(close + 1) == ':') {
+            has_explicit_port = true;
+          }
+        } else {
+          const char* colon = (const char*)memchr(authority, ':', authority_end - authority);
+          if (colon != nullptr) {
+            has_explicit_port = true;
+          }
+        }
+      }
+
+      if (has_explicit_port || slot.port == 0) {
+        snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s", slot.host);
+      } else {
+        const size_t authority_len = (size_t)(authority_end - slot.host);
+        snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%.*s:%u%s",
+                 (int)authority_len,
+                 slot.host,
+                 (unsigned)slot.port,
+                 path ? path : "");
+      }
     } else {
       const char* proto = "mqtt";
       if (slot.port == 8883) {
@@ -888,12 +929,43 @@ void MQTTBridge::setupSlot(int index) {
       snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s://%s:%d", proto, slot.host, slot.port);
     }
     slot.client->setServer(slot.broker_uri);
+    MQTT_DEBUG_PRINTLN("MQTT%d custom broker URI: %s (host='%s', port=%u)",
+      index + 1, slot.broker_uri, slot.host, (unsigned)slot.port);
 
-    // Custom TLS/WSS slots need the system CA cert bundle for server verification
+    // Custom TLS/WSS slots need a CA bundle for server verification.
+    // The bundle is loaded into the global s_crt_bundle exactly once to avoid
+    // a use-after-free race: connect() launches an async FreeRTOS task, and
+    // calling setCACertBundle() again from a later slot would free the global
+    // crts array while a prior slot's TLS handshake may still be reading it.
     bool needs_tls = (strncmp(slot.broker_uri, "mqtts://", 8) == 0 ||
                       strncmp(slot.broker_uri, "wss://", 6) == 0);
     if (needs_tls) {
-      slot.client->attachArduinoCACertBundle(true);
+      if (!s_ca_bundle_loaded) {
+        size_t bundle_len = 0;
+        if (rootca_crt_bundle_start != nullptr &&
+            rootca_crt_bundle_end != nullptr &&
+            rootca_crt_bundle_end > rootca_crt_bundle_start) {
+          bundle_len = static_cast<size_t>(rootca_crt_bundle_end - rootca_crt_bundle_start);
+        }
+
+        if (bundle_len > 0) {
+          MQTT_DEBUG_PRINTLN("MQTT global CA bundle init: embedded bundle (%u bytes)",
+            (unsigned)bundle_len);
+          // Load the bundle into the global s_crt_bundle via the first client.
+          // This is a one-time operation; subsequent clients reuse via attachArduinoCACertBundle.
+          slot.client->setCACertBundle(rootca_crt_bundle_start, bundle_len);
+          s_ca_bundle_loaded = true;
+        } else {
+          MQTT_DEBUG_PRINTLN("MQTT%d TLS: no embedded cert bundle available", index + 1);
+        }
+      } else {
+        // Global bundle already loaded — just attach the callback for this client.
+        slot.client->attachArduinoCACertBundle(true);
+      }
+      MQTT_DEBUG_PRINTLN("MQTT%d TLS verify: CA bundle %s", index + 1,
+        s_ca_bundle_loaded ? "active" : "unavailable");
+    } else {
+      MQTT_DEBUG_PRINTLN("MQTT%d custom broker uses non-TLS transport", index + 1);
     }
 
     if (strlen(slot.username) > 0) {

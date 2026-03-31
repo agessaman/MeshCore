@@ -9,6 +9,7 @@
 #endif
 #ifdef ESP_PLATFORM
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <esp_wifi.h>
 #endif
 #ifdef WITH_MQTT_BRIDGE
@@ -46,6 +47,59 @@ static bool isValidName(const char *n) {
   }
   return true;
 }
+
+#ifdef ESP_PLATFORM
+// Optional embedded CA bundle symbols produced by board_build.embed_files.
+// Weak linkage keeps non-bundle builds linkable.
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_src_certs_x509_crt_bundle_bin_start") __attribute__((weak));
+extern const uint8_t rootca_crt_bundle_end[] asm("_binary_src_certs_x509_crt_bundle_bin_end") __attribute__((weak));
+
+static bool parseTlsBundleTarget(const char* input, char* host_out, size_t host_out_size, uint16_t* port_out) {
+  if (!input || !host_out || host_out_size == 0 || !port_out) return false;
+
+  while (*input == ' ') input++;
+  if (*input == '\0') return false;
+
+  const char* start = input;
+  const char* scheme = strstr(input, "://");
+  if (scheme) start = scheme + 3;
+
+  const char* end = start;
+  while (*end && *end != '/' && *end != '?' && *end != '#') end++;
+  if (end <= start) return false;
+
+  uint16_t port = 443;
+  const char* host_start = start;
+  const char* host_end = end;
+
+  if (*host_start == '[') {
+    const char* close = (const char*)memchr(host_start, ']', host_end - host_start);
+    if (!close) return false;
+    if ((close + 1) < host_end && *(close + 1) == ':') {
+      int p = atoi(close + 2);
+      if (p <= 0 || p > 65535) return false;
+      port = (uint16_t)p;
+    }
+    host_start++;
+    host_end = close;
+  } else {
+    const char* colon = (const char*)memchr(host_start, ':', host_end - host_start);
+    if (colon) {
+      int p = atoi(colon + 1);
+      if (p <= 0 || p > 65535) return false;
+      port = (uint16_t)p;
+      host_end = colon;
+    }
+  }
+
+  size_t host_len = (size_t)(host_end - host_start);
+  if (host_len == 0 || host_len >= host_out_size) return false;
+  memcpy(host_out, host_start, host_len);
+  host_out[host_len] = '\0';
+  *port_out = port;
+  return true;
+}
+#endif
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   bool is_fresh_install = false;
@@ -584,6 +638,45 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       sprintf(reply, "Free: %d, Min: %d, Max: %d, Queue: %d", 
               ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(), 
               _callbacks->getQueueSize());
+    } else if (memcmp(command, "tls.bundletest ", 15) == 0) {
+#ifdef ESP_PLATFORM
+      if (WiFi.status() != WL_CONNECTED) {
+        strcpy(reply, "ERR: WiFi not connected");
+      } else {
+        size_t bundle_len = 0;
+        if (rootca_crt_bundle_start != nullptr &&
+            rootca_crt_bundle_end != nullptr &&
+            rootca_crt_bundle_end > rootca_crt_bundle_start) {
+          bundle_len = static_cast<size_t>(rootca_crt_bundle_end - rootca_crt_bundle_start);
+        }
+        if (bundle_len == 0) {
+          strcpy(reply, "ERR: no embedded cert bundle");
+        } else {
+          char host[96];
+          uint16_t port = 443;
+          if (!parseTlsBundleTarget(command + 15, host, sizeof(host), &port)) {
+            strcpy(reply, "ERR: usage tls.bundletest <host[:port]|url>");
+          } else {
+            WiFiClientSecure client;
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+            client.setCACertBundle(rootca_crt_bundle_start, bundle_len);
+#else
+            client.setCACertBundle(rootca_crt_bundle_start);
+#endif
+            client.setTimeout(8000);
+            bool ok = client.connect(host, port);
+            if (ok) {
+              client.stop();
+              snprintf(reply, 160, "OK: TLS bundle verified %s:%u", host, (unsigned)port);
+            } else {
+              snprintf(reply, 160, "ERR: TLS bundle failed %s:%u", host, (unsigned)port);
+            }
+          }
+        }
+      }
+#else
+      strcpy(reply, "ERR: unsupported on this platform");
+#endif
     } else if (memcmp(command, "start ota", 9) == 0) {
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
         strcpy(reply, "Error");
