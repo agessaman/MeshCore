@@ -902,6 +902,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           } else {
             strcpy(reply, "> (not set — custom slots use username/password auth)");
           }
+        } else if (memcmp(subcmd, "diag", 4) == 0) {
+          MQTTBridge::formatSlotDiagReply(reply, 160, slot);
         } else {
           sprintf(reply, "??: %s", config);
         }
@@ -918,6 +920,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           case WL_CONNECT_FAILED: status_str = "connect_failed"; break;
           case WL_CONNECTION_LOST: status_str = "connection_lost"; break;
           case WL_DISCONNECTED: status_str = "disconnected"; break;
+          case 255: status_str = "not_started"; break;  // WL_NO_SHIELD
           default: status_str = "unknown"; break;
         }
         if (status == WL_CONNECTED) {
@@ -945,7 +948,21 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
           }
 #endif
         } else {
+#ifdef WITH_MQTT_BRIDGE
+          uint8_t reason = MQTTBridge::getLastWifiDisconnectReason();
+          if (reason != 0) {
+            const char* desc = MQTTBridge::wifiReasonStr(reason);
+            if (desc) {
+              sprintf(reply, "> %s: %s (reason: %d)", status_str, desc, reason);
+            } else {
+              sprintf(reply, "> %s: reason %d", status_str, reason);
+            }
+          } else {
+            sprintf(reply, "> %s (code: %d)", status_str, status);
+          }
+#else
           sprintf(reply, "> %s (code: %d)", status_str, status);
+#endif
         }
       } else if (memcmp(config, "wifi.powersave", 14) == 0) {
         uint8_t ps = _prefs->wifi_power_save;

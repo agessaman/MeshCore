@@ -84,6 +84,12 @@ private:
     bool circuit_breaker_tripped;   // true = stop reconnecting until reconfigured
     unsigned long last_reconnect_attempt;
     unsigned long last_log_time;    // Throttle disconnect log messages
+
+    // Last error (stored for CLI diagnostics — serial-free debugging)
+    int32_t last_tls_err;           // esp_tls_last_esp_err (0 = no error)
+    int32_t last_tls_stack_err;     // mbedTLS stack error
+    int last_sock_errno;            // socket errno
+    unsigned long last_error_time;  // millis() of last error
   };
 
   static const size_t AUTH_TOKEN_SIZE = 768;
@@ -317,6 +323,11 @@ public:
 
   static unsigned long getWifiConnectedAtMillis();
   static void formatMqttStatusReply(char* buf, size_t bufsize, const NodePrefs* prefs);
+  static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
+  static uint8_t getLastWifiDisconnectReason();
+  static unsigned long getLastWifiDisconnectTime();
+  static const char* wifiReasonStr(uint8_t reason);
+  static const char* tlsErrorStr(int32_t err);
 
   void setStatsSources(mesh::Dispatcher* dispatcher, mesh::Radio* radio,
                        mesh::MainBoard* board, mesh::MillisecondClock* ms);

@@ -98,6 +98,10 @@ static void psram_free(void* ptr) {
 // Time (millis()) when WiFi was last seen connected; 0 when disconnected. Used for get wifi.status uptime.
 static unsigned long s_wifi_connected_at = 0;
 
+// Last WiFi disconnect reason (from ESP-IDF event). Used for get wifi.status diagnostics.
+static uint8_t s_wifi_disconnect_reason = 0;
+static unsigned long s_wifi_disconnect_time = 0;
+
 #ifdef MQTT_MEMORY_DEBUG
 // #region agent log
 static void agentLogHeap(const char* location, const char* message, const char* hypothesisId,
@@ -167,6 +171,107 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const NodePref
     pos += snprintf(buf + pos, bufsize - pos, ", %d: %s (%s)", i + 1, name, state);
   }
   snprintf(buf + pos, bufsize - pos, ", q:%d", q);
+}
+
+uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
+unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
+
+const char* MQTTBridge::wifiReasonStr(uint8_t reason) {
+  switch (reason) {
+    case 2:   return "auth expired";
+    case 4:   return "assoc timeout";
+    case 8:   return "AP disconnected";
+    case 15:  return "wrong password";
+    case 39:  return "SSID not found";
+    case 200: return "signal lost";
+    case 201: return "security mismatch";
+    case 202: return "auth mode rejected";
+    default:  return nullptr;
+  }
+}
+
+const char* MQTTBridge::tlsErrorStr(int32_t err) {
+  switch (err) {
+    case 0x8001: return "DNS failed";
+    case 0x8002: return "socket error";
+    case 0x8004: return "connect refused";
+    case 0x8006: return "TLS timeout";
+    case 0x800B: return "cert verify failed";
+    case 0x8010: return "mbedTLS error";
+    default:     return nullptr;
+  }
+}
+
+void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) {
+  if (!buf || bufsize == 0) return;
+  if (!s_mqtt_bridge_instance || !s_mqtt_bridge_instance->_initialized) {
+    snprintf(buf, bufsize, "> mqtt%d: bridge not running", slot_index + 1);
+    return;
+  }
+  if (slot_index < 0 || slot_index >= MAX_MQTT_SLOTS) {
+    snprintf(buf, bufsize, "> invalid slot");
+    return;
+  }
+
+  MQTTBridge* b = s_mqtt_bridge_instance;
+  const MQTTSlot& slot = b->_slots[slot_index];
+
+  // Determine state string
+  const char* state;
+  if (!slot.enabled && !slot.preset && slot.host[0] == '\0') {
+    snprintf(buf, bufsize, "> mqtt%d: not configured", slot_index + 1);
+    return;
+  } else if (!slot.enabled) {
+    state = "inactive";
+  } else if (!slot.client) {
+    state = "no client";
+  } else if (slot.connected) {
+    state = "ok";
+  } else if (slot.circuit_breaker_tripped) {
+    state = "fail";
+  } else {
+    state = "disc";
+  }
+
+  int pos = snprintf(buf, bufsize, "> mqtt%d: %s", slot_index + 1, state);
+
+  // If connected with no errors, we're done
+  if (slot.connected && slot.last_error_time == 0) {
+    snprintf(buf + pos, bufsize - pos, ", no errors");
+    return;
+  }
+
+  // Show last error if we have one
+  if (slot.last_error_time > 0) {
+    // TLS error with human-friendly description
+    if (slot.last_tls_err != 0) {
+      const char* desc = tlsErrorStr(slot.last_tls_err);
+      if (desc) {
+        pos += snprintf(buf + pos, bufsize - pos, ", %s (0x%04X)", desc, (unsigned)slot.last_tls_err);
+      } else {
+        pos += snprintf(buf + pos, bufsize - pos, ", tls:0x%04X", (unsigned)slot.last_tls_err);
+      }
+    }
+    // mbedTLS stack error (shown as negative hex per convention)
+    if (slot.last_tls_stack_err != 0) {
+      pos += snprintf(buf + pos, bufsize - pos, ", mbedtls:-0x%04X", (unsigned)(-slot.last_tls_stack_err));
+    }
+    // Socket errno
+    if (slot.last_sock_errno != 0) {
+      pos += snprintf(buf + pos, bufsize - pos, ", sock:%d", slot.last_sock_errno);
+    }
+    // Time ago
+    unsigned long ago_sec = (millis() - slot.last_error_time) / 1000;
+    if (ago_sec < 60) {
+      snprintf(buf + pos, bufsize - pos, ", %lus ago", ago_sec);
+    } else if (ago_sec < 3600) {
+      snprintf(buf + pos, bufsize - pos, ", %lum ago", ago_sec / 60);
+    } else {
+      snprintf(buf + pos, bufsize - pos, ", %luh ago", ago_sec / 3600);
+    }
+  } else if (!slot.connected) {
+    snprintf(buf + pos, bufsize - pos, ", no error info");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +682,11 @@ void MQTTBridge::initializeWiFiInTask() {
           _ntp_sync_pending = true;
         }
         break;
+      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        s_wifi_disconnect_reason = info.wifi_sta_disconnected.reason;
+        s_wifi_disconnect_time = millis();
+        MQTT_DEBUG_PRINTLN("WiFi disconnected: reason %d", s_wifi_disconnect_reason);
+        break;
       default:
         break;
     }
@@ -830,11 +940,11 @@ void MQTTBridge::setupSlot(int index) {
 
   slot.client = new PsychicMqttClient();
   slot.client->setAutoReconnect(false);  // We handle reconnect with our own backoff logic
-  if (slot.preset && slot.preset->keepalive > 0) {
-    slot.client->setKeepAlive(slot.preset->keepalive);
-  }
   bool uses_jwt = (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) || slot.audience[0] != '\0';
-  optimizeMqttClientConfig(slot.client, uses_jwt);
+  optimizeMqttClientConfig(slot.client, uses_jwt);  // sets 45s keepalive default
+  if (slot.preset && slot.preset->keepalive > 0) {
+    slot.client->setKeepAlive(slot.preset->keepalive);  // preset overrides default
+  }
 
   // Callbacks (capture index by value)
   slot.client->onConnect([this, index](bool sessionPresent) {
@@ -843,6 +953,10 @@ void MQTTBridge::setupSlot(int index) {
     _slots[index].reconnect_backoff = 0;
     _slots[index].max_backoff_failures = 0;
     _slots[index].circuit_breaker_tripped = false;
+    _slots[index].last_tls_err = 0;
+    _slots[index].last_tls_stack_err = 0;
+    _slots[index].last_sock_errno = 0;
+    _slots[index].last_error_time = 0;
     updateCachedConnectionStatus();
     publishStatusToSlot(index);
   });
@@ -852,6 +966,10 @@ void MQTTBridge::setupSlot(int index) {
     updateCachedConnectionStatus();
   });
   slot.client->onError([this, index](esp_mqtt_error_codes error) {
+    _slots[index].last_tls_err = error.esp_tls_last_esp_err;
+    _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
+    _slots[index].last_sock_errno = error.esp_transport_sock_errno;
+    _slots[index].last_error_time = millis();
     if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
       MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
         index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
