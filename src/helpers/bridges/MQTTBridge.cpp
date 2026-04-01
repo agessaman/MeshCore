@@ -353,6 +353,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
 
   // Pre-allocate JSON publish buffer (reused for all publishes to avoid alloc/free churn)
   _publish_json_buffer = (char*)psram_malloc(PUBLISH_JSON_BUFFER_SIZE);
+  _status_json_buffer = (char*)psram_malloc(STATUS_JSON_BUFFER_SIZE);
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +644,8 @@ void MQTTBridge::end() {
   _last_raw_data = nullptr;
   psram_free(_publish_json_buffer);
   _publish_json_buffer = nullptr;
+  psram_free(_status_json_buffer);
+  _status_json_buffer = nullptr;
 
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
@@ -825,9 +828,11 @@ void MQTTBridge::mqttTaskLoop() {
     // Periodic configuration check (throttled to avoid spam)
     checkConfigurationMismatch();
 
-    // Periodic NTP sync (every hour) - only when connected
+    // Periodic NTP refresh (every hour) — lightweight, non-blocking.
+    // Uses async SNTP instead of the heavy syncTimeWithNTP() which blocks Core 0
+    // for up to 20+ seconds with DNS lookups, UDP sockets, and retry loops.
     if (WiFi.status() == WL_CONNECTED && now - _last_ntp_sync > 3600000) {
-      syncTimeWithNTP();
+      refreshNTP();
     }
 
     // Publish status updates (handle millis() overflow correctly)
@@ -1572,9 +1577,17 @@ void MQTTBridge::publishStatusToSlot(int index) {
     return;  // Slot doesn't support status (e.g., meshrank) or missing required config
   }
 
-  static const size_t STATUS_JSON_SIZE = 768;
-  char* json_buffer = (char*)psram_malloc(STATUS_JSON_SIZE);
-  if (json_buffer == nullptr) return;
+  // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
+  char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
+  char* json_buffer = fallback_status_buffer;
+  bool status_buffer_locked = false;
+  #ifdef ESP_PLATFORM
+  if (_status_json_buffer != nullptr && _raw_data_mutex != nullptr &&
+      xSemaphoreTake(_raw_data_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    json_buffer = _status_json_buffer;
+    status_buffer_locked = true;
+  }
+  #endif
 
   char origin_id[65];
   char timestamp[32];
@@ -1620,7 +1633,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
 
   int len = MQTTMessageBuilder::buildStatusMessage(
     _origin, origin_id, _board_model, _firmware_version, radio_info,
-    client_version, "online", timestamp, json_buffer, STATUS_JSON_SIZE,
+    client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors
   );
@@ -1631,7 +1644,11 @@ void MQTTBridge::publishStatusToSlot(int index) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
     }
   }
-  psram_free(json_buffer);
+  #ifdef ESP_PLATFORM
+  if (status_buffer_locked) {
+    xSemaphoreGive(_raw_data_mutex);
+  }
+  #endif
 }
 
 void MQTTBridge::updateCachedConnectionStatus() {
@@ -1910,9 +1927,9 @@ void MQTTBridge::loop() {
   // Periodic configuration check (throttled to avoid spam)
   checkConfigurationMismatch();
 
-  // Periodic NTP sync (every hour) - only when connected
+  // Periodic NTP refresh (every hour) — lightweight, non-blocking.
   if (WiFi.status() == WL_CONNECTED && millis() - _last_ntp_sync > 3600000) {
-    syncTimeWithNTP();
+    refreshNTP();
   }
 
   // Publish status updates (handle millis() overflow correctly)
@@ -2159,12 +2176,17 @@ bool MQTTBridge::publishStatus() {
     return false;
   }
 
-  // JSON buffer in PSRAM when available
-  static const size_t STATUS_JSON_BUFFER_SIZE = 768;
-  char* json_buffer = (char*)psram_malloc(STATUS_JSON_BUFFER_SIZE);
-  if (json_buffer == nullptr) {
-    return false;
+  // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
+  char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
+  char* json_buffer = fallback_status_buffer;
+  bool status_buffer_locked = false;
+  #ifdef ESP_PLATFORM
+  if (_status_json_buffer != nullptr && _raw_data_mutex != nullptr &&
+      xSemaphoreTake(_raw_data_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    json_buffer = _status_json_buffer;
+    status_buffer_locked = true;
   }
+  #endif
   char origin_id[65];
   char timestamp[32];
   char radio_info[64];
@@ -2233,12 +2255,20 @@ bool MQTTBridge::publishStatus() {
     // treat as success to avoid infinite retry loops
     if (published || !any_slot_wants_status) {
       if (published) MQTT_DEBUG_PRINTLN("Status published");
-      psram_free(json_buffer);
+      #ifdef ESP_PLATFORM
+      if (status_buffer_locked) {
+        xSemaphoreGive(_raw_data_mutex);
+      }
+      #endif
       return true;
     }
   }
 
-  psram_free(json_buffer);
+  #ifdef ESP_PLATFORM
+  if (status_buffer_locked) {
+    xSemaphoreGive(_raw_data_mutex);
+  }
+  #endif
   return false;
 }
 
@@ -2249,14 +2279,20 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
 
   // Memory pressure check: Skip publishes when heap is severely fragmented
   #ifdef ESP32
+  #if defined(BOARD_HAS_PSRAM)
+  static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 60000;
+  #else
+  static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 52000;
+  #endif
   unsigned long now = millis();
   if (now - _last_memory_check > 5000) {
     size_t max_alloc = ESP.getMaxAllocHeap();
-    if (max_alloc < 60000) {
+    if (max_alloc < PUBLISH_SKIP_MAX_ALLOC_THRESHOLD) {
       _skipped_publishes++;
       static unsigned long last_skip_log = 0;
       if (now - last_skip_log > 60000) {
-        MQTT_DEBUG_PRINTLN("MQTT: Skipping publish due to memory pressure (Max alloc: %d, skipped: %d)", max_alloc, _skipped_publishes);
+        MQTT_DEBUG_PRINTLN("MQTT: Skipping publish due to memory pressure (Max alloc: %d, threshold: %d, skipped: %d)",
+                           max_alloc, (int)PUBLISH_SKIP_MAX_ALLOC_THRESHOLD, _skipped_publishes);
         last_skip_log = now;
       }
       return;
@@ -2489,12 +2525,23 @@ void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, 
 #ifdef ESP_PLATFORM
 void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   const unsigned long CRITICAL_CHECK_INTERVAL_MS = 60000;
+  #if defined(BOARD_HAS_PSRAM)
   const unsigned long PRESSURE_WINDOW_CRITICAL_MS = 180000;
   const unsigned long PRESSURE_WINDOW_MODERATE_MS = 300000;
   const unsigned long RECOVERY_THROTTLE_MS = 300000;
-  const unsigned long CRITICAL_LOG_INTERVAL_MS = 900000;
   const size_t PRESSURE_THRESHOLD_CRITICAL = 58000;
   const size_t PRESSURE_THRESHOLD_MODERATE = 70000;
+  const size_t HARD_RECOVERY_THRESHOLD = 54000;
+  #else
+  // Non-PSRAM boards run closer to the edge; use lower thresholds and longer windows.
+  const unsigned long PRESSURE_WINDOW_CRITICAL_MS = 300000;
+  const unsigned long PRESSURE_WINDOW_MODERATE_MS = 900000;
+  const unsigned long RECOVERY_THROTTLE_MS = 600000;
+  const size_t PRESSURE_THRESHOLD_CRITICAL = 50000;
+  const size_t PRESSURE_THRESHOLD_MODERATE = 56000;
+  const size_t HARD_RECOVERY_THRESHOLD = 46000;
+  #endif
+  const unsigned long CRITICAL_LOG_INTERVAL_MS = 900000;
 
   unsigned long now = millis();
   if (now - _last_critical_check_run < CRITICAL_CHECK_INTERVAL_MS) {
@@ -2526,9 +2573,9 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   static unsigned long last_critical_log = 0;
   if (now - last_critical_log >= CRITICAL_LOG_INTERVAL_MS) {
     last_critical_log = now;
-    if (max_alloc < 40000) {
+    if (max_alloc < PRESSURE_THRESHOLD_CRITICAL) {
       MQTT_DEBUG_PRINTLN("CRITICAL: Low memory! Free: %d, Max: %d", (int)free_h, (int)max_alloc);
-    } else if (max_alloc < 60000) {
+    } else if (max_alloc < PRESSURE_THRESHOLD_MODERATE) {
       MQTT_DEBUG_PRINTLN("WARNING: Memory pressure. Free: %d, Max: %d", (int)free_h, (int)max_alloc);
     }
     // Log slot client count
@@ -2543,7 +2590,9 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   unsigned long required_window_ms = (max_alloc < PRESSURE_THRESHOLD_CRITICAL)
       ? PRESSURE_WINDOW_CRITICAL_MS
       : PRESSURE_WINDOW_MODERATE_MS;
+  bool allow_recovery = !_cached_has_connected_slots || max_alloc < HARD_RECOVERY_THRESHOLD;
   if (_fragmentation_pressure_since != 0 &&
+      allow_recovery &&
       (now - _fragmentation_pressure_since) >= required_window_ms &&
       (now - _last_fragmentation_recovery) >= RECOVERY_THROTTLE_MS) {
     _last_fragmentation_recovery = now;
@@ -2593,6 +2642,15 @@ void MQTTBridge::recreateMqttClientsForFragmentationRecovery() {
 // ---------------------------------------------------------------------------
 // NTP time sync
 // ---------------------------------------------------------------------------
+
+void MQTTBridge::refreshNTP() {
+  // Lightweight periodic refresh: just restart SNTP which runs async in the background.
+  // No blocking DNS, no UDP sockets, no retry loops on the MQTT task loop.
+  // The heavy syncTimeWithNTP() is only used for initial sync and WiFi reconnect recovery.
+  configTime(0, 0, "pool.ntp.org");
+  _last_ntp_sync = millis();
+  MQTT_DEBUG_PRINTLN("NTP refresh triggered (async SNTP)");
+}
 
 void MQTTBridge::syncTimeWithNTP() {
   if (!WiFi.isConnected()) {

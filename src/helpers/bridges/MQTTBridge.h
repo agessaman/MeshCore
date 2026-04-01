@@ -179,6 +179,8 @@ private:
   // Pre-allocated JSON publish buffer (PSRAM when available, allocated once in begin())
   static const size_t PUBLISH_JSON_BUFFER_SIZE = 2048;
   char* _publish_json_buffer;
+  static const size_t STATUS_JSON_BUFFER_SIZE = 768;
+  char* _status_json_buffer;
 
   // Memory pressure monitoring
   unsigned long _last_memory_check;
@@ -267,6 +269,7 @@ private:
   void dequeuePacket();
   bool isAnySlotConnected();
   void syncTimeWithNTP();
+  void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
   Timezone* createTimezoneFromString(const char* tz_string);
   void checkConfigurationMismatch();
   bool isIATAValid() const;
