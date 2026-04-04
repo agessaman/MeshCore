@@ -66,9 +66,10 @@ struct NodePrefs { // persisted to file
   uint8_t mqtt_status_enabled;   // Enable status messages
   uint8_t mqtt_packets_enabled;  // Enable packet messages
   uint8_t mqtt_raw_enabled;      // Enable raw messages
-  uint8_t mqtt_tx_enabled;       // Enable TX packet uplinking
+  uint8_t mqtt_tx_enabled;       // TX packet uplinking: 0=off, 1=all, 2=advert (self-originated only)
   uint32_t mqtt_status_interval; // Status publish interval (ms)
-  
+  uint8_t mqtt_rx_enabled;       // Enable RX packet uplinking (default: on)
+
   // WiFi settings
   char wifi_ssid[32];       // WiFi SSID
   char wifi_password[64];  // WiFi password
@@ -175,6 +176,9 @@ struct MQTTPrefs {
   char mqtt_slot_token[MAX_MQTT_SLOTS][48];    // Per-slot token (e.g., MeshRank account token)
   char mqtt_slot_topic[MAX_MQTT_SLOTS][96];    // Per-slot custom topic template (custom preset only)
   char mqtt_slot_audience[MAX_MQTT_SLOTS][64];  // JWT audience (non-empty enables JWT auth for custom slots)
+
+  // --- Appended fields (added after initial 6-slot migration) ---
+  uint8_t mqtt_rx_enabled;       // Enable RX packet uplinking (default: on)
 };
 
 // 3-slot MQTTPrefs layout — used for migrating from 3-slot to 6-slot format.

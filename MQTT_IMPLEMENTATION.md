@@ -56,7 +56,8 @@ reboot
 ```bash
 get wifi.ssid
 get bridge.enabled
-get bridge.source
+get mqtt.rx
+get mqtt.tx
 get mqtt.origin
 get mqtt.iata
 get mqtt1.preset
@@ -190,7 +191,8 @@ The MQTT bridge comes with the following defaults for fresh installs:
 - **Status Messages**: Enabled
 - **Packet Messages**: Enabled
 - **Raw Messages**: Disabled
-- **TX Messages**: Disabled (RX only by default)
+- **RX Packets**: Enabled (uplink received packets)
+- **TX Packets**: Disabled (`off` — set to `on` or `advert` to enable)
 - **Status Interval**: 5 minutes (300000 ms)
 - **Slot 1**: `analyzer-us`
 - **Slot 2**: `analyzer-eu`
@@ -316,7 +318,8 @@ These settings apply across all MQTT slots:
 - `get mqtt.status` - Get MQTT status summary (connection info per slot)
 - `get mqtt.packets` - Get packet message setting (on/off)
 - `get mqtt.raw` - Get raw message setting (on/off)
-- `get mqtt.tx` - Get TX message setting (on/off)
+- `get mqtt.rx` - Get RX packet uplinking setting (on/off)
+- `get mqtt.tx` - Get TX packet uplinking setting (on/off/advert)
 - `get mqtt.interval` - Get status publish interval
 - `get mqtt.owner` - Get owner public key (serial console only)
 - `get mqtt.email` - Get owner email address (serial console only)
@@ -327,7 +330,11 @@ These settings apply across all MQTT slots:
 - `set mqtt.status on|off` - Enable/disable status messages
 - `set mqtt.packets on|off` - Enable/disable packet messages
 - `set mqtt.raw on|off` - Enable/disable raw messages
-- `set mqtt.tx on|off` - Enable/disable TX packet messages
+- `set mqtt.rx on|off` - Enable/disable RX (received) packet uplinking
+- `set mqtt.tx on|off|advert` - Set TX packet uplinking mode:
+  - `on` - Uplink all transmitted packets
+  - `advert` - Uplink only this node's own advert packets (self-originated)
+  - `off` - Disable TX packet uplinking
 - `set mqtt.interval <minutes>` - Set status publish interval (1-60 minutes)
 - `set mqtt.owner <64-hex-char-public-key>` - Set owner public key
 - `set mqtt.email <email>` - Set owner email address
@@ -412,10 +419,11 @@ The CLI commands are organized into two levels:
 ### Bridge Commands (`bridge.*`)
 **Low-level bridge control** - These settings apply to all bridge types (MQTT, RS232, ESP-NOW, etc.):
 - `bridge.enabled` - Master switch for the entire bridge system
-- `bridge.source` - Controls which packet events to capture (RX vs TX)
+- `bridge.source` - Controls which packet events to capture for non-MQTT bridges (RS232, ESP-NOW). For MQTT, use `mqtt.rx` and `mqtt.tx` instead.
 
 ### Bridge-Specific Commands (`mqtt.*`, `mqttN.*`, `wifi.*`, `timezone.*`)
 **Implementation-specific settings** - These only apply to the MQTT bridge:
+- `mqtt.rx` / `mqtt.tx` - Independent per-direction packet uplinking control
 - `mqttN.*` - Per-slot MQTT broker configuration (N = 1-6)
 - `mqtt.*` - Shared MQTT settings (message types, origin, IATA, etc.)
 - `wifi.*` - WiFi connection settings for MQTT connectivity
@@ -474,6 +482,10 @@ Minimal raw packet data for map integration.
 }
 ```
 
+**Notes:**
+- `SNR` and `RSSI` are only present for RX packets (received from radio). TX packets omit these fields since the packet originates from this node.
+- `path` is only present for direct-route packets with path data.
+
 ### Raw Message
 ```json
 {
@@ -501,8 +513,9 @@ Minimal raw packet data for map integration.
 ### Raw Radio Data Capture
 - Captures actual raw radio transmission data (including radio headers)
 - Uses proper MeshCore packet hashing (SHA256-based)
-- Provides accurate SNR/RSSI values from actual radio reception
-- Supports both RX and TX packet uplinking (configurable)
+- Provides accurate SNR/RSSI values from actual radio reception (RX packets only)
+- Independent RX and TX packet uplinking — both can be active simultaneously
+- TX advert mode: selectively uplink only this node's own advert packets
 
 ### Timezone Support
 - Full timezone support with automatic DST handling
@@ -605,7 +618,8 @@ set mqtt3.preset meshmapper
 ### Step 8: Verify Connection
 ```
 get bridge.enabled
-get bridge.source
+get mqtt.rx
+get mqtt.tx
 get mqtt.status
 get wifi.status
 ```
@@ -624,8 +638,8 @@ reboot
 ```
 get bridge.enabled
 set bridge.enabled on
-get bridge.source          # Should be "rx"
-set bridge.source rx
+get mqtt.rx                # Should be "on"
+set mqtt.rx on
 get mqtt.status            # Check per-slot connection status
 get mqtt1.diag             # Last slot error details (TLS/sock/time)
 get mqtt2.diag

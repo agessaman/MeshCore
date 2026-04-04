@@ -319,7 +319,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _status_enabled = true;
   _packets_enabled = true;
   _raw_enabled = false;
-  _tx_enabled = false;
+  _rx_enabled = true;
+  _tx_mode = 0;
 
   // Initialize all slots to empty/disabled state
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
@@ -439,7 +440,8 @@ void MQTTBridge::begin() {
   _status_enabled = _prefs->mqtt_status_enabled;
   _packets_enabled = _prefs->mqtt_packets_enabled;
   _raw_enabled = _prefs->mqtt_raw_enabled;
-  _tx_enabled = _prefs->mqtt_tx_enabled;
+  _rx_enabled = _prefs->mqtt_rx_enabled;
+  _tx_mode = _prefs->mqtt_tx_enabled;  // 0=off, 1=all, 2=advert
   // Set status interval to 5 minutes (300000 ms), or use preference if set and valid
   if (_prefs->mqtt_status_interval >= 1000 && _prefs->mqtt_status_interval <= 3600000) {
     _status_interval = _prefs->mqtt_status_interval;
@@ -1764,11 +1766,11 @@ void MQTTBridge::setSlotCustomBroker(int slot_index, const char* host, uint16_t 
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::checkConfigurationMismatch() {
-  // Check if bridge.source is set to tx (logTx) but mqtt.tx is disabled
-  if (_prefs->bridge_pkt_src == 0 && _packets_enabled && !_tx_enabled) {
+  // Warn if packets are enabled but both rx and tx are off — nothing will be published
+  if (_prefs->mqtt_packets_enabled && !_prefs->mqtt_rx_enabled && _prefs->mqtt_tx_enabled == 0) {
     unsigned long now = millis();
     if (_last_config_warning == 0 || (now - _last_config_warning > CONFIG_WARNING_INTERVAL)) {
-      MQTT_DEBUG_PRINTLN("MQTT: Configuration mismatch detected! bridge.source=tx (logTx) but mqtt.tx=off. Packets will not be published. Run 'set bridge.source rx' or 'set mqtt.tx on' to fix.");
+      MQTT_DEBUG_PRINTLN("MQTT: Both mqtt.rx and mqtt.tx are off — no packets will be published. Run 'set mqtt.rx on' or 'set mqtt.tx on' to fix.");
       _last_config_warning = now;
     }
   } else {
@@ -2038,7 +2040,7 @@ void MQTTBridge::loop() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled) return;
+  if (!_initialized || !_prefs->mqtt_packets_enabled || !_prefs->mqtt_rx_enabled) return;
 
   // Check if we have any enabled slots to send to
   bool has_valid_slots = false;
@@ -2055,9 +2057,18 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
-  if (!_initialized || !_packets_enabled || !_tx_enabled) return;
+  uint8_t tx_mode = _prefs->mqtt_tx_enabled;  // Read live from prefs (no restart needed)
+  if (!_initialized || !_prefs->mqtt_packets_enabled || tx_mode == 0) return;
 
-  // Queue packet for transmission (only if TX enabled)
+  // Advert mode: only queue self-originated advert packets
+  if (tx_mode == 2) {
+    if (packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return;
+    if (packet->payload_len < PUB_KEY_SIZE) return;
+    // Advert payload starts with advertiser's 32-byte public key — compare to our identity
+    if (!_identity || memcmp(_identity->pub_key, packet->payload, PUB_KEY_SIZE) != 0) return;
+  }
+
+  // Queue packet for transmission
   queuePacket(packet, true);
 }
 

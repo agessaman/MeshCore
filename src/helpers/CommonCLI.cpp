@@ -132,6 +132,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     _prefs->bridge_pkt_src = 1;  // Set to RX (logRx)
     savePrefs(fs);  // Save the updated preference
   }
+  // mqtt_rx_enabled: new field appended to end of MQTTPrefs. On upgrade from older firmware,
+  // the shorter /mqtt_prefs file won't contain it, so it keeps the default value (1 = on)
+  // set by setMQTTPrefsDefaults(). No explicit migration needed.
 #endif
 }
 
@@ -353,7 +356,8 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_status_enabled = 1;    // enabled by default
   prefs->mqtt_packets_enabled = 1;   // enabled by default
   prefs->mqtt_raw_enabled = 0;       // disabled by default
-  prefs->mqtt_tx_enabled = 0;        // disabled by default (RX only)
+  prefs->mqtt_tx_enabled = 0;        // disabled by default
+  prefs->mqtt_rx_enabled = 1;        // RX packets enabled by default
   prefs->mqtt_status_interval = 300000; // 5 minutes default
   // Slot presets: analyzer-us and analyzer-eu enabled by default, rest = none
   strncpy(prefs->mqtt_slot_preset[0], "analyzer-us", sizeof(prefs->mqtt_slot_preset[0]) - 1);
@@ -530,6 +534,7 @@ void CommonCLI::syncMQTTPrefsToNodePrefs() {
   _prefs->mqtt_packets_enabled = _mqtt_prefs.mqtt_packets_enabled;
   _prefs->mqtt_raw_enabled = _mqtt_prefs.mqtt_raw_enabled;
   _prefs->mqtt_tx_enabled = _mqtt_prefs.mqtt_tx_enabled;
+  _prefs->mqtt_rx_enabled = _mqtt_prefs.mqtt_rx_enabled;
   _prefs->mqtt_status_interval = _mqtt_prefs.mqtt_status_interval;
   StrHelper::strncpy(_prefs->wifi_ssid, _mqtt_prefs.wifi_ssid, sizeof(_prefs->wifi_ssid));
   StrHelper::strncpy(_prefs->wifi_password, _mqtt_prefs.wifi_password, sizeof(_prefs->wifi_password));
@@ -560,6 +565,7 @@ void CommonCLI::syncNodePrefsToMQTTPrefs() {
   _mqtt_prefs.mqtt_packets_enabled = _prefs->mqtt_packets_enabled;
   _mqtt_prefs.mqtt_raw_enabled = _prefs->mqtt_raw_enabled;
   _mqtt_prefs.mqtt_tx_enabled = _prefs->mqtt_tx_enabled;
+  _mqtt_prefs.mqtt_rx_enabled = _prefs->mqtt_rx_enabled;
   _mqtt_prefs.mqtt_status_interval = _prefs->mqtt_status_interval;
   StrHelper::strncpy(_mqtt_prefs.wifi_ssid, _prefs->wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
   StrHelper::strncpy(_mqtt_prefs.wifi_password, _prefs->wifi_password, sizeof(_mqtt_prefs.wifi_password));
@@ -864,7 +870,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       } else if (memcmp(config, "mqtt.raw", 8) == 0) {
         sprintf(reply, "> %s", _prefs->mqtt_raw_enabled ? "on" : "off");
       } else if (memcmp(config, "mqtt.tx", 7) == 0) {
-        sprintf(reply, "> %s", _prefs->mqtt_tx_enabled ? "on" : "off");
+        const char* tx_str = _prefs->mqtt_tx_enabled == 2 ? "advert" : (_prefs->mqtt_tx_enabled ? "on" : "off");
+        sprintf(reply, "> %s", tx_str);
+      } else if (memcmp(config, "mqtt.rx", 7) == 0) {
+        sprintf(reply, "> %s", _prefs->mqtt_rx_enabled ? "on" : "off");
       } else if (memcmp(config, "mqtt.interval", 13) == 0) {
         // Display interval in minutes (rounded)
         uint32_t minutes = (_prefs->mqtt_status_interval + 29999) / 60000; // Round up
@@ -1262,6 +1271,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         }
       } else if (memcmp(config, "bridge.source ", 14) == 0) {
         _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
+        // Also update mqtt.rx/mqtt.tx for MQTT bridge compatibility
+        if (_prefs->bridge_pkt_src == 1) {
+          _prefs->mqtt_rx_enabled = 1;
+          _prefs->mqtt_tx_enabled = 0;
+        } else {
+          _prefs->mqtt_rx_enabled = 0;
+          _prefs->mqtt_tx_enabled = 1;
+        }
         savePrefs();
         strcpy(reply, "OK");
 #endif
@@ -1321,7 +1338,15 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 savePrefs();
                 strcpy(reply, "OK");
               } else if (memcmp(config, "mqtt.tx ", 8) == 0) {
-                _prefs->mqtt_tx_enabled = memcmp(&config[8], "on", 2) == 0;
+                if (memcmp(&config[8], "advert", 6) == 0) {
+                  _prefs->mqtt_tx_enabled = 2;
+                } else {
+                  _prefs->mqtt_tx_enabled = memcmp(&config[8], "on", 2) == 0 ? 1 : 0;
+                }
+                savePrefs();
+                strcpy(reply, "OK");
+              } else if (memcmp(config, "mqtt.rx ", 8) == 0) {
+                _prefs->mqtt_rx_enabled = memcmp(&config[8], "on", 2) == 0 ? 1 : 0;
                 savePrefs();
                 strcpy(reply, "OK");
               } else if (memcmp(config, "mqtt.interval ", 14) == 0) {

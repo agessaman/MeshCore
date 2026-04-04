@@ -947,11 +947,42 @@ region save
 - `set bridge.source <source>`
 
 **Parameters:**
-- `source`: 
+- `source`:
   - `logRx`: bridges received packets
   - `logTx`: bridges transmitted packets
 
 **Default:** `logTx`
+
+> **Note:** For MQTT bridges, use `mqtt.rx` and `mqtt.tx` instead of `bridge.source`. These provide independent per-direction control and support both RX and TX simultaneously. `bridge.source` still works as a convenience alias for MQTT (setting `bridge.source rx` sets `mqtt.rx on` + `mqtt.tx off`, and vice versa), but `mqtt.rx`/`mqtt.tx` are preferred.
+
+---
+
+#### View or change MQTT RX packet uplinking
+**Usage:**
+- `get mqtt.rx`
+- `set mqtt.rx <on|off>`
+
+**Parameters:**
+- `on`: uplink received (RX) packets to MQTT brokers
+- `off`: disable RX packet uplinking
+
+**Default:** `on`
+
+---
+
+#### View or change MQTT TX packet uplinking
+**Usage:**
+- `get mqtt.tx`
+- `set mqtt.tx <on|off|advert>`
+
+**Parameters:**
+- `on`: uplink all transmitted (TX) packets to MQTT brokers
+- `advert`: uplink only this node's own advert packets (self-originated advertisements only — forwarded adverts from other nodes are filtered out)
+- `off`: disable TX packet uplinking
+
+**Default:** `off`
+
+> **Note:** `mqtt.rx` and `mqtt.tx` take effect immediately — no restart required. Both can be enabled simultaneously.
 
 ---
 

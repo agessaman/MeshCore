@@ -122,8 +122,11 @@ int MQTTMessageBuilder::buildPacketMessage(
   root["route"] = route;
   root["payload_len"] = payload_len_str;
   root["raw"] = raw;
-  root["SNR"] = snr_str;
-  root["RSSI"] = rssi_str;
+  // SNR and RSSI are only meaningful for RX packets (received from radio)
+  if (strcmp(direction, "rx") == 0) {
+    root["SNR"] = snr_str;
+    root["RSSI"] = rssi_str;
+  }
   root["hash"] = hash;
   
   if (path && strlen(path) > 0) {

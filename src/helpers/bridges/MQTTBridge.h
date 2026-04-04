@@ -110,7 +110,8 @@ private:
   bool _status_enabled;
   bool _packets_enabled;
   bool _raw_enabled;
-  bool _tx_enabled;
+  bool _rx_enabled;
+  uint8_t _tx_mode;  // 0=off, 1=all TX, 2=self-advert only
   unsigned long _last_status_publish;
   unsigned long _status_interval;
 

@@ -219,10 +219,8 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_MQTT_BRIDGE
-  if (_prefs.bridge_enabled && _prefs.bridge_pkt_src == 1) {
-    // Log received packets to MQTT (same as repeater)
-    if (bridge) bridge->onPacketReceived(pkt);
-  }
+  // MQTT bridge: always feed RX packets — bridge decides based on mqtt.rx setting
+  if (_prefs.bridge_enabled && bridge) bridge->onPacketReceived(pkt);
 #endif
 
   if (_logging) {
@@ -245,10 +243,8 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef WITH_MQTT_BRIDGE
-  if (_prefs.bridge_enabled && _prefs.bridge_pkt_src == 0) {
-    // Log transmitted packets to MQTT (same as repeater)
-    if (bridge) bridge->sendPacket(pkt);
-  }
+  // MQTT bridge: always feed TX packets — bridge decides based on mqtt.tx setting
+  if (_prefs.bridge_enabled && bridge) bridge->sendPacket(pkt);
 #endif
 
   if (_logging) {
@@ -673,6 +669,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.mqtt_packets_enabled = 1;   // enabled
   _prefs.mqtt_raw_enabled = 0;       // disabled
   _prefs.mqtt_tx_enabled = 0;        // disabled (RX only for now)
+  _prefs.mqtt_rx_enabled = 1;        // RX packets enabled by default
   _prefs.mqtt_status_interval = 300000; // 5 minutes
   
   // WiFi defaults (same as repeater)
