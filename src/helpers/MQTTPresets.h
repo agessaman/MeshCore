@@ -1,7 +1,17 @@
 #pragma once
 
-// Maximum number of configurable MQTT connection slots (available to all builds for struct layout)
+// Maximum number of configurable MQTT connection slots (available to all builds for struct layout).
+// Used in NodePrefs/MQTTPrefs for persistent storage — do NOT change without migration.
 static const int MAX_MQTT_SLOTS = 6;
+
+// Runtime slot array size: fewer slots on non-PSRAM boards to save ~1.2KB of heap.
+// Non-PSRAM boards are limited to 2 active connections (_max_active_slots), so 3 runtime
+// slots (2 active + 1 spare for reconfiguration) is sufficient.
+#if defined(BOARD_HAS_PSRAM)
+static const int RUNTIME_MQTT_SLOTS = 6;
+#else
+static const int RUNTIME_MQTT_SLOTS = 3;
+#endif
 
 #ifdef WITH_MQTT_BRIDGE
 

@@ -95,7 +95,7 @@ private:
   };
 
   static const size_t AUTH_TOKEN_SIZE = 768;
-  MQTTSlot _slots[MAX_MQTT_SLOTS];
+  MQTTSlot _slots[RUNTIME_MQTT_SLOTS];
 
   // JWT username shared across all JWT-auth slots (same device identity)
   char _jwt_username[70];  // Format: v1_{UPPERCASE_PUBLIC_KEY}
@@ -122,12 +122,16 @@ private:
     mesh::Packet packet_copy;  // ~258 bytes, full value copy
     unsigned long timestamp;
     bool is_tx;
-    // Store raw radio data with each packet to avoid it being overwritten
-    uint8_t raw_data[256];
-    int raw_len;
     float snr;
     float rssi;
+#if defined(BOARD_HAS_PSRAM)
+    // Store raw radio data with each packet to avoid it being overwritten.
+    // On non-PSRAM boards, raw hex is reconstructed from packet_copy.writeTo()
+    // at publish time to save ~2.5KB of heap (256 bytes × MAX_QUEUE_SIZE).
+    uint8_t raw_data[256];
+    int raw_len;
     bool has_raw_data;
+#endif
   };
 
   #if defined(BOARD_HAS_PSRAM)
@@ -165,7 +169,7 @@ private:
   int _max_active_slots;   // Runtime limit: 5 with PSRAM, 2 without
 
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
-  volatile bool _slot_reconfigure_pending[MAX_MQTT_SLOTS];
+  volatile bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS];
 
   // Timezone handling
   Timezone* _timezone;
