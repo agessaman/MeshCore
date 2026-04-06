@@ -77,10 +77,10 @@ get mqtt.status
 
 The MQTT bridge implementation provides:
 - Up to 6 MQTT connection slots with built-in presets
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, and CascadiaMesh
+- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, and TennMesh
 - Custom broker support with username/password authentication
-- JWT (Ed25519 device signing) authentication for preset brokers
-- WSS (WebSocket Secure) and direct MQTT transport
+- JWT (Ed25519 device signing) authentication for most preset brokers; TennMesh uses a fixed username/password (plain MQTT)
+- WSS (WebSocket Secure), direct MQTT/TLS, and plain MQTT (TennMesh) transport
 - Automatic reconnection with exponential backoff
 - JSON message formatting for status, packets, and raw data
 - Packet queuing during connection issues
@@ -103,6 +103,7 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `waev` | mqtt.waev.app:443 | JWT (Ed25519) | WSS |
 | `meshomatic` | us-east.meshomatic.net:443 | JWT (Ed25519) | WSS |
 | `cascadiamesh` | mqtt-v1.cascadiamesh.org:443 | JWT (Ed25519) | WSS |
+| `tennmesh` | mqtt.tennmesh.com:1883 | Username/password (fixed in firmware) | Plain MQTT |
 | `custom` | User-configured | Username/Password | MQTT or WSS |
 | `none` | (disabled) | — | — |
 
@@ -186,7 +187,7 @@ You can flash the merged firmware using either the web flasher or the command li
 
 The MQTT bridge comes with the following defaults for fresh installs:
 - **Origin**: Device name (set automatically from `set name`)
-- **IATA**: (blank — must be configured for Analyzer presets)
+- **IATA**: (blank — must be configured for MeshCore-style topic presets such as Analyzer and TennMesh)
 - **Status Messages**: Enabled
 - **Packet Messages**: Enabled
 - **Raw Messages**: Disabled
@@ -229,6 +230,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset waev` - Set slot N to Waev
 - `set mqttN.preset meshomatic` - Set slot N to Meshomatic
 - `set mqttN.preset cascadiamesh` - Set slot N to CascadiaMesh
+- `set mqttN.preset tennmesh` - Set slot N to TennMesh (plain MQTT; same `meshcore/{iata}/...` topics as Analyzer US)
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
 - `set mqttN.server <hostname>` - Set custom server hostname for slot N
@@ -305,7 +307,7 @@ When a slot's preset is `custom`, you can define a custom topic template using p
 
 If no custom topic is set, custom slots default to: `meshcore/{iata}/{device}/{type}`
 
-**Note:** Topic templates only apply to `custom` preset slots. Built-in presets (analyzer-us, analyzer-eu, meshmapper, meshrank, etc.) always use their hardcoded topic format.
+**Note:** Topic templates only apply to `custom` preset slots. Built-in presets (analyzer-us, analyzer-eu, meshmapper, meshrank, tennmesh, etc.) always use their hardcoded topic format.
 
 ### MQTT Shared Commands
 
@@ -496,10 +498,10 @@ Minimal raw packet data for map integration.
 
 ### Slot-Based Preset System
 - Up to 6 concurrent MQTT connections (with PSRAM), 2 without PSRAM
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, and CascadiaMesh
+- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, and TennMesh
 - Custom broker support with username/password auth and custom topic templates
-- JWT (Ed25519) authentication for preset brokers, token-in-topic for MeshRank
-- WSS (WebSocket Secure) and direct MQTT over TLS transport
+- JWT (Ed25519) for most preset brokers; MeshRank uses token-in-topic; TennMesh uses fixed username/password over plain MQTT
+- WSS (WebSocket Secure), direct MQTT over TLS, and plain MQTT (TennMesh)
 - Automatic reconnection with exponential backoff per slot
 - Circuit breaker pattern with periodic probes for recovery from prolonged outages
 - JWT token buffers only allocated for JWT-auth slots (memory efficient)
@@ -529,8 +531,8 @@ Minimal raw packet data for map integration.
 - Proper UTC system time handling
 
 ### Authentication
-- **JWT Authentication**: Ed25519-signed tokens for secure MQTT authentication (used by all built-in presets except meshrank and cascadiamesh)
-- **Username/Password**: Standard MQTT authentication for custom brokers
+- **JWT Authentication**: Ed25519-signed tokens for brokers that expect JWT (most built-in presets; not MeshRank or TennMesh). For `custom` slots, JWT is used when `audience` is set.
+- **Username/Password**: Custom brokers; TennMesh also uses fixed credentials embedded in the `tennmesh` preset (plain MQTT, no TLS)
 - **Username Format** (JWT): `v1_{UPPERCASE_PUBLIC_KEY}`
 - **Automatic Token Renewal**: Tokens are renewed before expiration
 
@@ -637,7 +639,7 @@ get mqtt1.diag             # Last slot error details (TLS/sock/time)
 get mqtt2.diag
 get mqtt3.diag
 get mqtt1.preset           # Verify slots are configured
-get mqtt.iata              # IATA must be set for Analyzer presets
+get mqtt.iata              # IATA must be set for MeshCore-topic presets (e.g. Analyzer, TennMesh)
 ```
 
 #### Timezone Issues

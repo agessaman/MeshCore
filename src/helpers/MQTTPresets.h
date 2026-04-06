@@ -36,6 +36,8 @@ struct MQTTPresetDef {
   unsigned long token_lifetime; // JWT token lifetime in seconds (0 = use default 86400)
   bool allow_retain;            // Whether the broker allows the MQTT retain flag
   uint16_t keepalive;           // MQTT keepalive in seconds (0 = library default 120s)
+  const char* userpass_username; // MQTT_AUTH_USERPASS: broker username; else nullptr
+  const char* userpass_password; // MQTT_AUTH_USERPASS: broker password; else nullptr
 };
 
 // Google Trust Services - GTS Root R4 (used by LetsMesh Analyzer)
@@ -97,17 +99,18 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 7;
+static const int MQTT_PRESET_COUNT = 8;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
-  { "analyzer-us",   "wss://mqtt-us-v1.letsmesh.net:443/mqtt", "mqtt-us-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
-  { "analyzer-eu",   "wss://mqtt-eu-v1.letsmesh.net:443/mqtt", "mqtt-eu-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
-  { "meshmapper",    "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",      ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
-  { "meshrank",      "mqtts://meshrank.net:8883",               nullptr,                   ISRG_ROOT_X1, MQTT_AUTH_NONE, MQTT_TOPIC_MESHRANK, 0,    false, 0 },
-  { "waev",          "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",           GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 3300, false, 55 },
-  { "meshomatic",    "wss://us-east.meshomatic.net:443/mqtt",    "us-east.meshomatic.net",  ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
-  { "cascadiamesh",  "wss://mqtt-v1.cascadiamesh.org:443/mqtt",  "mqtt-v1.cascadiamesh.org", ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55 },
+  { "analyzer-us",   "wss://mqtt-us-v1.letsmesh.net:443/mqtt", "mqtt-us-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
+  { "analyzer-eu",   "wss://mqtt-eu-v1.letsmesh.net:443/mqtt", "mqtt-eu-v1.letsmesh.net", GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
+  { "meshmapper",    "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",      ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 3300,  true,  55, nullptr, nullptr },
+  { "meshrank",      "mqtts://meshrank.net:8883",               nullptr,                   ISRG_ROOT_X1, MQTT_AUTH_NONE, MQTT_TOPIC_MESHRANK, 0,    false, 0, nullptr, nullptr },
+  { "waev",          "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",           GTS_ROOT_R4,  MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 3300, false, 55, nullptr, nullptr },
+  { "meshomatic",    "wss://us-east.meshomatic.net:443/mqtt",    "us-east.meshomatic.net",  ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
+  { "cascadiamesh",  "wss://mqtt-v1.cascadiamesh.org:443/mqtt",  "mqtt-v1.cascadiamesh.org", ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
+  { "tennmesh",      "mqtt://mqtt.tennmesh.com:1883",            nullptr,                   nullptr,      MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0, true, 55, "mqttfeed", "tc2live" },
 };
 
 // Find a preset by name, returns nullptr if not found

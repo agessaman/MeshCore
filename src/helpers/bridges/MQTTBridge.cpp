@@ -181,8 +181,10 @@ const char* MQTTBridge::wifiReasonStr(uint8_t reason) {
     case 2:   return "auth expired";
     case 4:   return "assoc timeout";
     case 8:   return "AP disconnected";
-    case 15:  return "wrong password";
+    case 15:  return "4-way handshake timeout";
+    case 34:  return "AP state mismatch (class 3 frame)";
     case 39:  return "SSID not found";
+    case 63:  return "SA query timeout (PMF)";
     case 200: return "signal lost";
     case 201: return "security mismatch";
     case 202: return "auth mode rejected";
@@ -301,7 +303,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
       _snmp_agent(nullptr),
 #endif
       _last_wifi_check(0), _last_wifi_status(WL_DISCONNECTED), _wifi_status_initialized(false),
-      _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0)
+      _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
+      _last_slot_reconnect_ms(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr), _raw_data_mutex(nullptr),
         _mqtt_task_stack(nullptr), _packet_queue_storage(nullptr)
@@ -748,7 +751,16 @@ void MQTTBridge::mqttTaskLoop() {
     #endif
 
     unsigned long now = millis();
-    handleWiFiConnection(now);
+    bool wifi_just_connected = handleWiFiConnection(now);
+    if (wifi_just_connected) {
+      // WiFi recovered — reset last_reconnect_attempt for disconnected slots so they
+      // retry immediately rather than waiting up to 5 min for backoff timers to expire.
+      for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+        if (_slots[i].enabled && _slots[i].initial_connect_done && !_slots[i].connected) {
+          _slots[i].last_reconnect_attempt = 0;
+        }
+      }
+    }
 
     // Check for pending NTP sync (triggered from WiFi event handler)
     if (_ntp_sync_pending && WiFi.status() == WL_CONNECTED) {
@@ -1025,6 +1037,9 @@ void MQTTBridge::setupSlot(int index) {
       if (slot.auth_token && strlen(slot.auth_token) > 0) {
         slot.client->setCredentials(_jwt_username, slot.auth_token);
       }
+    } else if (slot.preset->auth_type == MQTT_AUTH_USERPASS &&
+               slot.preset->userpass_username && slot.preset->userpass_password) {
+      slot.client->setCredentials(slot.preset->userpass_username, slot.preset->userpass_password);
     }
   } else {
     // Custom broker slot — build persistent URI
@@ -1194,8 +1209,12 @@ void MQTTBridge::maintainSlotConnections() {
   }
 
   // Only allow one reconnect attempt per maintenance cycle to avoid
-  // multiple simultaneous TLS handshakes blocking the network stack
-  bool reconnect_attempted_this_cycle = false;
+  // multiple simultaneous TLS handshakes blocking the network stack.
+  // Time-based guard: block reconnects if any slot reconnected within the last 15 s,
+  // ensuring the previous TLS handshake (and its Core-0-expensive completion events)
+  // finish before the next slot begins its own handshake.
+  const unsigned long RECONNECT_GUARD_MS = 15000UL;
+  bool reconnect_attempted_this_cycle = (now_millis - _last_slot_reconnect_ms < RECONNECT_GUARD_MS);
   // Only allow one full teardown+setup per cycle to limit heap fragmentation
   // when multiple slots fail simultaneously
   bool teardown_attempted_this_cycle = false;
@@ -1261,11 +1280,12 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           // to avoid internal heap leak/fragmentation from destroy/create cycles
           MQTT_DEBUG_PRINTLN("MQTT%d token renewal: reconnecting with fresh credentials", index + 1);
           if (slot.client->connected()) {
-            slot.client->disconnect();
+            slot.client->disconnect();  // stops the client internally
           }
           slot.client->setCredentials(_jwt_username, slot.auth_token);
-          slot.client->reconnect();
+          slot.client->connect();  // restart stopped client; reconnect() fails silently on a stopped client
           reconnect_attempted = true;
+          _last_slot_reconnect_ms = now_millis;
         } else {
           // Token renewed but old one still valid — just update credentials for next reconnect
           slot.client->setCredentials(_jwt_username, slot.auth_token);
@@ -1288,6 +1308,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
     if (probe_elapsed >= CIRCUIT_BREAKER_PROBE_INTERVAL_MS) {
       slot.last_reconnect_attempt = now_millis;
       reconnect_attempted = true;
+      _last_slot_reconnect_ms = now_millis;
       MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms)", index + 1, probe_elapsed);
       if (slot_uses_jwt) {
         unsigned long current_time = time(nullptr);
@@ -1353,23 +1374,26 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       }
       MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures);
       reconnect_attempted = true;
+      _last_slot_reconnect_ms = now_millis;
       if (slot_uses_jwt) {
         unsigned long current_time = time(nullptr);
         bool token_still_valid = slot.token_expires_at > 0 &&
                                 current_time < slot.token_expires_at &&
                                 (slot.token_expires_at - current_time) > 120; // >2 min remaining
 
-        if (token_still_valid && slot.reconnect_backoff <= 2) {
-          // Lightweight reconnect — reuse existing client but refresh JWT for fresh iat
+        if (token_still_valid) {
+          // Token valid — always lightweight reconnect regardless of backoff level.
+          // Avoids creating a new TLS session (teardown+setup) which can race with
+          // WiFi association and cause drops when multiple slots do it simultaneously.
           if (createSlotAuthToken(index)) {
             slot.client->setCredentials(_jwt_username, slot.auth_token);
-            MQTT_DEBUG_PRINTLN("MQTT%d lightweight reconnect (fresh token, expires in %lu sec)", index + 1, slot.token_expires_at - (unsigned long)time(nullptr));
+            MQTT_DEBUG_PRINTLN("MQTT%d reconnect (fresh token, backoff %d)", index + 1, slot.reconnect_backoff);
           } else {
-            MQTT_DEBUG_PRINTLN("MQTT%d lightweight reconnect (token refresh failed, using existing)", index + 1);
+            MQTT_DEBUG_PRINTLN("MQTT%d reconnect (token refresh failed, backoff %d)", index + 1, slot.reconnect_backoff);
           }
           slot.client->reconnect();
         } else {
-          // Full teardown: token expired/near expiry, or lightweight reconnect failed (backoff 3+)
+          // Token expired — full teardown to get fresh TLS context + credentials
           if (teardown_attempted) {
             // Defer to next cycle to limit heap fragmentation from simultaneous teardowns
             slot.last_reconnect_attempt = now_millis;
@@ -1378,7 +1402,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           teardown_attempted = true;
           uint8_t saved_backoff = slot.reconnect_backoff;
           uint8_t saved_failures = slot.max_backoff_failures;
-          MQTT_DEBUG_PRINTLN("MQTT%d full teardown+setup for reconnect (backoff %d)", index + 1, saved_backoff);
+          MQTT_DEBUG_PRINTLN("MQTT%d full teardown+setup (token expired, backoff %d)", index + 1, saved_backoff);
           teardownSlot(index);
           setupSlot(index);
           _slots[index].reconnect_backoff = saved_backoff;
@@ -1386,26 +1410,11 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           _slots[index].last_reconnect_attempt = now_millis;
         }
       } else {
-        // Non-JWT slots
-        if (slot.reconnect_backoff <= 2) {
-          // Lightweight reconnect on existing client
-          slot.client->reconnect();
-        } else {
-          // Full teardown after lightweight reconnect failed (backoff 3+)
-          if (teardown_attempted) {
-            slot.last_reconnect_attempt = now_millis;
-            return;
-          }
-          teardown_attempted = true;
-          uint8_t saved_backoff = slot.reconnect_backoff;
-          uint8_t saved_failures = slot.max_backoff_failures;
-          MQTT_DEBUG_PRINTLN("MQTT%d full teardown+setup for reconnect (backoff %d)", index + 1, saved_backoff);
-          teardownSlot(index);
-          setupSlot(index);
-          _slots[index].reconnect_backoff = saved_backoff;
-          _slots[index].max_backoff_failures = saved_failures;
-          _slots[index].last_reconnect_attempt = now_millis;
-        }
+        // Non-JWT slots — always lightweight reconnect on existing client.
+        // recreateMqttClientsForFragmentationRecovery() handles teardown when
+        // memory pressure warrants it, without the timing hazard here.
+        MQTT_DEBUG_PRINTLN("MQTT%d reconnect (non-JWT, backoff %d)", index + 1, slot.reconnect_backoff);
+        slot.client->reconnect();
       }
     }
   }
