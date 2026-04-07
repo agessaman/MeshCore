@@ -198,6 +198,7 @@ const char* MQTTBridge::tlsErrorStr(int32_t err) {
     case 0x8002: return "socket error";
     case 0x8004: return "connect refused";
     case 0x8006: return "TLS timeout";
+    case 0x8008: return "connection timeout";
     case 0x800B: return "cert verify failed";
     case 0x8010: return "mbedTLS error";
     default:     return nullptr;
@@ -1286,6 +1287,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           slot.client->connect();  // restart stopped client; reconnect() fails silently on a stopped client
           reconnect_attempted = true;
           _last_slot_reconnect_ms = now_millis;
+          MQTT_DEBUG_PRINTLN("MQTT%d int_heap=%d at token renewal reconnect", index + 1,
+              (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         } else {
           // Token renewed but old one still valid — just update credentials for next reconnect
           slot.client->setCredentials(_jwt_username, slot.auth_token);
@@ -1309,7 +1312,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       slot.last_reconnect_attempt = now_millis;
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
-      MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms)", index + 1, probe_elapsed);
+      MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms, int_heap=%d)", index + 1, probe_elapsed,
+          (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       if (slot_uses_jwt) {
         unsigned long current_time = time(nullptr);
         bool token_still_valid = slot.token_expires_at > 0 &&
@@ -1372,7 +1376,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           return;
         }
       }
-      MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures);
+      MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d, int_heap=%d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures,
+          (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
       if (slot_uses_jwt) {
@@ -1662,11 +1667,14 @@ void MQTTBridge::publishStatusToSlot(int index) {
     recv_errors = (int)_radio->getPacketsRecvErrors();
   }
 
+  // Internal heap free (for diagnosing repeater hangs from internal heap exhaustion)
+  int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
   int len = MQTTMessageBuilder::buildStatusMessage(
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
-    tx_air_secs, rx_air_secs, recv_errors
+    tx_air_secs, rx_air_secs, recv_errors, internal_heap_free
   );
 
   if (len > 0) {
@@ -2277,11 +2285,14 @@ bool MQTTBridge::publishStatus() {
     recv_errors = (int)_radio->getPacketsRecvErrors();
   }
 
+  // Internal heap free (for diagnosing repeater hangs from internal heap exhaustion)
+  int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
   int len = MQTTMessageBuilder::buildStatusMessage(
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
-    tx_air_secs, rx_air_secs, recv_errors
+    tx_air_secs, rx_air_secs, recv_errors, internal_heap_free
   );
 
   if (len > 0) {
@@ -2615,13 +2626,14 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
 
   size_t free_h = ESP.getFreeHeap();
   size_t max_alloc = ESP.getMaxAllocHeap();
+  size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  size_t internal_max_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
   #ifdef MQTT_MEMORY_DEBUG
-  unsigned long internal_f = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   unsigned long spiram_f = 0;
   #ifdef BOARD_HAS_PSRAM
   spiram_f = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   #endif
-  agentLogHeap("MQTTBridge.cpp:runCriticalMemoryCheckAndRecovery", "critical_memory_check", "H1_H4", free_h, max_alloc, internal_f, spiram_f);
+  agentLogHeap("MQTTBridge.cpp:runCriticalMemoryCheckAndRecovery", "critical_memory_check", "H1_H4", free_h, max_alloc, internal_free, spiram_f);
   #endif
 
   // Pressure timer: track how long max_alloc has been below moderate threshold
@@ -2637,11 +2649,29 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   static unsigned long last_critical_log = 0;
   if (now - last_critical_log >= CRITICAL_LOG_INTERVAL_MS) {
     last_critical_log = now;
+
+    // Always log heap state including internal heap (critical for diagnosing
+    // repeater hangs caused by internal heap exhaustion masked by PSRAM)
+    MQTT_DEBUG_PRINTLN("Heap: free=%d max=%d int_free=%d int_max=%d",
+        (int)free_h, (int)max_alloc, (int)internal_free, (int)internal_max_block);
+
     if (max_alloc < PRESSURE_THRESHOLD_CRITICAL) {
       MQTT_DEBUG_PRINTLN("CRITICAL: Low memory! Free: %d, Max: %d", (int)free_h, (int)max_alloc);
     } else if (max_alloc < PRESSURE_THRESHOLD_MODERATE) {
       MQTT_DEBUG_PRINTLN("WARNING: Memory pressure. Free: %d, Max: %d", (int)free_h, (int)max_alloc);
     }
+
+    // Internal heap pressure check (PSRAM boards only — total heap can look fine
+    // while internal heap is exhausted, starving WiFi driver and Core 1)
+    #if defined(BOARD_HAS_PSRAM)
+    const size_t INTERNAL_HEAP_CRITICAL = 40000;
+    const size_t INTERNAL_BLOCK_CRITICAL = 20000;
+    if (internal_free < INTERNAL_HEAP_CRITICAL || internal_max_block < INTERNAL_BLOCK_CRITICAL) {
+      MQTT_DEBUG_PRINTLN("CRITICAL: Internal heap low! int_free=%d int_max_block=%d",
+          (int)internal_free, (int)internal_max_block);
+    }
+    #endif
+
     // Log slot client count
     int n_active = 0;
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
