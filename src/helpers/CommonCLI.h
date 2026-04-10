@@ -235,6 +235,7 @@ public:
   };
   virtual void formatStatsReply(char *reply) = 0;
   virtual void formatRadioStatsReply(char *reply) = 0;
+  virtual void formatRadioDiagReply(char *reply) { strcpy(reply, "Not supported"); }
   virtual void formatPacketStatsReply(char *reply) = 0;
   virtual mesh::LocalIdentity& getSelfId() = 0;
   virtual void saveIdentity(const mesh::LocalIdentity& new_id) = 0;

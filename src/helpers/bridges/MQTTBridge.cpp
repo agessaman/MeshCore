@@ -1289,6 +1289,9 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           _last_slot_reconnect_ms = now_millis;
           MQTT_DEBUG_PRINTLN("MQTT%d int_heap=%d at token renewal reconnect", index + 1,
               (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+          MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
+              _radio ? _radio->getRadioState() : -1,
+              (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
         } else {
           // Token renewed but old one still valid — just update credentials for next reconnect
           slot.client->setCredentials(_jwt_username, slot.auth_token);
@@ -1314,6 +1317,9 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       _last_slot_reconnect_ms = now_millis;
       MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms, int_heap=%d)", index + 1, probe_elapsed,
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+      MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
+          _radio ? _radio->getRadioState() : -1,
+          (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       if (slot_uses_jwt) {
         unsigned long current_time = time(nullptr);
         bool token_still_valid = slot.token_expires_at > 0 &&
@@ -1378,6 +1384,9 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       }
       MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d, int_heap=%d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures,
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+      MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
+          _radio ? _radio->getRadioState() : -1,
+          (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
       if (slot_uses_jwt) {
@@ -1805,6 +1814,9 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
   if (!_wifi_status_initialized) {
     _last_wifi_status = current_wifi_status;
     _wifi_status_initialized = true;
+    if (current_wifi_status != WL_CONNECTED) {
+      _wifi_disconnected_time = now;
+    }
   }
   if (now - _last_wifi_check <= 10000) {
     return false;

@@ -58,6 +58,19 @@ void Dispatcher::loop() {
     _err_flags |= ERR_EVENT_STARTRX_TIMEOUT;
   }
 
+  // Radio watchdog: detect radio stuck in RX mode but not receiving any packets
+  if (is_recv && _radio->getLastRecvMillis() > 0) {
+    unsigned long silent_ms = _ms->getMillis() - _radio->getLastRecvMillis();
+    unsigned long since_recovery = _ms->getMillis() - last_watchdog_recovery;
+    if (silent_ms > RADIO_WATCHDOG_MS && since_recovery > RADIO_WATCHDOG_MS) {
+      _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
+      MESH_DEBUG_PRINTLN("Radio watchdog: silent %lu ms, state=%d, recovering", silent_ms, _radio->getRadioState());
+      _radio->idle();
+      _radio->startRecv();
+      last_watchdog_recovery = _ms->getMillis();
+    }
+  }
+
   if (outbound) {  // waiting for outbound send to be completed
     if (_radio->isSendComplete()) {
       long t = _ms->getMillis() - outbound_start;

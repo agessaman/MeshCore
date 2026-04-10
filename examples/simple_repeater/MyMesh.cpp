@@ -1196,6 +1196,10 @@ void MyMesh::formatRadioStatsReply(char *reply) {
   StatsFormatHelper::formatRadioStats(reply, _radio, radio_driver, getTotalAirTime(), getReceiveAirTime());
 }
 
+void MyMesh::formatRadioDiagReply(char *reply) {
+  StatsFormatHelper::formatRadioDiag(reply, _radio, radio_driver, *_ms, _err_flags, hasOutbound());
+}
+
 void MyMesh::formatPacketStatsReply(char *reply) {
   StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(), 
                                        getNumRecvFlood(), getNumRecvDirect());
