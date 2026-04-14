@@ -12,13 +12,14 @@ protected:
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
   unsigned long last_recv_millis;
+  unsigned long last_radio_interrupt_millis;  // updated on any ISR event, even CRC errors
 
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
 
 public:
-  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board) { n_recv = n_sent = 0; last_recv_millis = 0; }
+  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board) { n_recv = n_sent = 0; last_recv_millis = 0; last_radio_interrupt_millis = 0; }
 
   void idle() override;
   void startRecv() override;
@@ -54,6 +55,7 @@ public:
 
   uint8_t getRadioState() const override;
   unsigned long getLastRecvMillis() const override { return last_recv_millis; }
+  unsigned long getLastRadioInterruptMillis() const override { return last_radio_interrupt_millis; }
 
   virtual float getLastRSSI() const override;
   virtual float getLastSNR() const override;

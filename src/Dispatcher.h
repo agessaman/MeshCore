@@ -72,6 +72,7 @@ public:
 
   virtual uint8_t getRadioState() const { return 0; }
   virtual unsigned long getLastRecvMillis() const { return 0; }
+  virtual unsigned long getLastRadioInterruptMillis() const { return 0; }
 
   virtual bool isInRecvMode() const = 0;
 
@@ -132,6 +133,7 @@ class Dispatcher {
   Packet* outbound;  // current outbound packet
   unsigned long outbound_expiry, outbound_start, total_air_time, rx_air_time;
   unsigned long last_watchdog_recovery;
+  unsigned long last_radio_active_ms;   // updated on any TX or RX event; used by watchdog
   unsigned long next_tx_time;
   unsigned long cad_busy_start;
   unsigned long radio_nonrx_start;
@@ -160,6 +162,7 @@ protected:
     radio_nonrx_start = 0;
     prev_isrecv_mode = true;
     last_watchdog_recovery = 0;
+    last_radio_active_ms = 0;
   }
 
   virtual DispatcherAction onRecvPacket(Packet* pkt) = 0;
