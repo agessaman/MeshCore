@@ -307,7 +307,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
       _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
       _last_slot_reconnect_ms(0)
 #ifdef ESP_PLATFORM
-      , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr), _raw_data_mutex(nullptr),
+      , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _mqtt_task_stack(nullptr), _packet_queue_storage(nullptr)
 #else
       , _queue_head(0), _queue_tail(0)
@@ -531,15 +531,6 @@ void MQTTBridge::begin() {
     return;
   }
 
-  // Create mutex for raw radio data protection
-  _raw_data_mutex = xSemaphoreCreateMutex();
-  if (_raw_data_mutex == nullptr) {
-    MQTT_DEBUG_PRINTLN("Failed to create raw data mutex!");
-    vQueueDelete(_packet_queue_handle);
-    _packet_queue_handle = nullptr;
-    return;
-  }
-
   // Create FreeRTOS task for MQTT/WiFi processing on Core 0
   #ifndef MQTT_TASK_CORE
   #define MQTT_TASK_CORE 0
@@ -573,8 +564,6 @@ void MQTTBridge::begin() {
     _packet_queue_handle = nullptr;
     psram_free(_packet_queue_storage);
     _packet_queue_storage = nullptr;
-    vSemaphoreDelete(_raw_data_mutex);
-    _raw_data_mutex = nullptr;
     return;
   }
 
@@ -624,11 +613,6 @@ void MQTTBridge::end() {
   psram_free(_packet_queue_storage);
   _packet_queue_storage = nullptr;
 
-  // Delete mutex
-  if (_raw_data_mutex != nullptr) {
-    vSemaphoreDelete(_raw_data_mutex);
-    _raw_data_mutex = nullptr;
-  }
   #else
   // Clean up queued packet references
   // Packets are value-copied in the queue, so no external pointers to clean up.
@@ -1623,16 +1607,9 @@ void MQTTBridge::publishStatusToSlot(int index) {
   }
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
+  // _status_json_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
-  char* json_buffer = fallback_status_buffer;
-  bool status_buffer_locked = false;
-  #ifdef ESP_PLATFORM
-  if (_status_json_buffer != nullptr && _raw_data_mutex != nullptr &&
-      xSemaphoreTake(_raw_data_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-    json_buffer = _status_json_buffer;
-    status_buffer_locked = true;
-  }
-  #endif
+  char* json_buffer = (_status_json_buffer != nullptr) ? _status_json_buffer : fallback_status_buffer;
 
   char origin_id[65];
   char timestamp[32];
@@ -1692,11 +1669,6 @@ void MQTTBridge::publishStatusToSlot(int index) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
     }
   }
-  #ifdef ESP_PLATFORM
-  if (status_buffer_locked) {
-    xSemaphoreGive(_raw_data_mutex);
-  }
-  #endif
 }
 
 void MQTTBridge::updateCachedConnectionStatus() {
@@ -2161,16 +2133,20 @@ void MQTTBridge::processPacketQueue() {
       break;  // No more packets
     }
 
-    // Publish packet (use stored raw data if available)
-#if defined(BOARD_HAS_PSRAM)
+    // Update Core 0-owned last-raw-data for publishStatus() — no mutex needed since
+    // _last_raw_data is now written only here (Core 0) and read only by publishStatus() (Core 0).
+    if (!queued.is_tx && queued.has_raw_data && _last_raw_data) {
+      memcpy(_last_raw_data, queued.raw_data, queued.raw_len);
+      _last_raw_len       = queued.raw_len;
+      _last_snr           = queued.snr;
+      _last_rssi          = queued.rssi;
+      _last_raw_timestamp = millis();
+    }
+
     publishPacket(&queued.packet_copy, queued.is_tx,
                   queued.has_raw_data ? queued.raw_data : nullptr,
-                  queued.has_raw_data ? queued.raw_len : 0,
+                  queued.has_raw_data ? queued.raw_len  : 0,
                   queued.snr, queued.rssi);
-#else
-    publishPacket(&queued.packet_copy, queued.is_tx,
-                  nullptr, 0, queued.snr, queued.rssi);
-#endif
 
     // Publish raw if enabled
     if (_raw_enabled) {
@@ -2215,15 +2191,18 @@ void MQTTBridge::processPacketQueue() {
 
     QueuedPacket& queued = _packet_queue[_queue_head];
 
-#if defined(BOARD_HAS_PSRAM)
+    if (!queued.is_tx && queued.has_raw_data && _last_raw_data) {
+      memcpy(_last_raw_data, queued.raw_data, queued.raw_len);
+      _last_raw_len       = queued.raw_len;
+      _last_snr           = queued.snr;
+      _last_rssi          = queued.rssi;
+      _last_raw_timestamp = millis();
+    }
+
     publishPacket(&queued.packet_copy, queued.is_tx,
                   queued.has_raw_data ? queued.raw_data : nullptr,
-                  queued.has_raw_data ? queued.raw_len : 0,
+                  queued.has_raw_data ? queued.raw_len  : 0,
                   queued.snr, queued.rssi);
-#else
-    publishPacket(&queued.packet_copy, queued.is_tx,
-                  nullptr, 0, queued.snr, queued.rssi);
-#endif
 
     if (_raw_enabled) {
       publishRaw(&queued.packet_copy);
@@ -2245,16 +2224,9 @@ bool MQTTBridge::publishStatus() {
   }
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
+  // _status_json_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
-  char* json_buffer = fallback_status_buffer;
-  bool status_buffer_locked = false;
-  #ifdef ESP_PLATFORM
-  if (_status_json_buffer != nullptr && _raw_data_mutex != nullptr &&
-      xSemaphoreTake(_raw_data_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-    json_buffer = _status_json_buffer;
-    status_buffer_locked = true;
-  }
-  #endif
+  char* json_buffer = (_status_json_buffer != nullptr) ? _status_json_buffer : fallback_status_buffer;
   char origin_id[65];
   char timestamp[32];
   char radio_info[64];
@@ -2326,20 +2298,10 @@ bool MQTTBridge::publishStatus() {
     // treat as success to avoid infinite retry loops
     if (published || !any_slot_wants_status) {
       if (published) MQTT_DEBUG_PRINTLN("Status published");
-      #ifdef ESP_PLATFORM
-      if (status_buffer_locked) {
-        xSemaphoreGive(_raw_data_mutex);
-      }
-      #endif
       return true;
     }
   }
 
-  #ifdef ESP_PLATFORM
-  if (status_buffer_locked) {
-    xSemaphoreGive(_raw_data_mutex);
-  }
-  #endif
   return false;
 }
 
@@ -2490,23 +2452,17 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   queued.snr = 0.0f;
   queued.rssi = 0.0f;
 
-  // Capture raw radio data with mutex protection
-  if (!is_tx) {
-    if (xSemaphoreTake(_raw_data_mutex, 0) == pdTRUE) {
-      unsigned long current_time = millis();
-      if (_last_raw_len > 0 && (current_time - _last_raw_timestamp) < 1000) {
-#if defined(BOARD_HAS_PSRAM)
-        if (_last_raw_data && _last_raw_len <= (int)sizeof(queued.raw_data)) {
-          memcpy(queued.raw_data, _last_raw_data, _last_raw_len);
-          queued.raw_len = _last_raw_len;
-          queued.has_raw_data = true;
-        }
-#endif
-        queued.snr = _last_snr;
-        queued.rssi = _last_rssi;
-      }
-      xSemaphoreGive(_raw_data_mutex);
+  // Consume staged raw data (written by storeRawRadioData() on Core 1, same call sequence).
+  // No mutex needed — both sites run on Core 1 before xQueueSend() crosses the core boundary.
+  if (!is_tx && _staged_raw_valid) {
+    if (_staged_raw_len <= (int)sizeof(queued.raw_data)) {
+      memcpy(queued.raw_data, _staged_raw, _staged_raw_len);
+      queued.raw_len    = (uint8_t)_staged_raw_len;
+      queued.has_raw_data = true;
     }
+    queued.snr          = _staged_snr;
+    queued.rssi         = _staged_rssi;
+    _staged_raw_valid   = false;  // consumed; cleared before xQueueSend
   }
 
   // Try to send to queue (non-blocking)
@@ -2543,16 +2499,15 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   queued.snr = 0.0f;
   queued.rssi = 0.0f;
 
-  if (!is_tx && _last_raw_data && _last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
-#if defined(BOARD_HAS_PSRAM)
-    if (_last_raw_len <= (int)sizeof(queued.raw_data)) {
-      memcpy(queued.raw_data, _last_raw_data, _last_raw_len);
-      queued.raw_len = _last_raw_len;
+  if (!is_tx && _staged_raw_valid) {
+    if (_staged_raw_len <= (int)sizeof(queued.raw_data)) {
+      memcpy(queued.raw_data, _staged_raw, _staged_raw_len);
+      queued.raw_len    = (uint8_t)_staged_raw_len;
       queued.has_raw_data = true;
     }
-#endif
-    queued.snr = _last_snr;
-    queued.rssi = _last_rssi;
+    queued.snr          = _staged_snr;
+    queued.rssi         = _staged_rssi;
+    _staged_raw_valid   = false;
   }
 
   _queue_tail = (_queue_tail + 1) % MAX_QUEUE_SIZE;
@@ -2569,9 +2524,7 @@ void MQTTBridge::dequeuePacket() {
 
   QueuedPacket& dequeued = _packet_queue[_queue_head];
   memset(&dequeued, 0, sizeof(QueuedPacket));
-#if defined(BOARD_HAS_PSRAM)
   dequeued.has_raw_data = false;
-#endif
 
   _queue_head = (_queue_head + 1) % MAX_QUEUE_SIZE;
   _queue_count--;
@@ -2583,25 +2536,15 @@ void MQTTBridge::dequeuePacket() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi) {
-  if (len > 0 && len <= LAST_RAW_DATA_SIZE && _last_raw_data) {
-    #ifdef ESP_PLATFORM
-    if (_raw_data_mutex != nullptr && xSemaphoreTake(_raw_data_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-      memcpy(_last_raw_data, raw_data, len);
-      _last_raw_len = len;
-      _last_snr = snr;
-      _last_rssi = rssi;
-      _last_raw_timestamp = millis();
-      xSemaphoreGive(_raw_data_mutex);
-      MQTT_DEBUG_PRINTLN("Stored raw radio data: %d bytes, SNR=%.1f, RSSI=%.1f", len, snr, rssi);
-    }
-    #else
-    memcpy(_last_raw_data, raw_data, len);
-    _last_raw_len = len;
-    _last_snr = snr;
-    _last_rssi = rssi;
-    _last_raw_timestamp = millis();
-    MQTT_DEBUG_PRINTLN("Stored raw radio data: %d bytes, SNR=%.1f, RSSI=%.1f", len, snr, rssi);
-    #endif
+  // Writes into the Core 1-only staging area. No mutex needed: this function and
+  // queuePacket() are both called from Core 1 in guaranteed sequence for each packet.
+  if (len > 0 && len <= (int)LAST_RAW_DATA_SIZE) {
+    memcpy(_staged_raw, raw_data, len);
+    _staged_raw_len   = len;
+    _staged_snr       = snr;
+    _staged_rssi      = rssi;
+    _staged_raw_valid = true;
+    MQTT_DEBUG_PRINTLN("Staged raw radio data: %d bytes, SNR=%.1f, RSSI=%.1f", len, snr, rssi);
   }
 }
 

@@ -125,27 +125,25 @@ private:
     bool is_tx;
     float snr;
     float rssi;
-#if defined(BOARD_HAS_PSRAM)
-    // Store raw radio data with each packet to avoid it being overwritten.
-    // On non-PSRAM boards, raw hex is reconstructed from packet_copy.writeTo()
-    // at publish time to save ~2.5KB of heap (256 bytes × MAX_QUEUE_SIZE).
+    // Raw radio bytes embedded at enqueue time (Core 1), never shared across cores.
+    // On non-PSRAM boards the queue is smaller (6 items) to offset the per-item cost.
     uint8_t raw_data[256];
-    int raw_len;
+    uint8_t raw_len;
     bool has_raw_data;
-#endif
   };
 
   #if defined(BOARD_HAS_PSRAM)
   static const int MAX_QUEUE_SIZE = 50;
   #else
-  static const int MAX_QUEUE_SIZE = 10;
+  // Reduced from 10: raw_data[256] adds ~256 bytes/item; 6×543 ≈ 3.3 KB vs old 10×282 ≈ 2.8 KB.
+  // Net increase is <500 bytes; _last_raw_data (256 bytes) is eliminated to offset further.
+  static const int MAX_QUEUE_SIZE = 6;
   #endif
 
   // FreeRTOS queue for thread-safe packet queuing
   #ifdef ESP_PLATFORM
   QueueHandle_t _packet_queue_handle;
   TaskHandle_t _mqtt_task_handle;
-  SemaphoreHandle_t _raw_data_mutex;  // Mutex for raw radio data
   // PSRAM-backed task stack; TCB kept in internal RAM
   StackType_t* _mqtt_task_stack;     // nullptr if using dynamic task creation
   StaticTask_t _mqtt_task_tcb;
@@ -175,8 +173,17 @@ private:
   // Timezone handling
   Timezone* _timezone;
 
-  // Raw radio data storage (PSRAM when BOARD_HAS_PSRAM)
+  // Core 1-only staging: written by storeRawRadioData(), consumed by queuePacket().
+  // No mutex needed — both call sites run on Core 1 in guaranteed sequence.
   static const size_t LAST_RAW_DATA_SIZE = 256;
+  uint8_t _staged_raw[LAST_RAW_DATA_SIZE];
+  int     _staged_raw_len   = 0;
+  float   _staged_snr       = 0.0f;
+  float   _staged_rssi      = 0.0f;
+  bool    _staged_raw_valid = false;
+
+  // Core 0-owned copy of the most recent raw data — written only by processPacketQueue()
+  // on Core 0, read only by publishStatus() on Core 0. No mutex required.
   uint8_t* _last_raw_data;
   int _last_raw_len;
   float _last_snr;
