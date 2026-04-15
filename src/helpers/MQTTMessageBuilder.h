@@ -42,6 +42,7 @@ public:
    * @return Length of JSON string, or 0 on error
    */
   static int buildStatusMessage(
+    JsonDocument& doc,
     const char* origin,
     const char* origin_id,
     const char* model,
@@ -86,6 +87,7 @@ public:
    * @return Length of JSON string, or 0 on error
    */
   static int buildPacketMessage(
+    JsonDocument& doc,
     const char* origin,
     const char* origin_id,
     const char* timestamp,
@@ -137,6 +139,7 @@ public:
    * @return Length of JSON string, or 0 on error
    */
   static int buildPacketJSON(
+    JsonDocument& doc,
     mesh::Packet* packet,
     bool is_tx,
     const char* origin,
@@ -147,6 +150,7 @@ public:
   );
 
   static int buildPacketJSONFromRaw(
+    JsonDocument& doc,
     const uint8_t* raw_data,
     int raw_len,
     mesh::Packet* packet,

@@ -196,6 +196,11 @@ private:
   static const size_t STATUS_JSON_BUFFER_SIZE = 768;
   char* _status_json_buffer;
 
+  // JSON document scratch space — allocated once on the heap, reused via doc.clear().
+  // Keeps StaticJsonDocument<N> off the 8 KB MQTT task stack.
+  DynamicJsonDocument* _packet_json_doc;  // capacity = PUBLISH_JSON_BUFFER_SIZE
+  DynamicJsonDocument* _status_json_doc;  // capacity = STATUS_JSON_BUFFER_SIZE
+
   // Memory pressure monitoring
   unsigned long _last_memory_check;
   int _skipped_publishes;  // Count of skipped publishes due to memory pressure

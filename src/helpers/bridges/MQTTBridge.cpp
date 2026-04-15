@@ -305,7 +305,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
 #endif
       _last_wifi_check(0), _last_wifi_status(WL_DISCONNECTED), _wifi_status_initialized(false),
       _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
-      _last_slot_reconnect_ms(0)
+      _last_slot_reconnect_ms(0),
+      _packet_json_doc(nullptr), _status_json_doc(nullptr)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _mqtt_task_stack(nullptr), _packet_queue_storage(nullptr)
@@ -368,6 +369,11 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   // Pre-allocate JSON publish buffer (reused for all publishes to avoid alloc/free churn)
   _publish_json_buffer = (char*)psram_malloc(PUBLISH_JSON_BUFFER_SIZE);
   _status_json_buffer = (char*)psram_malloc(STATUS_JSON_BUFFER_SIZE);
+
+  // Allocate JSON document scratch space once; reused via doc.clear() on every publish.
+  // Keeps the large StaticJsonDocument<N> off the 8 KB MQTT task stack.
+  _packet_json_doc = new DynamicJsonDocument(PUBLISH_JSON_BUFFER_SIZE);
+  _status_json_doc = new DynamicJsonDocument(STATUS_JSON_BUFFER_SIZE);
 }
 
 // ---------------------------------------------------------------------------
@@ -646,6 +652,10 @@ void MQTTBridge::end() {
   psram_free(_status_json_buffer);
   _status_json_buffer = nullptr;
 
+  // Free JSON document scratch space
+  delete _packet_json_doc; _packet_json_doc = nullptr;
+  delete _status_json_doc; _status_json_doc = nullptr;
+
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
   MQTT_DEBUG_PRINTLN("MQTT Bridge stopped");
@@ -916,21 +926,12 @@ void MQTTBridge::mqttTaskLoop() {
       last_slot_status_update = now;
     }
 
-    // Adaptive task delay based on work done
-    bool has_work = (_queue_count > 0);
-    if (!has_work && _status_enabled) {
-      if (_last_status_publish == 0 ||
-          (now - _last_status_publish >= (_status_interval - 10000))) {
-        has_work = true;
-      }
-    }
-
-    // Adaptive delay: shorter when work pending, longer when idle
-    if (has_work) {
-      vTaskDelay(pdMS_TO_TICKS(5));
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
+    // Adaptive delay: 5 ms when packets are queued, 50 ms when idle.
+    // The previous "status approaching" check (widening to 5 ms for 10 s before each status
+    // publish) caused 2 000 unnecessary wakeups per interval; the 50 ms idle tick catches
+    // the status deadline with at most 50 ms of extra latency, which is irrelevant at a
+    // 5-minute interval.
+    vTaskDelay(pdMS_TO_TICKS(_queue_count > 0 ? 5 : 50));
   }
 }
 #endif
@@ -1657,6 +1658,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
+    *_status_json_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
@@ -1809,7 +1811,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
       } else if (ps_pref == 2) {
         ps_mode = WIFI_PS_MAX_MODEM;
       } else {
-        ps_mode = WIFI_PS_MIN_MODEM;
+        ps_mode = WIFI_PS_NONE;  // default: no power save; eliminates DTIM wake latency on mains-powered bridges
       }
       esp_wifi_set_ps(ps_mode);
       #ifdef MQTT_WIFI_TX_POWER
@@ -2147,6 +2149,7 @@ void MQTTBridge::processPacketQueue() {
                   queued.has_raw_data ? queued.raw_data : nullptr,
                   queued.has_raw_data ? queued.raw_len  : 0,
                   queued.snr, queued.rssi);
+    taskYIELD();  // allow higher-priority tasks to run between packet publishes
 
     // Publish raw if enabled
     if (_raw_enabled) {
@@ -2203,6 +2206,7 @@ void MQTTBridge::processPacketQueue() {
                   queued.has_raw_data ? queued.raw_data : nullptr,
                   queued.has_raw_data ? queued.raw_len  : 0,
                   queued.snr, queued.rssi);
+    // No taskYIELD() on non-ESP32 platforms (non-FreeRTOS, cooperative scheduling not needed)
 
     if (_raw_enabled) {
       publishRaw(&queued.packet_copy);
@@ -2273,6 +2277,7 @@ bool MQTTBridge::publishStatus() {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
+    *_status_json_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
@@ -2354,11 +2359,13 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   int len;
   if (raw_data && raw_len > 0) {
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
+      *_packet_json_doc,
       raw_data, raw_len, packet, is_tx, _origin, origin_id,
       snr, rssi, _timezone, active_buffer, active_buffer_size
     );
   } else if (_last_raw_data && _last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
+      *_packet_json_doc,
       _last_raw_data, _last_raw_len, packet, is_tx, _origin, origin_id,
       _last_snr, _last_rssi, _timezone, active_buffer, active_buffer_size
     );
@@ -2370,11 +2377,13 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
     uint8_t rlen = packet->writeTo(reconstructed);
     if (rlen > 0) {
       len = MQTTMessageBuilder::buildPacketJSONFromRaw(
+        *_packet_json_doc,
         reconstructed, rlen, packet, is_tx, _origin, origin_id,
         snr, rssi, _timezone, active_buffer, active_buffer_size
       );
     } else {
       len = MQTTMessageBuilder::buildPacketJSON(
+        *_packet_json_doc,
         packet, is_tx, _origin, origin_id, _timezone, active_buffer, active_buffer_size
       );
     }
@@ -2544,7 +2553,7 @@ void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, 
     _staged_snr       = snr;
     _staged_rssi      = rssi;
     _staged_raw_valid = true;
-    MQTT_DEBUG_PRINTLN("Staged raw radio data: %d bytes, SNR=%.1f, RSSI=%.1f", len, snr, rssi);
+    MQTT_DEBUG_PRINTLN("Stored raw radio data: %d bytes, SNR=%.1f, RSSI=%.1f", len, snr, rssi);
   }
 }
 

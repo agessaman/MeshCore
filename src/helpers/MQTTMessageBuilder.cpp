@@ -5,6 +5,7 @@
 #include "MeshCore.h"
 
 int MQTTMessageBuilder::buildStatusMessage(
+  JsonDocument& doc,
   const char* origin,
   const char* origin_id,
   const char* model,
@@ -25,8 +26,9 @@ int MQTTMessageBuilder::buildStatusMessage(
   int recv_errors,
   int internal_heap
 ) {
-  // Use StaticJsonDocument to avoid heap fragmentation (fixed-size stack allocation)
-  StaticJsonDocument<768> doc;  // Increased size to accommodate stats
+  // doc is provided by the caller (heap-allocated DynamicJsonDocument in MQTTBridge),
+  // keeping this 768-byte scratch space off the MQTT task stack.
+  doc.clear();
   JsonObject root = doc.to<JsonObject>();
   
   root["status"] = status;
@@ -78,6 +80,7 @@ int MQTTMessageBuilder::buildStatusMessage(
 }
 
 int MQTTMessageBuilder::buildPacketMessage(
+  JsonDocument& doc,
   const char* origin,
   const char* origin_id,
   const char* timestamp,
@@ -96,10 +99,9 @@ int MQTTMessageBuilder::buildPacketMessage(
   char* buffer,
   size_t buffer_size
 ) {
-  // Use StaticJsonDocument with fixed maximum size to avoid heap fragmentation
-  // Base JSON overhead ~200 bytes, raw hex can be up to 510 chars (255 bytes packet)
-  // Use maximum size (2048) to handle all packet sizes without heap allocation
-  StaticJsonDocument<2048> doc;
+  // doc is provided by the caller (heap-allocated DynamicJsonDocument in MQTTBridge),
+  // keeping this 2048-byte scratch space off the MQTT task stack.
+  doc.clear();
   JsonObject root = doc.to<JsonObject>();
   
   // Format numeric values as strings to avoid String object allocations
@@ -165,6 +167,7 @@ int MQTTMessageBuilder::buildRawMessage(
 }
 
 int MQTTMessageBuilder::buildPacketJSON(
+  JsonDocument& doc,
   mesh::Packet* packet,
   bool is_tx,
   const char* origin,
@@ -227,6 +230,7 @@ int MQTTMessageBuilder::buildPacketJSON(
   }
   
   return buildPacketMessage(
+    doc,
     origin, origin_id, timestamp,
     is_tx ? "tx" : "rx",
     time_str, date_str,
@@ -243,6 +247,7 @@ int MQTTMessageBuilder::buildPacketJSON(
 }
 
 int MQTTMessageBuilder::buildPacketJSONFromRaw(
+  JsonDocument& doc,
   const uint8_t* raw_data,
   int raw_len,
   mesh::Packet* packet,
@@ -309,6 +314,7 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
   }
   
   return buildPacketMessage(
+    doc,
     origin, origin_id, timestamp,
     is_tx ? "tx" : "rx",
     time_str, date_str,
