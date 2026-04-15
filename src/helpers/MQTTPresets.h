@@ -27,7 +27,7 @@ enum MQTTTopicStyle : uint8_t {
 };
 
 struct MQTTPresetDef {
-  const char* name;           // Preset identifier: "analyzer-us", "analyzer-eu", "meshmapper", "meshrank", "waev"
+  const char* name;           // Preset identifier: "analyzer-us", "analyzer-eu", "meshmapper", "meshrank", "waev", ...
   const char* server_url;     // Full URL including scheme: "wss://host:port/path" or "mqtts://host:port"
   const char* jwt_audience;   // JWT audience field (only for MQTT_AUTH_JWT, nullptr otherwise)
   const char* ca_cert;        // PEM CA certificate (nullptr to skip cert pinning)
@@ -99,7 +99,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 8;
+static const int MQTT_PRESET_COUNT = 9;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -111,6 +111,7 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
   { "meshomatic",    "wss://us-east.meshomatic.net:443/mqtt",    "us-east.meshomatic.net",  ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
   { "cascadiamesh",  "wss://mqtt-v1.cascadiamesh.org:443/mqtt",  "mqtt-v1.cascadiamesh.org", ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
   { "tennmesh",      "mqtt://mqtt.tennmesh.com:1883",            nullptr,                   nullptr,      MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0, true, 55, "mqttfeed", "tc2live" },
+  { "nashmesh",      "mqtt://mqtt.nashme.sh:1883",               nullptr,                   nullptr,      MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0, true, 55, "meshdev", "large4cats" },
 };
 
 // Find a preset by name, returns nullptr if not found

@@ -1467,7 +1467,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                       }
                     }
                   } else {
-                    strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, meshomatic, cascadiamesh, tennmesh, custom, none");
+                    strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, meshomatic, cascadiamesh, tennmesh, nashmesh, custom, none");
                   }
                 } else if (memcmp(subcmd, "server ", 7) == 0) {
                   StrHelper::strncpy(_prefs->mqtt_slot_host[slot], &subcmd[7], sizeof(_prefs->mqtt_slot_host[slot]));
