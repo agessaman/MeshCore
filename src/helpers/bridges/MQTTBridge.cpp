@@ -305,8 +305,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
 #endif
       _last_wifi_check(0), _last_wifi_status(WL_DISCONNECTED), _wifi_status_initialized(false),
       _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
-      _last_slot_reconnect_ms(0),
-      _packet_json_doc(nullptr), _status_json_doc(nullptr)
+      _last_slot_reconnect_ms(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _mqtt_task_stack(nullptr), _packet_queue_storage(nullptr)
@@ -333,7 +332,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
     _slots[i].enabled = false;
     _slots[i].client = nullptr;
     _slots[i].preset = nullptr;
-    _slots[i].auth_token = nullptr;
+    // auth_token[0] == '\0' after memset above — no valid token
     _slots[i].connected = false;
     _slots[i].initial_connect_done = false;
     _slots[i].token_expires_at = 0;
@@ -363,17 +362,18 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
 #endif
   #endif
 
-  // Raw radio buffer in PSRAM when available
-  _last_raw_data = (uint8_t*)psram_malloc(LAST_RAW_DATA_SIZE);
-
-  // Pre-allocate JSON publish buffer (reused for all publishes to avoid alloc/free churn)
+  // On PSRAM boards, allocate raw radio buffer and JSON char buffers in PSRAM to preserve
+  // internal heap. On non-PSRAM boards these are inline arrays in the class object —
+  // no separate allocation needed.
+  #if defined(BOARD_HAS_PSRAM)
+  _last_raw_data       = (uint8_t*)psram_malloc(LAST_RAW_DATA_SIZE);
   _publish_json_buffer = (char*)psram_malloc(PUBLISH_JSON_BUFFER_SIZE);
-  _status_json_buffer = (char*)psram_malloc(STATUS_JSON_BUFFER_SIZE);
-
-  // Allocate JSON document scratch space once; reused via doc.clear() on every publish.
-  // Keeps the large StaticJsonDocument<N> off the 8 KB MQTT task stack.
-  _packet_json_doc = new DynamicJsonDocument(PUBLISH_JSON_BUFFER_SIZE);
-  _status_json_doc = new DynamicJsonDocument(STATUS_JSON_BUFFER_SIZE);
+  _status_json_buffer  = (char*)psram_malloc(STATUS_JSON_BUFFER_SIZE);
+  #else
+  memset(_last_raw_data, 0, sizeof(_last_raw_data));
+  #endif
+  // JSON document scratch space is now a StaticJsonDocument inline class member —
+  // no heap allocation needed; reused via doc.clear() on every publish.
 }
 
 // ---------------------------------------------------------------------------
@@ -524,15 +524,20 @@ void MQTTBridge::begin() {
     _packet_queue_handle = nullptr;
   }
   #else
-  _packet_queue_storage = nullptr;
-  _packet_queue_handle = nullptr;
+  // Non-PSRAM: use inline class-member storage with static queue creation.
+  // Eliminates a separate heap allocation, reducing startup fragmentation.
+  _packet_queue_storage = _packet_queue_inline;
+  _packet_queue_handle = xQueueCreateStatic(MAX_QUEUE_SIZE, sizeof(QueuedPacket),
+                                             _packet_queue_storage, &_packet_queue_struct);
   #endif
   if (_packet_queue_handle == nullptr) {
     _packet_queue_handle = xQueueCreate(MAX_QUEUE_SIZE, sizeof(QueuedPacket));
   }
   if (_packet_queue_handle == nullptr) {
     MQTT_DEBUG_PRINTLN("Failed to create packet queue!");
+    #if defined(BOARD_HAS_PSRAM)
     psram_free(_packet_queue_storage);
+    #endif
     _packet_queue_storage = nullptr;
     return;
   }
@@ -568,7 +573,9 @@ void MQTTBridge::begin() {
     _mqtt_task_stack = nullptr;
     vQueueDelete(_packet_queue_handle);
     _packet_queue_handle = nullptr;
+    #if defined(BOARD_HAS_PSRAM)
     psram_free(_packet_queue_storage);
+    #endif
     _packet_queue_storage = nullptr;
     return;
   }
@@ -616,7 +623,9 @@ void MQTTBridge::end() {
     vQueueDelete(_packet_queue_handle);
     _packet_queue_handle = nullptr;
   }
+  #if defined(BOARD_HAS_PSRAM)
   psram_free(_packet_queue_storage);
+  #endif
   _packet_queue_storage = nullptr;
 
   #else
@@ -644,17 +653,13 @@ void MQTTBridge::end() {
     _timezone = nullptr;
   }
 
-  // Free PSRAM-backed buffers
-  psram_free(_last_raw_data);
-  _last_raw_data = nullptr;
-  psram_free(_publish_json_buffer);
-  _publish_json_buffer = nullptr;
-  psram_free(_status_json_buffer);
-  _status_json_buffer = nullptr;
-
-  // Free JSON document scratch space
-  delete _packet_json_doc; _packet_json_doc = nullptr;
-  delete _status_json_doc; _status_json_doc = nullptr;
+  // Free PSRAM-backed buffers (non-PSRAM builds use inline class arrays — no free needed)
+  #if defined(BOARD_HAS_PSRAM)
+  psram_free(_last_raw_data);       _last_raw_data = nullptr;
+  psram_free(_publish_json_buffer); _publish_json_buffer = nullptr;
+  psram_free(_status_json_buffer);  _status_json_buffer = nullptr;
+  #endif
+  // JSON documents are now StaticJsonDocument inline members — no heap allocation to free.
 
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
@@ -1011,16 +1016,10 @@ void MQTTBridge::setupSlot(int index) {
       slot.client->setCACert(slot.preset->ca_cert);
     }
 
-    // Allocate JWT token buffer if needed
-    if (slot.preset->auth_type == MQTT_AUTH_JWT && !slot.auth_token) {
-      slot.auth_token = (char*)psram_malloc(AUTH_TOKEN_SIZE);
-      if (slot.auth_token) slot.auth_token[0] = '\0';
-    }
-
     // Try to create token and connect (will succeed only if NTP synced)
     if (slot.preset->auth_type == MQTT_AUTH_JWT) {
       createSlotAuthToken(index);
-      if (slot.auth_token && strlen(slot.auth_token) > 0) {
+      if (slot.auth_token[0] != '\0') {
         slot.client->setCredentials(_jwt_username, slot.auth_token);
       }
     } else if (slot.preset->auth_type == MQTT_AUTH_USERPASS &&
@@ -1119,13 +1118,9 @@ void MQTTBridge::setupSlot(int index) {
 
     // Custom slot authentication: JWT if audience is set, else username/password
     if (slot.audience[0] != '\0') {
-      // JWT auth for custom slot — allocate token buffer and create initial token
-      if (!slot.auth_token) {
-        slot.auth_token = (char*)psram_malloc(AUTH_TOKEN_SIZE);
-        if (slot.auth_token) slot.auth_token[0] = '\0';
-      }
+      // JWT auth for custom slot — create initial token (buffer is always inline)
       createSlotAuthToken(index);
-      if (slot.auth_token && strlen(slot.auth_token) > 0) {
+      if (slot.auth_token[0] != '\0') {
         slot.client->setCredentials(_jwt_username, slot.auth_token);
       }
       MQTT_DEBUG_PRINTLN("MQTT%d custom broker using JWT auth (audience: %s)", index + 1, slot.audience);
@@ -1155,11 +1150,8 @@ void MQTTBridge::teardownSlot(int index) {
     slot.client = nullptr;
   }
 
-  // Free auth token buffer
-  if (slot.auth_token) {
-    psram_free(slot.auth_token);
-    slot.auth_token = nullptr;
-  }
+  // Invalidate auth token (inline buffer — just zero the first byte)
+  slot.auth_token[0] = '\0';
 
   slot.connected = false;
   slot.initial_connect_done = false;
@@ -1210,7 +1202,7 @@ void MQTTBridge::maintainSlotConnections() {
 
     // JWT slots need time sync before we can manage tokens
     bool slot_jwt = (_slots[i].preset && _slots[i].preset->auth_type == MQTT_AUTH_JWT) ||
-                    (!_slots[i].preset && _slots[i].audience[0] != '\0' && _slots[i].auth_token != nullptr);
+                    (!_slots[i].preset && _slots[i].audience[0] != '\0');
     if (slot_jwt && !can_do_jwt) {
       continue;
     }
@@ -1229,7 +1221,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
 
   // JWT token renewal (for preset JWT slots and custom slots with audience set)
   bool slot_uses_jwt = (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) ||
-                       (!slot.preset && slot.audience[0] != '\0' && slot.auth_token != nullptr);
+                       (!slot.preset && slot.audience[0] != '\0');
   if (slot_uses_jwt) {
     bool token_needs_renewal = false;
     if (!time_synced) {
@@ -1422,7 +1414,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
 bool MQTTBridge::createSlotAuthToken(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
-  if (!_identity || !slot.auth_token) return false;
+  if (!_identity) return false;
 
   // Determine JWT audience: preset takes priority, then custom slot audience field
   const char* audience = nullptr;
@@ -1658,7 +1650,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
-    *_status_json_doc,
+    _status_json_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
@@ -2277,7 +2269,7 @@ bool MQTTBridge::publishStatus() {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
-    *_status_json_doc,
+    _status_json_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
@@ -2359,13 +2351,13 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   int len;
   if (raw_data && raw_len > 0) {
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
-      *_packet_json_doc,
+      _packet_json_doc,
       raw_data, raw_len, packet, is_tx, _origin, origin_id,
       snr, rssi, _timezone, active_buffer, active_buffer_size
     );
   } else if (_last_raw_data && _last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
-      *_packet_json_doc,
+      _packet_json_doc,
       _last_raw_data, _last_raw_len, packet, is_tx, _origin, origin_id,
       _last_snr, _last_rssi, _timezone, active_buffer, active_buffer_size
     );
@@ -2377,13 +2369,13 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
     uint8_t rlen = packet->writeTo(reconstructed);
     if (rlen > 0) {
       len = MQTTMessageBuilder::buildPacketJSONFromRaw(
-        *_packet_json_doc,
+        _packet_json_doc,
         reconstructed, rlen, packet, is_tx, _origin, origin_id,
         snr, rssi, _timezone, active_buffer, active_buffer_size
       );
     } else {
       len = MQTTMessageBuilder::buildPacketJSON(
-        *_packet_json_doc,
+        _packet_json_doc,
         packet, is_tx, _origin, origin_id, _timezone, active_buffer, active_buffer_size
       );
     }
@@ -2794,7 +2786,7 @@ void MQTTBridge::syncTimeWithNTP() {
       unsigned long current_time = (unsigned long)time(nullptr);
       for (int i = 0; i < _max_active_slots; i++) {
         bool slot_jwt = (_slots[i].preset && _slots[i].preset->auth_type == MQTT_AUTH_JWT) ||
-                        (!_slots[i].preset && _slots[i].audience[0] != '\0' && _slots[i].auth_token != nullptr);
+                        (!_slots[i].preset && _slots[i].audience[0] != '\0');
         if (_slots[i].enabled && slot_jwt) {
           // Check if the slot's token was created with a stale time
           // (token_expires_at would be far in the past relative to current time)

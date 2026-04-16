@@ -57,6 +57,8 @@ class MeshSNMPAgent;  // Forward declaration
  */
 class MQTTBridge : public BridgeBase {
 private:
+  static const size_t AUTH_TOKEN_SIZE = 768;
+
   // Connection slot - each slot holds one MQTT connection
   struct MQTTSlot {
     PsychicMqttClient* client;
@@ -66,7 +68,8 @@ private:
     bool initial_connect_done;      // True after first connect() call
 
     // JWT auth state (used by preset JWT slots and custom slots with audience set)
-    char* auth_token;               // PSRAM-allocated, AUTH_TOKEN_SIZE bytes
+    // Inline buffer avoids per-reconnect heap alloc/free churn (fragmentation source).
+    char auth_token[AUTH_TOKEN_SIZE]; // empty string = no valid token
     unsigned long token_expires_at;
     unsigned long last_token_renewal;
 
@@ -94,7 +97,6 @@ private:
     unsigned long first_disconnect_time; // millis() of first disconnect after boot
   };
 
-  static const size_t AUTH_TOKEN_SIZE = 768;
   MQTTSlot _slots[RUNTIME_MQTT_SLOTS];
 
   // JWT username shared across all JWT-auth slots (same device identity)
@@ -147,9 +149,13 @@ private:
   // PSRAM-backed task stack; TCB kept in internal RAM
   StackType_t* _mqtt_task_stack;     // nullptr if using dynamic task creation
   StaticTask_t _mqtt_task_tcb;
-  // PSRAM-backed packet queue storage
-  uint8_t* _packet_queue_storage;    // nullptr if using dynamic queue
+  // Packet queue storage: PSRAM heap on PSRAM boards, inline array on non-PSRAM boards.
+  // Using xQueueCreateStatic with inline storage eliminates a separate heap allocation.
+  uint8_t* _packet_queue_storage;
   StaticQueue_t _packet_queue_struct;
+  #if !defined(BOARD_HAS_PSRAM)
+  uint8_t _packet_queue_inline[MAX_QUEUE_SIZE * sizeof(QueuedPacket)];
+  #endif
   #else
   // Fallback to circular buffer for non-ESP32 platforms
   QueuedPacket _packet_queue[MAX_QUEUE_SIZE];
@@ -184,22 +190,35 @@ private:
 
   // Core 0-owned copy of the most recent raw data — written only by processPacketQueue()
   // on Core 0, read only by publishStatus() on Core 0. No mutex required.
+  // On PSRAM boards: heap pointer into PSRAM. On non-PSRAM: inline array in class object.
+  static const size_t LAST_RAW_DATA_SIZE_MEMBER = 256;  // mirrors LAST_RAW_DATA_SIZE
+  #if defined(BOARD_HAS_PSRAM)
   uint8_t* _last_raw_data;
+  #else
+  uint8_t  _last_raw_data[LAST_RAW_DATA_SIZE_MEMBER];
+  #endif
   int _last_raw_len;
   float _last_snr;
   float _last_rssi;
   unsigned long _last_raw_timestamp;
 
-  // Pre-allocated JSON publish buffer (PSRAM when available, allocated once in begin())
+  // JSON publish/status serialization buffers — reused for every publish (no alloc/free churn).
+  // On PSRAM boards: heap pointer into PSRAM to save internal heap. On non-PSRAM: inline in
+  // class object so these allocations don't interleave with large TLS buffers at startup.
   static const size_t PUBLISH_JSON_BUFFER_SIZE = 2048;
-  char* _publish_json_buffer;
   static const size_t STATUS_JSON_BUFFER_SIZE = 768;
+  #if defined(BOARD_HAS_PSRAM)
+  char* _publish_json_buffer;
   char* _status_json_buffer;
+  #else
+  char _publish_json_buffer[PUBLISH_JSON_BUFFER_SIZE];
+  char _status_json_buffer[STATUS_JSON_BUFFER_SIZE];
+  #endif
 
-  // JSON document scratch space — allocated once on the heap, reused via doc.clear().
-  // Keeps StaticJsonDocument<N> off the 8 KB MQTT task stack.
-  DynamicJsonDocument* _packet_json_doc;  // capacity = PUBLISH_JSON_BUFFER_SIZE
-  DynamicJsonDocument* _status_json_doc;  // capacity = STATUS_JSON_BUFFER_SIZE
+  // JSON document scratch space — inline StaticJsonDocument keeps the pool off the 8 KB MQTT
+  // task stack and eliminates two separate heap allocations (fragmentation reduction).
+  StaticJsonDocument<PUBLISH_JSON_BUFFER_SIZE> _packet_json_doc;
+  StaticJsonDocument<STATUS_JSON_BUFFER_SIZE>  _status_json_doc;
 
   // Memory pressure monitoring
   unsigned long _last_memory_check;
