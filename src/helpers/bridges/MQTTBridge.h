@@ -242,7 +242,8 @@ private:
   static const unsigned long QUEUE_STALE_MS = 300000UL; // Flush queue after 5 min disconnected
 
   // Recovery: restart ESP after prolonged total failure
-  unsigned long _all_tripped_since;  // 0 = not all tripped
+  unsigned long _all_tripped_since;   // 0 = not all tripped
+  unsigned long _critical_heap_since; // 0 = max_alloc is above critical threshold
 
 #ifdef WITH_SNMP
   MeshSNMPAgent* _snmp_agent;

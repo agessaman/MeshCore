@@ -297,7 +297,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
       _cached_has_connected_slots(false),
       _last_memory_check(0), _skipped_publishes(0), _last_fragmentation_recovery(0),
       _fragmentation_pressure_since(0), _last_critical_check_run(0),
-      _last_no_broker_log(0), _queue_disconnected_since(0), _all_tripped_since(0),
+      _last_no_broker_log(0), _queue_disconnected_since(0), _all_tripped_since(0), _critical_heap_since(0),
       _last_config_warning(0),
       _dispatcher(nullptr), _radio(nullptr), _board(nullptr), _ms(nullptr),
 #ifdef WITH_SNMP
@@ -1280,6 +1280,21 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       return; // Token renewal handled connect; skip backoff logic below
     }
   }
+
+  // Pre-flight: don't attempt TLS if there isn't enough contiguous internal heap.
+  // Each failed attempt allocates ~42 KB, fails, and frees slightly fragmented — over many
+  // cycles this degrades max_alloc from 70 KB to unusable. Block early to stop accumulation.
+  #ifdef ESP_PLATFORM
+  {
+    static const size_t MIN_TLS_HEAP = 45000;
+    size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (avail < MIN_TLS_HEAP) {
+      MQTT_DEBUG_PRINTLN("MQTT%d connect deferred: max_block=%d < %d (heap too fragmented)",
+          index + 1, (int)avail, (int)MIN_TLS_HEAP);
+      return;
+    }
+  }
+  #endif
 
   // Periodic probe for circuit-breaker-tripped slots (recovery from transient outages)
   // Attempts a single reconnect every 30 minutes to see if the server has come back
@@ -2675,15 +2690,47 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   } else {
     _all_tripped_since = 0;
   }
+
+  // Hard restart when max_alloc has been critically low for an extended period.
+  // The all-tripped check above misses "one slot connected, one slot failing" scenarios
+  // where _cached_has_connected_slots=true keeps circuit_breaker_tripped from firing.
+  // Below the TLS viability floor, further reconnect attempts are futile and only
+  // accumulate fragmentation. A clean reboot is the reliable recovery path.
+  #if defined(BOARD_HAS_PSRAM)
+  const size_t CRITICAL_RESTART_THRESHOLD = 45000;
+  #else
+  const size_t CRITICAL_RESTART_THRESHOLD = 35000;
+  #endif
+  const unsigned long CRITICAL_RESTART_WINDOW_MS = 300000;  // 5 minutes
+  if (max_alloc < CRITICAL_RESTART_THRESHOLD) {
+    if (_critical_heap_since == 0) {
+      _critical_heap_since = now;
+    } else if ((now - _critical_heap_since) >= CRITICAL_RESTART_WINDOW_MS) {
+      MQTT_DEBUG_PRINTLN("CRITICAL: max_alloc=%d below %d for >5 min — restarting to recover heap.",
+          (int)max_alloc, (int)CRITICAL_RESTART_THRESHOLD);
+      delay(100);
+      ESP.restart();
+    }
+  } else {
+    _critical_heap_since = 0;
+  }
 }
 #endif
 
 void MQTTBridge::recreateMqttClientsForFragmentationRecovery() {
   // Disconnect, delete, and recreate all MQTT clients so they allocate fresh buffers.
+  // Preserve backoff state so recovery doesn't restart the rapid-failure cycle.
+  // teardownSlot() resets reconnect_backoff = 0; without this save/restore, recovery
+  // would reset backoff to 0, preventing the circuit breaker from ever tripping and
+  // allowing more TLS alloc/free churn. Pattern matches maintainSlotConnection() line ~1394.
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slots[i].enabled && !_slots[i].connected) {
+      uint8_t saved_backoff  = _slots[i].reconnect_backoff;
+      uint8_t saved_failures = _slots[i].max_backoff_failures;
       teardownSlot(i);
       setupSlot(i);
+      _slots[i].reconnect_backoff    = saved_backoff;
+      _slots[i].max_backoff_failures = saved_failures;
     }
   }
   updateCachedConnectionStatus();
