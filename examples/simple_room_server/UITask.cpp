@@ -2,8 +2,12 @@
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
 
+#ifndef USER_BTN_PRESSED
+#define USER_BTN_PRESSED LOW
+#endif
+
 #ifdef WITH_MQTT_BRIDGE
-  #include <WiFi.h>
+#include <WiFi.h>
 #endif
 
 #define AUTO_OFF_MILLIS      20000  // 20 seconds
@@ -100,7 +104,7 @@ void UITask::loop() {
   if (millis() >= _next_read) {
     int btnState = digitalRead(PIN_USER_BTN);
     if (btnState != _prevBtnState) {
-      if (btnState == LOW) {  // pressed?
+      if (btnState == USER_BTN_PRESSED) {  // pressed?
         if (_display->isOn()) {
           // TODO: any action ?
         } else {
