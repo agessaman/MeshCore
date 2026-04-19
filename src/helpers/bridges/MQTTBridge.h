@@ -87,6 +87,7 @@ private:
     bool circuit_breaker_tripped;   // true = stop reconnecting until reconfigured
     unsigned long last_reconnect_attempt;
     unsigned long last_log_time;    // Throttle disconnect log messages
+    unsigned long last_deferred_log_ms; // Throttle "connect deferred" log spam (Phase 1)
 
     // Last error (stored for CLI diagnostics — serial-free debugging)
     int32_t last_tls_err;           // esp_tls_last_esp_err (0 = no error)
@@ -245,6 +246,13 @@ private:
   unsigned long _all_tripped_since;   // 0 = not all tripped
   unsigned long _critical_heap_since; // 0 = max_alloc is above critical threshold
 
+  // Gray-zone detector: max_alloc below the TLS viability floor (MIN_TLS_HEAP)
+  // with no connected slots — used to trigger the two-phase recovery before the
+  // hard restart check, and to arm a 60 s escalation deadline if that recovery
+  // fails to restore viability.
+  unsigned long _stuck_below_tls_since;          // 0 = max_alloc above MIN_TLS_HEAP or slots connected
+  unsigned long _post_recovery_escalation_deadline; // 0 = not armed; else abs ms deadline for restart if still stuck
+
 #ifdef WITH_SNMP
   MeshSNMPAgent* _snmp_agent;
 #endif
@@ -282,8 +290,8 @@ private:
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
-  bool publishToSlot(int index, const char* topic, const char* payload, bool retained = false);
-  bool publishToAllSlots(const char* topic, const char* payload, bool retained = false);
+  bool publishToSlot(int index, const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
+  bool publishToAllSlots(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
   void publishStatusToSlot(int index);
   void updateCachedConnectionStatus();
 

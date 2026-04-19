@@ -298,6 +298,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
       _last_memory_check(0), _skipped_publishes(0), _last_fragmentation_recovery(0),
       _fragmentation_pressure_since(0), _last_critical_check_run(0),
       _last_no_broker_log(0), _queue_disconnected_since(0), _all_tripped_since(0), _critical_heap_since(0),
+      _stuck_below_tls_since(0), _post_recovery_escalation_deadline(0),
       _last_config_warning(0),
       _dispatcher(nullptr), _radio(nullptr), _board(nullptr), _ms(nullptr),
 #ifdef WITH_SNMP
@@ -1163,6 +1164,7 @@ void MQTTBridge::teardownSlot(int index) {
   slot.circuit_breaker_tripped = false;
   slot.last_reconnect_attempt = 0;
   slot.last_log_time = 0;
+  slot.last_deferred_log_ms = 0;
 }
 
 void MQTTBridge::maintainSlotConnections() {
@@ -1287,10 +1289,14 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   #ifdef ESP_PLATFORM
   {
     static const size_t MIN_TLS_HEAP = 45000;
+    static const unsigned long DEFERRED_LOG_INTERVAL_MS = 30000UL;
     size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     if (avail < MIN_TLS_HEAP) {
-      MQTT_DEBUG_PRINTLN("MQTT%d connect deferred: max_block=%d < %d (heap too fragmented)",
-          index + 1, (int)avail, (int)MIN_TLS_HEAP);
+      if (now_millis - slot.last_deferred_log_ms >= DEFERRED_LOG_INTERVAL_MS || slot.last_deferred_log_ms == 0) {
+        slot.last_deferred_log_ms = now_millis;
+        MQTT_DEBUG_PRINTLN("MQTT%d connect deferred: max_block=%d < %d (heap too fragmented)",
+            index + 1, (int)avail, (int)MIN_TLS_HEAP);
+      }
       return;
     }
   }
@@ -1484,7 +1490,7 @@ bool MQTTBridge::createSlotAuthToken(int index) {
   return false;
 }
 
-bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload, bool retained) {
+bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload, bool retained, uint8_t qos) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
   if (!slot.client || !slot.connected) {
@@ -1496,11 +1502,15 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
     return false;
   }
 
-  // Use async publish (enqueue) to avoid blocking the MQTT task loop.
-  // Synchronous publish with QoS 1 blocks waiting for PUBACK, which can stall
-  // all slots when one slot's network connection is degraded.
-  int result = slot.client->publish(topic, 1, retained, payload, strlen(payload), true);
-  if (result <= 0) {
+  // QoS 0 for the high-rate packet/raw publish paths: no PUBACK, no outbox store,
+  // no per-message heap alloc — critical for non-PSRAM fragmentation. QoS 1 is used
+  // only for low-rate retained status messages where delivery matters.
+  //
+  // esp_mqtt_client_enqueue return convention: QoS 0 returns msg_id == 0 on success
+  // (no tracking since there's no PUBACK); QoS 1/2 return a positive msg_id. Negative
+  // values (-1 generic failure, -2 outbox full) are the only actual failures.
+  int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), true);
+  if (result < 0) {
     static unsigned long last_fail_log = 0;
     unsigned long now = millis();
     if (now - last_fail_log > 60000) {
@@ -1512,11 +1522,11 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
   return true;
 }
 
-bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool retained) {
+bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool retained, uint8_t qos) {
   bool published = false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
-      if (publishToSlot(i, topic, payload, retained)) {
+      if (publishToSlot(i, topic, payload, retained, qos)) {
         published = true;
       }
     }
@@ -2300,7 +2310,7 @@ bool MQTTBridge::publishStatus() {
         if (buildTopicForSlot(i, MSG_STATUS, topic, sizeof(topic))) {
           any_slot_wants_status = true;
           bool use_retain = _slots[i].preset ? _slots[i].preset->allow_retain : false;
-          if (publishToSlot(i, topic, json_buffer, use_retain)) {
+          if (publishToSlot(i, topic, json_buffer, use_retain, 1)) {
             published = true;
           }
         }
@@ -2664,6 +2674,52 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
     _fragmentation_pressure_since = 0;
     MQTT_DEBUG_PRINTLN("Fragmentation recovery: recreating MQTT clients (max_alloc=%d, pressure %lu min)", (int)max_alloc, (unsigned long)(required_window_ms / 60000));
     recreateMqttClientsForFragmentationRecovery();
+    // Arm post-recovery escalation: if max_alloc hasn't recovered above MIN_TLS_HEAP
+    // within 60 s, the two-phase recovery failed and a clean reboot is the only option.
+    _post_recovery_escalation_deadline = now + 60000UL;
+  }
+
+  // Gray-zone trigger: MIN_TLS_HEAP (45000) is the pre-flight floor below which new
+  // TLS handshakes are blocked. If we sit below that floor with zero connected slots,
+  // no reconnect can succeed and we'll spin indefinitely. After 180 s of that state,
+  // force the two-phase recovery; the old pressure-window path only triggers after
+  // much longer windows and doesn't always apply when the gray-zone trap is active
+  // above PRESSURE_THRESHOLD_MODERATE but below MIN_TLS_HEAP.
+  static const size_t MIN_TLS_HEAP = 45000;
+  static const unsigned long STUCK_TRIGGER_MS = 180000UL;  // 3 min
+  static const unsigned long STUCK_COOLDOWN_MS = 600000UL; // 10 min between attempts
+  bool in_gray_zone = (!_cached_has_connected_slots && max_alloc < MIN_TLS_HEAP);
+  if (in_gray_zone) {
+    if (_stuck_below_tls_since == 0) {
+      _stuck_below_tls_since = now;
+    } else if ((now - _stuck_below_tls_since) >= STUCK_TRIGGER_MS &&
+               (now - _last_fragmentation_recovery) >= STUCK_COOLDOWN_MS) {
+      MQTT_DEBUG_PRINTLN("Gray-zone recovery: no slots connected, max_alloc=%d < %d for %lu s",
+          (int)max_alloc, (int)MIN_TLS_HEAP, (now - _stuck_below_tls_since) / 1000);
+      _last_fragmentation_recovery = now;
+      _stuck_below_tls_since = 0;
+      _fragmentation_pressure_since = 0;
+      recreateMqttClientsForFragmentationRecovery();
+      _post_recovery_escalation_deadline = now + 60000UL;
+    }
+  } else {
+    _stuck_below_tls_since = 0;
+  }
+
+  // Post-recovery escalation: if the two-phase recovery just ran and 60 s later
+  // we're still stuck below the TLS floor with no slots connected, the recovery
+  // failed (either the allocator couldn't coalesce or something else is pinning
+  // the heap). Fall through to a clean reboot rather than spin forever.
+  if (_post_recovery_escalation_deadline != 0 && now >= _post_recovery_escalation_deadline) {
+    bool still_stuck = !_cached_has_connected_slots && max_alloc < MIN_TLS_HEAP;
+    if (still_stuck) {
+      MQTT_DEBUG_PRINTLN("CRITICAL: two-phase recovery failed to restore TLS viability "
+          "(max_alloc=%d < %d, no slots connected) — restarting.",
+          (int)max_alloc, (int)MIN_TLS_HEAP);
+      delay(100);
+      ESP.restart();
+    }
+    _post_recovery_escalation_deadline = 0;
   }
 
   // Last resort: if ALL enabled slots have circuit breakers tripped for >1 hour,
@@ -2699,7 +2755,10 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
   #if defined(BOARD_HAS_PSRAM)
   const size_t CRITICAL_RESTART_THRESHOLD = 45000;
   #else
-  const size_t CRITICAL_RESTART_THRESHOLD = 35000;
+  // Non-PSRAM: raised from 35000 to 40000 so we actually restart when stuck in
+  // the gray zone (observed stuck value 35828 > 35000 previously evaded restart
+  // while still below MIN_TLS_HEAP=45000, trapping the device in a no-recovery loop).
+  const size_t CRITICAL_RESTART_THRESHOLD = 40000;
   #endif
   const unsigned long CRITICAL_RESTART_WINDOW_MS = 300000;  // 5 minutes
   if (max_alloc < CRITICAL_RESTART_THRESHOLD) {
@@ -2718,19 +2777,64 @@ void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
 #endif
 
 void MQTTBridge::recreateMqttClientsForFragmentationRecovery() {
-  // Disconnect, delete, and recreate all MQTT clients so they allocate fresh buffers.
-  // Preserve backoff state so recovery doesn't restart the rapid-failure cycle.
-  // teardownSlot() resets reconnect_backoff = 0; without this save/restore, recovery
-  // would reset backoff to 0, preventing the circuit breaker from ever tripping and
-  // allowing more TLS alloc/free churn. Pattern matches maintainSlotConnection() line ~1394.
+  // Two-phase recovery that reproduces what a WiFi drop achieves accidentally:
+  // ALL mbedTLS contexts are destroyed before any new one is allocated, giving the
+  // allocator a clean "no TLS context resident" moment so free blocks can coalesce.
+  //
+  // The previous per-slot teardown+setup loop held the earlier slot's fresh TLS
+  // context resident while later slots were still being torn down, defeating
+  // coalescing. It also skipped connected slots, so a "one up, one stuck" scenario
+  // was effectively a no-op — the connected slot's TLS allocation kept pinning
+  // the heap fragmented.
+
+  uint8_t saved_backoff[RUNTIME_MQTT_SLOTS] = {0};
+  uint8_t saved_failures[RUNTIME_MQTT_SLOTS] = {0};
+
+  #ifdef ESP_PLATFORM
+  size_t before_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  MQTT_DEBUG_PRINTLN("Fragmentation recovery: tearing down all slots (max_alloc=%d)", (int)before_alloc);
+  #endif
+
+  // Phase 1: tear down EVERY enabled slot, regardless of connected state.
+  // Saving backoff state prevents teardownSlot() from clobbering it back to zero,
+  // which would otherwise let circuit-breaker logic never trip after recovery.
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slots[i].enabled && !_slots[i].connected) {
-      uint8_t saved_backoff  = _slots[i].reconnect_backoff;
-      uint8_t saved_failures = _slots[i].max_backoff_failures;
+    if (_slots[i].enabled) {
+      saved_backoff[i] = _slots[i].reconnect_backoff;
+      saved_failures[i] = _slots[i].max_backoff_failures;
       teardownSlot(i);
+    }
+  }
+
+  // Settle: let the ESP-IDF MQTT task finish releasing transport and mbedTLS
+  // buffers before any new TLS context is allocated. Without this, the first
+  // setupSlot can race teardown cleanup and re-fragment at the same offset.
+  #ifdef ESP_PLATFORM
+  vTaskDelay(pdMS_TO_TICKS(500));
+  size_t after_teardown_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  MQTT_DEBUG_PRINTLN("Fragmentation recovery: all slots torn down, settled (max_alloc=%d)",
+      (int)after_teardown_alloc);
+  #else
+  delay(500);
+  #endif
+
+  // Phase 2: staggered setup so two TLS handshakes don't fire back-to-back and
+  // immediately re-fragment. 5 s between slots matches the boot-time stagger.
+  int active_count = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled) {
+      if (active_count >= _max_active_slots) {
+        break;
+      }
       setupSlot(i);
-      _slots[i].reconnect_backoff    = saved_backoff;
-      _slots[i].max_backoff_failures = saved_failures;
+      _slots[i].reconnect_backoff = saved_backoff[i];
+      _slots[i].max_backoff_failures = saved_failures[i];
+      active_count++;
+      #ifdef ESP_PLATFORM
+      if (active_count < _max_active_slots && (i + 1) < RUNTIME_MQTT_SLOTS) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+      }
+      #endif
     }
   }
   updateCachedConnectionStatus();
