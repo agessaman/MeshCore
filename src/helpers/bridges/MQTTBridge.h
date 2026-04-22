@@ -177,7 +177,12 @@ private:
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
   volatile bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS];
 
-  // Timezone handling
+  // Timezone handling.
+  // _timezone_storage is inline class storage (zero heap) that is reconfigured
+  // via setRules() whenever the preferred timezone string changes. _timezone
+  // is a stable alias pointer to &_timezone_storage so existing call sites
+  // that accept a Timezone* keep working without modification.
+  Timezone _timezone_storage;
   Timezone* _timezone;
 
   // Core 1-only staging: written by storeRawRadioData(), consumed by queuePacket().
@@ -221,12 +226,12 @@ private:
   StaticJsonDocument<PUBLISH_JSON_BUFFER_SIZE> _packet_json_doc;
   StaticJsonDocument<STATUS_JSON_BUFFER_SIZE>  _status_json_doc;
 
-  // Memory pressure monitoring
+  // Memory pressure monitoring (per-publish skip; see publishPacket()).
+  // The broader fragmentation-recovery machinery was removed in Phase 4 of
+  // the MQTT memory-defrag work — persistent MQTT clients no longer churn
+  // the heap, so gray-zone / critical-restart trackers are unnecessary.
   unsigned long _last_memory_check;
-  int _skipped_publishes;  // Count of skipped publishes due to memory pressure
-  unsigned long _last_fragmentation_recovery;  // Throttle: 5 min between recovery runs
-  unsigned long _fragmentation_pressure_since;  // 0 = not under pressure
-  unsigned long _last_critical_check_run;  // Throttle: run unified check at most every 60s
+  int _skipped_publishes;  // Exposed via SNMP; count of publishes skipped when max_alloc is too low
 
   // Status publish retry tracking
   unsigned long _last_status_retry;  // Track last retry attempt (separate from successful publish)
@@ -241,17 +246,6 @@ private:
   // Queue staleness tracking
   unsigned long _queue_disconnected_since;  // 0 = has connected slots
   static const unsigned long QUEUE_STALE_MS = 300000UL; // Flush queue after 5 min disconnected
-
-  // Recovery: restart ESP after prolonged total failure
-  unsigned long _all_tripped_since;   // 0 = not all tripped
-  unsigned long _critical_heap_since; // 0 = max_alloc is above critical threshold
-
-  // Gray-zone detector: max_alloc below the TLS viability floor (MIN_TLS_HEAP)
-  // with no connected slots — used to trigger the two-phase recovery before the
-  // hard restart check, and to arm a 60 s escalation deadline if that recovery
-  // fails to restore viability.
-  unsigned long _stuck_below_tls_since;          // 0 = max_alloc above MIN_TLS_HEAP or slots connected
-  unsigned long _post_recovery_escalation_deadline; // 0 = not armed; else abs ms deadline for restart if still stuck
 
 #ifdef WITH_SNMP
   MeshSNMPAgent* _snmp_agent;
@@ -285,8 +279,20 @@ private:
   bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
 
   // Internal methods - slot management
-  void setupSlot(int index);           // Create/destroy client for a slot based on its preset
-  void teardownSlot(int index);        // Disconnect and free slot resources
+  // Lifetime model (Phase 1 of MQTT memory-defrag):
+  // - initSlotClients() allocates one PsychicMqttClient per slot and registers
+  //   its persistent callbacks. Runs once per bridge lifetime in begin().
+  // - destroySlotClients() disconnects and deletes each client. Runs once in end().
+  // - setupSlot() configures an already-allocated client (server, credentials,
+  //   CA) and calls connect(). Safe to call multiple times to reconfigure.
+  // - teardownSlot() only disconnects — it never deletes the client. Leaves
+  //   the mbedTLS/transport state ready for a subsequent setupSlot().
+  // This avoids delete/new cycles that shed ~40 KB of mbedTLS buffers per
+  // reconfigure and fragment the internal heap on non-PSRAM boards.
+  void initSlotClients();              // Allocate persistent clients + register callbacks (once)
+  void destroySlotClients();           // Delete all persistent clients (shutdown only)
+  void setupSlot(int index);           // Configure and connect the slot's existing client
+  void teardownSlot(int index);        // Disconnect the slot's client (keeps the object alive)
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
@@ -295,10 +301,6 @@ private:
   void publishStatusToSlot(int index);
   void updateCachedConnectionStatus();
 
-  #ifdef ESP_PLATFORM
-  void runCriticalMemoryCheckAndRecovery();
-  #endif
-  void recreateMqttClientsForFragmentationRecovery();
   void processPacketQueue();
   bool publishStatus();  // Returns true if status was successfully published
   bool handleWiFiConnection(unsigned long now);
@@ -318,7 +320,10 @@ private:
   bool isAnySlotConnected();
   void syncTimeWithNTP();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
-  Timezone* createTimezoneFromString(const char* tz_string);
+  // Populates dst_out/std_out with TimeChangeRules for the given IANA or
+  // abbreviation string. Returns false if the string is not recognized
+  // (callers should fall back to UTC). Zero-allocation.
+  static bool timezoneRulesFromString(const char* tz_string, TimeChangeRule& dst_out, TimeChangeRule& std_out);
   void checkConfigurationMismatch();
   bool isIATAValid() const;
   bool isSlotReady(int index, char* reason_buf = nullptr, size_t reason_size = 0) const;

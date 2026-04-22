@@ -1,5 +1,7 @@
 #include "PsychicMqttClient.h"
 
+#include <string.h>
+
 static const char *TAG = "🐙";
 
 static void log_error_if_nonzero(const char *message, int error_code)
@@ -13,36 +15,26 @@ static void log_error_if_nonzero(const char *message, int error_code)
 PsychicMqttClient::PsychicMqttClient() : _mqtt_cfg()
 {
     memset(&_mqtt_cfg, 0, sizeof(_mqtt_cfg));
+    _topic[0] = '\0';
 }
 
 PsychicMqttClient::~PsychicMqttClient()
 {
     disconnect();
-    esp_mqtt_client_destroy(_client);
+    if (_client != nullptr)
+    {
+        esp_mqtt_client_destroy(_client);
+        _client = nullptr;
+    }
 
-    // Free memory in _buffer and _topic
     if (_buffer != nullptr)
     {
         free(_buffer);
-        _buffer = nullptr; // Set to nullptr to avoid dangling pointers
+        _buffer = nullptr;
+        _buffer_capacity = 0;
     }
-
-    if (_topic != nullptr)
-    {
-        free(_topic);
-        _topic = nullptr; // Set to nullptr to avoid dangling pointers
-    }
-
-    // Free memory in _onMessageUserCallbacks
-    for (auto &callback : _onMessageUserCallbacks)
-    {
-        if (callback.topic != nullptr)
-        {
-            free(callback.topic); // Free the dynamically allocated topic
-            callback.topic = nullptr;
-        }
-    }
-    _onMessageUserCallbacks.clear(); // Clear the vector
+    // Topic storage is inline; nothing to free.
+    // Subscription entries have inline topic storage; nothing to free.
 }
 
 PsychicMqttClient &PsychicMqttClient::setKeepAlive(int keepAlive)
@@ -224,53 +216,118 @@ PsychicMqttClient &PsychicMqttClient::setServer(const char *uri)
 
 PsychicMqttClient &PsychicMqttClient::onConnect(OnConnectUserCallback callback)
 {
-    _onConnectUserCallbacks.push_back(callback);
+    if (_onConnectUserCallbackCount < PSYCHIC_MAX_CONNECT_CB)
+    {
+        _onConnectUserCallbacks[_onConnectUserCallbackCount++] = std::move(callback);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "onConnect callback list full (max=%d)", PSYCHIC_MAX_CONNECT_CB);
+    }
     return *this;
 }
 
 PsychicMqttClient &PsychicMqttClient::onDisconnect(OnDisconnectUserCallback callback)
 {
-    _onDisconnectUserCallbacks.push_back(callback);
+    if (_onDisconnectUserCallbackCount < PSYCHIC_MAX_DISCONNECT_CB)
+    {
+        _onDisconnectUserCallbacks[_onDisconnectUserCallbackCount++] = std::move(callback);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "onDisconnect callback list full (max=%d)", PSYCHIC_MAX_DISCONNECT_CB);
+    }
     return *this;
 }
 
 PsychicMqttClient &PsychicMqttClient::onSubscribe(OnSubscribeUserCallback callback)
 {
-    _onSubscribeUserCallbacks.push_back(callback);
+    if (_onSubscribeUserCallbackCount < PSYCHIC_MAX_SUBSCRIBE_CB)
+    {
+        _onSubscribeUserCallbacks[_onSubscribeUserCallbackCount++] = std::move(callback);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "onSubscribe callback list full (max=%d)", PSYCHIC_MAX_SUBSCRIBE_CB);
+    }
     return *this;
 }
 
 PsychicMqttClient &PsychicMqttClient::onUnsubscribe(OnUnsubscribeUserCallback callback)
 {
-    _onUnsubscribeUserCallbacks.push_back(callback);
+    if (_onUnsubscribeUserCallbackCount < PSYCHIC_MAX_UNSUBSCRIBE_CB)
+    {
+        _onUnsubscribeUserCallbacks[_onUnsubscribeUserCallbackCount++] = std::move(callback);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "onUnsubscribe callback list full (max=%d)", PSYCHIC_MAX_UNSUBSCRIBE_CB);
+    }
     return *this;
 }
 
 PsychicMqttClient &PsychicMqttClient::onMessage(OnMessageUserCallback callback)
 {
-    OnMessageUserCallback_t subscription = {nullptr, 0, callback};
-    _onMessageUserCallbacks.push_back(subscription);
+    if (_onMessageUserCallbackCount < PSYCHIC_MAX_MESSAGE_CB)
+    {
+        OnMessageUserCallback_t &slot = _onMessageUserCallbacks[_onMessageUserCallbackCount++];
+        slot.topic[0] = '\0';
+        slot.qos = 0;
+        slot.callback = std::move(callback);
+        slot.has_topic = false;
+        slot.used = true;
+    }
+    else
+    {
+        ESP_LOGE(TAG, "onMessage callback list full (max=%d)", PSYCHIC_MAX_MESSAGE_CB);
+    }
     return *this;
 }
 
 PsychicMqttClient &PsychicMqttClient::onTopic(const char *topic, int qos, OnMessageUserCallback callback)
 {
-    OnMessageUserCallback_t subscription = {strcpy((char *)malloc(strlen(topic) + 1), topic), qos, callback};
-    _onMessageUserCallbacks.push_back(subscription);
+    if (_onMessageUserCallbackCount >= PSYCHIC_MAX_MESSAGE_CB)
+    {
+        ESP_LOGE(TAG, "onTopic subscription list full (max=%d)", PSYCHIC_MAX_MESSAGE_CB);
+        return *this;
+    }
+    OnMessageUserCallback_t &slot = _onMessageUserCallbacks[_onMessageUserCallbackCount++];
+    size_t tlen = strnlen(topic, PSYCHIC_MAX_TOPIC_LEN - 1);
+    memcpy(slot.topic, topic, tlen);
+    slot.topic[tlen] = '\0';
+    slot.qos = qos;
+    slot.callback = std::move(callback);
+    slot.has_topic = true;
+    slot.used = true;
+
     if (_connected)
-        subscribe(topic, qos);
+        subscribe(slot.topic, qos);
     return *this;
 }
 
 PsychicMqttClient &PsychicMqttClient::onPublish(OnPublishUserCallback callback)
 {
-    _onPublishUserCallbacks.push_back(callback);
+    if (_onPublishUserCallbackCount < PSYCHIC_MAX_PUBLISH_CB)
+    {
+        _onPublishUserCallbacks[_onPublishUserCallbackCount++] = std::move(callback);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "onPublish callback list full (max=%d)", PSYCHIC_MAX_PUBLISH_CB);
+    }
     return *this;
 }
 
 PsychicMqttClient &PsychicMqttClient::onError(OnErrorUserCallback callback)
 {
-    _onErrorUserCallbacks.push_back(callback);
+    if (_onErrorUserCallbackCount < PSYCHIC_MAX_ERROR_CB)
+    {
+        _onErrorUserCallbacks[_onErrorUserCallbackCount++] = std::move(callback);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "onError callback list full (max=%d)", PSYCHIC_MAX_ERROR_CB);
+    }
     return *this;
 }
 
@@ -287,13 +344,29 @@ void PsychicMqttClient::connect()
         ESP_LOGE(TAG, "MQTT URI not set.");
         return;
     }
+    int desired_buffer = _mqtt_cfg.buffer.size > 0 ? _mqtt_cfg.buffer.size : 1024;
 #else
     if (_mqtt_cfg.uri == nullptr)
     {
         ESP_LOGE(TAG, "MQTT URI not set.");
         return;
     }
+    int desired_buffer = _mqtt_cfg.buffer_size > 0 ? _mqtt_cfg.buffer_size : 1024;
 #endif
+
+    // Lazily size the reassembly buffer once for the client's lifetime.
+    // Messages larger than this will be rejected rather than triggering
+    // per-message heap allocation.
+    if (_buffer == nullptr)
+    {
+        _buffer_capacity = (size_t)desired_buffer;
+        _buffer = (char *)malloc(_buffer_capacity + 1);
+        if (_buffer == nullptr)
+        {
+            ESP_LOGE(TAG, "Failed to allocate reassembly buffer (%u bytes)", (unsigned)_buffer_capacity);
+            _buffer_capacity = 0;
+        }
+    }
 
     if (_client == nullptr)
     {
@@ -468,25 +541,26 @@ void PsychicMqttClient::_onConnect(esp_mqtt_event_handle_t &event)
 {
     ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 
-    // Resubscribe to all topics
-    for (auto topic : _onMessageUserCallbacks)
+    // Resubscribe to all registered topics.
+    for (uint8_t i = 0; i < _onMessageUserCallbackCount; ++i)
     {
-        if (topic.topic != nullptr)
-            subscribe(topic.topic, topic.qos);
+        OnMessageUserCallback_t &sub = _onMessageUserCallbacks[i];
+        if (sub.used && sub.has_topic)
+            subscribe(sub.topic, sub.qos);
     }
 
-    for (auto callback : _onConnectUserCallbacks)
+    for (uint8_t i = 0; i < _onConnectUserCallbackCount; ++i)
     {
-        callback(event->session_present);
+        _onConnectUserCallbacks[i](event->session_present);
     }
 }
 
 void PsychicMqttClient::_onDisconnect(esp_mqtt_event_handle_t &event)
 {
     ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
-    for (auto callback : _onDisconnectUserCallbacks)
+    for (uint8_t i = 0; i < _onDisconnectUserCallbackCount; ++i)
     {
-        callback(event->session_present);
+        _onDisconnectUserCallbacks[i](event->session_present);
     }
     _stopMqttClient = true;
 }
@@ -494,110 +568,106 @@ void PsychicMqttClient::_onDisconnect(esp_mqtt_event_handle_t &event)
 void PsychicMqttClient::_onSubscribe(esp_mqtt_event_handle_t &event)
 {
     ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-    for (auto callback : _onSubscribeUserCallbacks)
+    for (uint8_t i = 0; i < _onSubscribeUserCallbackCount; ++i)
     {
-        callback(event->msg_id);
+        _onSubscribeUserCallbacks[i](event->msg_id);
     }
 }
 
 void PsychicMqttClient::_onUnsubscribe(esp_mqtt_event_handle_t &event)
 {
     ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
-    for (auto callback : _onUnsubscribeUserCallbacks)
+    for (uint8_t i = 0; i < _onUnsubscribeUserCallbackCount; ++i)
     {
-        callback(event->msg_id);
+        _onUnsubscribeUserCallbacks[i](event->msg_id);
     }
 }
 
 void PsychicMqttClient::_onMessage(esp_mqtt_event_handle_t &event)
 {
-    // ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-    // printf("MSG_ID=%d\r\n", event->msg_id);
-    // printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
-    // printf("DATA=%.*s\r\n", event->data_len, event->data);
-    // printf("DATA_LEN=%d\r\n", event->data_len);
-    // printf("TOTAL_DATA_LEN=%d\r\n", event->total_data_len);
-    // printf("CURRENT_DATA_OFFSET=%d\r\n", event->current_data_offset);
-
-    // Check if we are dealing with a simple message
+    // Single-message path: payload fits in the event. No heap use.
     if (event->total_data_len == event->data_len)
     {
         ESP_LOGV(TAG, "MQTT_EVENT_DATA_SINGLE");
-        // Copy the characters from data->data_ptr to c-string
         char payload[event->data_len + 1];
-        memcpy(payload, (char *)event->data, event->data_len);
+        memcpy(payload, event->data, event->data_len);
         payload[event->data_len] = '\0';
-        ESP_LOGV(TAG, "Payload=%s", payload);
 
-        char topic[event->topic_len + 1];
-        memcpy(topic, (char *)event->topic, event->topic_len);
-        topic[event->topic_len] = '\0';
-        ESP_LOGV(TAG, "Topic=%s", topic);
+        size_t tlen = (size_t)event->topic_len;
+        if (tlen >= sizeof(_topic)) tlen = sizeof(_topic) - 1;
+        char topic[sizeof(_topic)];
+        memcpy(topic, event->topic, tlen);
+        topic[tlen] = '\0';
 
-        for (auto callback : _onMessageUserCallbacks)
+        for (uint8_t i = 0; i < _onMessageUserCallbackCount; ++i)
         {
-            if (callback.topic == nullptr || _isTopicMatch(topic, callback.topic))
+            OnMessageUserCallback_t &cb = _onMessageUserCallbacks[i];
+            if (!cb.used) continue;
+            if (!cb.has_topic || _isTopicMatch(topic, cb.topic))
             {
-                callback.callback(topic, payload, event->retain, event->qos, event->dup);
+                cb.callback(topic, payload, event->retain, event->qos, event->dup);
             }
         }
+        return;
     }
 
-    // Check if we are dealing with a first multipart message
-    else if (event->current_data_offset == 0)
+    // Multipart first chunk: remember the topic, begin reassembly in _buffer.
+    if (event->current_data_offset == 0)
     {
         ESP_LOGV(TAG, "MQTT_EVENT_DATA_MULTIPART_FIRST");
-        // Allocate memory for the buffer
-        _buffer = (char *)malloc(event->total_data_len + 1);
-        // Copy the characters from even->data to _buffer
-        memcpy(_buffer, (char *)event->data, event->data_len);
+        if (_buffer == nullptr)
+        {
+            ESP_LOGE(TAG, "multipart message but no reassembly buffer allocated");
+            return;
+        }
+        if ((size_t)event->total_data_len > _buffer_capacity)
+        {
+            ESP_LOGE(TAG, "multipart message size %d exceeds reassembly buffer %u", event->total_data_len, (unsigned)_buffer_capacity);
+            return;
+        }
+        memcpy(_buffer, event->data, event->data_len);
 
-        // Store the topic for later use, as it is only sent with the first message
-        _topic = (char *)malloc(event->topic_len + 1);
-        memcpy(_topic, (char *)event->topic, event->topic_len);
-        _topic[event->topic_len] = '\0';
+        size_t tlen = (size_t)event->topic_len;
+        if (tlen >= sizeof(_topic)) tlen = sizeof(_topic) - 1;
+        memcpy(_topic, event->topic, tlen);
+        _topic[tlen] = '\0';
+        return;
     }
 
-    // Check if we are on the last message
-    else if (event->current_data_offset + event->data_len == event->total_data_len)
+    // Multipart final chunk: finalize and dispatch.
+    if (event->current_data_offset + event->data_len == event->total_data_len)
     {
         ESP_LOGV(TAG, "MQTT_EVENT_DATA_MULTIPART_LAST");
-        // Copy the characters from even->data to _buffer
-        memcpy(_buffer + event->current_data_offset, (char *)event->data, event->data_len);
+        if (_buffer == nullptr) return;
+        if ((size_t)(event->current_data_offset + event->data_len) > _buffer_capacity) return;
+        memcpy(_buffer + event->current_data_offset, event->data, event->data_len);
         _buffer[event->total_data_len] = '\0';
-        ESP_LOGV(TAG, "Topic=%s", _topic);
-        ESP_LOGV(TAG, "Payload=%s", _buffer);
 
-        for (auto callback : _onMessageUserCallbacks)
+        for (uint8_t i = 0; i < _onMessageUserCallbackCount; ++i)
         {
-            if (callback.topic == nullptr || _isTopicMatch(_topic, callback.topic))
+            OnMessageUserCallback_t &cb = _onMessageUserCallbacks[i];
+            if (!cb.used) continue;
+            if (!cb.has_topic || _isTopicMatch(_topic, cb.topic))
             {
-                callback.callback(_topic, _buffer, event->retain, event->qos, event->dup);
+                cb.callback(_topic, _buffer, event->retain, event->qos, event->dup);
             }
         }
-
-        // Free the memory
-        free(_buffer);
-        _buffer = nullptr;
-        free(_topic);
-        _topic = nullptr;
+        return;
     }
 
-    // Otherwise, we are in the middle of the message
-    else
-    {
-        // copy the characters from even->data to _buffer
-        memcpy(_buffer + event->current_data_offset, (char *)event->data, event->data_len);
-        ESP_LOGV(TAG, "MQTT_EVENT_DATA_MULTIPART");
-    }
+    // Multipart middle chunk: copy into _buffer at the correct offset.
+    if (_buffer == nullptr) return;
+    if ((size_t)(event->current_data_offset + event->data_len) > _buffer_capacity) return;
+    memcpy(_buffer + event->current_data_offset, event->data, event->data_len);
+    ESP_LOGV(TAG, "MQTT_EVENT_DATA_MULTIPART");
 }
 
 void PsychicMqttClient::_onPublish(esp_mqtt_event_handle_t &event)
 {
     ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
-    for (auto callback : _onPublishUserCallbacks)
+    for (uint8_t i = 0; i < _onPublishUserCallbackCount; ++i)
     {
-        callback(event->msg_id);
+        _onPublishUserCallbacks[i](event->msg_id);
     }
 }
 
@@ -611,77 +681,70 @@ void PsychicMqttClient::_onError(esp_mqtt_event_handle_t &event)
         log_error_if_nonzero("captured as transport's socket errno", event->error_handle->esp_transport_sock_errno);
         ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
 
-        for (auto callback : _onErrorUserCallbacks)
+        for (uint8_t i = 0; i < _onErrorUserCallbackCount; ++i)
         {
-            callback(*event->error_handle);
+            _onErrorUserCallbacks[i](*event->error_handle);
         }
     }
 }
 
+// Zero-allocation MQTT topic/subscription match. Supports '+' single-level
+// wildcard and trailing '#' multi-level wildcard per MQTT 3.1.1 spec.
 bool PsychicMqttClient::_isTopicMatch(const char *topic, const char *subscription)
 {
-    ESP_LOGD(TAG, "Match topic: %s with subscription: %s", topic, subscription);
+    if (topic == nullptr || subscription == nullptr) return false;
 
-    String topicStr(topic);
-    String subscriptionStr(subscription);
+    const char *t = topic;
+    const char *s = subscription;
 
-    // Check if the subscription is a pure wildcard
-    if (subscriptionStr == "#" || subscriptionStr == "+")
+    for (;;)
     {
-        ESP_LOGV(TAG, "Subscription is a pure wildcard --> MATCH");
-        return true;
-    }
-
-    // Check if the topic is a simple match
-    if (topicStr == subscriptionStr)
-    {
-        ESP_LOGV(TAG, "Topic is a direct match --> MATCH");
-        return true;
-    }
-
-    // Split the topic and subscription into tokens
-    int topicIndex = 0;
-    int subscriptionIndex = 0;
-    int lastTopicIndex = topicStr.lastIndexOf('/');
-    int lastSubscriptionIndex = subscriptionStr.lastIndexOf('/');
-    String topicToken = topicStr.substring(topicIndex, topicStr.indexOf('/', topicIndex));
-    String subscriptionToken = subscriptionStr.substring(subscriptionIndex, subscriptionStr.indexOf('/', subscriptionIndex));
-
-    ESP_LOGV(TAG, "Initial topic token: %s, subscription token: %s", topicToken.c_str(), subscriptionToken.c_str());
-    ESP_LOGV(TAG, "Last topic index: %d, last subscription index: %d", lastTopicIndex, lastSubscriptionIndex);
-
-    while (topicToken.length() > 0 && subscriptionToken.length() > 0)
-    {
-        ESP_LOGV(TAG, "Comparing topic token: %s with subscription token: %s", topicToken.c_str(), subscriptionToken.c_str());
-
-        if (subscriptionToken == "#")
-        {
-            ESP_LOGV(TAG, "Subscription token is # --> MATCH");
+        // '#' at the start of a level matches everything remaining.
+        if (s[0] == '#' && s[1] == '\0')
             return true;
-        }
-        if (subscriptionToken != "+" && topicToken != subscriptionToken)
+
+        // Find end of the current level in both strings.
+        const char *t_end = strchr(t, '/');
+        const char *s_end = strchr(s, '/');
+        size_t t_len = t_end ? (size_t)(t_end - t) : strlen(t);
+        size_t s_len = s_end ? (size_t)(s_end - s) : strlen(s);
+
+        bool level_matches;
+        if (s_len == 1 && s[0] == '+')
         {
-            ESP_LOGV(TAG, "Tokens do not match and subscription token is not + --> NO MATCH");
+            // '+' matches exactly one level (any content, including empty).
+            level_matches = true;
+        }
+        else
+        {
+            level_matches = (t_len == s_len) && (memcmp(t, s, t_len) == 0);
+        }
+        if (!level_matches)
+            return false;
+
+        // Advance past this level.
+        bool t_done = (t_end == nullptr);
+        bool s_done = (s_end == nullptr);
+
+        if (t_done && s_done)
+            return true;
+
+        if (s_done)
+        {
+            // Subscription ended but topic has more levels → no match,
+            // unless the subscription ended with '+' and topic also has no
+            // more levels (already handled above).
             return false;
         }
 
-        ESP_LOGV(TAG, "Current token index: topic: %d, subscription: %d", topicIndex, subscriptionIndex);
-        if (topicIndex == lastTopicIndex + 1 || subscriptionIndex == lastSubscriptionIndex + 1)
+        if (t_done)
         {
-            ESP_LOGV(TAG, "End of tokens. Topic: %s, Subscription: %s", topicStr.substring(topicIndex).c_str(), subscriptionStr.substring(subscriptionIndex).c_str());
-            bool match = ((subscriptionToken == "+" && topicIndex == lastTopicIndex + 1) || topicStr.substring(topicIndex) == subscriptionStr.substring(subscriptionIndex));
-            ESP_LOGV(TAG, "End of tokens. Match: %s", match ? "true" : "false");
-            return match;
+            // Topic ended but subscription has more levels. Only matches if
+            // the remainder is exactly '#'.
+            return (s_end[1] == '#' && s_end[2] == '\0');
         }
 
-        topicIndex = topicStr.indexOf('/', topicIndex) + 1;
-        subscriptionIndex = subscriptionStr.indexOf('/', subscriptionIndex) + 1;
-        ESP_LOGV(TAG, "Next token index: topic: %d, subscription: %d", topicIndex, subscriptionIndex);
-        topicToken = topicStr.substring(topicIndex, topicStr.indexOf('/', topicIndex));
-        subscriptionToken = subscriptionStr.substring(subscriptionIndex, subscriptionStr.indexOf('/', subscriptionIndex));
-
-        ESP_LOGV(TAG, "Next topic token: %s, subscription token: %s", topicToken.c_str(), subscriptionToken.c_str());
+        t = t_end + 1;
+        s = s_end + 1;
     }
-
-    return false;
 }

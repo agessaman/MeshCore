@@ -32,16 +32,15 @@
  */
 
 #include <functional>
-#include <vector>
 
 #include "Arduino.h"
 #include "mqtt_client.h"
 #include "esp_crt_bundle.h"
 
-#define PSYCHIC_MQTT_CLIENT_VERSION_STR "0.2.1"
+#define PSYCHIC_MQTT_CLIENT_VERSION_STR "0.2.2"
 #define PSYCHIC_MQTT_CLIENT_VERSION_MAJOR 0
 #define PSYCHIC_MQTT_CLIENT_VERSION_MINOR 2
-#define PSYCHIC_MQTT_CLIENT_VERSION_PATCH 1
+#define PSYCHIC_MQTT_CLIENT_VERSION_PATCH 2
 
 #ifndef ARDUINO_ARCH_ESP32
 #error "This library only supports boards with an ESP32 processor."
@@ -56,11 +55,40 @@ typedef std::function<void(char *topic, char *payload, int retain, int qos, bool
 typedef std::function<void(int msgId)> OnPublishUserCallback;
 typedef std::function<void(esp_mqtt_error_codes_t error)> OnErrorUserCallback;
 
+// Fixed caps sized for MeshCore's usage patterns. All callback and subscription
+// storage is inline in the client object — zero dynamic allocation on register.
+#ifndef PSYCHIC_MAX_CONNECT_CB
+#define PSYCHIC_MAX_CONNECT_CB 4
+#endif
+#ifndef PSYCHIC_MAX_DISCONNECT_CB
+#define PSYCHIC_MAX_DISCONNECT_CB 4
+#endif
+#ifndef PSYCHIC_MAX_SUBSCRIBE_CB
+#define PSYCHIC_MAX_SUBSCRIBE_CB 2
+#endif
+#ifndef PSYCHIC_MAX_UNSUBSCRIBE_CB
+#define PSYCHIC_MAX_UNSUBSCRIBE_CB 2
+#endif
+#ifndef PSYCHIC_MAX_MESSAGE_CB
+#define PSYCHIC_MAX_MESSAGE_CB 4
+#endif
+#ifndef PSYCHIC_MAX_PUBLISH_CB
+#define PSYCHIC_MAX_PUBLISH_CB 2
+#endif
+#ifndef PSYCHIC_MAX_ERROR_CB
+#define PSYCHIC_MAX_ERROR_CB 4
+#endif
+#ifndef PSYCHIC_MAX_TOPIC_LEN
+#define PSYCHIC_MAX_TOPIC_LEN 128
+#endif
+
 typedef struct
 {
-    char *topic;
+    char topic[PSYCHIC_MAX_TOPIC_LEN];
     int qos;
     OnMessageUserCallback callback;
+    bool has_topic; // false = match all topics (onMessage)
+    bool used;
 } OnMessageUserCallback_t;
 
 /**
@@ -378,20 +406,39 @@ private:
     bool _connected = false;
     bool _stopMqttClient = false;
 
+    // Multipart message reassembly. _buffer is lazily allocated at connect() time
+    // to match the configured buffer size, then reused for the client's lifetime.
+    // _topic is inline storage, never heap-allocated.
     char *_buffer = nullptr;
-    char *_topic = nullptr;
+    size_t _buffer_capacity = 0;
+    char _topic[PSYCHIC_MAX_TOPIC_LEN];
 
     static void _onMqttEventStatic(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
     void _onMqttEvent(esp_event_base_t base, int32_t event_id, void *event_data);
     bool _isTopicMatch(const char *topic, const char *subscription);
 
-    std::vector<OnConnectUserCallback> _onConnectUserCallbacks;
-    std::vector<OnDisconnectUserCallback> _onDisconnectUserCallbacks;
-    std::vector<OnSubscribeUserCallback> _onSubscribeUserCallbacks;
-    std::vector<OnUnsubscribeUserCallback> _onUnsubscribeUserCallbacks;
-    std::vector<OnMessageUserCallback_t> _onMessageUserCallbacks;
-    std::vector<OnPublishUserCallback> _onPublishUserCallbacks;
-    std::vector<OnErrorUserCallback> _onErrorUserCallbacks;
+    // Fixed-size callback storage. Each slot is "used" once registered; we never
+    // unregister so we only ever append. Iteration uses the count, not sizeof.
+    OnConnectUserCallback _onConnectUserCallbacks[PSYCHIC_MAX_CONNECT_CB];
+    uint8_t _onConnectUserCallbackCount = 0;
+
+    OnDisconnectUserCallback _onDisconnectUserCallbacks[PSYCHIC_MAX_DISCONNECT_CB];
+    uint8_t _onDisconnectUserCallbackCount = 0;
+
+    OnSubscribeUserCallback _onSubscribeUserCallbacks[PSYCHIC_MAX_SUBSCRIBE_CB];
+    uint8_t _onSubscribeUserCallbackCount = 0;
+
+    OnUnsubscribeUserCallback _onUnsubscribeUserCallbacks[PSYCHIC_MAX_UNSUBSCRIBE_CB];
+    uint8_t _onUnsubscribeUserCallbackCount = 0;
+
+    OnMessageUserCallback_t _onMessageUserCallbacks[PSYCHIC_MAX_MESSAGE_CB];
+    uint8_t _onMessageUserCallbackCount = 0;
+
+    OnPublishUserCallback _onPublishUserCallbacks[PSYCHIC_MAX_PUBLISH_CB];
+    uint8_t _onPublishUserCallbackCount = 0;
+
+    OnErrorUserCallback _onErrorUserCallbacks[PSYCHIC_MAX_ERROR_CB];
+    uint8_t _onErrorUserCallbackCount = 0;
 
     void _onBeforeConnect(esp_mqtt_event_handle_t &event_data, esp_mqtt_client_handle_t &client);
     void _onConnect(esp_mqtt_event_handle_t &event_data);
