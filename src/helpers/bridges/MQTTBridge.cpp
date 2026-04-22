@@ -292,13 +292,16 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
       _ntp_client(_ntp_udp, "pool.ntp.org", 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
-      _timezone(nullptr), _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
+      // Default to UTC; setRules() will be called from syncTimeWithNTP when a
+      // non-UTC timezone string is configured. Timezone has no default ctor,
+      // so we must pass rules here.
+      _timezone_storage(TimeChangeRule{"UTC", Last, Sun, Mar, 0, 0}, TimeChangeRule{"UTC", Last, Sun, Mar, 0, 0}),
+      _timezone(&_timezone_storage),
+      _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
       _identity(identity),
       _cached_has_connected_slots(false),
-      _last_memory_check(0), _skipped_publishes(0), _last_fragmentation_recovery(0),
-      _fragmentation_pressure_since(0), _last_critical_check_run(0),
-      _last_no_broker_log(0), _queue_disconnected_since(0), _all_tripped_since(0), _critical_heap_since(0),
-      _stuck_below_tls_since(0), _post_recovery_escalation_deadline(0),
+      _last_memory_check(0), _skipped_publishes(0),
+      _last_no_broker_log(0), _queue_disconnected_since(0),
       _last_config_warning(0),
       _dispatcher(nullptr), _radio(nullptr), _board(nullptr), _ms(nullptr),
 #ifdef WITH_SNMP
@@ -592,6 +595,11 @@ void MQTTBridge::begin() {
   // NOTE: Slot setup deferred until after NTP sync in loop()
   #endif
 
+  // Allocate persistent MQTT client objects once. They live for the bridge's
+  // lifetime so reconfigure/reconnect paths reuse the same mbedTLS context
+  // instead of churning ~40 KB of internal heap per cycle.
+  initSlotClients();
+
   _initialized = true;
   s_mqtt_bridge_instance = this;
   MQTT_DEBUG_PRINTLN("MQTT Bridge initialized");
@@ -643,16 +651,17 @@ void MQTTBridge::end() {
   memset(_packet_queue, 0, sizeof(_packet_queue));
   #endif
 
-  // Teardown all slots
+  // Disconnect and delete persistent MQTT clients. teardownSlot() intentionally
+  // only disconnects; destruction happens here so the mbedTLS contexts survive
+  // the reconfigure/reconnect hot path.
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     teardownSlot(i);
   }
+  destroySlotClients();
 
-  // Clean up timezone object to prevent memory leak
-  if (_timezone) {
-    delete _timezone;
-    _timezone = nullptr;
-  }
+  // Timezone is inline class storage (_timezone_storage) since Phase 3 of
+  // the MQTT memory-defrag work — nothing to delete. _timezone always
+  // points at &_timezone_storage and stays valid for the bridge lifetime.
 
   // Free PSRAM-backed buffers (non-PSRAM builds use inline class arrays — no free needed)
   #if defined(BOARD_HAS_PSRAM)
@@ -907,22 +916,12 @@ void MQTTBridge::mqttTaskLoop() {
             _last_status_publish = now;
             _last_status_retry = 0;
             MQTT_DEBUG_PRINTLN("Status published successfully, next publish in %lu ms", _status_interval);
-            // If we're in the hole but just proved connectivity, recover sooner than the dedicated pressure timer
-            size_t max_alloc = ESP.getMaxAllocHeap();
-            if (max_alloc < 58000 && (now - _last_fragmentation_recovery) > 300000) {
-              _last_fragmentation_recovery = now;
-              _fragmentation_pressure_since = 0;
-              MQTT_DEBUG_PRINTLN("Fragmentation recovery after status (max_alloc=%d)", (int)max_alloc);
-              recreateMqttClientsForFragmentationRecovery();
-            }
           } else {
             MQTT_DEBUG_PRINTLN("Status publish failed, will retry in %lu ms", STATUS_RETRY_INTERVAL);
           }
         }
       }
     }
-
-    runCriticalMemoryCheckAndRecovery();
 
     // Update cached connection status periodically (every 5 seconds)
     // This ensures cache stays accurate even if callbacks miss updates
@@ -946,6 +945,77 @@ void MQTTBridge::mqttTaskLoop() {
 // Slot management
 // ---------------------------------------------------------------------------
 
+// Allocate one PsychicMqttClient per slot and register its persistent callbacks.
+// Called exactly once per bridge lifetime from begin(); the objects live until
+// destroySlotClients(). Reconfiguring a slot (preset change, JWT renewal,
+// reconnect) reuses the same client — no delete/new cycles, so the mbedTLS
+// context and its ~40 KB of internal-heap buffers are allocated once instead
+// of every reconfigure.
+void MQTTBridge::initSlotClients() {
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    MQTTSlot& slot = _slots[i];
+    if (slot.client != nullptr) continue;
+
+    slot.client = new PsychicMqttClient();
+    slot.client->setAutoReconnect(false);  // we handle reconnect with our own backoff
+
+    const int index = i;  // capture a fresh copy so lambdas refer to the right slot
+    slot.client->onConnect([this, index](bool sessionPresent) {
+      MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
+      _slots[index].connected = true;
+      _slots[index].reconnect_backoff = 0;
+      _slots[index].max_backoff_failures = 0;
+      _slots[index].circuit_breaker_tripped = false;
+      _slots[index].last_tls_err = 0;
+      _slots[index].last_tls_stack_err = 0;
+      _slots[index].last_sock_errno = 0;
+      _slots[index].last_error_time = 0;
+      updateCachedConnectionStatus();
+      publishStatusToSlot(index);
+    });
+    slot.client->onDisconnect([this, index](bool sessionPresent) {
+      MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
+      _slots[index].disconnect_count++;
+      if (_slots[index].first_disconnect_time == 0) {
+        _slots[index].first_disconnect_time = millis();
+      }
+      _slots[index].connected = false;
+      updateCachedConnectionStatus();
+    });
+    slot.client->onError([this, index](esp_mqtt_error_codes error) {
+      _slots[index].last_tls_err = error.esp_tls_last_esp_err;
+      _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
+      _slots[index].last_sock_errno = error.esp_transport_sock_errno;
+      _slots[index].last_error_time = millis();
+      if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
+        MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
+          index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
+          error.esp_transport_sock_errno, error.error_type);
+      } else {
+        MQTT_DEBUG_PRINTLN("MQTT%d error: type=%d", index + 1, error.error_type);
+      }
+    });
+  }
+}
+
+void MQTTBridge::destroySlotClients() {
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    MQTTSlot& slot = _slots[i];
+    if (slot.client == nullptr) continue;
+
+    if (slot.client->connected()) {
+      slot.client->disconnect();
+    }
+    #ifdef ESP_PLATFORM
+    vTaskDelay(pdMS_TO_TICKS(50));
+    #else
+    delay(50);
+    #endif
+    delete slot.client;
+    slot.client = nullptr;
+  }
+}
+
 void MQTTBridge::setupSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
@@ -955,11 +1025,47 @@ void MQTTBridge::setupSlot(int index) {
     return;
   }
 
-  // Don't recreate if already exists
-  if (slot.client) return;
+  // Persistent client is expected to have been allocated by initSlotClients().
+  // If it hasn't, we can't proceed — bail loudly rather than silently leaking.
+  if (slot.client == nullptr) {
+    MQTT_DEBUG_PRINTLN("MQTT%d: setupSlot before initSlotClients() — skipping", index + 1);
+    return;
+  }
 
-  slot.client = new PsychicMqttClient();
-  slot.client->setAutoReconnect(false);  // We handle reconnect with our own backoff logic
+  // Reconfigure path: if we're re-applying (e.g. after a preset change), stop
+  // the existing connection cleanly first. The client object (and its mbedTLS
+  // context) is reused; setCredentials / setServer below overwrite the config
+  // fields in place before connect() restarts the ESP-IDF client.
+  if (slot.initial_connect_done) {
+    if (slot.client->connected()) {
+      slot.client->disconnect();
+    }
+    // Clear TLS verification fields so a stale CA-bundle attach or cert
+    // pointer from a prior preset doesn't override the new one.
+    esp_mqtt_client_config_t* cfg = slot.client->getMqttConfig();
+    #if ESP_IDF_VERSION_MAJOR == 5
+    cfg->broker.verification.certificate = nullptr;
+    cfg->broker.verification.certificate_len = 0;
+    cfg->broker.verification.crt_bundle_attach = nullptr;
+    cfg->credentials.username = nullptr;
+    cfg->credentials.authentication.password = nullptr;
+    #else
+    cfg->cert_pem = nullptr;
+    cfg->cert_len = 0;
+    cfg->crt_bundle_attach = nullptr;
+    cfg->username = nullptr;
+    cfg->password = nullptr;
+    #endif
+    slot.auth_token[0] = '\0';
+    slot.connected = false;
+    slot.token_expires_at = 0;
+    slot.last_token_renewal = 0;
+    slot.reconnect_backoff = 0;
+    slot.max_backoff_failures = 0;
+    slot.circuit_breaker_tripped = false;
+    slot.last_reconnect_attempt = 0;
+  }
+
   bool uses_jwt = (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) || slot.audience[0] != '\0';
   optimizeMqttClientConfig(slot.client, uses_jwt);  // sets keepalive (45s PSRAM, 75s non-PSRAM)
   #ifndef MQTT_FORCE_KEEPALIVE_45
@@ -972,43 +1078,6 @@ void MQTTBridge::setupSlot(int index) {
   // Preset keepalive (55s) is more aggressive than needed behind Cloudflare.
   #endif
   #endif
-
-  // Callbacks (capture index by value)
-  slot.client->onConnect([this, index](bool sessionPresent) {
-    MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
-    _slots[index].connected = true;
-    _slots[index].reconnect_backoff = 0;
-    _slots[index].max_backoff_failures = 0;
-    _slots[index].circuit_breaker_tripped = false;
-    _slots[index].last_tls_err = 0;
-    _slots[index].last_tls_stack_err = 0;
-    _slots[index].last_sock_errno = 0;
-    _slots[index].last_error_time = 0;
-    updateCachedConnectionStatus();
-    publishStatusToSlot(index);
-  });
-  slot.client->onDisconnect([this, index](bool sessionPresent) {
-    MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
-    _slots[index].disconnect_count++;
-    if (_slots[index].first_disconnect_time == 0) {
-      _slots[index].first_disconnect_time = millis();
-    }
-    _slots[index].connected = false;
-    updateCachedConnectionStatus();
-  });
-  slot.client->onError([this, index](esp_mqtt_error_codes error) {
-    _slots[index].last_tls_err = error.esp_tls_last_esp_err;
-    _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
-    _slots[index].last_sock_errno = error.esp_transport_sock_errno;
-    _slots[index].last_error_time = millis();
-    if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
-      MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
-        index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
-        error.esp_transport_sock_errno, error.error_type);
-    } else {
-      MQTT_DEBUG_PRINTLN("MQTT%d error: type=%d", index + 1, error.error_type);
-    }
-  });
 
   if (slot.preset) {
     // Preset-based slot
@@ -1134,26 +1203,24 @@ void MQTTBridge::setupSlot(int index) {
   slot.initial_connect_done = true;
 }
 
+// Disconnect the slot's MQTT client and clear per-connection state, but leave
+// the client object alive so a subsequent setupSlot() can reuse its mbedTLS
+// context. This is called both on reconfigure (preset change) and at shutdown;
+// destruction of the underlying client happens once in destroySlotClients().
 void MQTTBridge::teardownSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
 
-  if (slot.client) {
-    if (slot.client->connected()) {
-      slot.client->disconnect();
-    }
+  if (slot.client && slot.client->connected()) {
+    slot.client->disconnect();
     #ifdef ESP_PLATFORM
     vTaskDelay(pdMS_TO_TICKS(50));
     #else
     delay(50);
     #endif
-    delete slot.client;
-    slot.client = nullptr;
   }
 
-  // Invalidate auth token (inline buffer — just zero the first byte)
   slot.auth_token[0] = '\0';
-
   slot.connected = false;
   slot.initial_connect_done = false;
   slot.broker_uri[0] = '\0';
@@ -1283,24 +1350,10 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
     }
   }
 
-  // Pre-flight: don't attempt TLS if there isn't enough contiguous internal heap.
-  // Each failed attempt allocates ~42 KB, fails, and frees slightly fragmented — over many
-  // cycles this degrades max_alloc from 70 KB to unusable. Block early to stop accumulation.
-  #ifdef ESP_PLATFORM
-  {
-    static const size_t MIN_TLS_HEAP = 45000;
-    static const unsigned long DEFERRED_LOG_INTERVAL_MS = 30000UL;
-    size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    if (avail < MIN_TLS_HEAP) {
-      if (now_millis - slot.last_deferred_log_ms >= DEFERRED_LOG_INTERVAL_MS || slot.last_deferred_log_ms == 0) {
-        slot.last_deferred_log_ms = now_millis;
-        MQTT_DEBUG_PRINTLN("MQTT%d connect deferred: max_block=%d < %d (heap too fragmented)",
-            index + 1, (int)avail, (int)MIN_TLS_HEAP);
-      }
-      return;
-    }
-  }
-  #endif
+  // Phase 4 (MQTT memory-defrag): the MIN_TLS_HEAP preflight was a workaround
+  // for the fragmentation caused by per-reconnect mbedTLS allocations. With
+  // persistent clients (Phase 1), the mbedTLS context is allocated once at
+  // startup and the preflight is no longer necessary.
 
   // Periodic probe for circuit-breaker-tripped slots (recovery from transient outages)
   // Attempts a single reconnect every 30 minutes to see if the server has come back
@@ -1319,39 +1372,16 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           _radio ? _radio->getRadioState() : -1,
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       if (slot_uses_jwt) {
-        unsigned long current_time = time(nullptr);
-        bool token_still_valid = slot.token_expires_at > 0 &&
-                                current_time < slot.token_expires_at &&
-                                (slot.token_expires_at - current_time) > 120; // >2 min remaining
-
-        if (token_still_valid) {
-          // Lightweight reconnect — reuse existing client but refresh JWT for fresh iat
-          if (createSlotAuthToken(index)) {
-            slot.client->setCredentials(_jwt_username, slot.auth_token);
-            MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (fresh token)", index + 1);
-          }
-          slot.client->connect();
-        } else {
-          // Token expired — regenerate token but avoid teardown+setup
-          // which would allocate new TLS context on potentially fragmented heap
-          if (slot.client) {
-            if (createSlotAuthToken(index)) {
-              slot.client->setCredentials(_jwt_username, slot.auth_token);
-              MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (regenerated expired token)", index + 1);
-            }
-            slot.client->connect();
-          } else {
-            // Client was destroyed — must do full setup
-            bool saved_tripped = slot.circuit_breaker_tripped;
-            MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (full setup, no client)", index + 1);
-            teardownSlot(index);
-            setupSlot(index);
-            _slots[index].circuit_breaker_tripped = saved_tripped;
-            _slots[index].last_reconnect_attempt = now_millis;
-          }
+        // Regenerate or refresh token, then reconnect the persistent client.
+        // The client object and its mbedTLS context are always live post
+        // initSlotClients(), so no full setup is ever needed here.
+        if (createSlotAuthToken(index)) {
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
+          MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (fresh token)", index + 1);
         }
+        slot.client->reconnect();
       } else {
-        slot.client->connect();
+        slot.client->reconnect();
       }
       // If the connect callback fires and sets slot.connected = true,
       // it will clear circuit_breaker_tripped via the onConnect handler
@@ -1388,43 +1418,19 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
       if (slot_uses_jwt) {
-        unsigned long current_time = time(nullptr);
-        bool token_still_valid = slot.token_expires_at > 0 &&
-                                current_time < slot.token_expires_at &&
-                                (slot.token_expires_at - current_time) > 120; // >2 min remaining
-
-        if (token_still_valid) {
-          // Token valid — always lightweight reconnect regardless of backoff level.
-          // Avoids creating a new TLS session (teardown+setup) which can race with
-          // WiFi association and cause drops when multiple slots do it simultaneously.
-          if (createSlotAuthToken(index)) {
-            slot.client->setCredentials(_jwt_username, slot.auth_token);
-            MQTT_DEBUG_PRINTLN("MQTT%d reconnect (fresh token, backoff %d)", index + 1, slot.reconnect_backoff);
-          } else {
-            MQTT_DEBUG_PRINTLN("MQTT%d reconnect (token refresh failed, backoff %d)", index + 1, slot.reconnect_backoff);
-          }
-          slot.client->reconnect();
+        // Always lightweight reconnect on the persistent client. A stale/expired
+        // token is handled by regenerating it in place and updating credentials
+        // — no teardown is needed because the client and its mbedTLS context
+        // persist for the bridge lifetime.
+        if (createSlotAuthToken(index)) {
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
+          MQTT_DEBUG_PRINTLN("MQTT%d reconnect (fresh token, backoff %d)", index + 1, slot.reconnect_backoff);
         } else {
-          // Token expired — full teardown to get fresh TLS context + credentials
-          if (teardown_attempted) {
-            // Defer to next cycle to limit heap fragmentation from simultaneous teardowns
-            slot.last_reconnect_attempt = now_millis;
-            return;
-          }
-          teardown_attempted = true;
-          uint8_t saved_backoff = slot.reconnect_backoff;
-          uint8_t saved_failures = slot.max_backoff_failures;
-          MQTT_DEBUG_PRINTLN("MQTT%d full teardown+setup (token expired, backoff %d)", index + 1, saved_backoff);
-          teardownSlot(index);
-          setupSlot(index);
-          _slots[index].reconnect_backoff = saved_backoff;
-          _slots[index].max_backoff_failures = saved_failures;
-          _slots[index].last_reconnect_attempt = now_millis;
+          MQTT_DEBUG_PRINTLN("MQTT%d reconnect (token refresh failed, backoff %d)", index + 1, slot.reconnect_backoff);
         }
+        slot.client->reconnect();
       } else {
-        // Non-JWT slots — always lightweight reconnect on existing client.
-        // recreateMqttClientsForFragmentationRecovery() handles teardown when
-        // memory pressure warrants it, without the timing hazard here.
+        // Non-JWT slots — lightweight reconnect on existing client.
         MQTT_DEBUG_PRINTLN("MQTT%d reconnect (non-JWT, backoff %d)", index + 1, slot.reconnect_backoff);
         slot.client->reconnect();
       }
@@ -2025,33 +2031,12 @@ void MQTTBridge::loop() {
       }
     }
 
-    // Check if status hasn't been published successfully for too long
-    if (_status_enabled && _last_status_publish != 0) {
-      unsigned long now = millis();
-      unsigned long time_since_last_success = (now >= _last_status_publish) ?
-                                              (now - _last_status_publish) :
-                                              (ULONG_MAX - _last_status_publish + now + 1);
-      const unsigned long MAX_FAILURE_TIME_MS = 600000;  // 10 minutes
-
-      if (time_since_last_success > MAX_FAILURE_TIME_MS) {
-        static unsigned long last_reinit_log = 0;
-        if (now - last_reinit_log > 300000) {
-          MQTT_DEBUG_PRINTLN("CRITICAL: Status publish has been failing for %lu ms (>%lu ms), forcing MQTT session reinitialization",
-                             time_since_last_success, MAX_FAILURE_TIME_MS);
-          last_reinit_log = now;
-        }
-
-        recreateMqttClientsForFragmentationRecovery();
-        _last_status_publish = 0;
-        _last_status_retry = 0;
-        MQTT_DEBUG_PRINTLN("MQTT session reinitialized (clients recreated) - reconnection on next loop");
-      }
-    }
+    // Phase 4 (MQTT memory-defrag): the "recreate on prolonged status failure"
+    // path and the periodic runCriticalMemoryCheckAndRecovery() call have been
+    // removed. They were both symptoms of the heap churn introduced by
+    // delete/new cycles of the MQTT client; with persistent clients the
+    // allocator stays healthy and these recovery hooks aren't required.
   }
-
-  #ifdef ESP_PLATFORM
-  runCriticalMemoryCheckAndRecovery();
-  #endif
   #endif
 }
 
@@ -2332,12 +2317,18 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 float snr, float rssi) {
   if (!packet) return;
 
-  // Memory pressure check: Skip publishes when heap is severely fragmented
+  // Memory pressure check: Skip publishes when there's not enough contiguous
+  // heap for the publish itself (JSON buffer + esp-mqtt outbox frame + WiFi TX
+  // path). Headroom only — NOT an mbedTLS preflight: persistent clients keep
+  // their TLS contexts allocated for the bridge lifetime, so the old ~52 KB
+  // "reserve space for reconnect" guard is obsolete post Phase 1. Publish
+  // payload is capped at PUBLISH_JSON_BUFFER_SIZE (2 KB); 8 KB is a safe
+  // ceiling including esp-mqtt frame overhead and transient TCP buffers.
   #ifdef ESP32
   #if defined(BOARD_HAS_PSRAM)
-  static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 60000;
+  static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 16000;
   #else
-  static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 52000;
+  static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 8000;
   #endif
   unsigned long now = millis();
   if (now - _last_memory_check > 5000) {
@@ -2575,272 +2566,6 @@ void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, 
 }
 
 // ---------------------------------------------------------------------------
-// Memory management
-// ---------------------------------------------------------------------------
-
-#ifdef ESP_PLATFORM
-void MQTTBridge::runCriticalMemoryCheckAndRecovery() {
-  const unsigned long CRITICAL_CHECK_INTERVAL_MS = 60000;
-  #if defined(BOARD_HAS_PSRAM)
-  const unsigned long PRESSURE_WINDOW_CRITICAL_MS = 180000;
-  const unsigned long PRESSURE_WINDOW_MODERATE_MS = 300000;
-  const unsigned long RECOVERY_THROTTLE_MS = 300000;
-  const size_t PRESSURE_THRESHOLD_CRITICAL = 58000;
-  const size_t PRESSURE_THRESHOLD_MODERATE = 70000;
-  const size_t HARD_RECOVERY_THRESHOLD = 54000;
-  #else
-  // Non-PSRAM boards run closer to the edge; use lower thresholds and longer windows.
-  const unsigned long PRESSURE_WINDOW_CRITICAL_MS = 300000;
-  const unsigned long PRESSURE_WINDOW_MODERATE_MS = 900000;
-  const unsigned long RECOVERY_THROTTLE_MS = 600000;
-  const size_t PRESSURE_THRESHOLD_CRITICAL = 50000;
-  const size_t PRESSURE_THRESHOLD_MODERATE = 56000;
-  const size_t HARD_RECOVERY_THRESHOLD = 46000;
-  #endif
-  const unsigned long CRITICAL_LOG_INTERVAL_MS = 900000;
-
-  unsigned long now = millis();
-  if (now - _last_critical_check_run < CRITICAL_CHECK_INTERVAL_MS) {
-    return;
-  }
-  _last_critical_check_run = now;
-
-  size_t free_h = ESP.getFreeHeap();
-  size_t max_alloc = ESP.getMaxAllocHeap();
-  size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-  size_t internal_max_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-  #ifdef MQTT_MEMORY_DEBUG
-  unsigned long spiram_f = 0;
-  #ifdef BOARD_HAS_PSRAM
-  spiram_f = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-  #endif
-  agentLogHeap("MQTTBridge.cpp:runCriticalMemoryCheckAndRecovery", "critical_memory_check", "H1_H4", free_h, max_alloc, internal_free, spiram_f);
-  #endif
-
-  // Pressure timer: track how long max_alloc has been below moderate threshold
-  if (max_alloc >= PRESSURE_THRESHOLD_MODERATE) {
-    _fragmentation_pressure_since = 0;
-  } else {
-    if (_fragmentation_pressure_since == 0) {
-      _fragmentation_pressure_since = now;
-    }
-  }
-
-  // Rate-limited diagnostic logging (every 15 min)
-  static unsigned long last_critical_log = 0;
-  if (now - last_critical_log >= CRITICAL_LOG_INTERVAL_MS) {
-    last_critical_log = now;
-
-    // Always log heap state including internal heap (critical for diagnosing
-    // repeater hangs caused by internal heap exhaustion masked by PSRAM)
-    MQTT_DEBUG_PRINTLN("Heap: free=%d max=%d int_free=%d int_max=%d",
-        (int)free_h, (int)max_alloc, (int)internal_free, (int)internal_max_block);
-
-    if (max_alloc < PRESSURE_THRESHOLD_CRITICAL) {
-      MQTT_DEBUG_PRINTLN("CRITICAL: Low memory! Free: %d, Max: %d", (int)free_h, (int)max_alloc);
-    } else if (max_alloc < PRESSURE_THRESHOLD_MODERATE) {
-      MQTT_DEBUG_PRINTLN("WARNING: Memory pressure. Free: %d, Max: %d", (int)free_h, (int)max_alloc);
-    }
-
-    // Internal heap pressure check (PSRAM boards only — total heap can look fine
-    // while internal heap is exhausted, starving WiFi driver and Core 1)
-    #if defined(BOARD_HAS_PSRAM)
-    const size_t INTERNAL_HEAP_CRITICAL = 40000;
-    const size_t INTERNAL_BLOCK_CRITICAL = 20000;
-    if (internal_free < INTERNAL_HEAP_CRITICAL || internal_max_block < INTERNAL_BLOCK_CRITICAL) {
-      MQTT_DEBUG_PRINTLN("CRITICAL: Internal heap low! int_free=%d int_max_block=%d",
-          (int)internal_free, (int)internal_max_block);
-    }
-    #endif
-
-    // Log slot client count
-    int n_active = 0;
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slots[i].client != nullptr) n_active++;
-    }
-    MQTT_DEBUG_PRINTLN("MQTT clients active: %d", n_active);
-  }
-
-  // Dedicated recovery
-  unsigned long required_window_ms = (max_alloc < PRESSURE_THRESHOLD_CRITICAL)
-      ? PRESSURE_WINDOW_CRITICAL_MS
-      : PRESSURE_WINDOW_MODERATE_MS;
-  bool allow_recovery = !_cached_has_connected_slots || max_alloc < HARD_RECOVERY_THRESHOLD;
-  if (_fragmentation_pressure_since != 0 &&
-      allow_recovery &&
-      (now - _fragmentation_pressure_since) >= required_window_ms &&
-      (now - _last_fragmentation_recovery) >= RECOVERY_THROTTLE_MS) {
-    _last_fragmentation_recovery = now;
-    _fragmentation_pressure_since = 0;
-    MQTT_DEBUG_PRINTLN("Fragmentation recovery: recreating MQTT clients (max_alloc=%d, pressure %lu min)", (int)max_alloc, (unsigned long)(required_window_ms / 60000));
-    recreateMqttClientsForFragmentationRecovery();
-    // Arm post-recovery escalation: if max_alloc hasn't recovered above MIN_TLS_HEAP
-    // within 60 s, the two-phase recovery failed and a clean reboot is the only option.
-    _post_recovery_escalation_deadline = now + 60000UL;
-  }
-
-  // Gray-zone trigger: MIN_TLS_HEAP (45000) is the pre-flight floor below which new
-  // TLS handshakes are blocked. If we sit below that floor with zero connected slots,
-  // no reconnect can succeed and we'll spin indefinitely. After 180 s of that state,
-  // force the two-phase recovery; the old pressure-window path only triggers after
-  // much longer windows and doesn't always apply when the gray-zone trap is active
-  // above PRESSURE_THRESHOLD_MODERATE but below MIN_TLS_HEAP.
-  static const size_t MIN_TLS_HEAP = 45000;
-  static const unsigned long STUCK_TRIGGER_MS = 180000UL;  // 3 min
-  static const unsigned long STUCK_COOLDOWN_MS = 600000UL; // 10 min between attempts
-  bool in_gray_zone = (!_cached_has_connected_slots && max_alloc < MIN_TLS_HEAP);
-  if (in_gray_zone) {
-    if (_stuck_below_tls_since == 0) {
-      _stuck_below_tls_since = now;
-    } else if ((now - _stuck_below_tls_since) >= STUCK_TRIGGER_MS &&
-               (now - _last_fragmentation_recovery) >= STUCK_COOLDOWN_MS) {
-      MQTT_DEBUG_PRINTLN("Gray-zone recovery: no slots connected, max_alloc=%d < %d for %lu s",
-          (int)max_alloc, (int)MIN_TLS_HEAP, (now - _stuck_below_tls_since) / 1000);
-      _last_fragmentation_recovery = now;
-      _stuck_below_tls_since = 0;
-      _fragmentation_pressure_since = 0;
-      recreateMqttClientsForFragmentationRecovery();
-      _post_recovery_escalation_deadline = now + 60000UL;
-    }
-  } else {
-    _stuck_below_tls_since = 0;
-  }
-
-  // Post-recovery escalation: if the two-phase recovery just ran and 60 s later
-  // we're still stuck below the TLS floor with no slots connected, the recovery
-  // failed (either the allocator couldn't coalesce or something else is pinning
-  // the heap). Fall through to a clean reboot rather than spin forever.
-  if (_post_recovery_escalation_deadline != 0 && now >= _post_recovery_escalation_deadline) {
-    bool still_stuck = !_cached_has_connected_slots && max_alloc < MIN_TLS_HEAP;
-    if (still_stuck) {
-      MQTT_DEBUG_PRINTLN("CRITICAL: two-phase recovery failed to restore TLS viability "
-          "(max_alloc=%d < %d, no slots connected) — restarting.",
-          (int)max_alloc, (int)MIN_TLS_HEAP);
-      delay(100);
-      ESP.restart();
-    }
-    _post_recovery_escalation_deadline = 0;
-  }
-
-  // Last resort: if ALL enabled slots have circuit breakers tripped for >1 hour,
-  // heap is likely too fragmented for TLS to ever succeed — reboot.
-  bool all_tripped = true;
-  int enabled_count = 0;
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slots[i].enabled) {
-      enabled_count++;
-      if (!_slots[i].circuit_breaker_tripped) {
-        all_tripped = false;
-        break;
-      }
-    }
-  }
-  if (enabled_count > 0 && all_tripped) {
-    if (_all_tripped_since == 0) {
-      _all_tripped_since = now;
-    } else if ((now - _all_tripped_since) >= 3600000UL) {
-      MQTT_DEBUG_PRINTLN("All MQTT slots circuit-breaker tripped for >1 hour. Restarting ESP.");
-      delay(100);
-      ESP.restart();
-    }
-  } else {
-    _all_tripped_since = 0;
-  }
-
-  // Hard restart when max_alloc has been critically low for an extended period.
-  // The all-tripped check above misses "one slot connected, one slot failing" scenarios
-  // where _cached_has_connected_slots=true keeps circuit_breaker_tripped from firing.
-  // Below the TLS viability floor, further reconnect attempts are futile and only
-  // accumulate fragmentation. A clean reboot is the reliable recovery path.
-  #if defined(BOARD_HAS_PSRAM)
-  const size_t CRITICAL_RESTART_THRESHOLD = 45000;
-  #else
-  // Non-PSRAM: raised from 35000 to 40000 so we actually restart when stuck in
-  // the gray zone (observed stuck value 35828 > 35000 previously evaded restart
-  // while still below MIN_TLS_HEAP=45000, trapping the device in a no-recovery loop).
-  const size_t CRITICAL_RESTART_THRESHOLD = 40000;
-  #endif
-  const unsigned long CRITICAL_RESTART_WINDOW_MS = 300000;  // 5 minutes
-  if (max_alloc < CRITICAL_RESTART_THRESHOLD) {
-    if (_critical_heap_since == 0) {
-      _critical_heap_since = now;
-    } else if ((now - _critical_heap_since) >= CRITICAL_RESTART_WINDOW_MS) {
-      MQTT_DEBUG_PRINTLN("CRITICAL: max_alloc=%d below %d for >5 min — restarting to recover heap.",
-          (int)max_alloc, (int)CRITICAL_RESTART_THRESHOLD);
-      delay(100);
-      ESP.restart();
-    }
-  } else {
-    _critical_heap_since = 0;
-  }
-}
-#endif
-
-void MQTTBridge::recreateMqttClientsForFragmentationRecovery() {
-  // Two-phase recovery that reproduces what a WiFi drop achieves accidentally:
-  // ALL mbedTLS contexts are destroyed before any new one is allocated, giving the
-  // allocator a clean "no TLS context resident" moment so free blocks can coalesce.
-  //
-  // The previous per-slot teardown+setup loop held the earlier slot's fresh TLS
-  // context resident while later slots were still being torn down, defeating
-  // coalescing. It also skipped connected slots, so a "one up, one stuck" scenario
-  // was effectively a no-op — the connected slot's TLS allocation kept pinning
-  // the heap fragmented.
-
-  uint8_t saved_backoff[RUNTIME_MQTT_SLOTS] = {0};
-  uint8_t saved_failures[RUNTIME_MQTT_SLOTS] = {0};
-
-  #ifdef ESP_PLATFORM
-  size_t before_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-  MQTT_DEBUG_PRINTLN("Fragmentation recovery: tearing down all slots (max_alloc=%d)", (int)before_alloc);
-  #endif
-
-  // Phase 1: tear down EVERY enabled slot, regardless of connected state.
-  // Saving backoff state prevents teardownSlot() from clobbering it back to zero,
-  // which would otherwise let circuit-breaker logic never trip after recovery.
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slots[i].enabled) {
-      saved_backoff[i] = _slots[i].reconnect_backoff;
-      saved_failures[i] = _slots[i].max_backoff_failures;
-      teardownSlot(i);
-    }
-  }
-
-  // Settle: let the ESP-IDF MQTT task finish releasing transport and mbedTLS
-  // buffers before any new TLS context is allocated. Without this, the first
-  // setupSlot can race teardown cleanup and re-fragment at the same offset.
-  #ifdef ESP_PLATFORM
-  vTaskDelay(pdMS_TO_TICKS(500));
-  size_t after_teardown_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-  MQTT_DEBUG_PRINTLN("Fragmentation recovery: all slots torn down, settled (max_alloc=%d)",
-      (int)after_teardown_alloc);
-  #else
-  delay(500);
-  #endif
-
-  // Phase 2: staggered setup so two TLS handshakes don't fire back-to-back and
-  // immediately re-fragment. 5 s between slots matches the boot-time stagger.
-  int active_count = 0;
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slots[i].enabled) {
-      if (active_count >= _max_active_slots) {
-        break;
-      }
-      setupSlot(i);
-      _slots[i].reconnect_backoff = saved_backoff[i];
-      _slots[i].max_backoff_failures = saved_failures[i];
-      active_count++;
-      #ifdef ESP_PLATFORM
-      if (active_count < _max_active_slots && (i + 1) < RUNTIME_MQTT_SLOTS) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-      }
-      #endif
-    }
-  }
-  updateCachedConnectionStatus();
-}
-
-// ---------------------------------------------------------------------------
 // NTP time sync
 // ---------------------------------------------------------------------------
 
@@ -2938,32 +2663,32 @@ void MQTTBridge::syncTimeWithNTP() {
       for (int i = 0; i < _max_active_slots; i++) {
         bool slot_jwt = (_slots[i].preset && _slots[i].preset->auth_type == MQTT_AUTH_JWT) ||
                         (!_slots[i].preset && _slots[i].audience[0] != '\0');
-        if (_slots[i].enabled && slot_jwt) {
-          // Check if the slot's token was created with a stale time
-          // (token_expires_at would be far in the past relative to current time)
+        if (_slots[i].enabled && slot_jwt && _slots[i].client) {
+          // Token created before NTP corrected the clock — refresh credentials
+          // in place and reconnect the persistent client. No teardown needed.
           if (_slots[i].token_expires_at > 0 && current_time > _slots[i].token_expires_at) {
             MQTT_DEBUG_PRINTLN("MQTT%d token stale after time correction, re-creating", i + 1);
-            teardownSlot(i);
-            setupSlot(i);
+            if (createSlotAuthToken(i)) {
+              _slots[i].client->setCredentials(_jwt_username, _slots[i].auth_token);
+            }
+            _slots[i].client->reconnect();
           }
         }
       }
     }
 
-    // Set timezone from string (with DST support) - only if changed
+    // Set timezone from string (with DST support) — only if changed.
+    // Reuses the inline _timezone_storage via setRules() instead of
+    // deleting/newing a Timezone, which was a per-change heap alloc pair.
     static char last_timezone[64] = "";
     if (strcmp(_prefs->timezone_string, last_timezone) != 0) {
-      if (_timezone) {
-        delete _timezone;
-        _timezone = nullptr;
-      }
-      Timezone* tz = createTimezoneFromString(_prefs->timezone_string);
-      if (tz) {
-        _timezone = tz;
-      } else {
+      TimeChangeRule dst_rule, std_rule;
+      if (!timezoneRulesFromString(_prefs->timezone_string, dst_rule, std_rule)) {
         TimeChangeRule utc = {"UTC", Last, Sun, Mar, 0, 0};
-        _timezone = new Timezone(utc, utc);
+        dst_rule = utc;
+        std_rule = utc;
       }
+      _timezone_storage.setRules(dst_rule, std_rule);
       strncpy(last_timezone, _prefs->timezone_string, sizeof(last_timezone) - 1);
       last_timezone[sizeof(last_timezone) - 1] = '\0';
     }
@@ -2980,115 +2705,131 @@ void MQTTBridge::syncTimeWithNTP() {
 // Timezone helper
 // ---------------------------------------------------------------------------
 
-Timezone* MQTTBridge::createTimezoneFromString(const char* tz_string) {
-  // Create Timezone objects for common IANA timezone strings
-
+// Populates dst_out and std_out with the DST/standard TimeChangeRules for the
+// given timezone string. Returns true on match, false on unknown strings. Zero
+// heap allocation — the caller then passes these into Timezone::setRules() on
+// an existing Timezone object.
+bool MQTTBridge::timezoneRulesFromString(const char* tz_string, TimeChangeRule& dst_out, TimeChangeRule& std_out) {
+  // GCC refuses to implicitly build a TimeChangeRule temporary from a bare
+  // braced-init-list on the right-hand side of operator= (the aggregate has a
+  // char[6] member). Name the type explicitly so a proper temporary is formed.
   // North America
   if (strcmp(tz_string, "America/Los_Angeles") == 0 || strcmp(tz_string, "America/Vancouver") == 0) {
-    TimeChangeRule pst = {"PST", First, Sun, Nov, 2, -480};  // UTC-8
-    TimeChangeRule pdt = {"PDT", Second, Sun, Mar, 2, -420}; // UTC-7
-    return new Timezone(pdt, pst);
+    std_out = TimeChangeRule{"PST", First, Sun, Nov, 2, -480};
+    dst_out = TimeChangeRule{"PDT", Second, Sun, Mar, 2, -420};
+    return true;
   } else if (strcmp(tz_string, "America/Denver") == 0) {
-    TimeChangeRule mst = {"MST", First, Sun, Nov, 2, -420};  // UTC-7
-    TimeChangeRule mdt = {"MDT", Second, Sun, Mar, 2, -360};  // UTC-6
-    return new Timezone(mdt, mst);
+    std_out = TimeChangeRule{"MST", First, Sun, Nov, 2, -420};
+    dst_out = TimeChangeRule{"MDT", Second, Sun, Mar, 2, -360};
+    return true;
   } else if (strcmp(tz_string, "America/Chicago") == 0) {
-    TimeChangeRule cst = {"CST", First, Sun, Nov, 2, -360};  // UTC-6
-    TimeChangeRule cdt = {"CDT", Second, Sun, Mar, 2, -300}; // UTC-5
-    return new Timezone(cdt, cst);
+    std_out = TimeChangeRule{"CST", First, Sun, Nov, 2, -360};
+    dst_out = TimeChangeRule{"CDT", Second, Sun, Mar, 2, -300};
+    return true;
   } else if (strcmp(tz_string, "America/New_York") == 0 || strcmp(tz_string, "America/Toronto") == 0) {
-    TimeChangeRule est = {"EST", First, Sun, Nov, 2, -300};   // UTC-5
-    TimeChangeRule edt = {"EDT", Second, Sun, Mar, 2, -240}; // UTC-4
-    return new Timezone(edt, est);
+    std_out = TimeChangeRule{"EST", First, Sun, Nov, 2, -300};
+    dst_out = TimeChangeRule{"EDT", Second, Sun, Mar, 2, -240};
+    return true;
   } else if (strcmp(tz_string, "America/Anchorage") == 0) {
-    TimeChangeRule akst = {"AKST", First, Sun, Nov, 2, -540}; // UTC-9
-    TimeChangeRule akdt = {"AKDT", Second, Sun, Mar, 2, -480}; // UTC-8
-    return new Timezone(akdt, akst);
+    std_out = TimeChangeRule{"AKST", First, Sun, Nov, 2, -540};
+    dst_out = TimeChangeRule{"AKDT", Second, Sun, Mar, 2, -480};
+    return true;
   } else if (strcmp(tz_string, "Pacific/Honolulu") == 0) {
-    TimeChangeRule hst = {"HST", Last, Sun, Oct, 2, -600}; // UTC-10 (no DST)
-    return new Timezone(hst, hst);
+    TimeChangeRule hst = {"HST", Last, Sun, Oct, 2, -600};
+    dst_out = hst; std_out = hst;
+    return true;
 
   // Europe
   } else if (strcmp(tz_string, "Europe/London") == 0) {
-    TimeChangeRule gmt = {"GMT", Last, Sun, Oct, 2, 0};     // UTC+0
-    TimeChangeRule bst = {"BST", Last, Sun, Mar, 1, 60};    // UTC+1
-    return new Timezone(bst, gmt);
+    std_out = TimeChangeRule{"GMT", Last, Sun, Oct, 2, 0};
+    dst_out = TimeChangeRule{"BST", Last, Sun, Mar, 1, 60};
+    return true;
   } else if (strcmp(tz_string, "Europe/Paris") == 0 || strcmp(tz_string, "Europe/Berlin") == 0) {
-    TimeChangeRule cet = {"CET", Last, Sun, Oct, 3, 60};    // UTC+1
-    TimeChangeRule cest = {"CEST", Last, Sun, Mar, 2, 120}; // UTC+2
-    return new Timezone(cest, cet);
+    std_out = TimeChangeRule{"CET", Last, Sun, Oct, 3, 60};
+    dst_out = TimeChangeRule{"CEST", Last, Sun, Mar, 2, 120};
+    return true;
   } else if (strcmp(tz_string, "Europe/Moscow") == 0) {
-    TimeChangeRule msk = {"MSK", Last, Sun, Oct, 3, 180};   // UTC+3 (no DST since 2014)
-    return new Timezone(msk, msk);
+    TimeChangeRule msk = {"MSK", Last, Sun, Oct, 3, 180};
+    dst_out = msk; std_out = msk;
+    return true;
 
   // Asia
   } else if (strcmp(tz_string, "Asia/Tokyo") == 0) {
-    TimeChangeRule jst = {"JST", Last, Sun, Oct, 2, 540};   // UTC+9 (no DST)
-    return new Timezone(jst, jst);
+    TimeChangeRule jst = {"JST", Last, Sun, Oct, 2, 540};
+    dst_out = jst; std_out = jst;
+    return true;
   } else if (strcmp(tz_string, "Asia/Shanghai") == 0 || strcmp(tz_string, "Asia/Hong_Kong") == 0) {
-    TimeChangeRule cst = {"CST", Last, Sun, Oct, 2, 480};   // UTC+8 (no DST)
-    return new Timezone(cst, cst);
+    TimeChangeRule cst = {"CST", Last, Sun, Oct, 2, 480};
+    dst_out = cst; std_out = cst;
+    return true;
   } else if (strcmp(tz_string, "Asia/Kolkata") == 0) {
-    TimeChangeRule ist = {"IST", Last, Sun, Oct, 2, 330};   // UTC+5:30 (no DST)
-    return new Timezone(ist, ist);
+    TimeChangeRule ist = {"IST", Last, Sun, Oct, 2, 330};
+    dst_out = ist; std_out = ist;
+    return true;
   } else if (strcmp(tz_string, "Asia/Dubai") == 0) {
-    TimeChangeRule gst = {"GST", Last, Sun, Oct, 2, 240};   // UTC+4 (no DST)
-    return new Timezone(gst, gst);
+    TimeChangeRule gst = {"GST", Last, Sun, Oct, 2, 240};
+    dst_out = gst; std_out = gst;
+    return true;
 
   // Australia
   } else if (strcmp(tz_string, "Australia/Sydney") == 0 || strcmp(tz_string, "Australia/Melbourne") == 0) {
-    TimeChangeRule aest = {"AEST", First, Sun, Apr, 3, 600};  // UTC+10
-    TimeChangeRule aedt = {"AEDT", First, Sun, Oct, 2, 660};   // UTC+11
-    return new Timezone(aedt, aest);
+    std_out = TimeChangeRule{"AEST", First, Sun, Apr, 3, 600};
+    dst_out = TimeChangeRule{"AEDT", First, Sun, Oct, 2, 660};
+    return true;
   } else if (strcmp(tz_string, "Australia/Perth") == 0) {
-    TimeChangeRule awst = {"AWST", Last, Sun, Oct, 2, 480};   // UTC+8 (no DST)
-    return new Timezone(awst, awst);
+    TimeChangeRule awst = {"AWST", Last, Sun, Oct, 2, 480};
+    dst_out = awst; std_out = awst;
+    return true;
 
   // Timezone abbreviations (with DST handling)
   } else if (strcmp(tz_string, "PDT") == 0 || strcmp(tz_string, "PST") == 0) {
-    TimeChangeRule pst = {"PST", First, Sun, Nov, 2, -480};
-    TimeChangeRule pdt = {"PDT", Second, Sun, Mar, 2, -420};
-    return new Timezone(pdt, pst);
+    std_out = TimeChangeRule{"PST", First, Sun, Nov, 2, -480};
+    dst_out = TimeChangeRule{"PDT", Second, Sun, Mar, 2, -420};
+    return true;
   } else if (strcmp(tz_string, "MDT") == 0 || strcmp(tz_string, "MST") == 0) {
-    TimeChangeRule mst = {"MST", First, Sun, Nov, 2, -420};
-    TimeChangeRule mdt = {"MDT", Second, Sun, Mar, 2, -360};
-    return new Timezone(mdt, mst);
+    std_out = TimeChangeRule{"MST", First, Sun, Nov, 2, -420};
+    dst_out = TimeChangeRule{"MDT", Second, Sun, Mar, 2, -360};
+    return true;
   } else if (strcmp(tz_string, "CDT") == 0 || strcmp(tz_string, "CST") == 0) {
-    TimeChangeRule cst = {"CST", First, Sun, Nov, 2, -360};
-    TimeChangeRule cdt = {"CDT", Second, Sun, Mar, 2, -300};
-    return new Timezone(cdt, cst);
+    std_out = TimeChangeRule{"CST", First, Sun, Nov, 2, -360};
+    dst_out = TimeChangeRule{"CDT", Second, Sun, Mar, 2, -300};
+    return true;
   } else if (strcmp(tz_string, "EDT") == 0 || strcmp(tz_string, "EST") == 0) {
-    TimeChangeRule est = {"EST", First, Sun, Nov, 2, -300};
-    TimeChangeRule edt = {"EDT", Second, Sun, Mar, 2, -240};
-    return new Timezone(edt, est);
+    std_out = TimeChangeRule{"EST", First, Sun, Nov, 2, -300};
+    dst_out = TimeChangeRule{"EDT", Second, Sun, Mar, 2, -240};
+    return true;
   } else if (strcmp(tz_string, "BST") == 0 || strcmp(tz_string, "GMT") == 0) {
-    TimeChangeRule gmt = {"GMT", Last, Sun, Oct, 2, 0};
-    TimeChangeRule bst = {"BST", Last, Sun, Mar, 1, 60};
-    return new Timezone(bst, gmt);
+    std_out = TimeChangeRule{"GMT", Last, Sun, Oct, 2, 0};
+    dst_out = TimeChangeRule{"BST", Last, Sun, Mar, 1, 60};
+    return true;
   } else if (strcmp(tz_string, "CEST") == 0 || strcmp(tz_string, "CET") == 0) {
-    TimeChangeRule cet = {"CET", Last, Sun, Oct, 3, 60};
-    TimeChangeRule cest = {"CEST", Last, Sun, Mar, 2, 120};
-    return new Timezone(cest, cet);
+    std_out = TimeChangeRule{"CET", Last, Sun, Oct, 3, 60};
+    dst_out = TimeChangeRule{"CEST", Last, Sun, Mar, 2, 120};
+    return true;
 
   // UTC and simple offsets
   } else if (strcmp(tz_string, "UTC") == 0) {
     TimeChangeRule utc = {"UTC", Last, Sun, Mar, 0, 0};
-    return new Timezone(utc, utc);
+    dst_out = utc; std_out = utc;
+    return true;
   } else if (strncmp(tz_string, "UTC", 3) == 0) {
     int offset = atoi(tz_string + 3);
     TimeChangeRule utc_offset = {"UTC", Last, Sun, Mar, 0, offset * 60};
-    return new Timezone(utc_offset, utc_offset);
+    dst_out = utc_offset; std_out = utc_offset;
+    return true;
   } else if (strncmp(tz_string, "GMT", 3) == 0) {
     int offset = atoi(tz_string + 3);
     TimeChangeRule gmt_offset = {"GMT", Last, Sun, Mar, 0, offset * 60};
-    return new Timezone(gmt_offset, gmt_offset);
-  } else if (strncmp(tz_string, "+", 1) == 0 || strncmp(tz_string, "-", 1) == 0) {
+    dst_out = gmt_offset; std_out = gmt_offset;
+    return true;
+  } else if (tz_string[0] == '+' || tz_string[0] == '-') {
     int offset = atoi(tz_string);
     TimeChangeRule offset_tz = {"TZ", Last, Sun, Mar, 0, offset * 60};
-    return new Timezone(offset_tz, offset_tz);
+    dst_out = offset_tz; std_out = offset_tz;
+    return true;
   } else {
     MQTT_DEBUG_PRINTLN("Unknown timezone: %s", tz_string);
-    return nullptr;
+    return false;
   }
 }
 
