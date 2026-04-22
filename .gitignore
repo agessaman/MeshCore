@@ -16,7 +16,7 @@ cmake-*
 compile_commands.json
 .venv/
 venv/
-
 # Script-generated cert bundles (see scripts/generate_cert_bundle.py)
 src/certs/x509_crt_bundle.bin
 ssl_certs/cacert.pem
+platformio.local.ini
