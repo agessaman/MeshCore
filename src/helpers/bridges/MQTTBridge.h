@@ -379,6 +379,8 @@ public:
 
   static unsigned long getWifiConnectedAtMillis();
   static void formatMqttStatusReply(char* buf, size_t bufsize, const NodePrefs* prefs);
+  /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
+  static bool isConfigValid(const NodePrefs* prefs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
   static uint8_t getLastWifiDisconnectReason();
   static unsigned long getLastWifiDisconnectTime();

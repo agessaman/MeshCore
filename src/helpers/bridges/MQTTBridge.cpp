@@ -51,6 +51,20 @@ static bool isWiFiConfigValid(const NodePrefs* prefs) {
 
 #ifdef WITH_MQTT_BRIDGE
 
+bool MQTTBridge::isConfigValid(const NodePrefs* prefs) {
+  if (!prefs || !isWiFiConfigValid(prefs)) return false;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    const char* preset_name = prefs->mqtt_slot_preset[i];
+    if (preset_name[0] == '\0' || strcmp(preset_name, MQTT_PRESET_NONE) == 0) continue;
+    if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
+      if (prefs->mqtt_slot_host[i][0] != '\0' && prefs->mqtt_slot_port[i] != 0) return true;
+    } else if (findMQTTPreset(preset_name) != nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Optional embedded CA bundle symbols produced by board_build.embed_files.
 // Weak linkage keeps non-bundle builds linkable and allows runtime fallback.
 extern const uint8_t rootca_crt_bundle_start[] asm("_binary_src_certs_x509_crt_bundle_bin_start") __attribute__((weak));
