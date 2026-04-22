@@ -1388,40 +1388,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       sprintf(reply, "unknown config: %s", config);
     }
-  } else if (memcmp(config, "mqtt.server ", 12) == 0) {
-    // Legacy single-broker CLI → slot 3 (index 2), same layout as old prefs migration.
-    const int legacy_slot = 2;
-    StrHelper::strncpy(_prefs->mqtt_slot_host[legacy_slot], &config[12], sizeof(_prefs->mqtt_slot_host[legacy_slot]));
-    StrHelper::strncpy(_prefs->mqtt_slot_preset[legacy_slot], MQTT_PRESET_CUSTOM, sizeof(_prefs->mqtt_slot_preset[legacy_slot]));
-    savePrefs();
-    _callbacks->restartBridgeSlot(legacy_slot);
-    strcpy(reply, "OK");
-  } else if (memcmp(config, "mqtt.port ", 10) == 0) {
-    const int legacy_slot = 2;
-    int port = atoi(&config[10]);
-    if (port > 0 && port <= 65535) {
-      _prefs->mqtt_slot_port[legacy_slot] = (uint16_t)port;
-      StrHelper::strncpy(_prefs->mqtt_slot_preset[legacy_slot], MQTT_PRESET_CUSTOM, sizeof(_prefs->mqtt_slot_preset[legacy_slot]));
-      savePrefs();
-      _callbacks->restartBridgeSlot(legacy_slot);
-      strcpy(reply, "OK");
-    } else {
-      strcpy(reply, "Error: port must be between 1 and 65535");
-    }
-  } else if (memcmp(config, "mqtt.username ", 14) == 0) {
-    const int legacy_slot = 2;
-    StrHelper::strncpy(_prefs->mqtt_slot_username[legacy_slot], &config[14], sizeof(_prefs->mqtt_slot_username[legacy_slot]));
-    StrHelper::strncpy(_prefs->mqtt_slot_preset[legacy_slot], MQTT_PRESET_CUSTOM, sizeof(_prefs->mqtt_slot_preset[legacy_slot]));
-    savePrefs();
-    _callbacks->restartBridgeSlot(legacy_slot);
-    strcpy(reply, "OK");
-  } else if (memcmp(config, "mqtt.password ", 14) == 0) {
-    const int legacy_slot = 2;
-    StrHelper::strncpy(_prefs->mqtt_slot_password[legacy_slot], &config[14], sizeof(_prefs->mqtt_slot_password[legacy_slot]));
-    StrHelper::strncpy(_prefs->mqtt_slot_preset[legacy_slot], MQTT_PRESET_CUSTOM, sizeof(_prefs->mqtt_slot_preset[legacy_slot]));
-    savePrefs();
-    _callbacks->restartBridgeSlot(legacy_slot);
-    strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.analyzer.us ", 17) == 0) {
     const int slot = 0;
     if (memcmp(&config[17], "on", 2) == 0) {
@@ -1660,14 +1626,6 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       sprintf(reply, "??: %s", config);
     }
-  } else if (memcmp(config, "mqtt.server", 11) == 0) {
-    sprintf(reply, "> %s", _prefs->mqtt_slot_host[2]);
-  } else if (memcmp(config, "mqtt.port", 9) == 0) {
-    sprintf(reply, "> %d", (int)_prefs->mqtt_slot_port[2]);
-  } else if (memcmp(config, "mqtt.username", 13) == 0) {
-    sprintf(reply, "> %s", _prefs->mqtt_slot_username[2]);
-  } else if (memcmp(config, "mqtt.password", 13) == 0) {
-    sprintf(reply, "> %s", _prefs->mqtt_slot_password[2]);
   } else if (memcmp(config, "wifi.ssid", 9) == 0) {
     sprintf(reply, "> %s", _prefs->wifi_ssid);
   } else if (memcmp(config, "wifi.pwd", 8) == 0) {
