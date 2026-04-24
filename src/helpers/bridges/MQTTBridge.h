@@ -125,6 +125,8 @@ private:
   struct QueuedPacket {
     mesh::Packet packet_copy;  // ~258 bytes, full value copy
     unsigned long timestamp;
+    unsigned long next_retry_ms;  // Earliest millis() when a failed send may be retried
+    uint8_t retry_attempts;       // Bounded resend attempts for transient QoS0 publish failures
     bool is_tx;
     float snr;
     float rssi;
@@ -311,10 +313,10 @@ private:
   void mqttTaskLoop();  // Main loop for MQTT task
   void initializeWiFiInTask();  // WiFi initialization moved to task
   #endif
-  void publishPacket(mesh::Packet* packet, bool is_tx,
+  bool publishPacket(mesh::Packet* packet, bool is_tx,
                      const uint8_t* raw_data = nullptr, int raw_len = 0,
                      float snr = 0.0f, float rssi = 0.0f);
-  void publishRaw(mesh::Packet* packet);
+  bool publishRaw(mesh::Packet* packet);
   void queuePacket(mesh::Packet* packet, bool is_tx);
   void dequeuePacket();
   bool isAnySlotConnected();

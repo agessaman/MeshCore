@@ -1531,11 +1531,15 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
   // values (-1 generic failure, -2 outbox full) are the only actual failures.
   int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), true);
   if (result < 0) {
-    static unsigned long last_fail_log = 0;
-    unsigned long now = millis();
-    if (now - last_fail_log > 60000) {
-      MQTT_DEBUG_PRINTLN("MQTT%d publish failed (result=%d)", index + 1, result);
-      last_fail_log = now;
+    // QoS0 packet/raw publishes are best-effort and may be retried from the
+    // bridge queue; avoid logging transient first-attempt failures here.
+    if (qos > 0) {
+      static unsigned long last_fail_log = 0;
+      unsigned long now = millis();
+      if (now - last_fail_log > 60000) {
+        MQTT_DEBUG_PRINTLN("MQTT%d publish failed (result=%d qos=%u)", index + 1, result, (unsigned)qos);
+        last_fail_log = now;
+      }
     }
     return false;
   }
@@ -2138,6 +2142,12 @@ void MQTTBridge::processPacketQueue() {
   int max_per_loop = (_queue_count > 5) ? 5 : 1;
   unsigned long loop_start_time = millis();
   const unsigned long MAX_PROCESSING_TIME_MS = (_queue_count > 5) ? 100 : 30;
+  static const uint8_t MAX_QOS0_RETRY_ATTEMPTS = 3;
+  static const unsigned long RETRY_DELAY_BASE_MS = 300UL;
+  static const unsigned long RETRY_DELAY_JITTER_MS = 200UL;
+  #ifdef MQTT_DIAG_VERBOSE
+  static unsigned long last_retry_schedule_log = 0;
+  #endif
 
   while (processed < max_per_loop) {
     unsigned long elapsed = millis() - loop_start_time;
@@ -2151,6 +2161,13 @@ void MQTTBridge::processPacketQueue() {
       break;  // No more packets
     }
 
+    unsigned long now_ms = millis();
+    if (queued.next_retry_ms != 0 && now_ms < queued.next_retry_ms) {
+      // Not ready yet; put it back and stop draining this cycle.
+      xQueueSend(_packet_queue_handle, &queued, 0);
+      break;
+    }
+
     // Update Core 0-owned last-raw-data for publishStatus() — no mutex needed since
     // _last_raw_data is now written only here (Core 0) and read only by publishStatus() (Core 0).
     if (!queued.is_tx && queued.has_raw_data && _last_raw_data) {
@@ -2161,18 +2178,52 @@ void MQTTBridge::processPacketQueue() {
       _last_raw_timestamp = millis();
     }
 
-    publishPacket(&queued.packet_copy, queued.is_tx,
-                  queued.has_raw_data ? queued.raw_data : nullptr,
-                  queued.has_raw_data ? queued.raw_len  : 0,
-                  queued.snr, queued.rssi);
+    bool packet_published = publishPacket(&queued.packet_copy, queued.is_tx,
+                                          queued.has_raw_data ? queued.raw_data : nullptr,
+                                          queued.has_raw_data ? queued.raw_len  : 0,
+                                          queued.snr, queued.rssi);
     taskYIELD();  // allow higher-priority tasks to run between packet publishes
 
     // Publish raw if enabled
+    bool raw_published = false;
     if (_raw_enabled) {
-      publishRaw(&queued.packet_copy);
+      raw_published = publishRaw(&queued.packet_copy);
     }
 
-    _queue_count--;
+    bool any_published = packet_published || raw_published;
+    if (!any_published && queued.retry_attempts < MAX_QOS0_RETRY_ATTEMPTS) {
+      queued.retry_attempts++;
+      unsigned long retry_delay_ms = RETRY_DELAY_BASE_MS + (now_ms % RETRY_DELAY_JITTER_MS);
+      queued.next_retry_ms = now_ms + retry_delay_ms;
+      #ifdef MQTT_DIAG_VERBOSE
+      if (now_ms - last_retry_schedule_log > 5000UL) {
+        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        MQTT_DEBUG_PRINTLN("Retry scheduled: attempt=%u/%u delay=%lu age=%lu q=%u pkt_type=%u packet_ok=%d raw_ok=%d",
+          (unsigned)queued.retry_attempts, (unsigned)MAX_QOS0_RETRY_ATTEMPTS,
+          retry_delay_ms, age_ms, (unsigned)uxQueueMessagesWaiting(_packet_queue_handle),
+          (unsigned)queued.packet_copy.getPayloadType(), packet_published ? 1 : 0, raw_published ? 1 : 0);
+        last_retry_schedule_log = now_ms;
+      }
+      #endif
+      if (xQueueSend(_packet_queue_handle, &queued, 0) != pdTRUE) {
+        MQTT_DEBUG_PRINTLN("Retry requeue failed, dropping packet (attempt=%u)", queued.retry_attempts);
+      }
+    } else if (!any_published) {
+      // Intentional: QoS0 best-effort packets are dropped silently in normal
+      // builds; detailed exhaustion logs are only emitted in verbose mode.
+      #ifdef MQTT_DIAG_VERBOSE
+      static unsigned long last_retry_drop_log = 0;
+      if (now_ms - last_retry_drop_log > 60000UL) {
+        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        MQTT_DEBUG_PRINTLN("Packet dropped after retry exhaustion (attempts=%u age=%lu pkt_type=%u packet_ok=%d raw_ok=%d)",
+          queued.retry_attempts, age_ms, (unsigned)queued.packet_copy.getPayloadType(),
+          packet_published ? 1 : 0, raw_published ? 1 : 0);
+        last_retry_drop_log = now_ms;
+      }
+      #endif
+    }
+
+    _queue_count = uxQueueMessagesWaiting(_packet_queue_handle);
     processed++;
   }
   #else
@@ -2201,6 +2252,12 @@ void MQTTBridge::processPacketQueue() {
   int max_per_loop = (_queue_count > 5) ? 5 : 1;
   unsigned long loop_start_time = millis();
   const unsigned long MAX_PROCESSING_TIME_MS = (_queue_count > 5) ? 100 : 30;
+  static const uint8_t MAX_QOS0_RETRY_ATTEMPTS = 3;
+  static const unsigned long RETRY_DELAY_BASE_MS = 300UL;
+  static const unsigned long RETRY_DELAY_JITTER_MS = 200UL;
+  #ifdef MQTT_DIAG_VERBOSE
+  static unsigned long last_retry_schedule_log = 0;
+  #endif
 
   while (_queue_count > 0 && processed < max_per_loop) {
     unsigned long elapsed = millis() - loop_start_time;
@@ -2209,6 +2266,10 @@ void MQTTBridge::processPacketQueue() {
     }
 
     QueuedPacket& queued = _packet_queue[_queue_head];
+    unsigned long now_ms = millis();
+    if (queued.next_retry_ms != 0 && now_ms < queued.next_retry_ms) {
+      break;
+    }
 
     if (!queued.is_tx && queued.has_raw_data && _last_raw_data) {
       memcpy(_last_raw_data, queued.raw_data, queued.raw_len);
@@ -2218,14 +2279,46 @@ void MQTTBridge::processPacketQueue() {
       _last_raw_timestamp = millis();
     }
 
-    publishPacket(&queued.packet_copy, queued.is_tx,
-                  queued.has_raw_data ? queued.raw_data : nullptr,
-                  queued.has_raw_data ? queued.raw_len  : 0,
-                  queued.snr, queued.rssi);
+    bool packet_published = publishPacket(&queued.packet_copy, queued.is_tx,
+                                          queued.has_raw_data ? queued.raw_data : nullptr,
+                                          queued.has_raw_data ? queued.raw_len  : 0,
+                                          queued.snr, queued.rssi);
     // No taskYIELD() on non-ESP32 platforms (non-FreeRTOS, cooperative scheduling not needed)
 
+    bool raw_published = false;
     if (_raw_enabled) {
-      publishRaw(&queued.packet_copy);
+      raw_published = publishRaw(&queued.packet_copy);
+    }
+
+    bool any_published = packet_published || raw_published;
+    if (!any_published && queued.retry_attempts < MAX_QOS0_RETRY_ATTEMPTS) {
+      queued.retry_attempts++;
+      unsigned long retry_delay_ms = RETRY_DELAY_BASE_MS + (now_ms % RETRY_DELAY_JITTER_MS);
+      queued.next_retry_ms = now_ms + retry_delay_ms;
+      #ifdef MQTT_DIAG_VERBOSE
+      if (now_ms - last_retry_schedule_log > 5000UL) {
+        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        MQTT_DEBUG_PRINTLN("Retry scheduled: attempt=%u/%u delay=%lu age=%lu q=%d pkt_type=%u packet_ok=%d raw_ok=%d",
+          (unsigned)queued.retry_attempts, (unsigned)MAX_QOS0_RETRY_ATTEMPTS,
+          retry_delay_ms, age_ms, _queue_count,
+          (unsigned)queued.packet_copy.getPayloadType(), packet_published ? 1 : 0, raw_published ? 1 : 0);
+        last_retry_schedule_log = now_ms;
+      }
+      #endif
+      break;  // keep packet at head for delayed retry
+    } else if (!any_published) {
+      // Intentional: QoS0 best-effort packets are dropped silently in normal
+      // builds; detailed exhaustion logs are only emitted in verbose mode.
+      #ifdef MQTT_DIAG_VERBOSE
+      static unsigned long last_retry_drop_log = 0;
+      if (now_ms - last_retry_drop_log > 60000UL) {
+        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        MQTT_DEBUG_PRINTLN("Packet dropped after retry exhaustion (attempts=%u age=%lu pkt_type=%u packet_ok=%d raw_ok=%d)",
+          queued.retry_attempts, age_ms, (unsigned)queued.packet_copy.getPayloadType(),
+          packet_published ? 1 : 0, raw_published ? 1 : 0);
+        last_retry_drop_log = now_ms;
+      }
+      #endif
     }
 
     dequeuePacket();
@@ -2326,10 +2419,10 @@ bool MQTTBridge::publishStatus() {
   return false;
 }
 
-void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
+bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 const uint8_t* raw_data, int raw_len,
                                 float snr, float rssi) {
-  if (!packet) return;
+  if (!packet) return false;
 
   // Memory pressure check: Skip publishes when there's not enough contiguous
   // heap for the publish itself (JSON buffer + esp-mqtt outbox frame + WiFi TX
@@ -2355,7 +2448,7 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                            max_alloc, (int)PUBLISH_SKIP_MAX_ALLOC_THRESHOLD, _skipped_publishes);
         last_skip_log = now;
       }
-      return;
+      return false;
     }
     _last_memory_check = now;
   }
@@ -2412,24 +2505,29 @@ void MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   }
 
   if (len > 0) {
+    bool published = false;
     char topic[128];
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
         if (buildTopicForSlot(i, MSG_PACKETS, topic, sizeof(topic))) {
-          publishToSlot(i, topic, active_buffer, false);
+          if (publishToSlot(i, topic, active_buffer, false)) {
+            published = true;
+          }
         }
       }
     }
+    return published;
   } else {
     uint8_t packet_type = packet->getPayloadType();
     if (packet_type == 4 || packet_type == 9) {
       MQTT_DEBUG_PRINTLN("Failed to build packet JSON for type=%d (len=%d), packet not published", packet_type, len);
     }
   }
+  return false;
 }
 
-void MQTTBridge::publishRaw(mesh::Packet* packet) {
-  if (!packet) return;
+bool MQTTBridge::publishRaw(mesh::Packet* packet) {
+  if (!packet) return false;
 
   // Use pre-allocated buffer; fallback to single stack buffer if not available
   char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];
@@ -2452,15 +2550,20 @@ void MQTTBridge::publishRaw(mesh::Packet* packet) {
   );
 
   if (len > 0) {
+    bool published = false;
     char topic[128];
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
         if (buildTopicForSlot(i, MSG_RAW, topic, sizeof(topic))) {
-          publishToSlot(i, topic, active_buffer, false);
+          if (publishToSlot(i, topic, active_buffer, false)) {
+            published = true;
+          }
         }
       }
     }
+    return published;
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

@@ -471,7 +471,11 @@ int PsychicMqttClient::publish(const char *topic, int qos, bool retain, const ch
     if (async)
     {
         ESP_LOGV(TAG, "Enqueuing message to topic %s with QoS %d", topic, qos);
-        return esp_mqtt_client_enqueue(_client, topic, payload, length, qos, retain, true);
+        // QoS0 telemetry is high-rate and does not need durable outbox storage.
+        // Avoiding store=true reduces small allocation churn in reconnect storms.
+        // Keep store=true for QoS1/2 so status/control semantics remain durable.
+        bool store_in_outbox = (qos > 0);
+        return esp_mqtt_client_enqueue(_client, topic, payload, length, qos, retain, store_in_outbox);
     }
     else
     {
