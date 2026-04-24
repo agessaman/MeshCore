@@ -15,11 +15,11 @@ Use one of the observer build targets (e.g., `heltec_v4_repeater_observer_mqtt`)
 If this is a fresh flash or full erase, configure your radio parameters first. These must match other nodes in your mesh:
 
 ```bash
-set radio 910.525 62.5 7 5
+set radio 910.525,62.5,7,5
 set tx 22
 ```
 
-Format: `set radio <freq_MHz> <bw_kHz> <sf> <cr>`
+Format: `set radio <freq_MHz>,<bw_kHz>,<sf>,<cr>`
 
 **3. Configure device identity**
 
@@ -558,7 +558,7 @@ The migration happens automatically on first boot after firmware update. No manu
 
 If this is a fresh flash, radio parameters must be set to match your mesh network:
 ```
-set radio 910.525 62.5 7 5
+set radio 910.525,62.5,7,5
 set tx 22
 ```
 
