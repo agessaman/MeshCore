@@ -44,6 +44,7 @@ PsychicMqttClient &PsychicMqttClient::setKeepAlive(int keepAlive)
 #else
     _mqtt_cfg.keepalive = keepAlive;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -54,6 +55,7 @@ PsychicMqttClient &PsychicMqttClient::setAutoReconnect(bool reconnect)
 #else
     _mqtt_cfg.disable_auto_reconnect = !reconnect;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -64,6 +66,7 @@ PsychicMqttClient &PsychicMqttClient::setClientId(const char *clientId)
 #else
     _mqtt_cfg.client_id = clientId;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -74,6 +77,7 @@ PsychicMqttClient &PsychicMqttClient::setCleanSession(bool cleanSession)
 #else
     _mqtt_cfg.disable_clean_session = !cleanSession;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -84,6 +88,7 @@ PsychicMqttClient &PsychicMqttClient::setBufferSize(int bufferSize)
 #else
     _mqtt_cfg.buffer_size = bufferSize;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -96,6 +101,7 @@ PsychicMqttClient &PsychicMqttClient::setTaskStackAndPriority(int stackSize, int
     _mqtt_cfg.task_stack = stackSize;
     _mqtt_cfg.task_prio = priority;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -108,6 +114,7 @@ PsychicMqttClient &PsychicMqttClient::setCACert(const char *rootCA, size_t rootC
     _mqtt_cfg.cert_pem = rootCA;
     _mqtt_cfg.cert_len = rootCALen;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -136,6 +143,7 @@ PsychicMqttClient &PsychicMqttClient::setCACertBundle(const uint8_t *bundle, siz
         _mqtt_cfg.crt_bundle_attach = NULL;
     }
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -152,6 +160,7 @@ PsychicMqttClient &PsychicMqttClient::attachArduinoCACertBundle(bool attach)
     else
         _mqtt_cfg.crt_bundle_attach = NULL;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -166,6 +175,7 @@ PsychicMqttClient &PsychicMqttClient::setCredentials(const char *username, const
     if (password != nullptr)
         _mqtt_cfg.password = password;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -183,6 +193,7 @@ PsychicMqttClient &PsychicMqttClient::setClientCertificate(const char *clientCer
     _mqtt_cfg.client_cert_len = clientCertLen;
     _mqtt_cfg.client_key_len = clientKeyLen;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -201,6 +212,7 @@ PsychicMqttClient &PsychicMqttClient::setWill(const char *topic, uint8_t qos, bo
     _mqtt_cfg.lwt_msg_len = length;
     _mqtt_cfg.lwt_msg = payload;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -211,6 +223,7 @@ PsychicMqttClient &PsychicMqttClient::setServer(const char *uri)
 #else
     _mqtt_cfg.uri = uri;
 #endif
+    _config_dirty = true;
     return *this;
 }
 
@@ -374,10 +387,28 @@ void PsychicMqttClient::connect()
         // Register event handler only once when client is first created
         // to avoid memory leak from repeated registrations
         esp_mqtt_client_register_event(_client, MQTT_EVENT_ANY, _onMqttEventStatic, this);
+        _config_dirty = false;
     }
     else
     {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_set_config(_client, &_mqtt_cfg));
+        if (_config_dirty)
+        {
+            esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
+            ESP_ERROR_CHECK_WITHOUT_ABORT(cfg_result);
+            if (cfg_result == ESP_OK)
+            {
+                _config_dirty = false;
+                ESP_LOGD(TAG, "connect(): applied mqtt config update");
+            }
+            else
+            {
+                ESP_LOGW(TAG, "connect(): failed to apply mqtt config, will retry");
+            }
+        }
+        else
+        {
+            ESP_LOGD(TAG, "connect(): mqtt config unchanged, skipping set_config");
+        }
     }
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_start(_client));
@@ -391,8 +422,25 @@ void PsychicMqttClient::reconnect()
         ESP_LOGW(TAG, "MQTT client not initialized, cannot reconnect.");
         return;
     }
-    // Update config in case credentials changed (e.g., refreshed JWT token)
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_set_config(_client, &_mqtt_cfg));
+    if (_config_dirty)
+    {
+        // Apply config only when mutating setters changed _mqtt_cfg.
+        esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(cfg_result);
+        if (cfg_result == ESP_OK)
+        {
+            _config_dirty = false;
+            ESP_LOGD(TAG, "reconnect(): applied mqtt config update");
+        }
+        else
+        {
+            ESP_LOGW(TAG, "reconnect(): failed to apply mqtt config, reconnecting with previous config");
+        }
+    }
+    else
+    {
+        ESP_LOGD(TAG, "reconnect(): mqtt config unchanged, skipping set_config");
+    }
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_reconnect(_client));
     ESP_LOGI(TAG, "MQTT client reconnect requested.");
 }

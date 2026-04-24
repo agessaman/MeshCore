@@ -405,6 +405,7 @@ private:
     esp_mqtt_error_codes_t _lastError;
     bool _connected = false;
     bool _stopMqttClient = false;
+    bool _config_dirty = true;
 
     // Multipart message reassembly. _buffer is lazily allocated at connect() time
     // to match the configured buffer size, then reused for the client's lifetime.
