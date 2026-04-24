@@ -112,7 +112,7 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
   { "cascadiamesh",  "wss://mqtt-v1.cascadiamesh.org:443/mqtt",  "mqtt-v1.cascadiamesh.org", ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
   { "tennmesh",      "mqtt://mqtt.tennmesh.com:1883",            nullptr,                   nullptr,      MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0, true, 55, "mqttfeed", "tc2live" },
   { "nashmesh",      "mqtt://mqtt.nashme.sh:1883",               nullptr,                   nullptr,      MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0, true, 55, "meshdev", "large4cats" },
-  { "chimesh",       "wss://mqtt.chimesh.org:443/mqtt",          "mqtt.chimesh.org",        ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
+  { "chimesh",       "wss://mqtt.chimesh.org:443",               "mqtt.chimesh.org",        ISRG_ROOT_X1, MQTT_AUTH_JWT,  MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr, nullptr },
   { "meshat.se",     "mqtts://mqtt.meshat.se:8883",              nullptr,                   ISRG_ROOT_X1, MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0, true, 55, "msh", "msh" },
 };
 
