@@ -1020,7 +1020,7 @@ region save
 - `advert`: uplink only this node's own advert packets (self-originated advertisements only — forwarded adverts from other nodes are filtered out)
 - `off`: disable TX packet uplinking
 
-**Default:** `off`
+**Default:** `advert`
 
 > **Note:** `mqtt.rx` and `mqtt.tx` take effect immediately — no restart required. Both can be enabled simultaneously.
 

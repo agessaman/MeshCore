@@ -195,7 +195,7 @@ The MQTT bridge comes with the following defaults for fresh installs:
 - **Packet Messages**: Enabled
 - **Raw Messages**: Disabled
 - **RX Packets**: Enabled (uplink received packets)
-- **TX Packets**: Disabled (`off` — set to `on` or `advert` to enable)
+- **TX Packets**: `advert` by default (uplink this node's own adverts; set to `on` for all TX or `off` to disable)
 - **Status Interval**: 5 minutes (300000 ms)
 - **Slot 1**: `analyzer-us`
 - **Slot 2**: `analyzer-eu`

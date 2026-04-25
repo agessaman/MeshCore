@@ -125,9 +125,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   syncMQTTPrefsToNodePrefs();
   
   // For MQTT bridge, migrate bridge.source to RX (logRx) only on fresh installs or upgrades
-  // This ensures new users get the correct default, but respects existing user choices
-  // MQTT bridge with TX requires mqtt.tx to be enabled (disabled by default),
-  // so RX is the sensible default for MQTT bridge installations
+  // so legacy "tx" is not the default. mqtt.rx / mqtt.tx are separate (fresh default: advert for TX)
   if ((is_fresh_install || is_upgrade) && _prefs->bridge_pkt_src == 0) {
     MESH_DEBUG_PRINTLN("MQTT Bridge: Migrating bridge.source from tx to rx (MQTT bridge default)");
     _prefs->bridge_pkt_src = 1;  // Set to RX (logRx)
@@ -364,7 +362,7 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_status_enabled = 1;    // enabled by default
   prefs->mqtt_packets_enabled = 1;   // enabled by default
   prefs->mqtt_raw_enabled = 0;       // disabled by default
-  prefs->mqtt_tx_enabled = 0;        // disabled by default
+  prefs->mqtt_tx_enabled = 2;        // advert: own adverts only, by default
   prefs->mqtt_rx_enabled = 1;        // RX packets enabled by default
   prefs->mqtt_status_interval = 300000; // 5 minutes default
   // Slot presets: analyzer-us and analyzer-eu enabled by default, rest = none
