@@ -104,6 +104,9 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `meshomatic` | us-east.meshomatic.net:443 | JWT (Ed25519) | WSS |
 | `cascadiamesh` | mqtt-v1.cascadiamesh.org:443 | JWT (Ed25519) | WSS |
 | `tennmesh` | mqtt.tennmesh.com:1883 | Username/password (fixed in firmware) | Plain MQTT |
+| `nashmesh` | mqtt://mqtt.nashme.sh:1883 | Username/password (fixed in firmware) | Plain MQTT |
+| `chimesh` | wss://mqtt.chimesh.org:443 | JWT (Ed25519) | WSS |
+| `meshat.se` | mqtts://mqtt.meshat.se:8883 | Username/password (fixed in firmware) | MQTT over TLS |
 | `custom` | User-configured | Username/Password | MQTT or WSS |
 | `none` | (disabled) | — | — |
 
@@ -231,6 +234,9 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset meshomatic` - Set slot N to Meshomatic
 - `set mqttN.preset cascadiamesh` - Set slot N to CascadiaMesh
 - `set mqttN.preset tennmesh` - Set slot N to TennMesh (plain MQTT; same `meshcore/{iata}/...` topics as Analyzer US)
+- `set mqttN.preset nashmesh` - Set slot N to NashMesh
+- `set mqttN.preset chimesh` - Set slot N to ChicagolandMesh
+- `set mqttN.preset meshat.se` - Set slot N to Meshat.se
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
 - `set mqttN.server <hostname>` - Set custom server hostname for slot N
