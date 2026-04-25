@@ -39,6 +39,10 @@ uint32_t Dispatcher::getCADFailMaxDuration() const {
   return 4000;   // 4 seconds
 }
 
+uint32_t Dispatcher::getRadioWatchdogMillis() const {
+  return RADIO_WATCHDOG_MS;
+}
+
 void Dispatcher::loop() {
   if (millisHasNowPassed(next_floor_calib_time)) {
     _radio->triggerNoiseFloorCalibrate(getInterferenceThreshold());
@@ -64,19 +68,22 @@ void Dispatcher::loop() {
   // in quiet mesh environments where packets may be more than RADIO_WATCHDOG_MS apart,
   // while still catching a truly stuck radio (PSRAM starvation → missed ISR → no activity).
   {
-    unsigned long last_recv = _radio->getLastRecvMillis();
-    unsigned long last_irq  = _radio->getLastRadioInterruptMillis();
-    unsigned long last_active = (last_recv > last_irq ? last_recv : last_irq);
-    if (last_radio_active_ms > last_active) last_active = last_radio_active_ms;
-    if (is_recv && last_active > 0) {
-      unsigned long silent_ms = _ms->getMillis() - last_active;
-      unsigned long since_recovery = _ms->getMillis() - last_watchdog_recovery;
-      if (silent_ms > RADIO_WATCHDOG_MS && since_recovery > RADIO_WATCHDOG_MS) {
-        _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
-        MESH_DEBUG_PRINTLN("Radio watchdog: silent %lu ms, state=%d, recovering", silent_ms, _radio->getRadioState());
-        _radio->idle();
-        _radio->startRecv();
-        last_watchdog_recovery = _ms->getMillis();
+    const uint32_t watchdog_ms = getRadioWatchdogMillis();
+    if (watchdog_ms > 0) {
+      unsigned long last_recv = _radio->getLastRecvMillis();
+      unsigned long last_irq  = _radio->getLastRadioInterruptMillis();
+      unsigned long last_active = (last_recv > last_irq ? last_recv : last_irq);
+      if (last_radio_active_ms > last_active) last_active = last_radio_active_ms;
+      if (is_recv && last_active > 0) {
+        unsigned long silent_ms = _ms->getMillis() - last_active;
+        unsigned long since_recovery = _ms->getMillis() - last_watchdog_recovery;
+        if (silent_ms > watchdog_ms && since_recovery > watchdog_ms) {
+          _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
+          MESH_DEBUG_PRINTLN("Radio watchdog: silent %lu ms, state=%d, recovering", silent_ms, _radio->getRadioState());
+          _radio->idle();
+          _radio->startRecv();
+          last_watchdog_recovery = _ms->getMillis();
+        }
       }
     }
   }

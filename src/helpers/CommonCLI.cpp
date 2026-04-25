@@ -2,7 +2,6 @@
 #include "CommonCLI.h"
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
-#include "TxtDataHelpers.h"
 #include <RTClib.h>
 
 #ifndef BRIDGE_MAX_BAUD
@@ -220,7 +219,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
     file.read((uint8_t *)&_prefs->snmp_enabled, sizeof(_prefs->snmp_enabled));                    // 291
     file.read((uint8_t *)&_prefs->snmp_community, sizeof(_prefs->snmp_community));                // 292
-    // next: 316
+    if (file.available() >= (int)sizeof(_prefs->radio_watchdog_minutes)) {
+      file.read((uint8_t *)&_prefs->radio_watchdog_minutes, sizeof(_prefs->radio_watchdog_minutes)); // 316
+    }
+    // next: 317
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -252,6 +254,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
     _prefs->snmp_enabled = constrain(_prefs->snmp_enabled, 0, 1);
     _prefs->snmp_community[sizeof(_prefs->snmp_community) - 1] = '\0'; // ensure null terminated
+    if (_prefs->radio_watchdog_minutes > 120) {
+      _prefs->radio_watchdog_minutes = 5;
+    }
 
     file.close();
   }
@@ -339,7 +344,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
     file.write((uint8_t *)&_prefs->snmp_enabled, sizeof(_prefs->snmp_enabled));                    // 291
     file.write((uint8_t *)&_prefs->snmp_community, sizeof(_prefs->snmp_community));                // 292
-    // next: 316
+    file.write((uint8_t *)&_prefs->radio_watchdog_minutes, sizeof(_prefs->radio_watchdog_minutes)); // 316
+    // next: 317
 
     file.close();
   }
@@ -742,8 +748,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       // change admin password
       StrHelper::strncpy(_prefs->password, &command[9], sizeof(_prefs->password));
       savePrefs();
-      sprintf(reply, "password now: ");
-      StrHelper::strncpy(&reply[14], _prefs->password, 160-15);   // echo back just to let admin know for sure!!
+      sprintf(reply, "password now: %s", _prefs->password);   // echo back just to let admin know for sure!!
     } else if (memcmp(command, "clear stats", 11) == 0) {
       _callbacks->clearStats();
       strcpy(reply, "(OK - stats reset)");
@@ -948,6 +953,30 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->agc_reset_interval = atoi(&config[19]) / 4;
     savePrefs();
     sprintf(reply, "OK - interval rounded to %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
+  } else if (memcmp(config, "radio.watchdog ", 15) == 0) {
+    const char* val = &config[15];
+    if (*val == 0) {
+      strcpy(reply, "Error: missing radio.watchdog minutes");
+      return;
+    }
+    for (const char* sp = val; *sp; sp++) {
+      if (*sp < '0' || *sp > '9') {
+        strcpy(reply, "Error: radio.watchdog must be an integer 0-120");
+        return;
+      }
+    }
+    int mins = atoi(val);
+    if (mins > 120) {
+      strcpy(reply, "Error: radio.watchdog must be 0-120 minutes");
+    } else {
+      _prefs->radio_watchdog_minutes = (uint8_t)mins;
+      savePrefs();
+      if (mins == 0) {
+        strcpy(reply, "OK - radio watchdog disabled");
+      } else {
+        sprintf(reply, "OK - radio watchdog %d min", mins);
+      }
+    }
   } else if (memcmp(config, "multi.acks ", 11) == 0) {
     _prefs->multi_acks = atoi(&config[11]);
     savePrefs();
@@ -1335,7 +1364,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           }
         }
       } else {
-        strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, meshomatic, cascadiamesh, tennmesh, nashmesh, chimesh, meshat.se, custom, none");
+        strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, meshomatic, cascadiamesh, tennmesh, nashmesh, custom, none");
       }
     } else if (memcmp(subcmd, "server ", 7) == 0) {
       StrHelper::strncpy(_prefs->mqtt_slot_host[slot], &subcmd[7], sizeof(_prefs->mqtt_slot_host[slot]));
@@ -1452,8 +1481,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: unsupported by this board");
     };
   } else {
-    strcpy(reply, "unknown config: ");
-    StrHelper::strncpy(&reply[16], config, 160-17);
+    sprintf(reply, "unknown config: %s", config);
   }
 }
 
@@ -1470,6 +1498,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %d", (uint32_t) _prefs->interference_threshold);
   } else if (memcmp(config, "agc.reset.interval", 18) == 0) {
     sprintf(reply, "> %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
+  } else if (memcmp(config, "radio.watchdog", 14) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->radio_watchdog_minutes);
   } else if (memcmp(config, "multi.acks", 10) == 0) {
     sprintf(reply, "> %d", (uint32_t) _prefs->multi_acks);
   } else if (memcmp(config, "allow.read.only", 15) == 0) {
@@ -1511,11 +1541,10 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "direct.txdelay", 14) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->direct_tx_delay_factor));
   } else if (memcmp(config, "owner.info", 10) == 0) {
-    auto start = reply;
     *reply++ = '>';
     *reply++ = ' ';
     const char* sp = _prefs->owner_info;
-    while (*sp && reply - start < 159) {
+    while (*sp) {
       *reply++ = (*sp == '\n') ? '|' : *sp;    // translate newline back to orig '|'
       sp++;
     }

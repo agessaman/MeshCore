@@ -103,6 +103,7 @@ struct NodePrefs { // persisted to file
   // SNMP settings (optional, only used when WITH_SNMP is defined)
   uint8_t snmp_enabled;          // boolean: 0=off, 1=on
   char snmp_community[24];       // community string (default "public")
+  uint8_t radio_watchdog_minutes; // 0=disabled, 1-120 minutes
 };
 
 #ifdef WITH_MQTT_BRIDGE

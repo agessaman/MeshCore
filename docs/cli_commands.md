@@ -102,9 +102,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 - `neighbor.remove <pubkey_prefix>`
 
 **Parameters:** 
-- `pubkey_prefix`: The public key of the node to remove from the neighbors list. This can be a short prefix or the full key. All neighbors matching the provided prefix will be removed.
-
-**Note:** You can remove all neighbors by sending a space character as the prefix. The space indicates an empty prefix, which matches all existing neighbors.
+- `pubkey_prefix`: The public key of the node to remove from the neighbors list
 
 ---
 
@@ -576,6 +574,20 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 - `value`: Interval in seconds rounded down to a multiple of 4 (17 becomes 16). 0 to disable.
 
 **Default:** `0.0`
+
+---
+
+#### View or change the radio watchdog interval
+**Usage:**
+- `get radio.watchdog`
+- `set radio.watchdog <minutes>`
+
+**Parameters:**
+- `minutes`: `0` to disable, or `1-120` minutes
+
+**Default:** `5`
+
+**Note:** On quiet meshes, increasing this can reduce false recoveries when no traffic is expected.
 
 ---
 

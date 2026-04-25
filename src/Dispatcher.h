@@ -180,6 +180,7 @@ protected:
   virtual uint32_t getCADFailMaxDuration() const;
   virtual int getInterferenceThreshold() const { return 0; }    // disabled by default
   virtual int getAGCResetInterval() const { return 0; }    // disabled by default
+  virtual uint32_t getRadioWatchdogMillis() const;
 
 public:
   void begin();

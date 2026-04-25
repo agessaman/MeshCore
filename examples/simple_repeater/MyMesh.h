@@ -165,6 +165,9 @@ protected:
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
   }
+  uint32_t getRadioWatchdogMillis() const override {
+    return ((uint32_t)_prefs.radio_watchdog_minutes) * 60000UL;
+  }
   uint8_t getExtraAckTransmitCount() const override {
     return _prefs.multi_acks;
   }

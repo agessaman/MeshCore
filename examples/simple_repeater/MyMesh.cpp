@@ -945,6 +945,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #ifdef WITH_MQTT_BRIDGE
   _prefs.agc_reset_interval = 7;    // 28 seconds (secs/4) — prevents AGC drift on long-running observers
 #endif
+  _prefs.radio_watchdog_minutes = 5; // 5 minutes default
 
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled
