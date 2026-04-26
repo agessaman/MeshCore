@@ -117,9 +117,9 @@ int MQTTMessageBuilder::buildPacketMessage(
   snprintf(snr_str, sizeof(snr_str), "%.1f", snr);
   snprintf(rssi_str, sizeof(rssi_str), "%d", rssi);
   
-  root["origin"] = origin;
-  root["origin_id"] = origin_id;
   root["timestamp"] = timestamp;
+  root["origin"] = origin;
+  root["hash"] = hash;
   root["type"] = "PACKET";
   root["direction"] = direction;
   root["time"] = time;
@@ -129,12 +129,12 @@ int MQTTMessageBuilder::buildPacketMessage(
   root["route"] = route;
   root["payload_len"] = payload_len_str;
   root["raw"] = raw;
+  root["origin_id"] = origin_id;
   // SNR and RSSI are only meaningful for RX packets (received from radio)
   if (strcmp(direction, "rx") == 0) {
     root["SNR"] = snr_str;
     root["RSSI"] = rssi_str;
   }
-  root["hash"] = hash;
   
   if (path && strlen(path) > 0) {
     root["path"] = path;
