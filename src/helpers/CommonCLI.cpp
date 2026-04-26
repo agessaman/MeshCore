@@ -41,6 +41,64 @@ static uint32_t _atoi(const char* sp) {
   return n;
 }
 
+#ifdef WITH_MQTT_BRIDGE
+static int getMQTTPresetNameCount() {
+  // Include virtual presets accepted by CLI parser.
+  return MQTT_PRESET_COUNT + 2; // built-ins + custom + none
+}
+
+static const char* getMQTTPresetNameByIndex(int index) {
+  if (index < MQTT_PRESET_COUNT) return MQTT_PRESETS[index].name;
+  if (index == MQTT_PRESET_COUNT) return MQTT_PRESET_CUSTOM;
+  if (index == MQTT_PRESET_COUNT + 1) return MQTT_PRESET_NONE;
+  return nullptr;
+}
+
+static void formatMQTTPresetListReply(char* reply, size_t reply_size, int start) {
+  if (!reply || reply_size == 0) return;
+  reply[0] = '\0';
+
+  const int total = getMQTTPresetNameCount();
+  if (start < 0 || start >= total) {
+    snprintf(reply, reply_size, "Error: preset list start must be 0-%d", total - 1);
+    return;
+  }
+
+  // Keep room for continuation marker and null terminator.
+  const size_t reserve_for_next = 18;
+  size_t used = 0;
+  bool wrote_any = false;
+
+  int index = start;
+  while (index < total) {
+    const char* name = getMQTTPresetNameByIndex(index);
+    if (!name) break;
+    size_t name_len = strlen(name);
+    size_t room = reply_size - used;
+    if (room <= reserve_for_next) break;
+    size_t needed = name_len + (wrote_any ? 1 : 0); // comma separator
+    if (needed >= room - reserve_for_next) break;
+    if (wrote_any) {
+      reply[used++] = ',';
+    }
+    memcpy(reply + used, name, name_len);
+    used += name_len;
+    reply[used] = '\0';
+    wrote_any = true;
+    index++;
+  }
+
+  if (!wrote_any) {
+    strcpy(reply, "Error: list page too small");
+    return;
+  }
+
+  if (index < total) {
+    snprintf(reply + used, reply_size - used, "... next:%d", index);
+  }
+}
+#endif
+
 static bool isValidName(const char *n) {
   while (*n) {
     if (*n == '[' || *n == ']' || *n == '/' || *n == '\\' || *n == ':' || *n == ',' || *n == '?' || *n == '*') return false;
@@ -1362,7 +1420,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           }
         }
       } else {
-        strcpy(reply, "Error: valid presets are: analyzer-us, analyzer-eu, meshmapper, meshrank, waev, meshomatic, cascadiamesh, tennmesh, nashmesh, custom, none");
+        strcpy(reply, "Error: unknown preset. Use 'get mqtt.presets'");
       }
     } else if (memcmp(subcmd, "server ", 7) == 0) {
       StrHelper::strncpy(_prefs->mqtt_slot_host[slot], &subcmd[7], sizeof(_prefs->mqtt_slot_host[slot]));
@@ -1605,6 +1663,23 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->mqtt_origin);
   } else if (memcmp(config, "mqtt.iata", 9) == 0) {
     sprintf(reply, "> %s", _prefs->mqtt_iata);
+  } else if (memcmp(config, "mqtt.presets", 12) == 0 && (config[12] == '\0' || config[12] == ' ')) {
+    int start = 0;
+    if (config[12] == ' ') {
+      const char* start_arg = &config[13];
+      if (*start_arg == '\0') {
+        strcpy(reply, "Error: usage get mqtt.presets [start]");
+        return;
+      }
+      for (const char* sp = start_arg; *sp; sp++) {
+        if (*sp < '0' || *sp > '9') {
+          strcpy(reply, "Error: usage get mqtt.presets [start]");
+          return;
+        }
+      }
+      start = (int)_atoi(start_arg);
+    }
+    formatMQTTPresetListReply(reply, 160, start);
   } else if (memcmp(config, "mqtt.status", 11) == 0) {
     MQTTBridge::formatMqttStatusReply(reply, 160, _prefs);
   } else if (memcmp(config, "mqtt.packets", 12) == 0) {
