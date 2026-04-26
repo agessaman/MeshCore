@@ -225,11 +225,6 @@ public:
     PsychicMqttClient &setWill(const char *topic, uint8_t qos, bool retain, const char *payload = nullptr, int length = 0);
 
     /**
-     * @brief Clears the last will and testament (disables LWT for the next connect / config apply).
-     */
-    PsychicMqttClient &clearLastWill();
-
-    /**
      * @brief Sets the MQTT server URI. Supports mqtt://, mqtts:// and ws://, wss:// as
      * transport protocols. Fully supports SSL/TLS.
      *
