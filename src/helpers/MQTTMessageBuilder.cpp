@@ -118,8 +118,8 @@ int MQTTMessageBuilder::buildPacketMessage(
   snprintf(rssi_str, sizeof(rssi_str), "%d", rssi);
   
   root["timestamp"] = timestamp;
-  root["origin"] = origin;
   root["hash"] = hash;
+  root["origin"] = origin;
   root["type"] = "PACKET";
   root["direction"] = direction;
   root["time"] = time;
