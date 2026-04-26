@@ -58,6 +58,8 @@ class MeshSNMPAgent;  // Forward declaration
 class MQTTBridge : public BridgeBase {
 private:
   static const size_t AUTH_TOKEN_SIZE = 768;
+  // Minimal offline LWT JSON (no stats); stable buffers per slot for esp_mqtt pointers.
+  static const size_t LWT_OFFLINE_JSON_MAX = 512;
 
   // Connection slot - each slot holds one MQTT connection
   struct MQTTSlot {
@@ -96,6 +98,9 @@ private:
     unsigned long last_error_time;  // millis() of last error
     uint32_t disconnect_count;      // Number of disconnect callbacks since boot
     unsigned long first_disconnect_time; // millis() of first disconnect after boot
+
+    char lwt_status_topic[128];
+    char lwt_payload[LWT_OFFLINE_JSON_MAX];
   };
 
   MQTTSlot _slots[RUNTIME_MQTT_SLOTS];
@@ -301,6 +306,7 @@ private:
   bool publishToSlot(int index, const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
   bool publishToAllSlots(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
   void publishStatusToSlot(int index);
+  void configureSlotLastWill(int index);
   void updateCachedConnectionStatus();
 
   void processPacketQueue();

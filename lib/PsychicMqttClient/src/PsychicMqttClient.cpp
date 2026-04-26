@@ -216,6 +216,25 @@ PsychicMqttClient &PsychicMqttClient::setWill(const char *topic, uint8_t qos, bo
     return *this;
 }
 
+PsychicMqttClient &PsychicMqttClient::clearLastWill()
+{
+#if ESP_IDF_VERSION_MAJOR == 5
+    _mqtt_cfg.session.last_will.topic = nullptr;
+    _mqtt_cfg.session.last_will.msg = nullptr;
+    _mqtt_cfg.session.last_will.msg_len = 0;
+    _mqtt_cfg.session.last_will.qos = 0;
+    _mqtt_cfg.session.last_will.retain = 0;
+#else
+    _mqtt_cfg.lwt_topic = nullptr;
+    _mqtt_cfg.lwt_msg = nullptr;
+    _mqtt_cfg.lwt_msg_len = 0;
+    _mqtt_cfg.lwt_qos = 0;
+    _mqtt_cfg.lwt_retain = 0;
+#endif
+    _config_dirty = true;
+    return *this;
+}
+
 PsychicMqttClient &PsychicMqttClient::setServer(const char *uri)
 {
 #if ESP_IDF_VERSION_MAJOR == 5

@@ -1213,8 +1213,58 @@ void MQTTBridge::setupSlot(int index) {
     }
   }
 
+  configureSlotLastWill(index);
+
   slot.client->connect();
   slot.initial_connect_done = true;
+}
+
+void MQTTBridge::configureSlotLastWill(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
+  MQTTSlot& slot = _slots[index];
+  if (!slot.client || !slot.enabled) return;
+
+  if (!buildTopicForSlot(index, MSG_STATUS, slot.lwt_status_topic, sizeof(slot.lwt_status_topic))) {
+    slot.client->clearLastWill();
+    return;
+  }
+
+  char origin_id[65];
+  char timestamp[32];
+  char radio_info[64];
+
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", &timeinfo);
+  } else {
+    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+  }
+
+  snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
+           _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
+
+  strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
+  origin_id[sizeof(origin_id) - 1] = '\0';
+
+  char client_version[64];
+  getClientVersion(client_version, sizeof(client_version));
+
+  // Minimal offline payload (no stats): default optional args to buildStatusMessage all omit sentinels.
+  int len = MQTTMessageBuilder::buildStatusMessage(
+    _status_json_doc,
+    _origin, origin_id, _board_model, _firmware_version, radio_info,
+    client_version, "offline", timestamp,
+    slot.lwt_payload, sizeof(slot.lwt_payload)
+  );
+
+  if (len > 0 && len < (int)sizeof(slot.lwt_payload)) {
+    slot.lwt_payload[len] = '\0';
+    bool use_retain = slot.preset ? slot.preset->allow_retain : false;
+    slot.client->setWill(slot.lwt_status_topic, 1, use_retain, slot.lwt_payload, len);
+  } else {
+    MQTT_DEBUG_PRINTLN("MQTT%d: LWT JSON build failed (len=%d)", index + 1, len);
+    slot.client->clearLastWill();
+  }
 }
 
 // Disconnect the slot's MQTT client and clear per-connection state, but leave
@@ -2973,14 +3023,18 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
   client->setKeepAlive(75);
 #endif
 
-  // Buffer sizing: 896 is the minimum safe size for JWT clients (CONNECT + 768-byte JWT).
-  // On PSRAM boards, use a uniform size to reduce fragmentation from mixed allocations.
-  // On non-PSRAM boards, use smaller buffers for non-JWT slots to reduce heap usage and
-  // leave smaller holes during teardown/recreate cycles.
+  // Buffer sizing must cover CONNECT packet assembly.
+  // With LWT enabled, CONNECT carries: client id + credentials + will topic + will payload.
+  // JWT slots need substantially more headroom than pre-LWT sizing.
+  //
+  // Keep one size per class to avoid allocation-size churn:
+  // - JWT/auth-heavy slots: 1536
+  // - Non-JWT slots: 1024
+  // On PSRAM boards use uniform 1536 for simplicity and stability.
 #if defined(BOARD_HAS_PSRAM)
-  static const int MQTT_CLIENT_BUFFER_SIZE = 896;
+  static const int MQTT_CLIENT_BUFFER_SIZE = 1536;
 #else
-  const int MQTT_CLIENT_BUFFER_SIZE = needs_large_buffer ? 896 : 512;
+  const int MQTT_CLIENT_BUFFER_SIZE = needs_large_buffer ? 1536 : 1024;
 #endif
 
   client->setBufferSize(MQTT_CLIENT_BUFFER_SIZE);
@@ -2989,7 +3043,7 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
   esp_mqtt_client_config_t* config = client->getMqttConfig();
   if (config) {
     #if defined(ESP_IDF_VERSION_MAJOR) && ESP_IDF_VERSION_MAJOR >= 5
-      if (config->buffer.out_size == 0 || config->buffer.out_size > MQTT_CLIENT_BUFFER_SIZE) {
+      if (config->buffer.out_size == 0 || config->buffer.out_size < MQTT_CLIENT_BUFFER_SIZE) {
         config->buffer.out_size = MQTT_CLIENT_BUFFER_SIZE;
       }
     #endif
