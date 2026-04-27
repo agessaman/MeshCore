@@ -99,12 +99,14 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 11;
+static const int MQTT_PRESET_COUNT = 13;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
   { "dutchmeshcore-1", "wss://collector1.dutchmeshcore.nl:443", "collector1.dutchmeshcore.nl", ISRG_ROOT_X1, MQTT_AUTH_JWT, MQTT_TOPIC_MESHCORE, 0, true, 55, nullptr, nullptr },
   { "dutchmeshcore-2", "wss://collector2.dutchmeshcore.nl:443", "collector2.dutchmeshcore.nl", ISRG_ROOT_X1, MQTT_AUTH_JWT, MQTT_TOPIC_MESHCORE, 0, true, 55, nullptr, nullptr },
+  { "analyzer-us",  "wss://mqtt-us-v1.letsmesh.net:443/mqtt",  "mqtt-us-v1.letsmesh.net",  GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
+  { "analyzer-eu",  "wss://mqtt-eu-v1.letsmesh.net:443/mqtt",  "mqtt-eu-v1.letsmesh.net",  GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
   { "meshmapper",   "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",       ISRG_ROOT_X1, MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
   { "meshrank",     "mqtts://meshrank.net:8883",               nullptr,                    ISRG_ROOT_X1, MQTT_AUTH_NONE,     MQTT_TOPIC_MESHRANK, 0,    false, 0,  nullptr,    nullptr },
   { "waev",         "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",            GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 3300, false, 55, nullptr,    nullptr },
