@@ -1,0 +1,48 @@
+name: Build Repeater Firmwares MQTT
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'repeater-*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Set version from tag
+        run: echo "FIRMWARE_VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+
+      - name: Build Repeater Firmwares MQTT
+        env:
+          FIRMWARE_VERSION: ${{ env.FIRMWARE_VERSION }}
+        run: |
+          chmod +x build.sh
+          /usr/bin/env bash build.sh build-repeater-firmwares-mqtt mqtt
+
+      - name: Upload Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: repeater-firmwares-mqtt
+          path: out
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Repeater Firmware MQTT ${{ env.FIRMWARE_VERSION }}
+          body: ""
+          draft: true
+          files: out/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
