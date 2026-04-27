@@ -57,7 +57,7 @@ New variants added (20 devices, both repeater and room-server observer envs wher
 1. `set wifi.ssid <your-ssid>`
 2. `set wifi.password <your-password>`
 3. `set mqtt.iata <your-3-letter-airport-code>`
-Only when updating a repeater/roomserver that's already set up you do step 4&5:
+Only when updating a repeater/roomserver that's already set up with mqtt you do step 4&5:
 4. `set mqtt1.preset dutchmeshcore-1`
 5. `set mqtt2.preset dutchmeshcore-2`
 
