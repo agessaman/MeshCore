@@ -441,11 +441,11 @@ void MQTTBridge::begin() {
   #endif
 
   // Limit active slots based on available memory.
-  // Each WSS/TLS connection needs ~40KB for mbedTLS buffers.
-  // Without PSRAM, even 3 concurrent connections would exhaust internal heap.
-  // With PSRAM, cap at 5 for safety (6 configurable but 5 active max).
+  // Each WSS/TLS connection holds ~36 KB of mbedTLS I/O buffers in internal SRAM for
+  // its lifetime. Cap at 3 on PSRAM boards so peak usage (~108 KB) leaves adequate
+  // headroom; cap at 2 without PSRAM where internal heap is tighter.
   #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  _max_active_slots = psramFound() ? 5 : 2;
+  _max_active_slots = psramFound() ? 3 : 2;
   #else
   _max_active_slots = 2;
   #endif
@@ -814,12 +814,12 @@ void MQTTBridge::mqttTaskLoop() {
     if (_ntp_synced && !_slots_setup_done) {
       _slots_setup_done = true;
 
-      // Redirect mbedTLS allocations to PSRAM to save ~40KB internal heap per TLS connection.
-      // This is critical when running 3 concurrent WSS connections.
-      #if defined(BOARD_HAS_PSRAM)
-      mbedtls_platform_set_calloc_free(psram_calloc, psram_free);
-      MQTT_DEBUG_PRINTLN("mbedTLS allocator redirected to PSRAM");
-      #endif
+      // mbedTLS stays in internal SRAM (no PSRAM redirect) so crypto operations run at
+      // full speed. PSRAM-backed TLS multiplied handshake duration ~10x via SPI bus
+      // latency, starving the WiFi management task and causing AP-side disconnects.
+      // _max_active_slots is limited to 3 to keep the ongoing per-session TLS buffers
+      // (~36 KB each) within the available internal heap.
+      MQTT_DEBUG_PRINTLN("mbedTLS using internal SRAM (no PSRAM redirect)");
 
       MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots (max %d active)...", _max_active_slots);
       int active_count = 0;
@@ -1263,6 +1263,12 @@ void MQTTBridge::maintainSlotConnections() {
   if (WiFi.status() != WL_CONNECTED) return;
 
   unsigned long now_millis = millis();
+
+  // Stabilization gate: hold off all TLS reconnects for 8 s after WiFi connects.
+  // This gives the AP (especially Meraki) time to complete its association state
+  // machine and exchange a few beacons before we start CPU-intensive TLS handshakes.
+  static const unsigned long WIFI_STABILIZE_MS = 8000UL;
+  if (s_wifi_connected_at > 0 && (now_millis - s_wifi_connected_at) < WIFI_STABILIZE_MS) return;
   unsigned long current_time = time(nullptr);
   bool time_synced = (current_time >= 1000000000); // After year 2001
 

@@ -174,7 +174,7 @@ private:
   bool _ntp_synced;
   bool _ntp_sync_pending;  // Flag to trigger NTP sync from loop() instead of event handler
   bool _slots_setup_done;  // Deferred: slots set up after NTP sync
-  int _max_active_slots;   // Runtime limit: 5 with PSRAM, 2 without
+  int _max_active_slots;   // Runtime limit: 3 with PSRAM, 2 without
 
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
   volatile bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS];
