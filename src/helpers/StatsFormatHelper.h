@@ -14,7 +14,7 @@ public:
       board.getBattMilliVolts(),
       ms.getMillis() / 1000,
       err_flags,
-      mgr->getOutboundTotal()
+      mgr->getOutboundCount(0xFFFFFFFF)
     );
   }
 
@@ -32,6 +32,24 @@ public:
       total_air_time_ms / 1000,
       total_rx_air_time_ms / 1000
     );
+  }
+
+  template<typename RadioDriverType>
+  static void formatRadioDiag(char* reply,
+                              mesh::Radio* radio,
+                              RadioDriverType& driver,
+                              mesh::MillisecondClock& ms,
+                              uint16_t err_flags,
+                              bool has_outbound) {
+    uint8_t st = radio->getRadioState();
+    const char* state_name = (st & 16) ? "INT_READY" : (st == 0 ? "IDLE" : (st == 1 ? "RX" : (st == 3 ? "TX_WAIT" : "?")));
+    unsigned long last_rx = radio->getLastRecvMillis();
+    unsigned long ago_secs = (last_rx > 0) ? (ms.getMillis() - last_rx) / 1000 : 0;
+    sprintf(reply,
+      "state=%d(%s), recv=%u, sent=%u, errors=%u, err_flags=%u, outbound=%s, last_rx=%lus ago",
+      st, state_name,
+      driver.getPacketsRecv(), driver.getPacketsSent(), driver.getPacketsRecvErrors(),
+      err_flags, has_outbound ? "yes" : "no", ago_secs);
   }
 
   template<typename RadioDriverType>

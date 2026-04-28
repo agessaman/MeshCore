@@ -61,11 +61,18 @@ public:
    */
   virtual void loop() { }
 
+  virtual void idle() { }
+  virtual void startRecv() { }
+
   virtual int getNoiseFloor() const { return 0; }
 
   virtual void triggerNoiseFloorCalibrate(int threshold) { }
 
   virtual void resetAGC() { }
+
+  virtual uint8_t getRadioState() const { return 0; }
+  virtual unsigned long getLastRecvMillis() const { return 0; }
+  virtual unsigned long getLastRadioInterruptMillis() const { return 0; }
 
   virtual bool isInRecvMode() const = 0;
 
@@ -76,6 +83,11 @@ public:
 
   virtual float getLastRSSI() const { return 0; }
   virtual float getLastSNR() const { return 0; }
+
+  /**
+   * \returns  number of receive errors (e.g. CRC failures) since last reset; 0 if not tracked.
+  */
+  virtual uint32_t getPacketsRecvErrors() const { return 0; }
 };
 
 /**
@@ -90,7 +102,6 @@ public:
   virtual void queueOutbound(Packet* packet, uint8_t priority, uint32_t scheduled_for) = 0;
   virtual Packet* getNextOutbound(uint32_t now) = 0;    // by priority
   virtual int getOutboundCount(uint32_t now) const = 0;
-  virtual int getOutboundTotal() const = 0;
   virtual int getFreeCount() const = 0;
   virtual Packet* getOutboundByIdx(int i) = 0;
   virtual Packet* removeOutboundByIdx(int i) = 0;
@@ -108,6 +119,11 @@ typedef uint32_t  DispatcherAction;
 #define ERR_EVENT_FULL              (1 << 0)
 #define ERR_EVENT_CAD_TIMEOUT       (1 << 1)
 #define ERR_EVENT_STARTRX_TIMEOUT   (1 << 2)
+#define ERR_EVENT_RADIO_WATCHDOG    (1 << 3)
+
+#ifndef RADIO_WATCHDOG_MS
+  #define RADIO_WATCHDOG_MS  300000   // 5 minutes
+#endif
 
 /**
  * \brief  The low-level task that manages detecting incoming Packets, and the queueing
@@ -116,6 +132,8 @@ typedef uint32_t  DispatcherAction;
 class Dispatcher {
   Packet* outbound;  // current outbound packet
   unsigned long outbound_expiry, outbound_start, total_air_time, rx_air_time;
+  unsigned long last_watchdog_recovery;
+  unsigned long last_radio_active_ms;   // updated on any TX or RX event; used by watchdog
   unsigned long next_tx_time;
   unsigned long cad_busy_start;
   unsigned long radio_nonrx_start;
@@ -123,12 +141,8 @@ class Dispatcher {
   bool  prev_isrecv_mode;
   uint32_t n_sent_flood, n_sent_direct;
   uint32_t n_recv_flood, n_recv_direct;
-  unsigned long tx_budget_ms;
-  unsigned long last_budget_update;
-  unsigned long duty_cycle_window_ms;
 
   void processRecvPacket(Packet* pkt);
-  void updateTxBudget();
 
 protected:
   PacketManager* _mgr;
@@ -141,15 +155,14 @@ protected:
   {
     outbound = NULL;
     total_air_time = rx_air_time = 0;
-    next_tx_time = ms.getMillis();
+    next_tx_time = 0;
     cad_busy_start = 0;
     next_floor_calib_time = next_agc_reset_time = 0;
     _err_flags = 0;
     radio_nonrx_start = 0;
     prev_isrecv_mode = true;
-    tx_budget_ms = 0;
-    last_budget_update = 0;
-    duty_cycle_window_ms = 3600000;
+    last_watchdog_recovery = 0;
+    last_radio_active_ms = 0;
   }
 
   virtual DispatcherAction onRecvPacket(Packet* pkt) = 0;
@@ -167,7 +180,7 @@ protected:
   virtual uint32_t getCADFailMaxDuration() const;
   virtual int getInterferenceThreshold() const { return 0; }    // disabled by default
   virtual int getAGCResetInterval() const { return 0; }    // disabled by default
-  virtual unsigned long getDutyCycleWindowMs() const { return 3600000; }
+  virtual uint32_t getRadioWatchdogMillis() const;
 
 public:
   void begin();
@@ -177,13 +190,14 @@ public:
   void releasePacket(Packet* packet);
   void sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
 
-  unsigned long getTotalAirTime() const { return total_air_time; }
+  unsigned long getTotalAirTime() const { return total_air_time; }  // in milliseconds
   unsigned long getReceiveAirTime() const {return rx_air_time; }
-  unsigned long getRemainingTxBudget() const { return tx_budget_ms; }
   uint32_t getNumSentFlood() const { return n_sent_flood; }
   uint32_t getNumSentDirect() const { return n_sent_direct; }
   uint32_t getNumRecvFlood() const { return n_recv_flood; }
   uint32_t getNumRecvDirect() const { return n_recv_direct; }
+  uint16_t getErrFlags() const { return _err_flags; }  // Get error flags
+  bool hasOutbound() const { return outbound != NULL; }
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
     _err_flags = 0;

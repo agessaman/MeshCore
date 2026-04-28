@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Mesh.h>
 #include <RTClib.h>
+#include <CayenneLPP.h>
 #include <target.h>
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -23,6 +24,15 @@
 #define WITH_BRIDGE
 #endif
 
+#ifdef WITH_MQTT_BRIDGE
+#include "helpers/bridges/MQTTBridge.h"
+#define WITH_BRIDGE
+#endif
+
+#ifdef WITH_SNMP
+#include "helpers/SNMPAgent.h"
+#endif
+
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/ClientACL.h>
@@ -35,9 +45,6 @@
 #include <helpers/RegionMap.h>
 #include "RateLimiter.h"
 
-#ifdef WITH_BRIDGE
-extern AbstractBridge* bridge;
-#endif
 
 struct RepeaterStats {
   uint16_t batt_milli_volts;
@@ -117,6 +124,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RS232Bridge bridge;
 #elif defined(WITH_ESPNOW_BRIDGE)
   ESPNowBridge bridge;
+#elif defined(WITH_MQTT_BRIDGE)
+  MQTTBridge* bridge;
+#endif
+#ifdef WITH_SNMP
+  MeshSNMPAgent _snmp_agent;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
@@ -152,6 +164,9 @@ protected:
   }
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
+  }
+  uint32_t getRadioWatchdogMillis() const override {
+    return ((uint32_t)_prefs.radio_watchdog_minutes) * 60000UL;
   }
   uint8_t getExtraAckTransmitCount() const override {
     return _prefs.multi_acks;
@@ -213,6 +228,7 @@ public:
   void removeNeighbor(const uint8_t* pubkey, int key_len) override;
   void formatStatsReply(char *reply) override;
   void formatRadioStatsReply(char *reply) override;
+  void formatRadioDiagReply(char *reply) override;
   void formatPacketStatsReply(char *reply) override;
   void startRegionsLoad() override;
   bool saveRegions() override;
@@ -228,21 +244,58 @@ public:
 
 #if defined(WITH_BRIDGE)
   void setBridgeState(bool enable) override {
-    if (enable == bridge.isRunning()) return;
+    if (!bridge) {
+#ifdef WITH_MQTT_BRIDGE
+      bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+#endif
+      if (!bridge) return;
+    }
+    if (enable == bridge->isRunning()) return;
     if (enable)
     {
-      bridge.begin();
+      // Set device metadata before starting bridge (same as in begin())
+      char device_id[65];
+      mesh::LocalIdentity self_id = getSelfId();
+      mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+      bridge->setDeviceID(device_id);
+      bridge->setFirmwareVersion(getFirmwareVer());
+      bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+      bridge->setBuildDate(getBuildDate());
+#ifdef WITH_MQTT_BRIDGE
+      bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#endif
+      bridge->begin();
     }
-    else 
+    else
     {
-      bridge.end();
+      bridge->end();
     }
   }
 
   void restartBridge() override {
-    if (!bridge.isRunning()) return;
-    bridge.end();
-    bridge.begin();
+    if (!bridge || !bridge->isRunning()) return;
+    bridge->end();
+    // Set device metadata before restarting bridge (same as in begin())
+    char device_id[65];
+    mesh::LocalIdentity self_id = getSelfId();
+    mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+    bridge->setDeviceID(device_id);
+    bridge->setFirmwareVersion(getFirmwareVer());
+    bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
+    bridge->setBuildDate(getBuildDate());
+#ifdef WITH_MQTT_BRIDGE
+    bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#endif
+    bridge->begin();
+  }
+
+  void restartBridgeSlot(int slot) override {
+    if (!bridge || !bridge->isRunning()) return;
+    bridge->setSlotPreset(slot, _prefs.mqtt_slot_preset[slot]);
+  }
+
+  int getQueueSize() override {
+    return bridge ? bridge->getQueueSize() : 0;
   }
 #endif
 

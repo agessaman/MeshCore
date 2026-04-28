@@ -23,15 +23,15 @@
 
 #if MESH_DEBUG && ARDUINO
   #include <Arduino.h>
-  #define MESH_DEBUG_PRINT(F, ...) Serial.printf("DEBUG: " F, ##__VA_ARGS__)
-  #define MESH_DEBUG_PRINTLN(F, ...) Serial.printf("DEBUG: " F "\n", ##__VA_ARGS__)
+  #define MESH_DEBUG_PRINT(F, ...) do { if (Serial.availableForWrite() > 0) { Serial.printf("DEBUG: " F, ##__VA_ARGS__); } } while(0)
+  #define MESH_DEBUG_PRINTLN(F, ...) do { if (Serial.availableForWrite() > 0) { Serial.printf("DEBUG: " F "\n", ##__VA_ARGS__); } } while(0)
 #else
   #define MESH_DEBUG_PRINT(...) {}
   #define MESH_DEBUG_PRINTLN(...) {}
 #endif
 
 #if BRIDGE_DEBUG && ARDUINO
-#define BRIDGE_DEBUG_PRINTLN(F, ...) Serial.printf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__)
+#define BRIDGE_DEBUG_PRINTLN(F, ...) do { if (Serial.availableForWrite() > 0) { Serial.printf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__); } } while(0)
 #else
 #define BRIDGE_DEBUG_PRINTLN(...) {}
 #endif

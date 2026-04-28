@@ -971,7 +971,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.mqtt_status_enabled = 1;    // enabled
   _prefs.mqtt_packets_enabled = 1;   // enabled
   _prefs.mqtt_raw_enabled = 0;       // disabled
-  _prefs.mqtt_tx_enabled = 1;        // all TX packets enabled by default
+  _prefs.mqtt_tx_enabled = 2;        // advert: own adverts only (matches MQTTPrefs default)
   _prefs.mqtt_rx_enabled = 1;        // RX packets enabled by default
   _prefs.mqtt_status_interval = 300000; // 5 minutes
 
