@@ -196,12 +196,19 @@ const char* MQTTBridge::wifiReasonStr(uint8_t reason) {
     case 4:   return "assoc timeout";
     case 8:   return "AP disconnected";
     case 15:  return "4-way handshake timeout";
+    case 18:  return "group cipher mismatch";
+    case 40:  return "cipher suite rejected";
+    case 49:  return "invalid PMKID";
+    case 61:  return "AP BSS management";
+    case 88:  return "AP BSS management";
+    case 168: return "AP band-steering kick";
     case 34:  return "AP state mismatch (class 3 frame)";
     case 39:  return "SSID not found";
     case 63:  return "SA query timeout (PMF)";
     case 200: return "signal lost";
     case 201: return "security mismatch";
     case 202: return "auth mode rejected";
+    case 204: return "handshake timeout";
     default:  return nullptr;
   }
 }
@@ -215,6 +222,7 @@ const char* MQTTBridge::tlsErrorStr(int32_t err) {
     case 0x8008: return "connection timeout";
     case 0x800B: return "cert verify failed";
     case 0x8010: return "mbedTLS error";
+    case 0x801A: return "TLS handshake failed";
     default:     return nullptr;
   }
 }
