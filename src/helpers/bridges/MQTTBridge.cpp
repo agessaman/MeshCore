@@ -100,6 +100,25 @@ static void* psram_calloc(size_t n, size_t size) {
 #endif
 }
 
+// Smart allocator for mbedTLS: routes large allocations (SSL record I/O buffers, ~16 KB
+// each) to PSRAM to limit internal heap pressure, while keeping small allocations (RSA/ECDH
+// BigNum scratch, cipher state) in fast internal SRAM. The SPI round-trips that caused WiFi
+// management starvation only occur on the small, tightly-looping crypto operations — those
+// stay in SRAM. Large buffers are accessed sequentially and tolerate PSRAM latency fine.
+// 4096 is a safe threshold: all mbedTLS crypto scratch is well under 1 KB; record buffers
+// are always >= MBEDTLS_SSL_IN_CONTENT_LEN (typically 4–16 KB).
+static void* mbedtls_smart_calloc(size_t n, size_t size) {
+  if (n == 0 || size == 0) return nullptr;
+  size_t total = n * size;
+#if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
+  if (total >= 4096) {
+    void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
+    if (p != nullptr) return p;
+  }
+#endif
+  return calloc(n, size);
+}
+
 static void psram_free(void* ptr) {
   if (ptr == nullptr) return;
 #if defined(ESP_PLATFORM)
@@ -441,11 +460,11 @@ void MQTTBridge::begin() {
   #endif
 
   // Limit active slots based on available memory.
-  // Each WSS/TLS connection holds ~36 KB of mbedTLS I/O buffers in internal SRAM for
-  // its lifetime. Cap at 3 on PSRAM boards so peak usage (~108 KB) leaves adequate
-  // headroom; cap at 2 without PSRAM where internal heap is tighter.
+  // Each WSS/TLS connection needs ~40 KB for mbedTLS buffers. With the smart allocator
+  // the large I/O record buffers land in PSRAM, so internal heap impact per session is
+  // small (<2 KB of crypto state). Cap at 5 with PSRAM; 2 without.
   #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  _max_active_slots = psramFound() ? 3 : 2;
+  _max_active_slots = psramFound() ? 5 : 2;
   #else
   _max_active_slots = 2;
   #endif
@@ -814,12 +833,15 @@ void MQTTBridge::mqttTaskLoop() {
     if (_ntp_synced && !_slots_setup_done) {
       _slots_setup_done = true;
 
-      // mbedTLS stays in internal SRAM (no PSRAM redirect) so crypto operations run at
-      // full speed. PSRAM-backed TLS multiplied handshake duration ~10x via SPI bus
-      // latency, starving the WiFi management task and causing AP-side disconnects.
-      // _max_active_slots is limited to 3 to keep the ongoing per-session TLS buffers
-      // (~36 KB each) within the available internal heap.
-      MQTT_DEBUG_PRINTLN("mbedTLS using internal SRAM (no PSRAM redirect)");
+      // Route mbedTLS large allocations (SSL record I/O buffers) to PSRAM to save
+      // internal heap, while keeping small crypto-scratch allocations (RSA/ECDH BigNum
+      // ops) in fast internal SRAM. This prevents the SPI round-trips that were extending
+      // TLS handshake duration ~10x and starving the WiFi management task, while still
+      // keeping per-session buffer pressure off the internal heap.
+      #if defined(BOARD_HAS_PSRAM)
+      mbedtls_platform_set_calloc_free(mbedtls_smart_calloc, psram_free);
+      MQTT_DEBUG_PRINTLN("mbedTLS smart allocator: crypto=SRAM, I/O buffers=PSRAM");
+      #endif
 
       MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots (max %d active)...", _max_active_slots);
       int active_count = 0;
