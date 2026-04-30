@@ -43,7 +43,7 @@ class MeshSNMPAgent;  // Forward declaration
  *
  * Features:
  * - Up to 6 configurable MQTT connection slots (5 active with PSRAM, 2 without)
- * - Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Cascadia Mesh, ColoradoMesh
+ * - Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Cascadia Mesh, Colorado Mesh
  * - Custom broker support with username/password auth
  * - JWT authentication with Ed25519 device signing
  * - Automatic reconnection with exponential backoff
