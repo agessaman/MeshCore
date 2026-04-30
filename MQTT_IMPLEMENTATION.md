@@ -77,7 +77,7 @@ get mqtt.status
 
 The MQTT bridge implementation provides:
 - Up to 6 MQTT connection slots with built-in presets
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, and TennMesh
+- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, Colorado Mesh and TennMesh
 - Custom broker support with username/password authentication
 - JWT (Ed25519 device signing) authentication for most preset brokers; TennMesh uses a fixed username/password (plain MQTT)
 - WSS (WebSocket Secure), direct MQTT/TLS, and plain MQTT (TennMesh) transport
@@ -94,22 +94,23 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 
 **Built-in Presets:**
 
-| Preset | Server | Auth | Transport |
-|--------|--------|------|-----------|
-| `analyzer-us` | mqtt-us-v1.letsmesh.net:443 | JWT (Ed25519) | WSS |
-| `analyzer-eu` | mqtt-eu-v1.letsmesh.net:443 | JWT (Ed25519) | WSS |
-| `meshmapper` | mqtt.meshmapper.cc:443 | JWT (Ed25519) | WSS |
-| `meshrank` | meshrank.net:8883 | None (token in topic) | MQTT over TLS |
-| `waev` | mqtt.waev.app:443 | JWT (Ed25519) | WSS |
-| `meshomatic` | us-east.meshomatic.net:443 | JWT (Ed25519) | WSS |
-| `cascadiamesh` | mqtt-v1.cascadiamesh.org:443 | JWT (Ed25519) | WSS |
-| `tennmesh` | mqtt.tennmesh.com:1883 | Username/password (fixed in firmware) | Plain MQTT |
-| `nashmesh` | mqtt://mqtt.nashme.sh:1883 | Username/password (fixed in firmware) | Plain MQTT |
-| `chimesh` | wss://mqtt.chimesh.org:443 | JWT (Ed25519) | WSS |
-| `meshat.se` | mqtts://mqtt.meshat.se:8883 | Username/password (fixed in firmware) | MQTT over TLS |
-| `eastidahomesh` | wss://broker.eastidahomesh.net:443 | None | WSS |
-| `custom` | User-configured | Username/Password | MQTT or WSS |
-| `none` | (disabled) | — | — |
+| Preset          | Server | Auth                                  | Transport |
+|-----------------|--------|---------------------------------------|-----------|
+| `analyzer-us`   | mqtt-us-v1.letsmesh.net:443 | JWT (Ed25519)                         | WSS |
+| `analyzer-eu`   | mqtt-eu-v1.letsmesh.net:443 | JWT (Ed25519)                         | WSS |
+| `meshmapper`    | mqtt.meshmapper.cc:443 | JWT (Ed25519)                         | WSS |
+| `meshrank`      | meshrank.net:8883 | None (token in topic)                 | MQTT over TLS |
+| `waev`          | mqtt.waev.app:443 | JWT (Ed25519)                         | WSS |
+| `meshomatic`    | us-east.meshomatic.net:443 | JWT (Ed25519)                         | WSS |
+| `cascadiamesh`  | mqtt-v1.cascadiamesh.org:443 | JWT (Ed25519)                         | WSS |
+| `tennmesh`      | mqtt.tennmesh.com:1883 | Username/password (fixed in firmware) | Plain MQTT |
+| `nashmesh`      | mqtt://mqtt.nashme.sh:1883 | Username/password (fixed in firmware) | Plain MQTT |
+| `chimesh`       | wss://mqtt.chimesh.org:443 | JWT (Ed25519)                         | WSS |
+| `meshat.se`     | mqtts://mqtt.meshat.se:8883 | Username/password (fixed in firmware) | MQTT over TLS |
+| `eastidahomesh` | wss://broker.eastidahomesh.net:443 | None                                  | WSS |
+| `coloradomesh`  | mqtt.meshcore.coloradomesh.org | JWT (Ed25519)                                   | WSS    |
+| `custom`        | User-configured | Username/Password                     | MQTT or WSS |
+| `none`          | (disabled) | —                                     | — |
 
 **Default Configuration:**
 - Slot 1: `analyzer-us`
@@ -238,6 +239,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset nashmesh` - Set slot N to NashMesh
 - `set mqttN.preset chimesh` - Set slot N to ChicagolandMesh
 - `set mqttN.preset meshat.se` - Set slot N to Meshat.se
+- `set mqttN.preset coloradomesh` - Set slot N to Colorado Mesh
 - `set mqttN.preset eastidahomesh` - Set slot N to EastIdahoMesh (WSS/TLS, no auth; packets on `meshcore/{IATA}/{PUBLIC_KEY}/packets`)
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
@@ -508,7 +510,7 @@ Minimal raw packet data for map integration.
 
 ### Slot-Based Preset System
 - Up to 6 concurrent MQTT connections (with PSRAM), 2 without PSRAM
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, and TennMesh
+- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, Colorado Mesh, EastIdahoMesh, and TennMesh
 - Custom broker support with username/password auth and custom topic templates
 - JWT (Ed25519) for most preset brokers; MeshRank uses token-in-topic; TennMesh uses fixed username/password over plain MQTT
 - WSS (WebSocket Secure), direct MQTT over TLS, and plain MQTT (TennMesh)
