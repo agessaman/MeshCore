@@ -103,19 +103,20 @@ static const int MQTT_PRESET_COUNT = 13;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
-  { "analyzer-us",  "wss://mqtt-us-v1.letsmesh.net:443/mqtt",  "mqtt-us-v1.letsmesh.net",  GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
-  { "analyzer-eu",  "wss://mqtt-eu-v1.letsmesh.net:443/mqtt",  "mqtt-eu-v1.letsmesh.net",  GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
-  { "meshmapper",   "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",       ISRG_ROOT_X1, MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
-  { "meshrank",     "mqtts://meshrank.net:8883",               nullptr,                    ISRG_ROOT_X1, MQTT_AUTH_NONE,     MQTT_TOPIC_MESHRANK, 0,    false, 0,  nullptr,    nullptr },
-  { "waev",         "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",            GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 3300, false, 55, nullptr,    nullptr },
-  { "meshomatic",   "wss://us-east.meshomatic.net:443/mqtt",   "us-east.meshomatic.net",   ISRG_ROOT_X1, MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
-  { "cascadiamesh", "wss://mqtt-v1.cascadiamesh.org:443/mqtt", "mqtt-v1.cascadiamesh.org", ISRG_ROOT_X1, MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
-  { "tennmesh",     "mqtt://mqtt.tennmesh.com:1883",           nullptr,                    nullptr,      MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0,    true,  55, "mqttfeed", "tc2live" },
-  { "nashmesh",     "mqtt://mqtt.nashme.sh:1883",              nullptr,                    nullptr,      MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0,    true,  55, "meshdev",  "large4cats" },
-  { "chimesh",      "wss://mqtt.chimesh.org:443",              "mqtt.chimesh.org",         ISRG_ROOT_X1, MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
-  { "meshat.se",    "mqtts://mqtt.meshat.se:8883",             nullptr,                    ISRG_ROOT_X1, MQTT_AUTH_USERPASS, MQTT_TOPIC_MESHCORE, 0,    true,  55, "msh",      "msh" },
-  { "eastidahomesh","wss://broker.eastidahomesh.net:443",      nullptr,                    ISRG_ROOT_X1, MQTT_AUTH_NONE,     MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
-  { "coloradomesh", "mqtt://mqtt.meshcore.coloradomesh.org:8883","mqtt.meshcore.coloradomesh.org", nullptr,      MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 0,    true,  55, nullptr,    nullptr },
+    //   name           url                                      server                             rootCA         auth                 topic                 keepalive tls enabled interval user         pass
+    { "analyzer-us",   "wss://mqtt-us-v1.letsmesh.net:443/mqtt",  "mqtt-us-v1.letsmesh.net",         GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "analyzer-eu",   "wss://mqtt-eu-v1.letsmesh.net:443/mqtt",  "mqtt-eu-v1.letsmesh.net",         GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "meshmapper",    "wss://mqtt.meshmapper.cc:443/mqtt",       "mqtt.meshmapper.cc",              ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "meshrank",      "mqtts://meshrank.net:8883",               nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHRANK,  0,       false,  0,       nullptr,     nullptr     },
+    { "waev",          "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",                   GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 3300,     false,  55,      nullptr,     nullptr     },
+    { "meshomatic",    "wss://us-east.meshomatic.net:443/mqtt",   "us-east.meshomatic.net",          ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "cascadiamesh",  "wss://mqtt-v1.cascadiamesh.org:443/mqtt", "mqtt-v1.cascadiamesh.org",        ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "tennmesh",      "mqtt://mqtt.tennmesh.com:1883",           nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   55,      "mqttfeed",   "tc2live"   },
+    { "nashmesh",      "mqtt://mqtt.nashme.sh:1883",              nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   55,      "meshdev",    "large4cats"},
+    { "chimesh",       "wss://mqtt.chimesh.org:443",              "mqtt.chimesh.org",                ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "meshat.se",     "mqtts://mqtt.meshat.se:8883",             nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   55,      "msh",        "msh"       },
+    { "eastidahomesh", "wss://broker.eastidahomesh.net:443",      nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "coloradomesh",  "wss://mqtt.meshcore.coloradomesh.org:1883","mqtt.meshcore.coloradomesh.org", ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found
