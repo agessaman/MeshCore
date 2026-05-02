@@ -41,3 +41,12 @@ jobs:
           files: out/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Device Releases
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FIRMWARE_VERSION: ${{ env.GIT_TAG_VERSION }}
+          RELEASE_PREFIX: repeater-mqtt
+          RELEASE_NAME_PREFIX: Repeater MQTT Firmware
+        run: /usr/bin/env bash .github/scripts/publish-device-releases.sh
