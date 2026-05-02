@@ -25,24 +25,26 @@ jobs:
       fail-fast: false
       matrix:
         environment:
-          # ESP32-S3 (most common platform)
-          - Heltec_v3_companion_radio_ble
-          - Heltec_v3_repeater
-          - Heltec_v3_room_server
-          # nRF52
-          - RAK_4631_companion_radio_ble
-          - RAK_4631_repeater
-          - RAK_4631_room_server
-          # RP2040
-          - PicoW_repeater
-          # STM32
-          - wio-e5-mini_repeater
+          # ESP32-S3 (Heltec v3)
+          - Heltec_v3_repeater_observer_mqtt
+          - Heltec_v3_room_server_observer_mqtt
+          # ESP32-S3 (Heltec v4)
+          - heltec_v4_repeater_observer_mqtt
+          - heltec_v4_room_server_observer_mqtt
+          # ESP32-S3 (LilyGo T3S3)
+          - LilyGo_T3S3_sx1262_repeater_observer_mqtt
+          - LilyGo_T3S3_sx1262_room_server_observer_mqtt
+          # ESP32-S3 (T-Beam Supreme)
+          - T_Beam_S3_Supreme_SX1262_repeater_observer_mqtt
+          # ESP32 (T-Beam SX1262)
+          - Tbeam_SX1262_repeater_observer_mqtt
+          - Tbeam_SX1262_room_server_observer_mqtt
+          # ESP32 (T-Beam SX1276)
+          - Tbeam_SX1276_repeater_observer_mqtt
+          - Tbeam_SX1276_room_server_observer_mqtt
           # ESP32-C6
-          - LilyGo_Tlora_C6_repeater_
-          # LR1110 (nRF52)
-          - wio_wm1110_repeater
-          # SX1276 (ESP32)
-          - Tbeam_SX1276_repeater
+          - LilyGo_Tlora_C6_repeater_observer_mqtt
+          - LilyGo_Tlora_C6_room_server_observer_mqtt
 
     steps:
       - name: Clone Repo
