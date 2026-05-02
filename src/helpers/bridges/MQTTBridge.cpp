@@ -611,7 +611,6 @@ void MQTTBridge::begin() {
   // Non-ESP32: Initialize WiFi directly (no task)
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFi.setAutoConnect(true);
   WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
 
   // NOTE: Slot setup deferred until after NTP sync in loop()
@@ -719,7 +718,6 @@ void MQTTBridge::initializeWiFiInTask() {
 
   // Enable automatic reconnection - ESP32 will handle reconnection automatically
   WiFi.setAutoReconnect(true);
-  WiFi.setAutoConnect(true);
 
   // Set up WiFi event handlers for better diagnostics and immediate disconnection detection
   WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
