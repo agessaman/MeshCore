@@ -1,0 +1,43 @@
+name: Build MQTT Firmwares
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'mqtt-*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Build MQTT Firmwares
+        env:
+          FIRMWARE_VERSION: ${{ env.GIT_TAG_VERSION }}
+        run: /usr/bin/env bash build.sh build-mqtt-firmwares
+
+      - name: Upload Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mqtt-firmwares
+          path: out
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MQTT Firmware ${{ env.GIT_TAG_VERSION }}
+          body: ""
+          draft: true
+          files: out/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

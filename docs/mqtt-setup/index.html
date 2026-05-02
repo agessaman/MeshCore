@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MeshCore MQTT Setup</title>
+  <style>
+    /* ── Variables ─────────────────────────────────────────────────────────── */
+    :root {
+      --bg:      #0f1117;
+      --surf:    #1a1d27;
+      --surf2:   #222536;
+      --surf3:   #2a2e42;
+      --border:  #2e3248;
+      --accent:  #5b8dee;
+      --accent2: #7c6fe0;
+      --green:   #3ecf8e;
+      --yellow:  #f5c542;
+      --red:     #e05b5b;
+      --text:    #e2e4ef;
+      --muted:   #7b82a0;
+      --tag-bg:  #252a3d;
+      --r:       8px;
+    }
+    [data-theme="light"] {
+      --bg:      #f4f6fb;
+      --surf:    #ffffff;
+      --surf2:   #eef0f8;
+      --surf3:   #e4e7f4;
+      --border:  #cdd2e8;
+      --accent:  #3d6fdb;
+      --accent2: #5e52c9;
+      --green:   #1a9e6e;
+      --yellow:  #a07008;
+      --red:     #c43a3a;
+      --text:    #1a1c2e;
+      --muted:   #5c6487;
+      --tag-bg:  #e8ecf8;
+    }
+    [data-theme="light"] .header h1,
+    [data-theme="light"] .slot-label { color: var(--text); }
+    [data-theme="light"] .cmd-line code { background: var(--surf3); color: var(--accent); }
+    [data-theme="light"] .info-panel {
+      background: linear-gradient(180deg, #f8f9ff 0%, #f0f3fb 100%);
+      border-color: var(--border);
+      box-shadow: 0 2px 8px rgba(0,0,0,.06);
+    }
+    [data-theme="light"] .info-panel summary { color: var(--text); }
+    [data-theme="light"] .info-box { background: rgba(61,111,219,.06); border-color: rgba(61,111,219,.2); }
+    [data-theme="light"] .info-box.warn { background: rgba(160,112,8,.06); border-color: rgba(160,112,8,.22); }
+    [data-theme="light"] .info-box p { color: var(--text); }
+    [data-theme="light"] .quick-link { background: rgba(255,255,255,.6); }
+    [data-theme="light"] .quick-link:hover { background: rgba(61,111,219,.06); color: var(--accent); }
+    [data-theme="light"] .site-footer { background: var(--surf2); color: var(--muted); border-top-color: var(--border); }
+    [data-theme="light"] .site-footer a { color: var(--accent); }
+    [data-theme="light"] .output-box { background: var(--surf3); border-color: var(--border); }
+    [data-theme="light"] .cmd-line { background: var(--surf2); border-color: var(--border); }
+
+    /* ── Reset ─────────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Navbar ────────────────────────────────────────────────────────────── */
+    .navbar {
+      background: var(--surf);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 20px;
+    }
+    .nav-inner {
+      max-width: 900px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .nav-links { display: flex; gap: 12px; align-items: center; }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      padding: 4px 8px;
+      border-radius: 6px;
+    }
+    .nav-links a:hover { color: var(--text); background: var(--surf2); }
+    .theme-toggle {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 6px;
+      padding: 4px 9px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+      line-height: 1;
+    }
+    .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Layout ────────────────────────────────────────────────────────────── */
+    .page { max-width: 900px; margin: 0 auto; padding: 24px 16px 60px; }
+
+    /* ── Header ────────────────────────────────────────────────────────────── */
+    .header { margin-bottom: 20px; }
+    .header h1 { font-size: 22px; font-weight: 700; color: #fff; gap: 10px; }
+    .header p { color: var(--muted); margin-top: 4px; font-size: 13px; }
+
+    /* ── Info panel ────────────────────────────────────────────────────────── */
+    .info-panel {
+      margin: 0 0 1.25rem 0;
+      border-radius: 14px;
+      border: 1px solid #27272a;
+      background: linear-gradient(180deg, #18181b 0%, #111827 100%);
+      box-shadow: 0 4px 18px rgba(0,0,0,.22);
+      overflow: hidden;
+    }
+    .info-panel summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 1rem 1.2rem;
+      color: #f4f4f5;
+      font-size: 1.05rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .info-panel summary::-webkit-details-marker { display: none; }
+    .info-panel summary:hover { background: rgba(255,255,255,.02); }
+    .info-panel[open] .arrow { transform: rotate(180deg); }
+    .arrow { transition: transform .2s ease; font-size: 1rem; }
+    .info-panel-body {
+      padding: 0 1.2rem 1.2rem 1.2rem;
+      display: flex;
+      flex-direction: column;
+      gap: .9rem;
+    }
+    .info-box {
+      padding: .85rem 1rem;
+      border-radius: 10px;
+      background: rgba(96,165,250,.08);
+      border: 1px solid rgba(96,165,250,.22);
+    }
+    .info-box.warn {
+      background: rgba(250,204,21,.08);
+      border: 1px solid rgba(250,204,21,.22);
+    }
+    .info-box h4 { font-size: 14px; font-weight: 700; }
+    .info-box p { margin-top: .45rem; color: #e4e4e7; font-size: 13px; line-height: 1.6; }
+    .info-box a { color: #60a5fa; font-weight: 600; text-decoration: none; }
+    .info-box a:hover { color: #93c5fd; }
+
+    /* ── Quick links ───────────────────────────────────────────────────────── */
+    .quick-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: .65rem; }
+    .quick-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255,255,255,.03);
+      border: 1px solid var(--border);
+      color: var(--text);
+      text-decoration: none;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 12px;
+      transition: all .15s ease;
+    }
+    .quick-link:hover { border-color: var(--accent); color: var(--accent); background: rgba(255,255,255,.05); }
+
+    /* ── Section headers ───────────────────────────────────────────────────── */
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin: 0 0 10px 0;
+    }
+
+    /* ── Global settings card ──────────────────────────────────────────────── */
+    .global-card {
+      background: var(--surf);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .global-card-inner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      align-items: flex-end;
+    }
+    .field-group { display: flex; flex-direction: column; gap: 5px; }
+    .field-group label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    input[type=text], select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color .15s;
+      font-family: inherit;
+    }
+    input[type=text]:focus, select:focus { border-color: var(--accent); }
+    select { cursor: pointer; }
+    select option { background: var(--surf2); }
+    .iata-input { width: 120px; text-transform: uppercase; font-family: 'Consolas', monospace; letter-spacing: .08em; }
+    .field-hint { font-size: 11px; color: var(--muted); }
+
+    /* ── Slot grid ─────────────────────────────────────────────────────────── */
+    .slots-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .slot-card {
+      background: var(--surf);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 14px;
+      transition: border-color .15s;
+    }
+    .slot-card:hover { border-color: var(--accent2); }
+    .slot-card.has-preset { border-color: var(--accent); }
+    .slot-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .slot-label {
+      font-size: 15px;
+      font-weight: 700;
+      color: #fff;
+      font-family: 'Consolas', monospace;
+    }
+    .slot-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .badge-jwt    { background: #1a2e4a; color: #5b8dee; border: 1px solid #2a3e6a; }
+    .badge-token  { background: #2a1a4a; color: #9c8dee; border: 1px solid #3a2a6a; }
+    .badge-pass   { background: #1a2e1a; color: #3ecf8e; border: 1px solid #2a4a2a; }
+    .badge-none   { background: var(--surf2); color: var(--muted); border: 1px solid var(--border); }
+    .slot-select { width: 100%; }
+    .slot-extra { margin-top: 10px; }
+    .token-input { width: 100%; font-family: 'Consolas', monospace; font-size: 12px; }
+
+    /* ── Buttons ───────────────────────────────────────────────────────────── */
+    .btn {
+      background: var(--surf2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 6px 13px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: inherit;
+    }
+    .btn:hover { border-color: var(--accent); background: var(--bg); }
+    .btn-accent {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      font-weight: 600;
+    }
+    .btn-accent:hover { background: #4a7ddf; border-color: #4a7ddf; }
+    .btn-sm { padding: 4px 9px; font-size: 11px; }
+    .btn.copied { border-color: var(--green); color: var(--green); }
+
+    /* ── Output section ────────────────────────────────────────────────────── */
+    .output-section { margin-bottom: 24px; }
+    .output-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .output-box {
+      background: #0c0e14;
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 14px;
+      font-family: 'Consolas', 'Fira Mono', monospace;
+      font-size: 13px;
+    }
+    .cmd-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: #131620;
+      border: 1px solid #1e2235;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+    }
+    .cmd-line:last-child { margin-bottom: 0; }
+    .cmd-line code {
+      flex: 1;
+      color: var(--accent);
+      font-family: inherit;
+      font-size: 13px;
+      word-break: break-all;
+    }
+    .cmd-comment {
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 6px;
+      padding-left: 4px;
+      display: block;
+    }
+    .cmd-comment:not(:first-child) { margin-top: 10px; }
+    .empty-msg {
+      color: var(--muted);
+      font-size: 13px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      text-align: center;
+      padding: 20px 0;
+    }
+
+    /* ── Footer ────────────────────────────────────────────────────────────── */
+    .site-footer {
+      margin-top: 2rem;
+      padding: 1rem 0;
+      text-align: center;
+      background: #111827;
+      color: #d4d4d8;
+      font-size: .9rem;
+      border-top: 1px solid #27272a;
+    }
+    .site-footer a { color: #60a5fa; text-decoration: none; font-weight: 600; }
+    .site-footer a:hover { color: #93c5fd; }
+
+    /* ── Toast ─────────────────────────────────────────────────────────────── */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 2000;
+      pointer-events: none;
+    }
+    .toast-msg {
+      background: var(--surf);
+      border: 1px solid var(--green);
+      border-radius: var(--r);
+      padding: 10px 16px;
+      font-size: 13px;
+      color: var(--green);
+      box-shadow: 0 4px 20px rgba(0,0,0,.5);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: all .2s;
+    }
+    .toast-msg.show { opacity: 1; transform: none; }
+
+    /* ── Responsive ────────────────────────────────────────────────────────── */
+    @media (max-width: 600px) {
+      .slots-grid { grid-template-columns: 1fr; }
+      .global-card-inner { flex-direction: column; align-items: stretch; }
+      .iata-input { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="nav-inner">
+    <div class="nav-links">
+      <a href="https://elektr0vodka.github.io/meshcore-nl-discovered-channels/" target="_blank" rel="noopener noreferrer">NL Channels</a>
+      <a href="https://github.com/Elektr0Vodka/MeshCore-MQTT" target="_blank" rel="noopener noreferrer">MeshCore-MQTT</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" title="Toggle theme">🌙</button>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="header">
+    <h1>📡 MeshCore MQTT Setup</h1>
+    <p>Configure your MQTT slots and get ready-to-paste CLI commands for your node.</p>
+  </div>
+
+  <details class="info-panel" open>
+    <summary><span>How to use this tool</span><span class="arrow">▼</span></summary>
+    <div class="info-panel-body">
+      <div class="info-box">
+        <h4 style="color:#93c5fd">Steps</h4>
+        <p>
+          1. Enter your <strong>IATA airport code</strong> (e.g. <code style="color:var(--accent)">AMS</code> for Amsterdam) — this identifies your location on the mesh map.<br>
+          2. Pick a <strong>preset</strong> for each slot you want to enable. Slots left on <em>none</em> are disabled.<br>
+          3. For <strong>MeshRank</strong> slots, paste your token from <a href="https://meshrank.net" target="_blank" rel="noopener noreferrer">meshrank.net</a>.<br>
+          4. Copy the generated commands and paste them into the MeshCore CLI (Remote Terminal or serial console).
+        </p>
+      </div>
+      <div class="info-box warn">
+        <h4 style="color:#facc15">Default slots on DutchMeshCore firmware</h4>
+        <p>
+          The DutchMeshCore build pre-assigns <strong>slot 1 → dutchmeshcore-1</strong> and <strong>slot 2 → dutchmeshcore-2</strong> by default.
+          You only need to run <code style="color:var(--accent)">set mqtt.iata &lt;code&gt;</code> to start publishing — unless you want to change the slot assignments.
+        </p>
+      </div>
+      <div class="info-box">
+        <h4 style="color:#93c5fd">Useful links</h4>
+        <div class="quick-links">
+          <a class="quick-link" href="https://www.iata.org/en/publications/directories/code-search/" target="_blank" rel="noopener noreferrer">IATA Code Lookup</a>
+          <a class="quick-link" href="https://meshrank.net" target="_blank" rel="noopener noreferrer">MeshRank (get token)</a>
+          <a class="quick-link" href="https://meshmapper.cc" target="_blank" rel="noopener noreferrer">MeshMapper</a>
+          <a class="quick-link" href="https://github.com/Elektr0Vodka/MeshCore-MQTT" target="_blank" rel="noopener noreferrer">Firmware Repo</a>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <!-- Global Settings -->
+  <p class="section-title">Global settings</p>
+  <div class="global-card">
+    <div class="global-card-inner">
+      <div class="field-group">
+        <label for="iatainput">IATA Airport Code</label>
+        <input type="text" id="iatainput" class="iata-input" placeholder="e.g. AMS" maxlength="8" autocomplete="off" spellcheck="false" />
+        <span class="field-hint">3-letter code for your nearest airport. Required for most presets.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Slot Configurator -->
+  <p class="section-title">MQTT Slots (1–6)</p>
+  <div class="slots-grid" id="slotsGrid"></div>
+
+  <!-- Generated Commands -->
+  <div class="output-section">
+    <div class="output-header">
+      <p class="section-title" style="margin:0">Generated commands</p>
+      <button class="btn btn-accent" id="copyAllBtn">Copy all</button>
+    </div>
+    <div class="output-box" id="outputBox">
+      <p class="empty-msg">Select a preset above to generate commands.</p>
+    </div>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  <a href="https://github.com/Elektr0Vodka/MeshCore-MQTT" target="_blank" rel="noopener noreferrer">Elektr0Vodka</a>
+  &mdash; MeshCore MQTT Setup Tool &mdash; 2026
+</footer>
+
+<div class="toast"><div class="toast-msg" id="toastMsg"></div></div>
+
+<script>
+  // ── Preset definitions ────────────────────────────────────────────────────
+  const PRESETS = [
+    { id: 'none',             label: 'None (disabled)',          auth: 'none',  needsIata: false, region: '' },
+    { id: 'dutchmeshcore-1',  label: 'DutchMeshCore 1',          auth: 'jwt',   needsIata: true,  region: '🇳🇱 NL' },
+    { id: 'dutchmeshcore-2',  label: 'DutchMeshCore 2',          auth: 'jwt',   needsIata: true,  region: '🇳🇱 NL' },
+    { id: 'analyzer-us',      label: 'Analyzer US (LetsMesh)',    auth: 'jwt',   needsIata: true,  region: '🇺🇸 US' },
+    { id: 'analyzer-eu',      label: 'Analyzer EU (LetsMesh)',    auth: 'jwt',   needsIata: true,  region: '🇪🇺 EU' },
+    { id: 'meshmapper',       label: 'MeshMapper',                auth: 'jwt',   needsIata: true,  region: '🌍' },
+    { id: 'meshrank',         label: 'MeshRank',                  auth: 'token', needsIata: false, region: '🌍' },
+    { id: 'waev',             label: 'WAEV',                      auth: 'jwt',   needsIata: true,  region: '🇦🇺 AU' },
+    { id: 'meshomatic',       label: 'MeshOmatic (US East)',      auth: 'jwt',   needsIata: true,  region: '🇺🇸 US' },
+    { id: 'cascadiamesh',     label: 'CascadiaMesh',              auth: 'jwt',   needsIata: true,  region: '🇺🇸 US' },
+    { id: 'tennmesh',         label: 'TennMesh',                  auth: 'pass',  needsIata: true,  region: '🇺🇸 US' },
+    { id: 'nashmesh',         label: 'NashMe.sh',                 auth: 'pass',  needsIata: true,  region: '🇺🇸 US' },
+    { id: 'chimesh',          label: 'ChiMesh',                   auth: 'jwt',   needsIata: true,  region: '🇺🇸 US' },
+    { id: 'meshat.se',        label: 'Meshat.se',                 auth: 'pass',  needsIata: true,  region: '🇸🇪 SE' },
+  ];
+
+  const presetMap = Object.fromEntries(PRESETS.map(p => [p.id, p]));
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  const state = {
+    iata: '',
+    slots: ['none', 'none', 'none', 'none', 'none', 'none'],
+    tokens: ['', '', '', '', '', ''],
+  };
+
+  // ── Theme ─────────────────────────────────────────────────────────────────
+  const themes = ['dark', 'light'];
+  let themeIdx = 0;
+  const themeIcons = ['🌙', '☀️'];
+
+  const saved = localStorage.getItem('mqttsetup-theme');
+  if (saved === 'light') { themeIdx = 1; document.documentElement.setAttribute('data-theme', 'light'); }
+
+  document.getElementById('themeToggle').addEventListener('click', () => {
+    themeIdx = (themeIdx + 1) % themes.length;
+    const t = themes[themeIdx];
+    document.documentElement.setAttribute('data-theme', t === 'dark' ? '' : t);
+    document.getElementById('themeToggle').textContent = themeIcons[themeIdx];
+    localStorage.setItem('mqttsetup-theme', t);
+  });
+
+  // ── Build slot cards ──────────────────────────────────────────────────────
+  function buildSlots() {
+    const grid = document.getElementById('slotsGrid');
+    grid.innerHTML = '';
+    for (let i = 0; i < 6; i++) {
+      const card = document.createElement('div');
+      card.className = 'slot-card';
+      card.id = `slot-card-${i}`;
+
+      const optionsHtml = PRESETS.map(p =>
+        `<option value="${p.id}"${p.id === state.slots[i] ? ' selected' : ''}>${p.region ? p.region + ' ' : ''}${p.label}</option>`
+      ).join('');
+
+      card.innerHTML = `
+        <div class="slot-head">
+          <span class="slot-label">mqtt${i + 1}</span>
+          <span class="slot-badge badge-none" id="slot-badge-${i}">none</span>
+        </div>
+        <select class="slot-select" id="slot-select-${i}">
+          ${optionsHtml}
+        </select>
+        <div class="slot-extra" id="slot-extra-${i}" style="display:none">
+          <div class="field-group" style="margin-top:0">
+            <label for="slot-token-${i}">MeshRank Token</label>
+            <input type="text" class="token-input" id="slot-token-${i}" placeholder="Paste your meshrank token…" autocomplete="off" spellcheck="false" value="${state.tokens[i]}" />
+            <span class="field-hint">Get your token at <a href="https://meshrank.net" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">meshrank.net</a></span>
+          </div>
+        </div>
+      `;
+      grid.appendChild(card);
+
+      card.querySelector(`#slot-select-${i}`).addEventListener('change', e => {
+        state.slots[i] = e.target.value;
+        updateSlotUI(i);
+        render();
+      });
+      card.querySelector(`#slot-token-${i}`).addEventListener('input', e => {
+        state.tokens[i] = e.target.value.trim();
+        render();
+      });
+
+      updateSlotUI(i);
+    }
+  }
+
+  function authBadge(auth) {
+    if (auth === 'jwt')   return ['badge-jwt',   'JWT'];
+    if (auth === 'token') return ['badge-token', 'Token'];
+    if (auth === 'pass')  return ['badge-pass',  'User/Pass'];
+    return ['badge-none', 'none'];
+  }
+
+  function updateSlotUI(i) {
+    const preset = presetMap[state.slots[i]];
+    const card   = document.getElementById(`slot-card-${i}`);
+    const badge  = document.getElementById(`slot-badge-${i}`);
+    const extra  = document.getElementById(`slot-extra-${i}`);
+
+    const [cls, label] = authBadge(preset.auth);
+    badge.className = `slot-badge ${cls}`;
+    badge.textContent = label;
+
+    card.classList.toggle('has-preset', preset.id !== 'none');
+    extra.style.display = preset.auth === 'token' ? 'block' : 'none';
+  }
+
+  // ── IATA input ────────────────────────────────────────────────────────────
+  document.getElementById('iatainput').addEventListener('input', e => {
+    state.iata = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    e.target.value = state.iata;
+    render();
+  });
+
+  // ── Render commands ───────────────────────────────────────────────────────
+  function render() {
+    const box = document.getElementById('outputBox');
+    const lines = buildCommands();
+
+    if (lines.length === 0) {
+      box.innerHTML = '<p class="empty-msg">Select a preset above to generate commands.</p>';
+      return;
+    }
+
+    box.innerHTML = lines.map(item => {
+      if (item.type === 'comment') {
+        return `<span class="cmd-comment"># ${escHtml(item.text)}</span>`;
+      }
+      return `
+        <div class="cmd-line">
+          <code>${escHtml(item.cmd)}</code>
+          <button class="btn btn-sm" onclick="copyLine(this, '${escAttr(item.cmd)}')">Copy</button>
+        </div>`;
+    }).join('');
+  }
+
+  function buildCommands() {
+    const lines = [];
+    const activeSlots = state.slots.map((p, i) => ({ preset: presetMap[p], idx: i })).filter(s => s.preset.id !== 'none');
+
+    if (activeSlots.length === 0) return lines;
+
+    // IATA — needed if any active slot uses needsIata
+    const needsIata = activeSlots.some(s => s.preset.needsIata);
+    if (needsIata) {
+      lines.push({ type: 'comment', text: 'Set your IATA airport code (once per device)' });
+      const iataVal = state.iata || 'XXX';
+      lines.push({ type: 'cmd', cmd: `set mqtt.iata ${iataVal}` });
+    }
+
+    // Per-slot commands
+    for (const { preset, idx } of activeSlots) {
+      lines.push({ type: 'comment', text: `Slot ${idx + 1} — ${preset.label}` });
+      lines.push({ type: 'cmd', cmd: `set mqtt${idx + 1}.preset ${preset.id}` });
+      if (preset.auth === 'token') {
+        const tok = state.tokens[idx] || '<your-meshrank-token>';
+        lines.push({ type: 'cmd', cmd: `set mqtt${idx + 1}.token ${tok}` });
+      }
+    }
+
+    return lines;
+  }
+
+  // ── Copy helpers ──────────────────────────────────────────────────────────
+  function copyLine(btn, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+    });
+  }
+
+  document.getElementById('copyAllBtn').addEventListener('click', () => {
+    const lines = buildCommands().filter(l => l.type === 'cmd').map(l => l.cmd);
+    if (lines.length === 0) { toast('Nothing to copy yet.'); return; }
+    navigator.clipboard.writeText(lines.join('\n')).then(() => toast('All commands copied!'));
+  });
+
+  let toastTimer;
+  function toast(msg) {
+    const el = document.getElementById('toastMsg');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function escAttr(s) {
+    return s.replace(/'/g, "\\'");
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  buildSlots();
+  render();
+</script>
+</body>
+</html>
