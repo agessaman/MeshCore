@@ -152,7 +152,13 @@ pio run -e heltec_v4_repeater_observer_mqtt
 
 # Station G2
 pio run -e Station_G2_repeater_observer_mqtt
+
+# LilyGo T-LoRa V2.1-1.6 (TTGO LoRa32 V1.0)
+pio run -e LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt
+pio run -e LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt
 ```
+
+**TLora naming:** The env prefix `LilyGo_TLora_V2_1_1_6` is LilyGo’s **T-LoRa V2.1–1.6** board (SX1276); PlatformIO selects **`ttgo-lora32-v1`** (TTGO LoRa32 V1.0). **MQTT observer** envs extend a slim base **without** `sensor_base` so the image fits `min_spiffs`; **all other** `LilyGo_TLora_V2_1_1_6_*` targets still use optional I2C environmental sensors as before. The **`lilygo_tlora_c6`** variant is separate hardware (ESP32-C6).
 
 ### Partition Table Changes — Merged Firmware Required
 
@@ -162,8 +168,17 @@ Some MQTT observer builds use a non-default partition table to accommodate the l
 |-------------|----------------|------------|---------------|-------|
 | `LilyGo_T3S3_sx1262_repeater_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | Changed from default (1.25 MB) |
 | `LilyGo_T3S3_sx1262_room_server_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | Changed from default (1.25 MB) |
+| `LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | TTGO LoRa32 V1.0; observer env omits `sensor_base` for flash budget (same `min_spiffs` as other TLora builds) |
+| `LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | same |
 | `Station_G2_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
 | `Station_G2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+
+**NVS / settings when the partition layout changes**
+
+Flashing a **full merged image** (`*-merged.bin` at offset `0x0`) writes a new bootloader **and** partition table. If that layout **differs** from what is already on the device, **NVS is typically wiped or invalidated** — expect to lose stored configuration (admin preferences, WiFi, MQTT slots, name, etc.) and reconfigure from scratch.
+
+- **`LilyGo_TLora_V2_1_1_6_*_observer_mqtt`:** These use the **same** `min_spiffs.csv` layout as other MeshCore TLora builds, so moving between repeater / room server / MQTT observer does **not** require a different partition table for normal upgrades. **If you previously installed an older TLora MQTT observer that used `huge_app.csv`,** flashing this firmware switches back to `min_spiffs` — treat that as a **partition layout change** (merged flash; NVS may be reset). **If you install MeshCore on a device that used a non-MeshCore partition map,** the first merged flash can still **wipe** settings.
+- **`Station_G2_*_observer_mqtt`:** These use `default_16MB.csv`. The same applies if you move **from** firmware that was built with a **different** partition table — the first merged flash that installs this layout can **wipe** stored settings.
 
 **How to flash the merged firmware:**
 
@@ -179,7 +194,7 @@ You can flash the merged firmware using either the web flasher or the command li
   esptool.py write_flash 0x0 .pio/build/LilyGo_T3S3_sx1262_repeater_observer_mqtt/firmware-merged.bin
   ```
 
-> **Note:** Flashing the merged firmware will erase Bluetooth pairings but preserves device configuration stored in NVS. After the first merged flash, subsequent updates can use OTA or the standard non-merged binary.
+> **Note:** If the **partition layout is unchanged** (e.g. updating the MQTT observer build in place), device configuration in NVS is usually retained; Bluetooth pairings may still be cleared on some upgrade paths. If the **partition table is new to the device**, see **NVS / settings when the partition layout changes** above — stored settings are typically lost. After the first merged flash **for a given layout**, subsequent updates on that board can use OTA or the standard non-merged binary when applicable.
 
 ### Build Flags
 - `WITH_MQTT_BRIDGE=1` - Enable MQTT bridge (required)
