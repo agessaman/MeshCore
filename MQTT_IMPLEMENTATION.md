@@ -108,6 +108,8 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `chimesh` | wss://mqtt.chimesh.org:443 | JWT (Ed25519) | WSS |
 | `meshat.se` | mqtts://mqtt.meshat.se:8883 | Username/password (fixed in firmware) | MQTT over TLS |
 | `eastidahomesh` | wss://broker.eastidahomesh.net:443 | None | WSS |
+| `dutchmeshcore-1` | wss://collector1.dutchmeshcore.nl:443 | JWT (Ed25519) | WSS |
+| `dutchmeshcore-2` | wss://collector2.dutchmeshcore.nl:443 | JWT (Ed25519) | WSS |
 | `custom` | User-configured | Username/Password | MQTT or WSS |
 | `none` | (disabled) | — | — |
 
@@ -254,6 +256,8 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset chimesh` - Set slot N to ChicagolandMesh
 - `set mqttN.preset meshat.se` - Set slot N to Meshat.se
 - `set mqttN.preset eastidahomesh` - Set slot N to EastIdahoMesh (WSS/TLS, no auth; packets on `meshcore/{IATA}/{PUBLIC_KEY}/packets`)
+- `set mqttN.preset dutchmeshcore-1` - Set slot N to DutchMeshcore-1
+- `set mqttN.preset dutchmeshcore-2` - Set slot N to DutchMeshcore-2
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
 - `set mqttN.server <hostname>` - Set custom server hostname for slot N
