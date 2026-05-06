@@ -708,9 +708,11 @@ bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin){
     return true;
   } else if (Serial1.available()) {
     MESH_DEBUG_PRINTLN("Serial GPS init correctly and is turned on");
+#ifdef PIN_GPS_EN
     if(PIN_GPS_EN){
       gpsResetPin = PIN_GPS_EN;
     }
+#endif
     serialGPSFlag = true;
     gps_active = true;
     gps_detected = true;
