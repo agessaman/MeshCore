@@ -129,6 +129,9 @@ void KissModem::processFrame() {
         memcpy(_pending_tx, data, data_len);
         _pending_tx_len = data_len;
         _has_pending_tx = true;
+      } else if (_has_pending_tx) {
+        uint8_t result = 0x00;
+        writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
       }
       break;
 
@@ -257,6 +260,7 @@ void KissModem::processTx() {
           _tx_timer = millis();
           _tx_state = TX_DELAY;
         } else {
+          _tx_timer = millis();
           _tx_state = TX_WAIT_CLEAR;
         }
       }
@@ -273,19 +277,28 @@ void KissModem::processTx() {
           _tx_timer = millis();
           _tx_state = TX_SLOT_WAIT;
         }
+      } else if (millis() - _tx_timer >= _radio.getEstAirtimeFor(KISS_MAX_PACKET_SIZE) * KISS_TX_TIMEOUT_FACTOR) {
+        _tx_timer = millis();
+        _tx_state = TX_DELAY;
       }
       break;
 
     case TX_SLOT_WAIT:
       if (millis() - _tx_timer >= (uint32_t)_slottime * 10) {
+        _tx_timer = millis();
         _tx_state = TX_WAIT_CLEAR;
       }
       break;
 
     case TX_DELAY:
       if (millis() - _tx_timer >= (uint32_t)_txdelay * 10) {
-        _radio.startSendRaw(_pending_tx, _pending_tx_len);
-        _tx_state = TX_SENDING;
+        if (_radio.startSendRaw(_pending_tx, _pending_tx_len)) {
+          _tx_timer = millis();
+          _tx_state = TX_SENDING;
+        } else {
+          _has_pending_tx = false;
+          _tx_state = TX_IDLE;
+        }
       }
       break;
 
@@ -293,6 +306,12 @@ void KissModem::processTx() {
       if (_radio.isSendComplete()) {
         _radio.onSendFinished();
         uint8_t result = 0x01;
+        writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
+        _has_pending_tx = false;
+        _tx_state = TX_IDLE;
+      } else if (millis() - _tx_timer >= _radio.getEstAirtimeFor(_pending_tx_len) * KISS_TX_TIMEOUT_FACTOR) {
+        _radio.onSendFinished();
+        uint8_t result = 0x00;
         writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
         _has_pending_tx = false;
         _tx_state = TX_IDLE;

@@ -26,6 +26,7 @@
 #define KISS_DEFAULT_TXDELAY     50
 #define KISS_DEFAULT_PERSISTENCE 63
 #define KISS_DEFAULT_SLOTTIME    10
+#define KISS_TX_TIMEOUT_FACTOR   3/2   // 1.5x estimated airtime
 
 #define HW_CMD_GET_IDENTITY      0x01
 #define HW_CMD_GET_RANDOM        0x02
