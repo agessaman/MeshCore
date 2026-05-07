@@ -72,6 +72,7 @@
 #define HW_ERR_MAC_FAILED        0x04
 #define HW_ERR_UNKNOWN_CMD       0x05
 #define HW_ERR_ENCRYPT_FAILED    0x06
+#define HW_ERR_TX_BUSY           0x07
 
 #define KISS_FIRMWARE_VERSION 1
 

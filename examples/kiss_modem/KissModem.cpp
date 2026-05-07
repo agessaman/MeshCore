@@ -130,8 +130,7 @@ void KissModem::processFrame() {
         _pending_tx_len = data_len;
         _has_pending_tx = true;
       } else if (_has_pending_tx) {
-        uint8_t result = 0x00;
-        writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
+        writeHardwareError(HW_ERR_TX_BUSY);
       }
       break;
 
@@ -296,6 +295,8 @@ void KissModem::processTx() {
           _tx_timer = millis();
           _tx_state = TX_SENDING;
         } else {
+          uint8_t result = 0x00;
+          writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
           _has_pending_tx = false;
           _tx_state = TX_IDLE;
         }
