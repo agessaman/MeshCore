@@ -982,9 +982,13 @@ struct FreqRange {
 };
 
 static FreqRange repeat_freq_ranges[] = {
+  #ifdef ALLOWED_REPEAT_FREQ_RANGE
+  ALLOWED_REPEAT_FREQ_RANGE
+  #else
   { 433000, 433000 },
   { 869000, 869000 },
   { 918000, 918000 }
+  #endif
 };
 
 bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
