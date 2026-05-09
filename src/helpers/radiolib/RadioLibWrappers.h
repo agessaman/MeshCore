@@ -13,16 +13,20 @@ protected:
   int32_t _floor_sample_sum;
   unsigned long last_recv_millis;
   unsigned long last_radio_interrupt_millis;  // updated on any ISR event, even CRC errors
+  uint8_t _preamble_sf;
 
+  void idle() override;
+  void startRecv() override;
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
 
 public:
-  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board) { n_recv = n_sent = 0; last_recv_millis = 0; last_radio_interrupt_millis = 0; }
-
-  void idle() override;
-  void startRecv() override;
+  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0) {
+    n_recv = n_sent = n_recv_errors = 0;
+    last_recv_millis = 0;
+    last_radio_interrupt_millis = 0;
+  }
 
   void begin() override;
   virtual void powerOff() { _radio->sleep(); }
@@ -34,13 +38,20 @@ public:
   bool isInRecvMode() const override;
   bool isChannelActive();
 
-  bool isReceiving() override { 
+  bool isReceiving() override {
     if (isReceivingPacket()) return true;
 
     return isChannelActive();
   }
 
+  virtual void setParams(float freq, float bw, uint8_t sf, uint8_t cr) = 0;
+  uint32_t getRngSeed();
+  void setTxPower(int8_t dbm);
+
   virtual float getCurrentRSSI() =0;
+  virtual uint8_t getSpreadingFactor() const { return LORA_SF; }
+  static uint16_t preambleLengthForSF(uint8_t sf) { return sf <= 8 ? 32 : 16; }
+  void updatePreamble(uint8_t sf) { _preamble_sf = sf; _radio->setPreambleLength(preambleLengthForSF(sf)); }
 
   int getNoiseFloor() const override { return _noise_floor; }
   void triggerNoiseFloorCalibrate(int threshold) override;
