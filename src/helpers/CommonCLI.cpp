@@ -1275,8 +1275,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     strcpy(reply, "OK");
 #endif
 #ifdef WITH_MQTT_BRIDGE
+  } else if (strcmp(config, "mqtt.origin") == 0) {
+    _prefs->mqtt_origin[0] = '\0';
+    savePrefs();
+    strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.origin ", 12) == 0) {
     StrHelper::strncpy(_prefs->mqtt_origin, &config[12], sizeof(_prefs->mqtt_origin));
+    StrHelper::stripSurroundingQuotes(_prefs->mqtt_origin, sizeof(_prefs->mqtt_origin));
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.iata ", 10) == 0) {

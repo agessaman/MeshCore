@@ -1,5 +1,6 @@
 #include "MQTTBridge.h"
 #include "../MQTTMessageBuilder.h"
+#include "../TxtDataHelpers.h"
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
@@ -18,25 +19,6 @@
 #include <mbedtls/platform.h>
 #endif
 
-// Helper function to strip quotes from strings (both single and double quotes)
-static void stripQuotes(char* str, size_t max_len) {
-  if (!str || max_len == 0) return;
-
-  size_t len = strlen(str);
-  if (len == 0) return;
-
-  // Remove leading quote (single or double)
-  if (str[0] == '"' || str[0] == '\'') {
-    memmove(str, str + 1, len);
-    len--;
-  }
-
-  // Remove trailing quote (single or double)
-  if (len > 0 && (str[len-1] == '"' || str[len-1] == '\'')) {
-    str[len-1] = '\0';
-  }
-}
-
 // Effective MQTT origin: empty mqtt_origin follows node_name; otherwise mqtt_origin override (quotes stripped).
 static void applyEffectiveOrigin(const NodePrefs* prefs, char* dest, size_t dest_size) {
   if (!prefs || !dest || dest_size == 0) return;
@@ -46,7 +28,7 @@ static void applyEffectiveOrigin(const NodePrefs* prefs, char* dest, size_t dest
     strncpy(dest, prefs->mqtt_origin, dest_size - 1);
   }
   dest[dest_size - 1] = '\0';
-  stripQuotes(dest, dest_size);
+  StrHelper::stripSurroundingQuotes(dest, dest_size);
 }
 
 void MQTTBridge::refreshOriginFromPrefs() {
@@ -488,7 +470,7 @@ void MQTTBridge::begin() {
   strncpy(_iata, _prefs->mqtt_iata, sizeof(_iata) - 1);
   _iata[sizeof(_iata) - 1] = '\0';
 
-  stripQuotes(_iata, sizeof(_iata));
+  StrHelper::stripSurroundingQuotes(_iata, sizeof(_iata));
 
   // Convert IATA code to uppercase (IATA codes are conventionally uppercase)
   for (int i = 0; _iata[i]; i++) {
