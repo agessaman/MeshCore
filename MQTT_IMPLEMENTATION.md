@@ -478,7 +478,8 @@ Minimal raw packet data for map integration.
   "model": "device_model",
   "firmware_version": "firmware_version",
   "radio": "radio_info",
-  "client_version": "meshcore-custom-repeater/{build_date}"
+  "client_version": "meshcore-custom-repeater/{build_date}",
+  "repeat": "on|off"
 }
 ```
 

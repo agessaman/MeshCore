@@ -1736,7 +1736,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
-    tx_air_secs, rx_air_secs, recv_errors, internal_heap_free
+    tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
+    _prefs->disable_fwd ? "off" : "on"
   );
 
   if (len > 0) {
@@ -2425,7 +2426,8 @@ bool MQTTBridge::publishStatus() {
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
-    tx_air_secs, rx_air_secs, recv_errors, internal_heap_free
+    tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
+    _prefs->disable_fwd ? "off" : "on"
   );
 
   if (len > 0) {

@@ -24,7 +24,8 @@ int MQTTMessageBuilder::buildStatusMessage(
   int tx_air_secs,
   int rx_air_secs,
   int recv_errors,
-  int internal_heap
+  int internal_heap,
+  const char* repeat
 ) {
   // doc is provided by the caller (heap-allocated DynamicJsonDocument in MQTTBridge),
   // keeping this 768-byte scratch space off the MQTT task stack.
@@ -39,7 +40,10 @@ int MQTTMessageBuilder::buildStatusMessage(
   root["firmware_version"] = firmware_version;
   root["radio"] = radio;
   root["client_version"] = client_version;
-  
+  if (repeat != nullptr) {
+    root["repeat"] = repeat;
+  }
+
   // Add stats object if any stats are provided
   if (battery_mv >= 0 || uptime_secs >= 0 || errors >= 0 || queue_len >= 0 ||
       noise_floor > -999 || tx_air_secs >= 0 || rx_air_secs >= 0 || recv_errors >= 0 ||

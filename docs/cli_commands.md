@@ -766,6 +766,8 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 - `name`: Region name
 - `parent_name`: Parent region name (optional, defaults to wildcard)
 
+**Note:** In firmware **v1.15.0** and later, `region put` enables flooding for that region by default (you do not need a separate `region allowf <name>` after each `put`). On **v1.14.0** and earlier, new regions may still require `region allowf` for flooding—see [`region allowf`](#allow-a-region).
+
 ---
 
 #### Remove a region
