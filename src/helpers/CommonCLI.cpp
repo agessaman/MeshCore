@@ -1660,7 +1660,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
 #ifdef WITH_MQTT_BRIDGE
   } else if (memcmp(config, "mqtt.origin", 11) == 0) {
-    sprintf(reply, "> %s", _prefs->mqtt_origin);
+    char effective_origin[32];
+    MQTTBridge::getEffectiveMqttOrigin(_prefs, effective_origin, sizeof(effective_origin));
+    sprintf(reply, "> %s", effective_origin);
   } else if (memcmp(config, "mqtt.iata", 9) == 0) {
     sprintf(reply, "> %s", _prefs->mqtt_iata);
   } else if (memcmp(config, "mqtt.presets", 12) == 0 && (config[12] == '\0' || config[12] == ' ')) {

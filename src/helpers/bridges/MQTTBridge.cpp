@@ -37,6 +37,32 @@ static void stripQuotes(char* str, size_t max_len) {
   }
 }
 
+// Effective MQTT origin: empty mqtt_origin follows node_name; otherwise mqtt_origin override (quotes stripped).
+static void applyEffectiveOrigin(const NodePrefs* prefs, char* dest, size_t dest_size) {
+  if (!prefs || !dest || dest_size == 0) return;
+  if (prefs->mqtt_origin[0] == '\0') {
+    strncpy(dest, prefs->node_name, dest_size - 1);
+  } else {
+    strncpy(dest, prefs->mqtt_origin, dest_size - 1);
+  }
+  dest[dest_size - 1] = '\0';
+  stripQuotes(dest, dest_size);
+}
+
+void MQTTBridge::refreshOriginFromPrefs() {
+  if (!_prefs) return;
+  applyEffectiveOrigin(_prefs, _origin, sizeof(_origin));
+}
+
+void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* prefs, char* buf, size_t buf_size) {
+  if (!buf || buf_size == 0) return;
+  if (!prefs) {
+    buf[0] = '\0';
+    return;
+  }
+  applyEffectiveOrigin(prefs, buf, buf_size);
+}
+
 // Helper function to check if WiFi credentials are valid
 static bool isWiFiConfigValid(const NodePrefs* prefs) {
   // Check if WiFi SSID is configured (not empty)
@@ -457,14 +483,11 @@ void MQTTBridge::begin() {
     return;
   }
 
-  // Update origin and IATA from preferences
-  strncpy(_origin, _prefs->mqtt_origin, sizeof(_origin) - 1);
-  _origin[sizeof(_origin) - 1] = '\0';
+  refreshOriginFromPrefs();
+
   strncpy(_iata, _prefs->mqtt_iata, sizeof(_iata) - 1);
   _iata[sizeof(_iata) - 1] = '\0';
 
-  // Strip quotes from origin and IATA if present
-  stripQuotes(_origin, sizeof(_origin));
   stripQuotes(_iata, sizeof(_iata));
 
   // Convert IATA code to uppercase (IATA codes are conventionally uppercase)
@@ -1650,6 +1673,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
   MQTTSlot& slot = _slots[index];
   if (!slot.client || !slot.connected) return;
 
+  refreshOriginFromPrefs();
+
   // Build per-slot topic (handles IATA check for meshcore, token check for meshrank)
   char status_topic[128];
   if (!buildTopicForSlot(index, MSG_STATUS, status_topic, sizeof(status_topic))) {
@@ -2344,6 +2369,8 @@ bool MQTTBridge::publishStatus() {
     return false;
   }
 
+  refreshOriginFromPrefs();
+
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
   // _status_json_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
@@ -2431,6 +2458,8 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 const uint8_t* raw_data, int raw_len,
                                 float snr, float rssi) {
   if (!packet) return false;
+
+  refreshOriginFromPrefs();
 
   // Memory pressure check: Skip publishes when there's not enough contiguous
   // heap for the publish itself (JSON buffer + esp-mqtt outbox frame + WiFi TX
@@ -2536,6 +2565,8 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
 
 bool MQTTBridge::publishRaw(mesh::Packet* packet) {
   if (!packet) return false;
+
+  refreshOriginFromPrefs();
 
   // Use pre-allocated buffer; fallback to single stack buffer if not available
   char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];

@@ -682,8 +682,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bridge_baud = 115200;  // baud rate
   _prefs.bridge_channel = 1;    // channel 1
 
-  // MQTT defaults (same as repeater)
-  StrHelper::strncpy(_prefs.mqtt_origin, "MeshCore-RoomServer", sizeof(_prefs.mqtt_origin));
+  // MQTT defaults (same as repeater; empty mqtt_origin follows node_name when publishing)
+  _prefs.mqtt_origin[0] = '\0';
   StrHelper::strncpy(_prefs.mqtt_iata, "SEA", sizeof(_prefs.mqtt_iata));
   _prefs.mqtt_status_enabled = 1;    // enabled
   _prefs.mqtt_packets_enabled = 1;   // enabled
@@ -755,10 +755,6 @@ void MyMesh::begin(FILESYSTEM *fs) {
   applyGpsPrefs();
 #endif
 #ifdef WITH_MQTT_BRIDGE
-  // Set MQTT origin to actual device name (not build-time ADVERT_NAME) - same as repeater
-  StrHelper::strncpy(_prefs.mqtt_origin, _prefs.node_name, sizeof(_prefs.mqtt_origin));
-  MESH_DEBUG_PRINTLN("MQTT origin set to device name: %s", _prefs.mqtt_origin);
-
   if (_prefs.bridge_enabled) {
     // Defer construction to avoid static init crashes on ESP32 classic
     bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);

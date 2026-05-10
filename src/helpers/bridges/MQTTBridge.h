@@ -333,6 +333,7 @@ private:
   void optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_large_buffer = false);
   void getClientVersion(char* buffer, size_t buffer_size) const;
   void logMemoryStatus();
+  void refreshOriginFromPrefs();
 
 public:
   MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
@@ -380,6 +381,8 @@ public:
   bool isReady() const;
 
   static unsigned long getWifiConnectedAtMillis();
+  /** Resolved origin for MQTT JSON: node_name when mqtt_origin is empty, else mqtt_origin (with quote stripping). */
+  static void getEffectiveMqttOrigin(const NodePrefs* prefs, char* buf, size_t buf_size);
   static void formatMqttStatusReply(char* buf, size_t bufsize, const NodePrefs* prefs);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
   static bool isConfigValid(const NodePrefs* prefs);
