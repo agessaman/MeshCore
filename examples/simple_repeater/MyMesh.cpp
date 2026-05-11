@@ -965,8 +965,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
-  // MQTT defaults
-  StrHelper::strncpy(_prefs.mqtt_origin, "MeshCore-Repeater", sizeof(_prefs.mqtt_origin));
+  // MQTT defaults (mqtt_origin empty => effective origin follows node_name at publish time)
+  _prefs.mqtt_origin[0] = '\0';
   StrHelper::strncpy(_prefs.mqtt_iata, "SEA", sizeof(_prefs.mqtt_iata));
   _prefs.mqtt_status_enabled = 1;    // enabled
   _prefs.mqtt_packets_enabled = 1;   // enabled
@@ -1009,10 +1009,6 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
-
-  // Set MQTT origin to actual device name (not build-time ADVERT_NAME)
-  StrHelper::strncpy(_prefs.mqtt_origin, _prefs.node_name, sizeof(_prefs.mqtt_origin));
-  MESH_DEBUG_PRINTLN("MQTT origin set to device name: %s", _prefs.mqtt_origin);
 
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
@@ -1078,8 +1074,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 #endif
 
-  radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
-  radio_set_tx_power(_prefs.tx_power_dbm);
+  radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  radio_driver.setTxPower(_prefs.tx_power_dbm);
 
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
@@ -1173,7 +1169,7 @@ void MyMesh::dumpLogFile() {
 }
 
 void MyMesh::setTxPower(int8_t power_dbm) {
-  radio_set_tx_power(power_dbm);
+  radio_driver.setTxPower(power_dbm);
 }
 
 #if defined(USE_SX1262) || defined(USE_SX1268)
@@ -1408,13 +1404,13 @@ void MyMesh::loop() {
 
   if (set_radio_at && millisHasNowPassed(set_radio_at)) { // apply pending (temporary) radio params
     set_radio_at = 0;                                     // clear timer
-    radio_set_params(pending_freq, pending_bw, pending_sf, pending_cr);
+    radio_driver.setParams(pending_freq, pending_bw, pending_sf, pending_cr);
     MESH_DEBUG_PRINTLN("Temp radio params");
   }
 
   if (revert_radio_at && millisHasNowPassed(revert_radio_at)) { // revert radio params to orig
     revert_radio_at = 0;                                        // clear timer
-    radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+    radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
     MESH_DEBUG_PRINTLN("Radio params restored");
   }
 

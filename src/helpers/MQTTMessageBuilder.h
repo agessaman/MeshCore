@@ -39,6 +39,7 @@ public:
    * @param rx_air_secs RX air time in seconds (optional, -1 to omit)
    * @param recv_errors Radio receive/CRC errors (optional, -1 to omit)
    * @param internal_heap Internal heap free bytes (optional, -1 to omit)
+   * @param repeat Repeat/forwarding status ("on" or "off"); nullptr omits the field
    * @return Length of JSON string, or 0 on error
    */
   static int buildStatusMessage(
@@ -61,7 +62,8 @@ public:
     int tx_air_secs = -1,
     int rx_air_secs = -1,
     int recv_errors = -1,
-    int internal_heap = -1
+    int internal_heap = -1,
+    const char* repeat = nullptr
   );
 
   /**

@@ -77,7 +77,7 @@ get mqtt.status
 
 The MQTT bridge implementation provides:
 - Up to 6 MQTT connection slots with built-in presets
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, and TennMesh
+- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, ColoradoMesh, and TennMesh
 - Custom broker support with username/password authentication
 - JWT (Ed25519 device signing) authentication for most preset brokers; TennMesh uses a fixed username/password (plain MQTT)
 - WSS (WebSocket Secure), direct MQTT/TLS, and plain MQTT (TennMesh) transport
@@ -110,6 +110,7 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `eastidahomesh` | wss://broker.eastidahomesh.net:443 | None | WSS |
 | `dutchmeshcore-1` | wss://collector1.dutchmeshcore.nl:443 | JWT (Ed25519) | WSS |
 | `dutchmeshcore-2` | wss://collector2.dutchmeshcore.nl:443 | JWT (Ed25519) | WSS |
+| `coloradomesh` | wss://mqtt.meshcore.coloradomesh.org:1883 | JWT (Ed25519) | WSS |
 | `custom` | User-configured | Username/Password | MQTT or WSS |
 | `none` | (disabled) | — | — |
 
@@ -258,6 +259,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset eastidahomesh` - Set slot N to EastIdahoMesh (WSS/TLS, no auth; packets on `meshcore/{IATA}/{PUBLIC_KEY}/packets`)
 - `set mqttN.preset dutchmeshcore-1` - Set slot N to DutchMeshcore-1
 - `set mqttN.preset dutchmeshcore-2` - Set slot N to DutchMeshcore-2
+- `set mqttN.preset coloradomesh` - Set slot N to ColoradoMesh
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
 - `set mqttN.server <hostname>` - Set custom server hostname for slot N
@@ -334,7 +336,7 @@ When a slot's preset is `custom`, you can define a custom topic template using p
 
 If no custom topic is set, custom slots default to: `meshcore/{iata}/{device}/{type}`
 
-**Note:** Topic templates only apply to `custom` preset slots. Built-in presets (analyzer-us, analyzer-eu, meshmapper, meshrank, eastidahomesh, tennmesh, etc.) always use their hardcoded topic format.
+**Note:** Topic templates only apply to `custom` preset slots. Built-in presets (analyzer-us, analyzer-eu, meshmapper, meshrank, eastidahomesh, coloradomesh, tennmesh, etc.) always use their hardcoded topic format.
 
 ### MQTT Shared Commands
 
@@ -482,7 +484,8 @@ Minimal raw packet data for map integration.
   "model": "device_model",
   "firmware_version": "firmware_version",
   "radio": "radio_info",
-  "client_version": "meshcore-custom-repeater/{build_date}"
+  "client_version": "meshcore-custom-repeater/{build_date}",
+  "repeat": "on|off"
 }
 ```
 
@@ -527,7 +530,7 @@ Minimal raw packet data for map integration.
 
 ### Slot-Based Preset System
 - Up to 6 concurrent MQTT connections (with PSRAM), 2 without PSRAM
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, and TennMesh
+- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, ColoradoMesh, and TennMesh
 - Custom broker support with username/password auth and custom topic templates
 - JWT (Ed25519) for most preset brokers; MeshRank uses token-in-topic; TennMesh uses fixed username/password over plain MQTT
 - WSS (WebSocket Secure), direct MQTT over TLS, and plain MQTT (TennMesh)
@@ -668,7 +671,7 @@ get mqtt1.diag             # Last slot error details (TLS/sock/time)
 get mqtt2.diag
 get mqtt3.diag
 get mqtt1.preset           # Verify slots are configured
-get mqtt.iata              # IATA must be set for MeshCore-topic presets (e.g. Analyzer, TennMesh)
+get mqtt.iata              # IATA must be set for MeshCore-topic presets (e.g. Analyzer, ColoradoMesh, TennMesh)
 ```
 
 #### Timezone Issues
