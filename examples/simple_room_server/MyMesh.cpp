@@ -680,6 +680,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.alert_enabled = 0;
   _prefs.alert_psk_b64[0] = '\0';
   _prefs.alert_hashtag[0] = '\0';
+  _prefs.alert_region[0] = '\0';
   _prefs.alert_wifi_minutes = 30;
   _prefs.alert_mqtt_minutes = 240;
   _prefs.alert_min_interval_min = 60;
@@ -802,6 +803,24 @@ void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint3
     codes[1] = 0;  // REVISIT: set to 'home' Region, for sender/return region?
     sendFlood(pkt, codes, delay_millis, path_hash_size);
   }
+}
+
+bool MyMesh::resolveAlertScope(TransportKey& dest) {
+  // Same resolution policy as simple_repeater: alert.region > default_scope.
+  // The room server doesn't currently embed an AlertReporter, but keeping
+  // the override in lockstep means the callback path works the same on both
+  // builds and we won't get caught out if/when it does.
+  if (_prefs.alert_region[0]) {
+    auto r = region_map.findByNamePrefix(_prefs.alert_region);
+    if (r && region_map.getTransportKeysFor(*r, &dest, 1) > 0 && !dest.isNull()) {
+      return true;
+    }
+  }
+  if (!default_scope.isNull()) {
+    dest = default_scope;
+    return true;
+  }
+  return false;
 }
 
 void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size) {

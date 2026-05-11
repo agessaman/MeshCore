@@ -66,7 +66,7 @@ static int alert_decode_base64(const char* in, size_t in_len, uint8_t* out) {
 #endif
 
 AlertReporter::AlertReporter()
-    : _prefs(nullptr), _mesh(nullptr),
+    : _prefs(nullptr), _mesh(nullptr), _callbacks(nullptr),
 #ifdef WITH_MQTT_BRIDGE
       _bridge(nullptr),
 #endif
@@ -77,9 +77,10 @@ AlertReporter::AlertReporter()
 #endif
 }
 
-void AlertReporter::begin(NodePrefs* prefs, mesh::Mesh* mesh) {
+void AlertReporter::begin(NodePrefs* prefs, mesh::Mesh* mesh, CommonCLICallbacks* callbacks) {
   _prefs = prefs;
   _mesh = mesh;
+  _callbacks = callbacks;
   onConfigChanged();
 }
 
@@ -89,13 +90,59 @@ void AlertReporter::setBridge(MQTTBridge* bridge) {
 }
 #endif
 
-// Decoded bytes of the well-known PUBLIC group PSK ("izOH6cXN6mrJ5e26oRXNcg==").
-// We refuse to use this key for fault alerts so that infrastructure alarms
-// never spam every node subscribed to the default Public channel.
-static const uint8_t ALERT_PUBLIC_PSK_BYTES[16] = {
-  0x8B, 0x33, 0x87, 0xE9, 0xC5, 0xCD, 0xEA, 0x6A,
-  0xC9, 0xE5, 0xED, 0xBA, 0xA1, 0x15, 0xCD, 0x72
+// Channels banned as fault-alert destinations. Fault alerts are noisy
+// operator-infrastructure messages; routing them to community channels would
+// flood every nearby companion app (and amplify via well-known auto-responder
+// bots), so the firmware refuses these keys at both CLI set-time and at
+// runtime in resolveChannel.
+//
+// Provenance for each row can be re-derived with:
+//   printf '#name' | openssl dgst -sha256 | cut -c1-32
+// or for raw b64 PSKs:
+//   echo 'izOH6cXN6mrJ5e26oRXNcg==' | base64 -d | xxd -p
+//
+// To ban an additional channel: append one new row; no other code changes
+// required. The matcher converts the candidate's 16-byte secret to a
+// lowercase hex string and does a linear strcmp — N is tiny.
+struct BannedAlertChannel {
+  const char* label;
+  const char* secret_hex;  // 32 lowercase hex chars (no 0x, no separators)
 };
+
+static const BannedAlertChannel BANNED_ALERT_CHANNELS[] = {
+  // Public group PSK ("izOH6cXN6mrJ5e26oRXNcg==")
+  { "PUBLIC", "8b3387e9c5cdea6ac9e5edbaa115cd72" },
+  // sha256("#test")[0..15] — auto-responders in many regions
+  { "#test",  "9cd8fcf22a47333b591d96a2b848b73f" },
+  // sha256("#bot")[0..15] — generic bot channel, frequent auto-responders
+  { "#bot",   "eb50a1bcb3e4e5d7bf69a57c9dada211" },
+};
+
+const char* alertReporterBannedChannelMatch(const uint8_t* secret16) {
+  char hex[33];
+  static const char* H = "0123456789abcdef";
+  for (int i = 0; i < 16; i++) {
+    hex[i*2]   = H[(secret16[i] >> 4) & 0xF];
+    hex[i*2+1] = H[secret16[i] & 0xF];
+  }
+  hex[32] = '\0';
+  for (size_t i = 0; i < sizeof(BANNED_ALERT_CHANNELS) / sizeof(BANNED_ALERT_CHANNELS[0]); i++) {
+    if (strcmp(hex, BANNED_ALERT_CHANNELS[i].secret_hex) == 0) {
+      return BANNED_ALERT_CHANNELS[i].label;
+    }
+  }
+  return nullptr;
+}
+
+const char* alertReporterBannedChannelMatchB64(const char* psk_b64) {
+  if (!psk_b64) return nullptr;
+  size_t len_in = strlen(psk_b64);
+  if (len_in == 0) return nullptr;
+  uint8_t secret[32];
+  int n = alert_decode_base64(psk_b64, len_in, secret);
+  if (n != 16) return nullptr;  // banned table only contains 16-byte secrets
+  return alertReporterBannedChannelMatch(secret);
+}
 
 bool AlertReporter::resolveChannel(mesh::GroupChannel& out) const {
   if (!_prefs) return false;
@@ -110,12 +157,15 @@ bool AlertReporter::resolveChannel(mesh::GroupChannel& out) const {
   int len = alert_decode_base64(psk, psk_len, out.secret);
   if (len != 32 && len != 16) return false;
 
-  // Hard refuse the well-known PUBLIC PSK regardless of how it was supplied,
-  // belt-and-suspenders against an operator pasting it into alert.psk or a
-  // hashtag whose hash somehow collides (astronomically improbable).
-  if (len == 16 && memcmp(out.secret, ALERT_PUBLIC_PSK_BYTES, 16) == 0) {
-    ALERT_DEBUG_PRINTLN("refused PUBLIC PSK for alert channel");
-    return false;
+  // Belt-and-suspenders against an operator pasting a banned PSK directly
+  // into alert.psk, or a hashtag whose hash somehow collides with one of the
+  // banned 16-byte secrets (astronomically improbable, but free to check).
+  if (len == 16) {
+    const char* banned = alertReporterBannedChannelMatch(out.secret);
+    if (banned) {
+      ALERT_DEBUG_PRINTLN("refused banned channel '%s' for alert", banned);
+      return false;
+    }
   }
 
   // PATH_HASH_SIZE bytes — same scheme used by addChannel().
@@ -158,7 +208,22 @@ bool AlertReporter::sendChannel(const char* text) {
     ALERT_DEBUG_PRINTLN("createGroupDatagram failed (pool empty?)");
     return false;
   }
-  _mesh->sendFlood(pkt);
+
+  // Ride the repeater's default scope (or `alert.region` override) when the
+  // host MyMesh provides one — same path MyMesh uses for adverts and
+  // broadcast channel messages. Falls back to plain (unscoped) flood when
+  // no callbacks are wired or no scope is configured, matching the
+  // pre-scoped behavior on builds without RegionMap.
+  TransportKey scope;
+  bool have_scope = _callbacks && _callbacks->resolveAlertScope(scope) && !scope.isNull();
+  if (have_scope) {
+    uint16_t codes[2];
+    codes[0] = scope.calcTransportCode(pkt);
+    codes[1] = 0;
+    _mesh->sendFlood(pkt, codes);
+  } else {
+    _mesh->sendFlood(pkt);
+  }
   ALERT_DEBUG_PRINTLN("sent: %s", text);
   return true;
 }

@@ -2,6 +2,7 @@
 #include "CommonCLI.h"
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
+#include "AlertReporter.h"  // for alertReporterBannedChannelMatch()
 #include <RTClib.h>
 #include <Utils.h>
 
@@ -320,9 +321,13 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     if (file.available() >= (int)sizeof(_prefs->alert_hashtag)) {
       file.read((uint8_t *)&_prefs->alert_hashtag, sizeof(_prefs->alert_hashtag));
     }
+    if (file.available() >= (int)sizeof(_prefs->alert_region)) {
+      file.read((uint8_t *)&_prefs->alert_region, sizeof(_prefs->alert_region));
+    }
     // ensure null termination after raw read
     _prefs->alert_psk_b64[sizeof(_prefs->alert_psk_b64) - 1] = '\0';
     _prefs->alert_hashtag[sizeof(_prefs->alert_hashtag) - 1] = '\0';
+    _prefs->alert_region[sizeof(_prefs->alert_region) - 1] = '\0';
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -452,6 +457,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->alert_mqtt_minutes, sizeof(_prefs->alert_mqtt_minutes));
     file.write((uint8_t *)&_prefs->alert_min_interval_min, sizeof(_prefs->alert_min_interval_min));
     file.write((uint8_t *)&_prefs->alert_hashtag, sizeof(_prefs->alert_hashtag));
+    file.write((uint8_t *)&_prefs->alert_region, sizeof(_prefs->alert_region));
 
     file.close();
   }
@@ -1629,11 +1635,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       // Quick character-count check before storing; AlertReporter will redo the
       // full base64 decode and reject anything that doesn't yield 16 or 32 bytes.
       strcpy(reply, "Error: PSK must be 24 chars (16-byte) or 44 chars (32-byte) base64");
-    } else if (strcmp(val, "izOH6cXN6mrJ5e26oRXNcg==") == 0 ||
-               strcmp(val, "izOH6cXN6mrJ5e26oRXNcg") == 0) {
-      // Refuse the well-known PUBLIC group PSK — fault alerts must not spam
-      // every node on the default Public channel.
-      strcpy(reply, "Error: refusing PUBLIC PSK; pick a private key or hashtag");
+    } else if (const char* banned = alertReporterBannedChannelMatchB64(val)) {
+      // Refuse any key on the banned channel list (Public PSK, well-known
+      // auto-responder hashtags like #test/#bot, etc.). Fault alerts on those
+      // channels would spam every node in the area.
+      sprintf(reply, "Error: refusing banned channel '%s'; pick a private key or hashtag", banned);
     } else {
       StrHelper::strncpy(_prefs->alert_psk_b64, val, sizeof(_prefs->alert_psk_b64));
       // The new PSK is operator-supplied, so any previously-derived hashtag
@@ -1677,18 +1683,48 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         uint8_t digest[32];
         mesh::Utils::sha256(digest, sizeof(digest),
                             (const uint8_t*)hashtag, (int)strlen(hashtag));
-        char b64[48];
-        size_t b64_len = alert_encode_base64(digest, 16, b64, sizeof(b64));
-        if (b64_len == 0 || b64_len >= sizeof(_prefs->alert_psk_b64)) {
-          strcpy(reply, "Error: failed to derive PSK from hashtag");
+        if (const char* banned = alertReporterBannedChannelMatch(digest)) {
+          // Hashtag derives to a banned key (e.g. `set alert.hashtag test`
+          // hits the #test entry). Refuse before clobbering existing config.
+          sprintf(reply, "Error: refusing banned channel '%s'", banned);
         } else {
-          StrHelper::strncpy(_prefs->alert_hashtag, hashtag, sizeof(_prefs->alert_hashtag));
-          StrHelper::strncpy(_prefs->alert_psk_b64, b64, sizeof(_prefs->alert_psk_b64));
-          savePrefs();
-          _callbacks->onAlertConfigChanged();
-          sprintf(reply, "OK - alert.hashtag: %s", _prefs->alert_hashtag);
+          char b64[48];
+          size_t b64_len = alert_encode_base64(digest, 16, b64, sizeof(b64));
+          if (b64_len == 0 || b64_len >= sizeof(_prefs->alert_psk_b64)) {
+            strcpy(reply, "Error: failed to derive PSK from hashtag");
+          } else {
+            StrHelper::strncpy(_prefs->alert_hashtag, hashtag, sizeof(_prefs->alert_hashtag));
+            StrHelper::strncpy(_prefs->alert_psk_b64, b64, sizeof(_prefs->alert_psk_b64));
+            savePrefs();
+            _callbacks->onAlertConfigChanged();
+            sprintf(reply, "OK - alert.hashtag: %s", _prefs->alert_hashtag);
+          }
         }
       }
+    }
+  } else if (memcmp(config, "alert.region", 12) == 0 && (config[12] == 0 || config[12] == ' ')) {
+    // `set alert.region <name>` overrides the repeater's default_scope for
+    // alert sends only. `set alert.region` (no arg) clears it. The name is
+    // looked up lazily via RegionMap at send time; we deliberately don't
+    // mutate the region map here, so naming an unknown region is allowed
+    // but will silently fall back to default_scope until the operator runs
+    // `region put` for it.
+    const char* val = (config[12] == ' ') ? &config[13] : "";
+    while (*val == ' ') val++;
+    size_t len = strlen(val);
+    if (len == 0) {
+      _prefs->alert_region[0] = '\0';
+      savePrefs();
+      _callbacks->onAlertConfigChanged();
+      strcpy(reply, "OK - alert.region cleared (using default scope)");
+    } else if (len >= sizeof(_prefs->alert_region)) {
+      strcpy(reply, "Error: alert.region too long");
+    } else {
+      StrHelper::strncpy(_prefs->alert_region, val, sizeof(_prefs->alert_region));
+      StrHelper::stripSurroundingQuotes(_prefs->alert_region, sizeof(_prefs->alert_region));
+      savePrefs();
+      _callbacks->onAlertConfigChanged();
+      sprintf(reply, "OK - alert.region: %s", _prefs->alert_region);
     }
   } else if (memcmp(config, "alert.wifi ", 11) == 0) {
     int mins = (int)_atoi(&config[11]);
@@ -2030,6 +2066,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->alert_hashtag[0] ? _prefs->alert_hashtag : "(unset)");
   } else if (memcmp(config, "alert.psk", 9) == 0) {
     sprintf(reply, "> %s", _prefs->alert_psk_b64[0] ? _prefs->alert_psk_b64 : "(unset)");
+  } else if (memcmp(config, "alert.region", 12) == 0) {
+    sprintf(reply, "> %s", _prefs->alert_region[0] ? _prefs->alert_region : "(unset, using default scope)");
   } else if (memcmp(config, "alert.wifi", 10) == 0) {
     sprintf(reply, "> %u min%s", (unsigned)_prefs->alert_wifi_minutes,
             _prefs->alert_wifi_minutes == 0 ? " (disabled)" : "");

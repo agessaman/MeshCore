@@ -118,6 +118,11 @@ struct NodePrefs { // persisted to file
   // text here purely for `get alert.hashtag` readback. A subsequent
   // `set alert.psk` clears this field so it doesn't lie about provenance.
   char     alert_hashtag[24];
+  // Optional region name (e.g. "us", "eu"); empty = use the repeater's
+  // default_scope. Looked up lazily via RegionMap::findByNamePrefix at send
+  // time, so the operator can name a region that doesn't exist yet without
+  // polluting region_map state. Falls back to default_scope on miss.
+  char     alert_region[31];
 };
 
 #ifdef WITH_MQTT_BRIDGE
@@ -296,6 +301,14 @@ public:
     // no op by default
   }
   virtual bool sendAlertText(const char* /*text*/) {
+    return false; // no op by default
+  }
+  // Resolve the TransportKey scope to use for outgoing fault-alert floods.
+  // Implementations should consult NodePrefs::alert_region first (look up via
+  // RegionMap), then fall back to the repeater's default_scope, then return
+  // false if neither yields a usable key. AlertReporter falls back to an
+  // unscoped flood when this returns false.
+  virtual bool resolveAlertScope(TransportKey& /*dest*/) {
     return false; // no op by default
   }
 };

@@ -9,6 +9,23 @@
 #endif
 
 /**
+ * Returns the label of a banned alert channel if \a secret16 matches one of
+ * the channels in the BANNED_ALERT_CHANNELS table (e.g. "PUBLIC", "#test",
+ * "#bot"), or nullptr otherwise. Centralized here so both AlertReporter and
+ * the CommonCLI `set alert.psk` / `set alert.hashtag` handlers can share one
+ * source of truth — adding a new banned channel is a one-line table edit.
+ */
+const char* alertReporterBannedChannelMatch(const uint8_t* secret16);
+
+/**
+ * Convenience: base64-decodes \a psk_b64 and forwards to
+ * alertReporterBannedChannelMatch. Returns nullptr if not banned (or if
+ * the input doesn't decode to a 16-byte key — non-16-byte keys cannot
+ * match any banned entry anyway).
+ */
+const char* alertReporterBannedChannelMatchB64(const char* psk_b64);
+
+/**
  * \brief Send-only group-channel "fault alert" reporter for repeater/observer
  *        builds.
  *
@@ -19,8 +36,9 @@
  *
  * The alert channel must be explicitly configured to either a private base64
  * PSK (`set alert.psk`) or a hashtag name (`set alert.hashtag`); the
- * well-known PUBLIC group key is rejected on purpose, since fault alerts
- * would otherwise spam every node subscribed to the default Public channel.
+ * well-known PUBLIC group key (and a small list of other auto-responder
+ * channels — see BANNED_ALERT_CHANNELS in AlertReporter.cpp) are rejected on
+ * purpose so fault alerts never spam community channels.
  *
  * Edge-triggered + rate-limited via NodePrefs::alert_min_interval_min so a
  * flapping link cannot spam the channel.
@@ -37,10 +55,11 @@ public:
 
   /**
    * Wire up the reporter. Must be called from MyMesh::begin() after prefs
-   * are loaded. \a node_name is captured by reference so subsequent rename
-   * (set name) is reflected automatically.
+   * are loaded. \a callbacks is optional — when non-null the reporter uses
+   * it to resolve a TransportKey scope for outgoing alert floods (so the
+   * packet rides the repeater's default scope or an `alert.region` override).
    */
-  void begin(NodePrefs* prefs, mesh::Mesh* mesh);
+  void begin(NodePrefs* prefs, mesh::Mesh* mesh, CommonCLICallbacks* callbacks = nullptr);
 
 #ifdef WITH_MQTT_BRIDGE
   /** Bridge can be (re)created lazily; pass nullptr to detach. */
@@ -80,6 +99,7 @@ private:
 
   NodePrefs* _prefs;
   mesh::Mesh* _mesh;
+  CommonCLICallbacks* _callbacks;
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* _bridge;
   Fault _wifi;

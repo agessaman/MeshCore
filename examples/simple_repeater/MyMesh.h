@@ -216,6 +216,7 @@ public:
 
   void onAlertConfigChanged() override { _alerter.onConfigChanged(); }
   bool sendAlertText(const char* text) override { return _alerter.sendText(text); }
+  bool resolveAlertScope(TransportKey& dest) override;
   bool formatFileSystem() override;
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
   void updateAdvertTimer() override;
