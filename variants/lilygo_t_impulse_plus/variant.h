@@ -88,8 +88,8 @@ extern "C"
 #define GPS_EN _PINNUM(1, 10)
 #define GPS_UART_RX _PINNUM(1, 11)
 #define GPS_UART_TX _PINNUM(1, 12)
-#define PIN_GPS_RX GPS_UART_TX
-#define PIN_GPS_TX GPS_UART_RX
+#define PIN_GPS_RX GPS_UART_RX
+#define PIN_GPS_TX GPS_UART_TX
 #define PIN_GPS_EN GPS_EN
 #define GPS_BAUD_RATE 38400
 #define PIN_GPS_EN_ACTIVE LOW
