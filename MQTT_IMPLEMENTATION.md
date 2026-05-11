@@ -172,13 +172,15 @@ Some MQTT observer builds use a non-default partition table to accommodate the l
 | `LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | same |
 | `Station_G2_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
 | `Station_G2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+| `LilyGo_TBeam_1W_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | Set in `boards/t_beam_1w.json`; required vs implicit `default.csv` |
+| `LilyGo_TBeam_1W_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | same |
 
 **NVS / settings when the partition layout changes**
 
 Flashing a **full merged image** (`*-merged.bin` at offset `0x0`) writes a new bootloader **and** partition table. If that layout **differs** from what is already on the device, **NVS is typically wiped or invalidated** — expect to lose stored configuration (admin preferences, WiFi, MQTT slots, name, etc.) and reconfigure from scratch.
 
 - **`LilyGo_TLora_V2_1_1_6_*_observer_mqtt`:** These use the **same** `min_spiffs.csv` layout as other MeshCore TLora builds, so moving between repeater / room server / MQTT observer does **not** require a different partition table for normal upgrades. **If you previously installed an older TLora MQTT observer that used `huge_app.csv`,** flashing this firmware switches back to `min_spiffs` — treat that as a **partition layout change** (merged flash; NVS may be reset). **If you install MeshCore on a device that used a non-MeshCore partition map,** the first merged flash can still **wipe** settings.
-- **`Station_G2_*_observer_mqtt`:** These use `default_16MB.csv`. The same applies if you move **from** firmware that was built with a **different** partition table — the first merged flash that installs this layout can **wipe** stored settings.
+- **`Station_G2_*_observer_mqtt`** and **`LilyGo_TBeam_1W_*_observer_mqtt`**: These use `default_16MB.csv` to accomodate the larger size of the MQTT observer firmware. Installing MQTT observer firmware on these devices requires a **merged** flash the first time. The same applies if you move **from** firmware that was built with a **different** partition table—the first merged flash that installs this layout will **wipe** stored settings. 
 
 **How to flash the merged firmware:**
 
