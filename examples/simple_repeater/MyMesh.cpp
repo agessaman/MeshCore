@@ -947,6 +947,19 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #endif
   _prefs.radio_watchdog_minutes = 5; // 5 minutes default
 
+  // Alert channel defaults — disabled by default, and the channel is left
+  // unconfigured so a freshly-flashed observer never broadcasts on the
+  // well-known Public hashtag. Operators must explicitly pick a private
+  // key (`set alert.psk`) or a hashtag (`set alert.hashtag`) before alerts
+  // can fire. The sender prefix on outgoing alert messages is always the
+  // node name (`set name ...`), so there's no separate `alert.name`.
+  _prefs.alert_enabled = 0;
+  _prefs.alert_psk_b64[0] = '\0';
+  _prefs.alert_hashtag[0] = '\0';
+  _prefs.alert_wifi_minutes = 30;     // 30 minutes
+  _prefs.alert_mqtt_minutes = 240;    // 4 hours
+  _prefs.alert_min_interval_min = 60; // re-arm window: 1 hour
+
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled
   _prefs.bridge_delay   = 500;  // milliseconds
@@ -1072,6 +1085,12 @@ void MyMesh::begin(FILESYSTEM *fs) {
       bridge->begin();
     }
   }
+#endif
+
+  // Wire fault-alert reporter. begin() is safe regardless of bridge state.
+  _alerter.begin(&_prefs, this);
+#if defined(WITH_MQTT_BRIDGE)
+  _alerter.setBridge(bridge);
 #endif
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
@@ -1424,6 +1443,8 @@ void MyMesh::loop() {
   uint32_t now = millis();
   uptime_millis += now - last_millis;
   last_millis = now;
+
+  _alerter.onLoop(now);
 
 #ifdef WITH_SNMP
   // Push radio stats to SNMP agent every 2 seconds

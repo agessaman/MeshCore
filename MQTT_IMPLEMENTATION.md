@@ -678,6 +678,99 @@ set timezone EST                 # Abbreviation
 set timezone UTC-5               # UTC offset
 ```
 
+## Fault Alerts (Group Channel)
+
+The repeater can broadcast a one-line fault notification on a configured group channel when WiFi or any active MQTT slot has been disconnected longer than a configurable threshold.
+
+The alert is sent over **LoRa** as a `PAYLOAD_TYPE_GRP_TXT` flood packet on the configured channel (with sender = device name) — *not* over MQTT. This is intentional: the MQTT path is what's broken, so the only working delivery is the mesh itself. Anyone in radio range subscribed to the same channel/hashtag in their companion app will see the alert inline with normal channel chat.
+
+> **The default Public channel is intentionally NOT supported.** Fault alerts are operator-infrastructure noise — broadcasting them on the well-known Public PSK would spam every node in the area. The implementation explicitly rejects the Public PSK (`izOH6cXN6mrJ5e26oRXNcg==`) at both the CLI validation step and the alert-send path. You must explicitly point alerts at a **private PSK** (`set alert.psk`) or a **hashtag channel** (`set alert.hashtag`) before alerts can fire.
+
+### What triggers an alert
+
+- **WiFi**: continuously down for at least `alert.wifi` minutes (default 30)
+- **MQTT slot N**: enabled, has connected at least once since boot, and has been disconnected for at least `alert.mqtt` minutes (default 240, i.e. 4 h)
+
+A "recovered" message is sent once when the underlying connection comes back. After firing, a fault is rate-limited by `alert.interval` (default 60 minutes) before it can re-fire — this prevents flapping links from spamming the channel.
+
+### Defaults
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `alert` | `off` | Master enable for automatic fault alerts |
+| `alert.psk` | *(unset)* | Private base64 PSK (24 or 44 chars). The active channel key. |
+| `alert.hashtag` | *(unset)* | Informational only; set via `set alert.hashtag` to pre-derive `alert.psk` from `sha256("#name")[0..15]`. Cleared when `alert.psk` is set directly. |
+| `alert.wifi` | `30` (min) | 0 disables WiFi alerts |
+| `alert.mqtt` | `240` (min) | 0 disables MQTT alerts |
+| `alert.interval` | `60` (min) | Minutes between repeat alerts of the same fault. **Hard floor of 60 min** so a flapping link can't spam the mesh; the CLI rejects lower values and AlertReporter clamps stale prefs at runtime. |
+
+> `alert.psk` is unset on a fresh flash. **Alerts cannot fire and `alert test` will refuse to send until you configure either `alert.psk` directly or `alert.hashtag` (which derives one).** The sender shown on outgoing alert messages is always the node name (`set name ...`); there is no separate `alert.name`.
+
+### CLI
+
+Get:
+- `get alert` — master on/off
+- `get alert.psk` — the active base64 PSK (or `(unset)`)
+- `get alert.hashtag` — the originating hashtag (or `(unset)`, e.g. after `set alert.psk` overrides the hashtag-derived key)
+- `get alert.wifi` / `get alert.mqtt` / `get alert.interval`
+
+Set:
+- `set alert on` / `set alert off`
+- `set alert.psk <base64>` — 24-char (16-byte) or 44-char (32-byte) base64; rejects the well-known Public PSK. Clears `alert.hashtag` since the new key is operator-supplied.
+- `set alert.psk` (no argument) — clears both `alert.psk` and `alert.hashtag`
+- `set alert.hashtag <name>` — derives the 16-byte key from `sha256("#name")` *once*, stores it as `alert.psk`, and remembers the hashtag for `get alert.hashtag`. `#` prefix is added if omitted (so `alerts` and `#alerts` are equivalent).
+- `set alert.hashtag` (no argument) — clears both `alert.psk` and `alert.hashtag`
+- `set alert.wifi <minutes>` (0–1440; 0 = disabled)
+- `set alert.mqtt <minutes>` (0–10080; 0 = disabled)
+- `set alert.interval <minutes>` (60–10080; 60-minute floor to protect mesh airtime)
+
+Action:
+- `alert test` — send a one-off `[test] alert channel ok` immediately on the configured channel; ignores `alert on/off` so operators can verify the channel before enabling fault firing. Returns an error if no channel is configured.
+- `alert test <message>` — send a custom test message: `[test] <message>`.
+
+### Example: dedicated hashtag channel (recommended for operator groups)
+
+```bash
+set alert.hashtag ops-alerts   # stored as "#ops-alerts"; key = sha256("#ops-alerts")[0..15]
+set alert.wifi 10              # tighter for ops monitoring
+set alert.mqtt 60
+set alert on
+alert test
+```
+
+Anyone running a companion app and subscribed to the `#ops-alerts` hashtag channel will see the alerts inline.
+
+### Example: dedicated alerts channel with a private PSK
+
+Generate a 16-byte random PSK and base64-encode it (24 chars), or use the companion app's "Add channel" feature to create one and copy the secret. Then:
+
+```bash
+set alert.psk <your_24_or_44_char_base64_psk>
+set alert.wifi 10
+set alert.mqtt 60
+set alert on
+alert test
+```
+
+Subscribers running a MeshCore companion app should add a channel with the same PSK; alerts will appear in that channel's chat view. (Pick any local name for it — the sender of incoming alert messages is the repeater's node name.)
+
+### Sample messages
+
+```
+MyObserver: WiFi down 47m (reason 201)
+MyObserver: WiFi recovered after 1h3m
+MyObserver: MQTT slot 1 (analyzer-us) down 4h12m
+MyObserver: MQTT slot 1 (analyzer-us) recovered after 4h45m
+```
+
+### Notes
+
+- A reboot during an outage resets the timer; the alert won't double-fire because `millis()` starts at 0 at boot. The fault must persist `alert.wifi` / `alert.mqtt` minutes from boot.
+- Fault state is stored in RAM only — no persistence across reboots.
+- The MQTT-slot watcher uses a separate per-slot `current_outage_started_ms` field that is reset on each reconnect, distinct from the `first_disconnect_time` shown in `mqttN.diag` (which remains a "first disconnect since boot" counter for diagnostics).
+- WiFi-down alerts can only be delivered if the LoRa radio is up. There is no fallback path.
+- The default Public PSK is **rejected** at both `set alert.psk` and at the alert-send path, so even if you somehow set it via a saved config file, the firmware will silently refuse to broadcast on it.
+
 ## SNMP Monitoring
 
 Observer nodes include an optional SNMP v2c agent that exposes radio stats, MQTT connectivity, memory usage, and network information to standard monitoring tools. See [MQTT_SNMP.md](MQTT_SNMP.md) for setup and OID reference.

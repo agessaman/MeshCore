@@ -675,6 +675,15 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
+  // Alert channel defaults (same as repeater; off by default and unconfigured).
+  // Operator must pick `set alert.psk` or `set alert.hashtag` before alerts fire.
+  _prefs.alert_enabled = 0;
+  _prefs.alert_psk_b64[0] = '\0';
+  _prefs.alert_hashtag[0] = '\0';
+  _prefs.alert_wifi_minutes = 30;
+  _prefs.alert_mqtt_minutes = 240;
+  _prefs.alert_min_interval_min = 60;
+
   // bridge defaults (same as repeater)
   _prefs.bridge_enabled = 1;    // enabled
   _prefs.bridge_delay   = 500;  // milliseconds

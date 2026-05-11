@@ -3,6 +3,29 @@
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
 #include <RTClib.h>
+#include <Utils.h>
+
+// Tiny base64 encoder used by `set alert.hashtag` to render a derived 16-byte
+// key into NodePrefs::alert_psk_b64. Kept inline so we don't drag the
+// densaugeo/base64 PlatformIO dep into every CLI-using build.
+static size_t alert_encode_base64(const uint8_t* in, size_t in_len, char* out, size_t out_size) {
+  static const char TBL[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  size_t needed = ((in_len + 2) / 3) * 4 + 1;
+  if (out_size < needed) return 0;
+  size_t o = 0;
+  for (size_t i = 0; i < in_len; i += 3) {
+    uint32_t v = (uint32_t)in[i] << 16;
+    int rem = (int)(in_len - i);
+    if (rem > 1) v |= (uint32_t)in[i + 1] << 8;
+    if (rem > 2) v |= (uint32_t)in[i + 2];
+    out[o++] = TBL[(v >> 18) & 0x3F];
+    out[o++] = TBL[(v >> 12) & 0x3F];
+    out[o++] = (rem > 1) ? TBL[(v >> 6) & 0x3F] : '=';
+    out[o++] = (rem > 2) ? TBL[v & 0x3F]        : '=';
+  }
+  out[o] = '\0';
+  return o;
+}
 
 #ifndef BRIDGE_MAX_BAUD
 #define BRIDGE_MAX_BAUD 115200
@@ -278,7 +301,28 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     if (file.available() >= (int)sizeof(_prefs->radio_watchdog_minutes)) {
       file.read((uint8_t *)&_prefs->radio_watchdog_minutes, sizeof(_prefs->radio_watchdog_minutes)); // 316
     }
-    // next: 317
+    // Alert channel fields (appended; older files won't have them — defaults from MyMesh ctor remain)
+    if (file.available() >= (int)sizeof(_prefs->alert_enabled)) {
+      file.read((uint8_t *)&_prefs->alert_enabled, sizeof(_prefs->alert_enabled));
+    }
+    if (file.available() >= (int)sizeof(_prefs->alert_psk_b64)) {
+      file.read((uint8_t *)&_prefs->alert_psk_b64, sizeof(_prefs->alert_psk_b64));
+    }
+    if (file.available() >= (int)sizeof(_prefs->alert_wifi_minutes)) {
+      file.read((uint8_t *)&_prefs->alert_wifi_minutes, sizeof(_prefs->alert_wifi_minutes));
+    }
+    if (file.available() >= (int)sizeof(_prefs->alert_mqtt_minutes)) {
+      file.read((uint8_t *)&_prefs->alert_mqtt_minutes, sizeof(_prefs->alert_mqtt_minutes));
+    }
+    if (file.available() >= (int)sizeof(_prefs->alert_min_interval_min)) {
+      file.read((uint8_t *)&_prefs->alert_min_interval_min, sizeof(_prefs->alert_min_interval_min));
+    }
+    if (file.available() >= (int)sizeof(_prefs->alert_hashtag)) {
+      file.read((uint8_t *)&_prefs->alert_hashtag, sizeof(_prefs->alert_hashtag));
+    }
+    // ensure null termination after raw read
+    _prefs->alert_psk_b64[sizeof(_prefs->alert_psk_b64) - 1] = '\0';
+    _prefs->alert_hashtag[sizeof(_prefs->alert_hashtag) - 1] = '\0';
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -401,7 +445,13 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->snmp_enabled, sizeof(_prefs->snmp_enabled));                    // 291
     file.write((uint8_t *)&_prefs->snmp_community, sizeof(_prefs->snmp_community));                // 292
     file.write((uint8_t *)&_prefs->radio_watchdog_minutes, sizeof(_prefs->radio_watchdog_minutes)); // 316
-    // next: 317
+    // Alert channel fields (appended)
+    file.write((uint8_t *)&_prefs->alert_enabled, sizeof(_prefs->alert_enabled));
+    file.write((uint8_t *)&_prefs->alert_psk_b64, sizeof(_prefs->alert_psk_b64));
+    file.write((uint8_t *)&_prefs->alert_wifi_minutes, sizeof(_prefs->alert_wifi_minutes));
+    file.write((uint8_t *)&_prefs->alert_mqtt_minutes, sizeof(_prefs->alert_mqtt_minutes));
+    file.write((uint8_t *)&_prefs->alert_min_interval_min, sizeof(_prefs->alert_min_interval_min));
+    file.write((uint8_t *)&_prefs->alert_hashtag, sizeof(_prefs->alert_hashtag));
 
     file.close();
   }
@@ -808,6 +858,21 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "clear stats", 11) == 0) {
       _callbacks->clearStats();
       strcpy(reply, "(OK - stats reset)");
+    } else if (memcmp(command, "alert test", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+      // Send a one-off test alert on the configured alert channel.
+      const char* extra = command[10] == ' ' ? &command[11] : "";
+      char text[120];
+      if (*extra) {
+        snprintf(text, sizeof(text), "[test] %s", extra);
+      } else {
+        strcpy(text, "[test] alert channel ok");
+      }
+      if (!_prefs->alert_psk_b64[0]) {
+        strcpy(reply, "Error: alert channel not configured (set alert.psk or set alert.hashtag)");
+      } else {
+        bool ok = _callbacks->sendAlertText(text);
+        strcpy(reply, ok ? "OK - alert sent" : "Error: alert send failed (bad PSK or PUBLIC key refused?)");
+      }
     } else if (memcmp(command, "get ", 4) == 0) {
       handleGetCmd(sender_timestamp, command, reply);
     } else if (memcmp(command, "set ", 4) == 0) {
@@ -1528,6 +1593,132 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     savePrefs();
     strcpy(reply, "OK");
 #endif
+  } else if (memcmp(config, "alert ", 6) == 0) {
+    // set alert on|off
+    const char* val = &config[6];
+    if (memcmp(val, "on", 2) == 0 && (val[2] == 0 || val[2] == ' ')) {
+      _prefs->alert_enabled = 1;
+      savePrefs();
+      _callbacks->onAlertConfigChanged();
+      strcpy(reply, "OK - alerts on");
+    } else if (memcmp(val, "off", 3) == 0 && (val[3] == 0 || val[3] == ' ')) {
+      _prefs->alert_enabled = 0;
+      savePrefs();
+      _callbacks->onAlertConfigChanged();
+      strcpy(reply, "OK - alerts off");
+    } else {
+      strcpy(reply, "Error: usage set alert on|off");
+    }
+  } else if (memcmp(config, "alert.psk", 9) == 0 && (config[9] == 0 || config[9] == ' ')) {
+    // `set alert.psk` with no argument clears the field (alerts then disabled
+    // until a new psk/hashtag is configured).
+    const char* val = (config[9] == ' ') ? &config[10] : "";
+    while (*val == ' ') val++;
+    size_t len = strlen(val);
+    if (len == 0) {
+      _prefs->alert_psk_b64[0] = '\0';
+      _prefs->alert_hashtag[0] = '\0';
+      savePrefs();
+      _callbacks->onAlertConfigChanged();
+      strcpy(reply, "OK - alert.psk cleared (alerts disabled until configured)");
+    } else if (len >= sizeof(_prefs->alert_psk_b64)) {
+      strcpy(reply, "Error: PSK too long (max 47 chars)");
+    } else if (val[0] == '#') {
+      strcpy(reply, "Error: use 'set alert.hashtag' for hashtag channels");
+    } else if (len != 24 && len != 44) {
+      // Quick character-count check before storing; AlertReporter will redo the
+      // full base64 decode and reject anything that doesn't yield 16 or 32 bytes.
+      strcpy(reply, "Error: PSK must be 24 chars (16-byte) or 44 chars (32-byte) base64");
+    } else if (strcmp(val, "izOH6cXN6mrJ5e26oRXNcg==") == 0 ||
+               strcmp(val, "izOH6cXN6mrJ5e26oRXNcg") == 0) {
+      // Refuse the well-known PUBLIC group PSK — fault alerts must not spam
+      // every node on the default Public channel.
+      strcpy(reply, "Error: refusing PUBLIC PSK; pick a private key or hashtag");
+    } else {
+      StrHelper::strncpy(_prefs->alert_psk_b64, val, sizeof(_prefs->alert_psk_b64));
+      // The new PSK is operator-supplied, so any previously-derived hashtag
+      // name is no longer accurate provenance — drop it.
+      _prefs->alert_hashtag[0] = '\0';
+      savePrefs();
+      _callbacks->onAlertConfigChanged();
+      strcpy(reply, "OK - alert.psk updated");
+    }
+  } else if (memcmp(config, "alert.hashtag", 13) == 0 && (config[13] == 0 || config[13] == ' ')) {
+    const char* val = (config[13] == ' ') ? &config[14] : "";
+    while (*val == ' ') val++;
+    size_t in_len = strlen(val);
+    if (in_len == 0) {
+      _prefs->alert_psk_b64[0] = '\0';
+      _prefs->alert_hashtag[0] = '\0';
+      savePrefs();
+      _callbacks->onAlertConfigChanged();
+      strcpy(reply, "OK - alert.hashtag cleared (alerts disabled until configured)");
+    } else {
+      // Canonical stored form is "#name" because the leading '#' is part of
+      // the sha256 input (matching the companion-app hashtag-channel
+      // derivation in docs/companion_protocol.md). Accept the user typing
+      // either "alerts" or "#alerts".
+      char hashtag[sizeof(_prefs->alert_hashtag)];
+      size_t need = (val[0] == '#') ? in_len : in_len + 1;
+      if (need >= sizeof(hashtag)) {
+        strcpy(reply, "Error: hashtag too long");
+      } else {
+        if (val[0] == '#') {
+          StrHelper::strncpy(hashtag, val, sizeof(hashtag));
+        } else {
+          hashtag[0] = '#';
+          StrHelper::strncpy(&hashtag[1], val, sizeof(hashtag) - 1);
+        }
+
+        // Derive the channel key once: first 16 bytes of sha256("#name"),
+        // then base64-encode and store in alert_psk_b64. We don't re-derive
+        // on every send — operators can later override with `set alert.psk`
+        // without leaving stale hashtag text behind.
+        uint8_t digest[32];
+        mesh::Utils::sha256(digest, sizeof(digest),
+                            (const uint8_t*)hashtag, (int)strlen(hashtag));
+        char b64[48];
+        size_t b64_len = alert_encode_base64(digest, 16, b64, sizeof(b64));
+        if (b64_len == 0 || b64_len >= sizeof(_prefs->alert_psk_b64)) {
+          strcpy(reply, "Error: failed to derive PSK from hashtag");
+        } else {
+          StrHelper::strncpy(_prefs->alert_hashtag, hashtag, sizeof(_prefs->alert_hashtag));
+          StrHelper::strncpy(_prefs->alert_psk_b64, b64, sizeof(_prefs->alert_psk_b64));
+          savePrefs();
+          _callbacks->onAlertConfigChanged();
+          sprintf(reply, "OK - alert.hashtag: %s", _prefs->alert_hashtag);
+        }
+      }
+    }
+  } else if (memcmp(config, "alert.wifi ", 11) == 0) {
+    int mins = (int)_atoi(&config[11]);
+    if (mins < 0 || mins > 1440) {
+      strcpy(reply, "Error: alert.wifi must be 0-1440 minutes (0=off)");
+    } else {
+      _prefs->alert_wifi_minutes = (uint16_t)mins;
+      savePrefs();
+      sprintf(reply, "OK - alert.wifi %d min%s", mins, mins == 0 ? " (disabled)" : "");
+    }
+  } else if (memcmp(config, "alert.mqtt ", 11) == 0) {
+    int mins = (int)_atoi(&config[11]);
+    if (mins < 0 || mins > 10080) {
+      strcpy(reply, "Error: alert.mqtt must be 0-10080 minutes (0=off)");
+    } else {
+      _prefs->alert_mqtt_minutes = (uint16_t)mins;
+      savePrefs();
+      sprintf(reply, "OK - alert.mqtt %d min%s", mins, mins == 0 ? " (disabled)" : "");
+    }
+  } else if (memcmp(config, "alert.interval ", 15) == 0) {
+    int mins = (int)_atoi(&config[15]);
+    // Floor at 60 min: faster re-fires would let a flapping link spam the
+    // mesh with a fresh GRP_TXT flood every minute — terrible for airtime.
+    if (mins < 60 || mins > 10080) {
+      strcpy(reply, "Error: alert.interval must be 60-10080 minutes");
+    } else {
+      _prefs->alert_min_interval_min = (uint16_t)mins;
+      savePrefs();
+      sprintf(reply, "OK - alert.interval %d min", mins);
+    }
   } else if (memcmp(config, "adc.multiplier ", 15) == 0) {
     _prefs->adc_multiplier = atof(&config[15]);
     if (_board->setAdcMultiplier(_prefs->adc_multiplier)) {
@@ -1835,6 +2026,20 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   #else
       strcpy(reply, "ERROR: unsupported");
   #endif
+  } else if (memcmp(config, "alert.hashtag", 13) == 0) {
+    sprintf(reply, "> %s", _prefs->alert_hashtag[0] ? _prefs->alert_hashtag : "(unset)");
+  } else if (memcmp(config, "alert.psk", 9) == 0) {
+    sprintf(reply, "> %s", _prefs->alert_psk_b64[0] ? _prefs->alert_psk_b64 : "(unset)");
+  } else if (memcmp(config, "alert.wifi", 10) == 0) {
+    sprintf(reply, "> %u min%s", (unsigned)_prefs->alert_wifi_minutes,
+            _prefs->alert_wifi_minutes == 0 ? " (disabled)" : "");
+  } else if (memcmp(config, "alert.mqtt", 10) == 0) {
+    sprintf(reply, "> %u min%s", (unsigned)_prefs->alert_mqtt_minutes,
+            _prefs->alert_mqtt_minutes == 0 ? " (disabled)" : "");
+  } else if (memcmp(config, "alert.interval", 14) == 0) {
+    sprintf(reply, "> %u min", (unsigned)_prefs->alert_min_interval_min);
+  } else if (memcmp(config, "alert", 5) == 0 && (config[5] == 0 || config[5] == '\n' || config[5] == '\r')) {
+    sprintf(reply, "> %s", _prefs->alert_enabled ? "on" : "off");
   } else if (memcmp(config, "adc.multiplier", 14) == 0) {
     float adc_mult = _board->getAdcMultiplier();
     if (adc_mult == 0.0f) {

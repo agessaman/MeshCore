@@ -198,6 +198,25 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const NodePref
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
 
+unsigned long MQTTBridge::getSlotCurrentOutageStartMs(int slot_index) const {
+  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return 0;
+  return _slots[slot_index].current_outage_started_ms;
+}
+
+bool MQTTBridge::isSlotEnabledAndAttempted(int slot_index) const {
+  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return false;
+  const MQTTSlot& s = _slots[slot_index];
+  return s.enabled && s.initial_connect_done;
+}
+
+const char* MQTTBridge::getSlotPresetName(int slot_index) const {
+  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return "?";
+  const MQTTSlot& s = _slots[slot_index];
+  if (s.preset && s.preset->name) return s.preset->name;
+  if (!s.enabled) return MQTT_PRESET_NONE;
+  return MQTT_PRESET_CUSTOM;
+}
+
 const char* MQTTBridge::wifiReasonStr(uint8_t reason) {
   switch (reason) {
     case 2:   return "auth expired";
@@ -997,6 +1016,7 @@ void MQTTBridge::initSlotClients() {
       _slots[index].last_tls_stack_err = 0;
       _slots[index].last_sock_errno = 0;
       _slots[index].last_error_time = 0;
+      _slots[index].current_outage_started_ms = 0;  // clear current-outage timer for AlertReporter
       updateCachedConnectionStatus();
       publishStatusToSlot(index);
     });
@@ -1005,6 +1025,9 @@ void MQTTBridge::initSlotClients() {
       _slots[index].disconnect_count++;
       if (_slots[index].first_disconnect_time == 0) {
         _slots[index].first_disconnect_time = millis();
+      }
+      if (_slots[index].current_outage_started_ms == 0) {
+        _slots[index].current_outage_started_ms = millis();
       }
       _slots[index].connected = false;
       updateCachedConnectionStatus();
