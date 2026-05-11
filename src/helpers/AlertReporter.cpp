@@ -214,15 +214,20 @@ bool AlertReporter::sendChannel(const char* text) {
   // broadcast channel messages. Falls back to plain (unscoped) flood when
   // no callbacks are wired or no scope is configured, matching the
   // pre-scoped behavior on builds without RegionMap.
+  //
+  // path_hash_size must honor the repeater's configured path.hash.mode (1, 2,
+  // or 3-byte hashes); the Mesh.h default of 1 would silently downgrade
+  // observers running on 2/3-byte regional meshes.
+  const uint8_t path_hash_size = (uint8_t)(_prefs->path_hash_mode + 1);
   TransportKey scope;
   bool have_scope = _callbacks && _callbacks->resolveAlertScope(scope) && !scope.isNull();
   if (have_scope) {
     uint16_t codes[2];
     codes[0] = scope.calcTransportCode(pkt);
     codes[1] = 0;
-    _mesh->sendFlood(pkt, codes);
+    _mesh->sendFlood(pkt, codes, 0, path_hash_size);
   } else {
-    _mesh->sendFlood(pkt);
+    _mesh->sendFlood(pkt, 0, path_hash_size);
   }
   ALERT_DEBUG_PRINTLN("sent: %s", text);
   return true;
