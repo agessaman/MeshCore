@@ -33,7 +33,7 @@ public:
     // read battery voltage
     int adcvalue = 0;
     analogReadResolution(12);
-    analogReference(AR_INTERNAL);
+    analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(BATTERY_ADC_DATA);
 
