@@ -5,45 +5,6 @@
 #include <string.h>
 #include <stdio.h>
 
-// Minimal base64 decoder — kept local to avoid dragging the densaugeo/base64
-// PlatformIO dependency into every repeater env that doesn't otherwise need
-// it (only chat builds with MAX_GROUP_CHANNELS pulled it in via BaseChatMesh).
-// Returns the number of decoded bytes, or 0 on error. Output buffer must be
-// at least (in_len * 3 / 4) bytes.
-static int alert_decode_base64(const char* in, size_t in_len, uint8_t* out) {
-  static const int8_t TBL[128] = {
-    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
-    52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1,
-    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
-    15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
-    -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-    41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1
-  };
-  size_t pad = 0;
-  while (in_len > 0 && in[in_len - 1] == '=') { in_len--; pad++; }
-  if ((in_len + pad) % 4 != 0) return 0;
-  if (pad > 2) return 0;
-
-  size_t out_pos = 0;
-  uint32_t buffer = 0;
-  int bits = 0;
-  for (size_t i = 0; i < in_len; i++) {
-    unsigned char c = (unsigned char)in[i];
-    if (c >= 128) return 0;
-    int v = TBL[c];
-    if (v < 0) return 0;
-    buffer = (buffer << 6) | (uint32_t)v;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out[out_pos++] = (uint8_t)((buffer >> bits) & 0xFF);
-    }
-  }
-  return (int)out_pos;
-}
-
 // Header layout for PAYLOAD_TYPE_GRP_TXT before encryption:
 //   [0..3] timestamp (uint32_t LE) — also helps make packet_hash unique
 //   [4]    TXT_TYPE_PLAIN
@@ -98,12 +59,12 @@ void AlertReporter::setBridge(MQTTBridge* bridge) {
 //
 // Provenance for each row can be re-derived with:
 //   printf '#name' | openssl dgst -sha256 | cut -c1-32
-// or for raw b64 PSKs:
-//   echo 'izOH6cXN6mrJ5e26oRXNcg==' | base64 -d | xxd -p
+// or for the Public PSK:
+//   echo 'izOH6cXN6mrJ5e26oRXNcg==' | base64 -d | xxd -p -c 16
 //
 // To ban an additional channel: append one new row; no other code changes
-// required. The matcher converts the candidate's 16-byte secret to a
-// lowercase hex string and does a linear strcmp — N is tiny.
+// required. Both the table entries and `alert_psk_hex` are 32 lowercase hex
+// chars (16-byte secret), so the matcher is a direct strcmp.
 struct BannedAlertChannel {
   const char* label;
   const char* secret_hex;  // 32 lowercase hex chars (no 0x, no separators)
@@ -120,12 +81,7 @@ static const BannedAlertChannel BANNED_ALERT_CHANNELS[] = {
 
 const char* alertReporterBannedChannelMatch(const uint8_t* secret16) {
   char hex[33];
-  static const char* H = "0123456789abcdef";
-  for (int i = 0; i < 16; i++) {
-    hex[i*2]   = H[(secret16[i] >> 4) & 0xF];
-    hex[i*2+1] = H[secret16[i] & 0xF];
-  }
-  hex[32] = '\0';
+  mesh::Utils::toHex(hex, secret16, 16);
   for (size_t i = 0; i < sizeof(BANNED_ALERT_CHANNELS) / sizeof(BANNED_ALERT_CHANNELS[0]); i++) {
     if (strcmp(hex, BANNED_ALERT_CHANNELS[i].secret_hex) == 0) {
       return BANNED_ALERT_CHANNELS[i].label;
@@ -134,42 +90,37 @@ const char* alertReporterBannedChannelMatch(const uint8_t* secret16) {
   return nullptr;
 }
 
-const char* alertReporterBannedChannelMatchB64(const char* psk_b64) {
-  if (!psk_b64) return nullptr;
-  size_t len_in = strlen(psk_b64);
-  if (len_in == 0) return nullptr;
-  uint8_t secret[32];
-  int n = alert_decode_base64(psk_b64, len_in, secret);
-  if (n != 16) return nullptr;  // banned table only contains 16-byte secrets
+const char* alertReporterBannedChannelMatchHex(const char* psk_hex) {
+  if (!psk_hex || strlen(psk_hex) != 32) return nullptr;
+  uint8_t secret[16];
+  if (!mesh::Utils::fromHex(secret, 16, psk_hex)) return nullptr;
   return alertReporterBannedChannelMatch(secret);
 }
 
 bool AlertReporter::resolveChannel(mesh::GroupChannel& out) const {
   if (!_prefs) return false;
 
-  // alert_psk_b64 is the single source of truth — `set alert.hashtag`
-  // pre-derives the base64 PSK from sha256("#name")[0..15] at CLI time.
-  const char* psk = _prefs->alert_psk_b64;
-  size_t psk_len = strlen(psk);
-  if (psk_len == 0 || psk_len >= sizeof(_prefs->alert_psk_b64)) return false;
+  // alert_psk_hex is the single source of truth — `set alert.hashtag`
+  // pre-derives the hex-encoded PSK from sha256("#name")[0..15] at CLI time.
+  // Only 16-byte secrets (32 hex chars) are supported; 32-byte channel keys
+  // are not used anywhere in MeshCore practice and not represented in the
+  // banned table either.
+  const char* psk = _prefs->alert_psk_hex;
+  if (strlen(psk) != 32) return false;
 
   memset(out.secret, 0, sizeof(out.secret));
-  int len = alert_decode_base64(psk, psk_len, out.secret);
-  if (len != 32 && len != 16) return false;
+  if (!mesh::Utils::fromHex(out.secret, 16, psk)) return false;
 
   // Belt-and-suspenders against an operator pasting a banned PSK directly
   // into alert.psk, or a hashtag whose hash somehow collides with one of the
   // banned 16-byte secrets (astronomically improbable, but free to check).
-  if (len == 16) {
-    const char* banned = alertReporterBannedChannelMatch(out.secret);
-    if (banned) {
-      ALERT_DEBUG_PRINTLN("refused banned channel '%s' for alert", banned);
-      return false;
-    }
+  const char* banned = alertReporterBannedChannelMatch(out.secret);
+  if (banned) {
+    ALERT_DEBUG_PRINTLN("refused banned channel '%s' for alert", banned);
+    return false;
   }
 
-  // PATH_HASH_SIZE bytes — same scheme used by addChannel().
-  mesh::Utils::sha256(out.hash, sizeof(out.hash), out.secret, len);
+  mesh::Utils::sha256(out.hash, sizeof(out.hash), out.secret, 16);
   return true;
 }
 

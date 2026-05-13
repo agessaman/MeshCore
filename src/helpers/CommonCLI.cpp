@@ -6,28 +6,6 @@
 #include <RTClib.h>
 #include <Utils.h>
 
-// Tiny base64 encoder used by `set alert.hashtag` to render a derived 16-byte
-// key into NodePrefs::alert_psk_b64. Kept inline so we don't drag the
-// densaugeo/base64 PlatformIO dep into every CLI-using build.
-static size_t alert_encode_base64(const uint8_t* in, size_t in_len, char* out, size_t out_size) {
-  static const char TBL[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  size_t needed = ((in_len + 2) / 3) * 4 + 1;
-  if (out_size < needed) return 0;
-  size_t o = 0;
-  for (size_t i = 0; i < in_len; i += 3) {
-    uint32_t v = (uint32_t)in[i] << 16;
-    int rem = (int)(in_len - i);
-    if (rem > 1) v |= (uint32_t)in[i + 1] << 8;
-    if (rem > 2) v |= (uint32_t)in[i + 2];
-    out[o++] = TBL[(v >> 18) & 0x3F];
-    out[o++] = TBL[(v >> 12) & 0x3F];
-    out[o++] = (rem > 1) ? TBL[(v >> 6) & 0x3F] : '=';
-    out[o++] = (rem > 2) ? TBL[v & 0x3F]        : '=';
-  }
-  out[o] = '\0';
-  return o;
-}
-
 #ifndef BRIDGE_MAX_BAUD
 #define BRIDGE_MAX_BAUD 115200
 #endif
@@ -306,8 +284,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     if (file.available() >= (int)sizeof(_prefs->alert_enabled)) {
       file.read((uint8_t *)&_prefs->alert_enabled, sizeof(_prefs->alert_enabled));
     }
-    if (file.available() >= (int)sizeof(_prefs->alert_psk_b64)) {
-      file.read((uint8_t *)&_prefs->alert_psk_b64, sizeof(_prefs->alert_psk_b64));
+    if (file.available() >= (int)sizeof(_prefs->alert_psk_hex)) {
+      file.read((uint8_t *)&_prefs->alert_psk_hex, sizeof(_prefs->alert_psk_hex));
     }
     if (file.available() >= (int)sizeof(_prefs->alert_wifi_minutes)) {
       file.read((uint8_t *)&_prefs->alert_wifi_minutes, sizeof(_prefs->alert_wifi_minutes));
@@ -325,7 +303,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       file.read((uint8_t *)&_prefs->alert_region, sizeof(_prefs->alert_region));
     }
     // ensure null termination after raw read
-    _prefs->alert_psk_b64[sizeof(_prefs->alert_psk_b64) - 1] = '\0';
+    _prefs->alert_psk_hex[sizeof(_prefs->alert_psk_hex) - 1] = '\0';
     _prefs->alert_hashtag[sizeof(_prefs->alert_hashtag) - 1] = '\0';
     _prefs->alert_region[sizeof(_prefs->alert_region) - 1] = '\0';
 
@@ -452,7 +430,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->radio_watchdog_minutes, sizeof(_prefs->radio_watchdog_minutes)); // 316
     // Alert channel fields (appended)
     file.write((uint8_t *)&_prefs->alert_enabled, sizeof(_prefs->alert_enabled));
-    file.write((uint8_t *)&_prefs->alert_psk_b64, sizeof(_prefs->alert_psk_b64));
+    file.write((uint8_t *)&_prefs->alert_psk_hex, sizeof(_prefs->alert_psk_hex));
     file.write((uint8_t *)&_prefs->alert_wifi_minutes, sizeof(_prefs->alert_wifi_minutes));
     file.write((uint8_t *)&_prefs->alert_mqtt_minutes, sizeof(_prefs->alert_mqtt_minutes));
     file.write((uint8_t *)&_prefs->alert_min_interval_min, sizeof(_prefs->alert_min_interval_min));
@@ -873,7 +851,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       } else {
         strcpy(text, "[test] alert channel ok");
       }
-      if (!_prefs->alert_psk_b64[0]) {
+      if (!_prefs->alert_psk_hex[0]) {
         strcpy(reply, "Error: alert channel not configured (set alert.psk or set alert.hashtag)");
       } else {
         bool ok = _callbacks->sendAlertText(text);
@@ -1622,62 +1600,46 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*val == ' ') val++;
     size_t len = strlen(val);
     if (len == 0) {
-      _prefs->alert_psk_b64[0] = '\0';
+      _prefs->alert_psk_hex[0] = '\0';
       _prefs->alert_hashtag[0] = '\0';
       savePrefs();
       _callbacks->onAlertConfigChanged();
       strcpy(reply, "OK - alert.psk cleared (alerts disabled until configured)");
-    } else if (len >= sizeof(_prefs->alert_psk_b64)) {
-      strcpy(reply, "Error: PSK too long (max 47 chars)");
     } else if (val[0] == '#') {
       strcpy(reply, "Error: use 'set alert.hashtag' for hashtag channels");
+    } else if (len != 32) {
+      // 16-byte channel secret = 32 hex chars. This is what the mobile app's
+      // "Share Channel" emits, what `set alert.hashtag` derives, and what the
+      // BANNED_ALERT_CHANNELS table holds. 32-byte channels aren't used
+      // anywhere in MeshCore practice.
+      strcpy(reply, "Error: PSK must be 32 hex chars (16-byte channel secret)");
     } else {
-      // Accept either:
-      //   - base64: 24 chars (16-byte secret) or 44 chars (32-byte secret) —
-      //     the format `BaseChatMesh::addChannel` already expects.
-      //   - hex:    32 chars (16-byte secret) or 64 chars (32-byte secret) —
-      //     what the MeshCore mobile app's "share" button emits for both
-      //     private channels and hashtag channels.
-      // Hex input is converted to base64 once at CLI time so the on-disk
-      // representation (and AlertReporter's decode path) stays unchanged.
-      char canonical_b64[48];
-      const char* store = nullptr;
-
-      if (len == 32 || len == 64) {
-        bool all_hex = true;
-        for (size_t i = 0; i < len; i++) {
-          if (!mesh::Utils::isHexChar(val[i])) { all_hex = false; break; }
-        }
-        if (all_hex) {
-          uint8_t raw[32];
-          int raw_len = (int)(len / 2);
-          if (mesh::Utils::fromHex(raw, raw_len, val)) {
-            size_t b64_len = alert_encode_base64(raw, (size_t)raw_len, canonical_b64, sizeof(canonical_b64));
-            if (b64_len > 0 && b64_len < sizeof(_prefs->alert_psk_b64)) {
-              store = canonical_b64;
-            }
-          }
-        }
+      // Validate all-hex, then normalize via fromHex/toHex so the stored
+      // form is always lowercase regardless of input case.
+      uint8_t raw[16];
+      bool all_hex = true;
+      for (size_t i = 0; i < len; i++) {
+        if (!mesh::Utils::isHexChar(val[i])) { all_hex = false; break; }
       }
-      if (!store && (len == 24 || len == 44)) {
-        store = val;
-      }
-
-      if (!store) {
-        strcpy(reply, "Error: PSK must be 32/64 hex chars or 24/44 chars base64 (16- or 32-byte secret)");
-      } else if (const char* banned = alertReporterBannedChannelMatchB64(store)) {
-        // Refuse any key on the banned channel list (Public PSK, well-known
-        // auto-responder hashtags like #test/#bot, etc.). Fault alerts on
-        // those channels would spam every node in the area.
-        sprintf(reply, "Error: refusing banned channel '%s'; pick a private key or hashtag", banned);
+      if (!all_hex || !mesh::Utils::fromHex(raw, 16, val)) {
+        strcpy(reply, "Error: PSK must be 32 hex chars (16-byte channel secret)");
       } else {
-        StrHelper::strncpy(_prefs->alert_psk_b64, store, sizeof(_prefs->alert_psk_b64));
-        // The new PSK is operator-supplied, so any previously-derived hashtag
-        // name is no longer accurate provenance — drop it.
-        _prefs->alert_hashtag[0] = '\0';
-        savePrefs();
-        _callbacks->onAlertConfigChanged();
-        strcpy(reply, "OK - alert.psk updated");
+        char normalized[33];
+        mesh::Utils::toHex(normalized, raw, 16);
+        if (const char* banned = alertReporterBannedChannelMatchHex(normalized)) {
+          // Refuse any key on the banned channel list (Public PSK, well-known
+          // auto-responder hashtags like #test/#bot, etc.). Fault alerts on
+          // those channels would spam every node in the area.
+          sprintf(reply, "Error: refusing banned channel '%s'; pick a private key or hashtag", banned);
+        } else {
+          StrHelper::strncpy(_prefs->alert_psk_hex, normalized, sizeof(_prefs->alert_psk_hex));
+          // The new PSK is operator-supplied, so any previously-derived
+          // hashtag name is no longer accurate provenance — drop it.
+          _prefs->alert_hashtag[0] = '\0';
+          savePrefs();
+          _callbacks->onAlertConfigChanged();
+          strcpy(reply, "OK - alert.psk updated");
+        }
       }
     }
   } else if (memcmp(config, "alert.hashtag", 13) == 0 && (config[13] == 0 || config[13] == ' ')) {
@@ -1685,7 +1647,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*val == ' ') val++;
     size_t in_len = strlen(val);
     if (in_len == 0) {
-      _prefs->alert_psk_b64[0] = '\0';
+      _prefs->alert_psk_hex[0] = '\0';
       _prefs->alert_hashtag[0] = '\0';
       savePrefs();
       _callbacks->onAlertConfigChanged();
@@ -1708,9 +1670,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         }
 
         // Derive the channel key once: first 16 bytes of sha256("#name"),
-        // then base64-encode and store in alert_psk_b64. We don't re-derive
-        // on every send — operators can later override with `set alert.psk`
-        // without leaving stale hashtag text behind.
+        // store hex-encoded in alert_psk_hex. We don't re-derive on every
+        // send — operators can later override with `set alert.psk` without
+        // leaving stale hashtag text behind.
         uint8_t digest[32];
         mesh::Utils::sha256(digest, sizeof(digest),
                             (const uint8_t*)hashtag, (int)strlen(hashtag));
@@ -1719,17 +1681,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           // hits the #test entry). Refuse before clobbering existing config.
           sprintf(reply, "Error: refusing banned channel '%s'", banned);
         } else {
-          char b64[48];
-          size_t b64_len = alert_encode_base64(digest, 16, b64, sizeof(b64));
-          if (b64_len == 0 || b64_len >= sizeof(_prefs->alert_psk_b64)) {
-            strcpy(reply, "Error: failed to derive PSK from hashtag");
-          } else {
-            StrHelper::strncpy(_prefs->alert_hashtag, hashtag, sizeof(_prefs->alert_hashtag));
-            StrHelper::strncpy(_prefs->alert_psk_b64, b64, sizeof(_prefs->alert_psk_b64));
-            savePrefs();
-            _callbacks->onAlertConfigChanged();
-            sprintf(reply, "OK - alert.hashtag: %s", _prefs->alert_hashtag);
-          }
+          char hex[33];
+          mesh::Utils::toHex(hex, digest, 16);
+          StrHelper::strncpy(_prefs->alert_hashtag, hashtag, sizeof(_prefs->alert_hashtag));
+          StrHelper::strncpy(_prefs->alert_psk_hex, hex, sizeof(_prefs->alert_psk_hex));
+          savePrefs();
+          _callbacks->onAlertConfigChanged();
+          sprintf(reply, "OK - alert.hashtag: %s", _prefs->alert_hashtag);
         }
       }
     }
@@ -2096,7 +2054,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "alert.hashtag", 13) == 0) {
     sprintf(reply, "> %s", _prefs->alert_hashtag[0] ? _prefs->alert_hashtag : "(unset)");
   } else if (memcmp(config, "alert.psk", 9) == 0) {
-    sprintf(reply, "> %s", _prefs->alert_psk_b64[0] ? _prefs->alert_psk_b64 : "(unset)");
+    sprintf(reply, "> %s", _prefs->alert_psk_hex[0] ? _prefs->alert_psk_hex : "(unset)");
   } else if (memcmp(config, "alert.region", 12) == 0) {
     sprintf(reply, "> %s", _prefs->alert_region[0] ? _prefs->alert_region : "(unset, using default scope)");
   } else if (memcmp(config, "alert.wifi", 10) == 0) {

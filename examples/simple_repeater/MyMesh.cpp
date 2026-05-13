@@ -954,7 +954,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   // can fire. The sender prefix on outgoing alert messages is always the
   // node name (`set name ...`), so there's no separate `alert.name`.
   _prefs.alert_enabled = 0;
-  _prefs.alert_psk_b64[0] = '\0';
+  _prefs.alert_psk_hex[0] = '\0';
   _prefs.alert_hashtag[0] = '\0';
   _prefs.alert_region[0] = '\0';      // empty = use default_scope
   _prefs.alert_wifi_minutes = 30;     // 30 minutes

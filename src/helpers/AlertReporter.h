@@ -18,12 +18,12 @@
 const char* alertReporterBannedChannelMatch(const uint8_t* secret16);
 
 /**
- * Convenience: base64-decodes \a psk_b64 and forwards to
- * alertReporterBannedChannelMatch. Returns nullptr if not banned (or if
- * the input doesn't decode to a 16-byte key — non-16-byte keys cannot
- * match any banned entry anyway).
+ * Convenience: hex-decodes \a psk_hex (32 lowercase/uppercase hex chars) and
+ * forwards to alertReporterBannedChannelMatch. Returns nullptr if not banned
+ * (or if the input isn't a valid 32-char hex string — only 16-byte secrets
+ * are present in the banned table).
  */
-const char* alertReporterBannedChannelMatchB64(const char* psk_b64);
+const char* alertReporterBannedChannelMatchHex(const char* psk_hex);
 
 /**
  * \brief Send-only group-channel "fault alert" reporter for repeater/observer
@@ -34,7 +34,7 @@ const char* alertReporterBannedChannelMatchB64(const char* psk_b64);
  * message on the configured alert channel ("WiFi down 47m — MyObserver"),
  * then arms a "recovered" message for the next state transition.
  *
- * The alert channel must be explicitly configured to either a private base64
+ * The alert channel must be explicitly configured to either a private hex
  * PSK (`set alert.psk`) or a hashtag name (`set alert.hashtag`); the
  * well-known PUBLIC group key (and a small list of other auto-responder
  * channels — see BANNED_ALERT_CHANNELS in AlertReporter.cpp) are rejected on
@@ -67,7 +67,7 @@ public:
 #endif
 
   /**
-   * Re-derive the cached GroupChannel from \a alert_psk_b64. Call from the
+   * Re-derive the cached GroupChannel from \a alert_psk_hex. Call from the
    * CLI hot-reload hook after `set alert.psk` / `set alert.hashtag` / `set alert on|off`.
    */
   void onConfigChanged();

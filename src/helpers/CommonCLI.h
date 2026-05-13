@@ -109,12 +109,12 @@ struct NodePrefs { // persisted to file
   // Sent over the radio (NOT over MQTT) so the alert still works while the MQTT path is broken.
   // All fields are appended at the end of NodePrefs for binary-compatible upgrades.
   uint8_t  alert_enabled;          // 0 = off (default), 1 = on
-  char     alert_psk_b64[48];      // base64 PSK; empty = alerts disabled. PUBLIC_GROUP_PSK is rejected.
+  char     alert_psk_hex[33];      // 32 lowercase hex chars (16-byte channel secret) + null; empty = alerts disabled. Banned keys (Public/#test/#bot) are rejected.
   uint16_t alert_wifi_minutes;     // WiFi-down threshold in minutes (0 = disabled), default 30
   uint16_t alert_mqtt_minutes;     // MQTT-down threshold in minutes (0 = disabled), default 240 (4 h)
   uint16_t alert_min_interval_min; // min minutes between alerts for the same fault, default 60, floor 60
   // When the operator configures via `set alert.hashtag <name>`, we derive
-  // alert_psk_b64 from sha256("#name")[0..15] once and remember the hashtag
+  // alert_psk_hex from sha256("#name")[0..15] once and remember the hashtag
   // text here purely for `get alert.hashtag` readback. A subsequent
   // `set alert.psk` clears this field so it doesn't lie about provenance.
   char     alert_hashtag[24];

@@ -678,7 +678,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   // Alert channel defaults (same as repeater; off by default and unconfigured).
   // Operator must pick `set alert.psk` or `set alert.hashtag` before alerts fire.
   _prefs.alert_enabled = 0;
-  _prefs.alert_psk_b64[0] = '\0';
+  _prefs.alert_psk_hex[0] = '\0';
   _prefs.alert_hashtag[0] = '\0';
   _prefs.alert_region[0] = '\0';
   _prefs.alert_wifi_minutes = 30;
