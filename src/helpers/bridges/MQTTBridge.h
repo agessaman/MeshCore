@@ -223,7 +223,7 @@ private:
   char _status_json_buffer[STATUS_JSON_BUFFER_SIZE];
   #endif
 
-  // JSON document scratch space — inline StaticJsonDocument keeps the pool off the 8 KB MQTT
+  // JSON document scratch space — inline StaticJsonDocument keeps the pool off the MQTT
   // task stack and eliminates two separate heap allocations (fragmentation reduction).
   StaticJsonDocument<PUBLISH_JSON_BUFFER_SIZE> _packet_json_doc;
   StaticJsonDocument<STATUS_JSON_BUFFER_SIZE>  _status_json_doc;

@@ -1665,8 +1665,12 @@ void MQTTBridge::publishStatusToSlot(int index) {
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
   // _status_json_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
+  #if defined(BOARD_HAS_PSRAM)
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
   char* json_buffer = (_status_json_buffer != nullptr) ? _status_json_buffer : fallback_status_buffer;
+  #else
+  char* json_buffer = _status_json_buffer;
+  #endif
 
   char origin_id[65];
   char timestamp[32];
@@ -2356,8 +2360,12 @@ bool MQTTBridge::publishStatus() {
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
   // _status_json_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
+  #if defined(BOARD_HAS_PSRAM)
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
   char* json_buffer = (_status_json_buffer != nullptr) ? _status_json_buffer : fallback_status_buffer;
+  #else
+  char* json_buffer = _status_json_buffer;
+  #endif
   char origin_id[65];
   char timestamp[32];
   char radio_info[64];
@@ -2475,7 +2483,8 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   }
   #endif
 
-  // Use pre-allocated buffer; fallback to single stack buffer if not available
+  // Use pre-allocated buffer; stack fallback only when PSRAM heap alloc may be null.
+#if defined(BOARD_HAS_PSRAM)
   char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];
   char* active_buffer;
   size_t active_buffer_size;
@@ -2486,6 +2495,10 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
     active_buffer = json_buffer_stack;
     active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   }
+#else
+  char* active_buffer = _publish_json_buffer;
+  const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
+#endif
   char origin_id[65];
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
@@ -2552,7 +2565,7 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet) {
 
   refreshOriginFromPrefs();
 
-  // Use pre-allocated buffer; fallback to single stack buffer if not available
+#if defined(BOARD_HAS_PSRAM)
   char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];
   char* active_buffer;
   size_t active_buffer_size;
@@ -2563,6 +2576,10 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet) {
     active_buffer = json_buffer_stack;
     active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   }
+#else
+  char* active_buffer = _publish_json_buffer;
+  const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
+#endif
   char origin_id[65];
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
