@@ -714,7 +714,7 @@ A "recovered" message is sent once when the underlying connection comes back. Af
 | Setting | Default | Notes |
 |---------|---------|-------|
 | `alert` | `off` | Master enable for automatic fault alerts |
-| `alert.psk` | *(unset)* | Private base64 PSK (24 or 44 chars). The active channel key. |
+| `alert.psk` | *(unset)* | Private channel secret. Accepts either base64 (24 or 44 chars, like `BaseChatMesh::addChannel`) or hex (32 or 64 chars, like the mobile app's "Share Channel" output). Stored internally as base64. |
 | `alert.hashtag` | *(unset)* | Informational only; set via `set alert.hashtag` to pre-derive `alert.psk` from `sha256("#name")[0..15]`. Cleared when `alert.psk` is set directly. |
 | `alert.region` | *(unset)* | Optional region name; overrides the repeater's `default_scope` for alert sends only. Empty = use `default_scope`. Looked up lazily via `RegionMap`; unknown names silently fall back to `default_scope`. |
 | `alert.wifi` | `30` (min) | 0 disables WiFi alerts |
@@ -734,7 +734,7 @@ Get:
 
 Set:
 - `set alert on` / `set alert off`
-- `set alert.psk <base64>` — 24-char (16-byte) or 44-char (32-byte) base64; rejects banned channels (Public, `#test`, `#bot`). Clears `alert.hashtag` since the new key is operator-supplied.
+- `set alert.psk <secret>` — 24-/44-char base64 **or** 32-/64-char hex (16- or 32-byte secret); rejects banned channels (Public, `#test`, `#bot`). Clears `alert.hashtag` since the new key is operator-supplied. The mobile app's "share" output is hex; either format is accepted.
 - `set alert.psk` (no argument) — clears both `alert.psk` and `alert.hashtag`
 - `set alert.hashtag <name>` — derives the 16-byte key from `sha256("#name")` *once*, stores it as `alert.psk`, and remembers the hashtag for `get alert.hashtag`. `#` prefix is added if omitted (so `alerts` and `#alerts` are equivalent). Refuses banned hashtag names.
 - `set alert.hashtag` (no argument) — clears both `alert.psk` and `alert.hashtag`
@@ -765,7 +765,7 @@ Anyone running a companion app and subscribed to the `#ops-alerts` hashtag chann
 Generate a 16-byte random PSK and base64-encode it (24 chars), or use the companion app's "Add channel" feature to create one and copy the secret. Then:
 
 ```bash
-set alert.psk <your_24_or_44_char_base64_psk>
+set alert.psk <secret>     # base64 (24/44 chars) or hex (32/64 chars) — mobile "share" works as-is
 set alert.wifi 10
 set alert.mqtt 60
 set alert on

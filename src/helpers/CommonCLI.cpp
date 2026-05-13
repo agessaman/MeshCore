@@ -1631,23 +1631,54 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: PSK too long (max 47 chars)");
     } else if (val[0] == '#') {
       strcpy(reply, "Error: use 'set alert.hashtag' for hashtag channels");
-    } else if (len != 24 && len != 44) {
-      // Quick character-count check before storing; AlertReporter will redo the
-      // full base64 decode and reject anything that doesn't yield 16 or 32 bytes.
-      strcpy(reply, "Error: PSK must be 24 chars (16-byte) or 44 chars (32-byte) base64");
-    } else if (const char* banned = alertReporterBannedChannelMatchB64(val)) {
-      // Refuse any key on the banned channel list (Public PSK, well-known
-      // auto-responder hashtags like #test/#bot, etc.). Fault alerts on those
-      // channels would spam every node in the area.
-      sprintf(reply, "Error: refusing banned channel '%s'; pick a private key or hashtag", banned);
     } else {
-      StrHelper::strncpy(_prefs->alert_psk_b64, val, sizeof(_prefs->alert_psk_b64));
-      // The new PSK is operator-supplied, so any previously-derived hashtag
-      // name is no longer accurate provenance — drop it.
-      _prefs->alert_hashtag[0] = '\0';
-      savePrefs();
-      _callbacks->onAlertConfigChanged();
-      strcpy(reply, "OK - alert.psk updated");
+      // Accept either:
+      //   - base64: 24 chars (16-byte secret) or 44 chars (32-byte secret) —
+      //     the format `BaseChatMesh::addChannel` already expects.
+      //   - hex:    32 chars (16-byte secret) or 64 chars (32-byte secret) —
+      //     what the MeshCore mobile app's "share" button emits for both
+      //     private channels and hashtag channels.
+      // Hex input is converted to base64 once at CLI time so the on-disk
+      // representation (and AlertReporter's decode path) stays unchanged.
+      char canonical_b64[48];
+      const char* store = nullptr;
+
+      if (len == 32 || len == 64) {
+        bool all_hex = true;
+        for (size_t i = 0; i < len; i++) {
+          if (!mesh::Utils::isHexChar(val[i])) { all_hex = false; break; }
+        }
+        if (all_hex) {
+          uint8_t raw[32];
+          int raw_len = (int)(len / 2);
+          if (mesh::Utils::fromHex(raw, raw_len, val)) {
+            size_t b64_len = alert_encode_base64(raw, (size_t)raw_len, canonical_b64, sizeof(canonical_b64));
+            if (b64_len > 0 && b64_len < sizeof(_prefs->alert_psk_b64)) {
+              store = canonical_b64;
+            }
+          }
+        }
+      }
+      if (!store && (len == 24 || len == 44)) {
+        store = val;
+      }
+
+      if (!store) {
+        strcpy(reply, "Error: PSK must be 32/64 hex chars or 24/44 chars base64 (16- or 32-byte secret)");
+      } else if (const char* banned = alertReporterBannedChannelMatchB64(store)) {
+        // Refuse any key on the banned channel list (Public PSK, well-known
+        // auto-responder hashtags like #test/#bot, etc.). Fault alerts on
+        // those channels would spam every node in the area.
+        sprintf(reply, "Error: refusing banned channel '%s'; pick a private key or hashtag", banned);
+      } else {
+        StrHelper::strncpy(_prefs->alert_psk_b64, store, sizeof(_prefs->alert_psk_b64));
+        // The new PSK is operator-supplied, so any previously-derived hashtag
+        // name is no longer accurate provenance — drop it.
+        _prefs->alert_hashtag[0] = '\0';
+        savePrefs();
+        _callbacks->onAlertConfigChanged();
+        strcpy(reply, "OK - alert.psk updated");
+      }
     }
   } else if (memcmp(config, "alert.hashtag", 13) == 0 && (config[13] == 0 || config[13] == ' ')) {
     const char* val = (config[13] == ' ') ? &config[14] : "";
