@@ -1,8 +1,20 @@
 #include "MQTTMessageBuilder.h"
 #include <ArduinoJson.h>
+#include <cstring>
 #include <time.h>
 #include <Timezone.h>
 #include "MeshCore.h"
+
+void MQTTMessageBuilder::formatIsoTimestampForMqtt(time_t now, Timezone* timezone, char* buffer, size_t buffer_size) {
+  if (!buffer || buffer_size == 0) return;
+  time_t local_wall = timezone ? timezone->toLocal(now) : now;
+  struct tm* tm_info = localtime(&local_wall);
+  if (tm_info && strftime(buffer, buffer_size, "%Y-%m-%dT%H:%M:%S.000000", tm_info) > 0) {
+    return;
+  }
+  strncpy(buffer, "2024-01-01T12:00:00.000000", buffer_size - 1);
+  buffer[buffer_size - 1] = '\0';
+}
 
 int MQTTMessageBuilder::buildStatusMessage(
   JsonDocument& doc,
@@ -182,22 +194,11 @@ int MQTTMessageBuilder::buildPacketJSON(
 ) {
   if (!packet) return 0;
   
-  // Get current device time (should be UTC since system timezone is set to UTC)
   time_t now = time(nullptr);
-  
-  // Convert to local time using timezone library (for timestamp field only)
-  time_t local_time = timezone ? timezone->toLocal(now) : now;
-  struct tm* local_timeinfo = localtime(&local_time);
-  
-  // Format timestamp in ISO 8601 format (LOCAL TIME)
   char timestamp[32];
-  if (local_timeinfo) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", local_timeinfo);
-  } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
-  }
+  formatIsoTimestampForMqtt(now, timezone, timestamp, sizeof(timestamp));
   
-  // Get UTC time (since system timezone is UTC, time() returns UTC)
+  // Packet time/date: UTC (gmtime), same family as meshcoretomqtt serial fields
   struct tm* utc_timeinfo = gmtime(&now);
   
   // Format time and date (ALWAYS UTC)
@@ -266,22 +267,10 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
 ) {
   if (!packet || !raw_data || raw_len <= 0) return 0;
   
-  // Get current device time (should be UTC since system timezone is set to UTC)
   time_t now = time(nullptr);
-  
-  // Convert to local time using timezone library (for timestamp field only)
-  time_t local_time = timezone ? timezone->toLocal(now) : now;
-  struct tm* local_timeinfo = localtime(&local_time);
-  
-  // Format timestamp in ISO 8601 format (LOCAL TIME)
   char timestamp[32];
-  if (local_timeinfo) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", local_timeinfo);
-  } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
-  }
+  formatIsoTimestampForMqtt(now, timezone, timestamp, sizeof(timestamp));
   
-  // Get UTC time (since system timezone is UTC, time() returns UTC)
   struct tm* utc_timeinfo = gmtime(&now);
   
   // Format time and date (ALWAYS UTC)
@@ -344,20 +333,9 @@ int MQTTMessageBuilder::buildRawJSON(
 ) {
   if (!packet) return 0;
   
-  // Get current device time
   time_t now = time(nullptr);
-  
-  // Convert to local time using timezone library
-  time_t local_time = timezone ? timezone->toLocal(now) : now;
-  struct tm* timeinfo = localtime(&local_time);
-  
-  // Format timestamp in ISO 8601 format
   char timestamp[32];
-  if (timeinfo) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", timeinfo);
-  } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
-  }
+  formatIsoTimestampForMqtt(now, timezone, timestamp, sizeof(timestamp));
   
   // Convert packet to hex
   // MAX_TRANS_UNIT is 255, so max hex size is 510 chars + null = 511 bytes

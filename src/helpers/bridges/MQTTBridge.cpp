@@ -4,6 +4,7 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
+#include <time.h>
 
 #ifdef WITH_SNMP
 #include "../SNMPAgent.h"
@@ -1676,13 +1677,9 @@ void MQTTBridge::publishStatusToSlot(int index) {
   char timestamp[32];
   char radio_info[64];
 
-  // Get current timestamp in ISO 8601 format
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", &timeinfo);
-  } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
-  }
+  // Status timestamp: same prefs-based wall clock as packet/raw JSON `timestamp`
+  // (not libc getLocalTime — SNTP uses UTC offset 0; prefs Timezone is separate).
+  MQTTMessageBuilder::formatIsoTimestampForMqtt(time(nullptr), _timezone, timestamp, sizeof(timestamp));
 
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
            _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
@@ -2370,13 +2367,9 @@ bool MQTTBridge::publishStatus() {
   char timestamp[32];
   char radio_info[64];
 
-  // Get current timestamp in ISO 8601 format
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", &timeinfo);
-  } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
-  }
+  // Status timestamp: same prefs-based wall clock as packet/raw JSON `timestamp`
+  // (not libc getLocalTime — SNTP uses UTC offset 0; prefs Timezone is separate).
+  MQTTMessageBuilder::formatIsoTimestampForMqtt(time(nullptr), _timezone, timestamp, sizeof(timestamp));
 
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
            _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
