@@ -756,9 +756,9 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
-#### Bulk-define region hierarchy (single line)
+#### Define region hierarchy (single line)
 **Usage:**
-- `region bulk <token> [<token> ...]`
+- `region def <token> [<token> ...]`
 
 **Parameters (tokens):** Space-separated. A logical **cursor** starts at the wildcard `*`.
 
@@ -771,26 +771,26 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Note:** On error, the reply is a short `Err - ...` message; regions placed before the failure remain (same as a partial chain of `region put`).
 
-**Note:** Repeater serial accepts one line up to **160 characters** total; split very large trees across multiple `region bulk` commands.
+**Note:** Repeater serial accepts one line up to **160 characters** total; split very large trees across multiple `region def` commands.
 
-**Note:** `|` only splits once per token. `region bulk a|b|c|d` is **not** a flat-list shorthand — use `region bulk a|* b|* c|* d|*` for multiple children of `*`.
+**Note:** `|` only splits once per token. `region def a|b|c|d` is **not** a flat-list shorthand — use `region def a|* b|* c|* d|*` for multiple children of `*`.
 
 **Example — linear chain:**
 ```
-region bulk west pnw wa w-wa sea
+region def west pnw wa w-wa sea
 region save
 ```
 
 **Example — branched tree** (equivalent to `region put west` … `region put sw-wa wa`):
 ```
-region bulk west pnw or pdx|pnw wa sw-wa
+region def west pnw or pdx|pnw wa sw-wa
 region save
 ```
-Same with comma as jump delimiter: `region bulk west pnw or pdx,pnw wa sw-wa`
+Same with comma as jump delimiter: `region def west pnw or pdx,pnw wa sw-wa`
 
 **Example — flat list** (each region child of `*`):
 ```
-region bulk west|* pnw|* or|* pdx|* wa|* sw-wa
+region def west|* pnw|* or|* pdx|* wa|* sw-wa
 region save
 ```
 

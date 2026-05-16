@@ -898,15 +898,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 void CommonCLI::handleRegionCmd(char* command, char* reply) {
   reply[0] = 0;
 
-  // `region bulk ...` — cursor-walk over space-separated tokens (must run before
+  // `region def ...` — cursor-walk over space-separated tokens (must run before
   // parseTextParts, which only keeps 4 segments and mutates the buffer).
   char* cmd = command;
   while (*cmd == ' ') cmd++;
-  if (strncmp(cmd, "region bulk", 11) == 0 && (cmd[11] == ' ' || cmd[11] == '\0')) {
-    char* payload = cmd + 11;
+  if (strncmp(cmd, "region def", 10) == 0 && (cmd[10] == ' ' || cmd[10] == '\0')) {
+    char* payload = cmd + 10;
     while (*payload == ' ') payload++;
     if (*payload == '\0') {
-      snprintf(reply, 160, "Err - empty bulk");
+      snprintf(reply, 160, "Err - empty def");
       return;
     }
     RegionEntry* cursor = &_region_map->getWildcard();
