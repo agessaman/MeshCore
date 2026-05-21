@@ -1,0 +1,43 @@
+name: Build Repeater MQTT Firmwares
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'repeater-mqtt-*'
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Build Firmwares
+        env:
+          FIRMWARE_VERSION: ${{ env.GIT_TAG_VERSION }}
+          OUT_DIR: .prebuilt
+        run: /usr/bin/env bash build.sh build-repeater-mqtt-firmwares
+
+      - name: Upload Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: repeater-mqtt-firmwares
+          path: .prebuilt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: Repeater MQTT Firmware ${{ env.GIT_TAG_VERSION }}
+          body: ""
+          draft: true
+          files: .prebuilt/*

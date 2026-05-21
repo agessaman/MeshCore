@@ -17,6 +17,8 @@ Commands:
   build-companion-firmwares: Build all companion firmwares for all build targets.
   build-repeater-firmwares: Build all repeater firmwares for all build targets.
   build-room-server-firmwares: Build all chat room server firmwares for all build targets.
+  build-repeater-mqtt-firmwares: Build all MQTT repeater observer firmwares for all build targets.
+  build-room-server-mqtt-firmwares: Build all MQTT room server observer firmwares for all build targets.
 
 Examples:
 Build firmware for the "RAK_4631_repeater" device target
@@ -158,12 +160,12 @@ build_firmware() {
     python3 bin/uf2conv/uf2conv.py .pio/build/$1/firmware.hex -c -o .pio/build/$1/firmware.uf2 -f 0xADA52840 >/dev/null 2>&1 || true
   fi
 
-  # Copy any produced artifacts to out folder.
-  cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
-  cp .pio/build/$1/firmware-merged.bin out/${FIRMWARE_FILENAME}-merged.bin 2>/dev/null || true
-  cp .pio/build/$1/firmware.hex out/${FIRMWARE_FILENAME}.hex 2>/dev/null || true
-  cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
-  cp .pio/build/$1/firmware.zip out/${FIRMWARE_FILENAME}.zip 2>/dev/null || true
+  # Copy any produced artifacts to output folder.
+  cp .pio/build/$1/firmware.bin "$OUT_DIR/${FIRMWARE_FILENAME}.bin" 2>/dev/null || true
+  cp .pio/build/$1/firmware-merged.bin "$OUT_DIR/${FIRMWARE_FILENAME}-merged.bin" 2>/dev/null || true
+  cp .pio/build/$1/firmware.hex "$OUT_DIR/${FIRMWARE_FILENAME}.hex" 2>/dev/null || true
+  cp .pio/build/$1/firmware.uf2 "$OUT_DIR/${FIRMWARE_FILENAME}.uf2" 2>/dev/null || true
+  cp .pio/build/$1/firmware.zip "$OUT_DIR/${FIRMWARE_FILENAME}.zip" 2>/dev/null || true
 
 }
 
@@ -229,15 +231,28 @@ build_room_server_firmwares() {
 
 }
 
+build_repeater_mqtt_firmwares() {
+  # build all MQTT repeater observer firmwares
+  build_all_firmwares_by_suffix "_repeater_observer_mqtt"
+}
+
+build_room_server_mqtt_firmwares() {
+  # build all MQTT room server observer firmwares
+  build_all_firmwares_by_suffix "_room_server_observer_mqtt"
+}
+
 build_firmwares() {
   build_companion_firmwares
   build_repeater_firmwares
   build_room_server_firmwares
 }
 
+# output directory — override with OUT_DIR env var (e.g. OUT_DIR=.prebuilt)
+OUT_DIR="${OUT_DIR:-out}"
+
 # clean build dir
-rm -rf out
-mkdir -p out
+rm -rf "$OUT_DIR"
+mkdir -p "$OUT_DIR"
 
 # handle script args
 if [[ $1 == "build-firmware" ]]; then
@@ -265,4 +280,8 @@ elif [[ $1 == "build-repeater-firmwares" ]]; then
   build_repeater_firmwares
 elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
+elif [[ $1 == "build-repeater-mqtt-firmwares" ]]; then
+  build_repeater_mqtt_firmwares
+elif [[ $1 == "build-room-server-mqtt-firmwares" ]]; then
+  build_room_server_mqtt_firmwares
 fi
