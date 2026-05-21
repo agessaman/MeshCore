@@ -6,21 +6,6 @@ repo_name: Dutch-MeshCore/DutchMeshCore.nl-MQTT
 repo_url: https://github.com/Dutch-MeshCore/DutchMeshCore.nl-MQTT/
 edit_uri: edit/main/docs/
 
-nav:
-  - Introduction: index.md
-  - FAQ: faq.md
-  - CLI Commands: cli_commands.md
-  - Companion Protocol: companion_protocol.md
-  - KISS Modem Protocol: kiss_modem_protocol.md
-  - Packet Format: packet_format.md
-  - Payloads: payloads.md
-  - QR Codes: qr_codes.md
-  - Terminal Chat CLI: terminal_chat_cli.md
-  - Number Allocations: number_allocations.md
-  - nRF52 Power Management: nrf52_power_management.md
-  - Stats Binary Frames: stats_binary_frames.md
-  - Local Documentation: docs.md
-
 theme:
   name: material
   logo: _assets/meshcore.svg

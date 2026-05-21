@@ -68,7 +68,7 @@ get mqtt.status
 **That's it!** The device will now:
 - Connect to WiFi automatically
 - Start uplinking mesh packets to configured MQTT brokers
-- By default, publish to Let's Mesh Analyzer US (slot 1) and EU (slot 2)
+- By default, publish to the DutchMeshCore presets: `dutchmeshcore-1` in slot 1 and `dutchmeshcore-2` in slot 2
 - Use device name as MQTT origin (set automatically)
 
 ---
@@ -115,8 +115,8 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `none` | (disabled) | — | — |
 
 **Default Configuration:**
-- Slot 1: `analyzer-us`
-- Slot 2: `analyzer-eu`
+- Slot 1: `dutchmeshcore-1` (DutchMeshCore preset)
+- Slot 2: `dutchmeshcore-2` (DutchMeshCore preset)
 - Slots 3-6: `none`
 
 **Memory Limits:**
@@ -216,8 +216,8 @@ The MQTT bridge comes with the following defaults for fresh installs:
 - **RX Packets**: Enabled (uplink received packets)
 - **TX Packets**: `advert` by default (uplink this node's own adverts; set to `on` for all TX or `off` to disable)
 - **Status Interval**: 5 minutes (300000 ms)
-- **Slot 1**: `analyzer-us`
-- **Slot 2**: `analyzer-eu`
+- **Slot 1**: `dutchmeshcore-1` (DutchMeshCore preset)
+- **Slot 2**: `dutchmeshcore-2` (DutchMeshCore preset)
 - **Slots 3-6**: `none` (disabled)
 - **WiFi SSID**: (blank — must be configured)
 - **WiFi Password**: (blank — must be configured)
@@ -631,8 +631,8 @@ set repeat off
 
 ### Step 6: Verify Slot Configuration
 ```
-get mqtt1.preset    # Should show: analyzer-us
-get mqtt2.preset    # Should show: analyzer-eu
+get mqtt1.preset    # Should show: dutchmeshcore-1
+get mqtt2.preset    # Should show: dutchmeshcore-2
 get mqtt3.preset    # Should show: none
 ```
 

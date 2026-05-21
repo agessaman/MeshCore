@@ -26,7 +26,7 @@ set wifi.pwd YourWiFiPassword
 reboot
 ```
 
-Fresh MQTT preferences in this firmware default to slot 1 `dutchmeshcore-1`, slot 2 `dutchmeshcore-2`, and slots 3-6 `none`. The DutchMeshCore presets use:
+Fresh MQTT preferences in this firmware default to the DutchMeshCore presets in slots 1 and 2: slot 1 is `dutchmeshcore-1`, slot 2 is `dutchmeshcore-2`, and slots 3-6 are `none`. The DutchMeshCore presets use:
 
 | Preset | Server | Authentication | Transport |
 |---|---|---|---|

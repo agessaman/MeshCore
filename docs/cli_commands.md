@@ -1097,7 +1097,7 @@ get wifi.status
 - `set mqttN.preset dutchmeshcore-1`: Use `wss://collector1.dutchmeshcore.nl:443/mqtt`
 - `set mqttN.preset dutchmeshcore-2`: Use `wss://collector2.dutchmeshcore.nl:443/mqtt`
 
-**Default for this firmware:** Slot 1 is `dutchmeshcore-1`, slot 2 is `dutchmeshcore-2`, and slots 3-6 are `none`.
+**Default for this firmware:** Slot 1 and slot 2 are DutchMeshCore presets. Slot 1 is `dutchmeshcore-1`, slot 2 is `dutchmeshcore-2`, and slots 3-6 are `none`.
 
 ---
 
