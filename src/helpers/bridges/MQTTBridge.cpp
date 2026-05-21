@@ -2884,7 +2884,7 @@ bool MQTTBridge::timezoneRulesFromString(const char* tz_string, TimeChangeRule& 
     std_out = TimeChangeRule{"GMT", Last, Sun, Oct, 2, 0};
     dst_out = TimeChangeRule{"BST", Last, Sun, Mar, 1, 60};
     return true;
-  } else if (strcmp(tz_string, "Europe/Paris") == 0 || strcmp(tz_string, "Europe/Berlin") == 0) {
+  } else if (strcmp(tz_string, "Europe/Amsterdam") == 0 || strcmp(tz_string, "Europe/Paris") == 0 || strcmp(tz_string, "Europe/Berlin") == 0) {
     std_out = TimeChangeRule{"CET", Last, Sun, Oct, 3, 60};
     dst_out = TimeChangeRule{"CEST", Last, Sun, Mar, 2, 120};
     return true;

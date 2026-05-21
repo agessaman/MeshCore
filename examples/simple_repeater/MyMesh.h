@@ -76,11 +76,11 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "19 Apr 2026"
+  #define FIRMWARE_BUILD_DATE   "21 May 2026 dutchmeshcore.nl"
 #endif
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.15.0"
+  #define FIRMWARE_VERSION   "v1.15.0-dutchmeshcore.nl"
 #endif
 
 #define FIRMWARE_ROLE "repeater"

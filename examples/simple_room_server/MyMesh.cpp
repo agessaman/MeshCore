@@ -697,12 +697,12 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   StrHelper::strncpy(_prefs.wifi_password, "password_here", sizeof(_prefs.wifi_password));
   
   // Timezone defaults (same as repeater - Pacific Time with DST support)
-  StrHelper::strncpy(_prefs.timezone_string, "America/Los_Angeles", sizeof(_prefs.timezone_string));
-  _prefs.timezone_offset = -8; // fallback
+  StrHelper::strncpy(_prefs.timezone_string, "Europe/Amsterdam", sizeof(_prefs.timezone_string));
+  _prefs.timezone_offset = 1; // fallback
   
-  // MQTT slot presets (analyzer-us and analyzer-eu enabled by default)
-  StrHelper::strncpy(_prefs.mqtt_slot_preset[0], "analyzer-us", sizeof(_prefs.mqtt_slot_preset[0]));
-  StrHelper::strncpy(_prefs.mqtt_slot_preset[1], "analyzer-eu", sizeof(_prefs.mqtt_slot_preset[1]));
+  // MQTT slot presets (dutchmeshcore-1 and dutchmeshcore-2 enabled by default)
+  StrHelper::strncpy(_prefs.mqtt_slot_preset[0], "dutchmeshcore-1", sizeof(_prefs.mqtt_slot_preset[0]));
+  StrHelper::strncpy(_prefs.mqtt_slot_preset[1], "dutchmeshcore-2", sizeof(_prefs.mqtt_slot_preset[1]));
   StrHelper::strncpy(_prefs.mqtt_slot_preset[2], "none", sizeof(_prefs.mqtt_slot_preset[2]));
 
   next_post_idx = 0;
