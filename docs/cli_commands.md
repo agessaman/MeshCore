@@ -1038,7 +1038,7 @@ region save
 
 ### MQTT Observer Firmware (When MQTT bridge support is compiled in)
 
-MQTT observer builds add WiFi connectivity and MQTT packet uplinking to repeater and room server firmware. See [MQTT Observer Firmware](./mqtt_observer_firmware.md) for setup, build targets, partition notes, and troubleshooting.
+MQTT observer builds add WiFi connectivity and MQTT packet uplinking to repeater and room server firmware.
 
 #### Quick first-time setup
 **Usage:**
@@ -1243,6 +1243,90 @@ set mqtt3.topic mynetwork/{device}/{type}
 **Parameters:**
 - `string`: IANA timezone (`Europe/Amsterdam`), abbreviation (`CET`), or UTC offset (`UTC+1`)
 - `offset`: Fallback offset in hours (`-12` to `+14`)
+
+---
+
+#### MQTT observer build targets
+**Usage:**
+```bash
+pio run -e Heltec_v3_repeater_observer_mqtt
+pio run -e heltec_v4_repeater_observer_mqtt
+pio run -e Station_G2_repeater_observer_mqtt
+pio run -e LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt
+pio run -e LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt
+```
+
+**Build flags:**
+- `WITH_MQTT_BRIDGE=1`: Enable MQTT bridge support
+- `WITH_SNMP=1`: Enable optional SNMP monitoring on supported observer builds
+
+---
+
+#### MQTT observer flashing notes
+
+Some MQTT observer builds use larger app partitions for MQTT, TLS, and certificate bundle support. When a board's partition table changes, flash the merged firmware (`*-merged.bin`) the first time so the bootloader and partition table are written together.
+
+| Environment | Partition table | Flash size | App slot size | Notes |
+|---|---|---:|---:|---|
+| `LilyGo_T3S3_sx1262_repeater_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | Changed from default |
+| `LilyGo_T3S3_sx1262_room_server_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | Changed from default |
+| `LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | TTGO LoRa32 V1.0; observer env omits `sensor_base` |
+| `LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt` | `min_spiffs.csv` | 4 MB | 1.875 MB | Same as repeater observer |
+| `Station_G2_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+| `Station_G2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+
+**Merged firmware example:**
+```bash
+pio run -t mergebin -e LilyGo_T3S3_sx1262_repeater_observer_mqtt
+esptool.py write_flash 0x0 .pio/build/LilyGo_T3S3_sx1262_repeater_observer_mqtt/firmware-merged.bin
+```
+
+**Note:** If the partition layout changes, stored settings in NVS are typically wiped or invalidated. Expect to reconfigure admin preferences, WiFi, MQTT slots, device name, and related settings.
+
+---
+
+#### MQTT topics
+
+| Type | Topic |
+|---|---|
+| Status | `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/status` |
+| Packets | `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/packets` |
+| Raw | `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/raw` |
+
+**Note:** `{DEVICE_PUBLIC_KEY}` is the device public key as 64 hexadecimal characters.
+
+---
+
+#### MQTT troubleshooting
+
+**WiFi issues:**
+```bash
+get wifi.ssid
+get wifi.pwd
+get wifi.status
+set wifi.powersave none
+reboot
+```
+
+**No MQTT messages appearing:**
+```bash
+get bridge.enabled
+set bridge.enabled on
+get mqtt.rx
+set mqtt.rx on
+get mqtt.tx
+get mqtt.status
+get mqtt1.preset
+get mqtt2.preset
+get mqtt.iata
+```
+
+**Timezone issues:**
+```bash
+get timezone
+set timezone Europe/Amsterdam
+set timezone.offset 1
+```
 
 ---
 

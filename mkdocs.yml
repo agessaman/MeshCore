@@ -10,7 +10,6 @@ nav:
   - Introduction: index.md
   - FAQ: faq.md
   - CLI Commands: cli_commands.md
-  - MQTT Observer Firmware: mqtt_observer_firmware.md
   - Companion Protocol: companion_protocol.md
   - KISS Modem Protocol: kiss_modem_protocol.md
   - Packet Format: packet_format.md
