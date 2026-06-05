@@ -4,6 +4,7 @@
 #include <helpers/IdentityStore.h>
 #include "KissModem.h"
 
+#if !defined(KISS_NO_CRYPTO)
 #if defined(NRF52_PLATFORM)
   #include <InternalFileSystem.h>
 #elif defined(RP2040_PLATFORM)
@@ -12,6 +13,7 @@
   #include <SPIFFS.h>
 #else
   #include <InternalFileSystem.h>
+#endif
 #endif
 
 #if defined(KISS_UART_RX) && defined(KISS_UART_TX)
@@ -31,6 +33,7 @@ void halt() {
   while (1) ;
 }
 
+#if !defined(KISS_NO_CRYPTO)
 void loadOrCreateIdentity() {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   InternalFS.begin();
@@ -54,6 +57,7 @@ void loadOrCreateIdentity() {
     store.save("_main", identity);
   }
 }
+#endif
 
 void onSetRadio(float freq, float bw, uint8_t sf, uint8_t cr) {
   radio_driver.setParams(freq, bw, sf, cr);
@@ -83,7 +87,9 @@ void setup() {
   radio_driver.begin();
 
   rng.begin(radio_driver.getRngSeed());
+#if !defined(KISS_NO_CRYPTO)
   loadOrCreateIdentity();
+#endif
 
   sensors.begin();
 
