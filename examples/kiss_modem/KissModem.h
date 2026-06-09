@@ -140,10 +140,12 @@ class KissModem {
   size_t escapedLength(uint8_t b) const;
   size_t escapedLength(const uint8_t* data, size_t len) const;
   bool canWriteFrame(size_t total_len) const;  // true only if the whole frame fits the TX buffer now
-  void writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len);
+  // wait_for_space: spin up to KISS_WRITE_TIMEOUT_MS for buffer room (host-awaited replies);
+  // false drops immediately if it won't fit (RX data/notifications, recoverable over-air)
+  void writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len, bool wait_for_space);
   void writeByte(uint8_t b);
   void writeFrame(uint8_t type, const uint8_t* data, uint16_t len);
-  void writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len);
+  void writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len, bool wait_for_space = true);
   void writeHardwareError(uint8_t error_code);
   void processFrame();
   void handleHardwareCommand(uint8_t sub_cmd, const uint8_t* data, uint16_t len);
