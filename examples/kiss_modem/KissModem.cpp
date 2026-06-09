@@ -49,12 +49,23 @@ bool KissModem::canWriteFrame(size_t total_len) const {
   return available > 0 && (size_t)available >= total_len;
 }
 
-void KissModem::writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len) {
+void KissModem::writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len, bool wait_for_space) {
   // All-or-nothing: only write if the whole escaped frame fits, so loop() never blocks and frames are never truncated
   size_t total_len = 2;  // frame delimiters
   total_len += escapedLength(prefix, prefix_len);
   total_len += escapedLength(data, len);
-  if (!canWriteFrame(total_len)) return;
+
+  if (!canWriteFrame(total_len)) {
+    // RX data is droppable (host recovers it over-air), so bail immediately. But a response/
+    // notification the host is blocked on (TX_DONE, command replies) has no over-air recovery;
+    // give the host up to KISS_WRITE_TIMEOUT_MS to drain, then give up. We only poll the cheap
+    // canWriteFrame() check and never call the blocking write() while full, so loop() is bounded.
+    if (!wait_for_space) return;
+    uint32_t start = millis();
+    do {
+      if ((uint32_t)(millis() - start) >= KISS_WRITE_TIMEOUT_MS) return;
+    } while (!canWriteFrame(total_len));
+  }
 
   _serial.write(KISS_FEND);
   for (size_t i = 0; i < prefix_len; i++) {
@@ -79,13 +90,14 @@ void KissModem::writeByte(uint8_t b) {
 }
 
 void KissModem::writeFrame(uint8_t type, const uint8_t* data, uint16_t len) {
+  // RX data frame: droppable, host recovers over-air
   uint8_t prefix[] = { type };
-  writeEscapedFrame(prefix, sizeof(prefix), data, len);
+  writeEscapedFrame(prefix, sizeof(prefix), data, len, false);
 }
 
-void KissModem::writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len) {
+void KissModem::writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len, bool wait_for_space) {
   uint8_t prefix[] = { KISS_CMD_SETHARDWARE, sub_cmd };
-  writeEscapedFrame(prefix, sizeof(prefix), data, len);
+  writeEscapedFrame(prefix, sizeof(prefix), data, len, wait_for_space);
 }
 
 void KissModem::writeHardwareError(uint8_t error_code) {
@@ -350,7 +362,7 @@ void KissModem::onPacketReceived(int8_t snr, int8_t rssi, const uint8_t* packet,
   writeFrame(KISS_CMD_DATA, packet, len);
   if (_signal_report_enabled) {
     uint8_t meta[2] = { (uint8_t)snr, (uint8_t)rssi };
-    writeHardwareFrame(HW_RESP_RX_META, meta, 2);
+    writeHardwareFrame(HW_RESP_RX_META, meta, 2, false);  // notification, droppable like its DATA frame
   }
 }
 
