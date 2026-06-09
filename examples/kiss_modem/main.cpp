@@ -113,7 +113,13 @@ void setup() {
 #endif
   modem = new KissModem(Serial1, identity, rng, radio_driver, board, sensors);
 #else
+#if defined(ESP32) && (ARDUINO_USB_MODE == 1)
+  Serial.setTxBufferSize(KISS_TX_BUFFER_SIZE);  // HWCDC ring must fit a whole KISS frame; set before begin()
+#endif
   Serial.begin(115200);
+#if defined(ESP32)
+  Serial.setTxTimeoutMs(KISS_WRITE_TIMEOUT_MS);
+#endif
   uint32_t start = millis();
   while (!Serial && millis() - start < 3000) delay(10);
   delay(100);

@@ -14,11 +14,9 @@
 class BluePillBoard : public STM32Board {
 public:
   void begin() override {
-    STM32Board::begin();
-#if defined(P_LORA_TX_LED)
-    pinMode(P_LORA_TX_LED, OUTPUT);
-    digitalWrite(P_LORA_TX_LED, HIGH);
-#endif
+      STM32Board::begin();
+    pinMode(PB13, OUTPUT);
+    digitalWrite(PB13, HIGH);
   }
 
   const char* getManufacturerName() const override {

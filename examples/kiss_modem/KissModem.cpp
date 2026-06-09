@@ -32,6 +32,40 @@ void KissModem::begin() {
   _tx_state = TX_IDLE;
 }
 
+size_t KissModem::escapedLength(uint8_t b) const {
+  return (b == KISS_FEND || b == KISS_FESC) ? 2 : 1;
+}
+
+size_t KissModem::escapedLength(const uint8_t* data, size_t len) const {
+  size_t total = 0;
+  for (size_t i = 0; i < len; i++) {
+    total += escapedLength(data[i]);
+  }
+  return total;
+}
+
+bool KissModem::canWriteFrame(size_t total_len) const {
+  int available = _serial.availableForWrite();
+  return available > 0 && (size_t)available >= total_len;
+}
+
+void KissModem::writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len) {
+  // All-or-nothing: only write if the whole escaped frame fits, so loop() never blocks and frames are never truncated
+  size_t total_len = 2;  // frame delimiters
+  total_len += escapedLength(prefix, prefix_len);
+  total_len += escapedLength(data, len);
+  if (!canWriteFrame(total_len)) return;
+
+  _serial.write(KISS_FEND);
+  for (size_t i = 0; i < prefix_len; i++) {
+    writeByte(prefix[i]);
+  }
+  for (uint16_t i = 0; i < len; i++) {
+    writeByte(data[i]);
+  }
+  _serial.write(KISS_FEND);
+}
+
 void KissModem::writeByte(uint8_t b) {
   if (b == KISS_FEND) {
     _serial.write(KISS_FESC);
@@ -45,22 +79,13 @@ void KissModem::writeByte(uint8_t b) {
 }
 
 void KissModem::writeFrame(uint8_t type, const uint8_t* data, uint16_t len) {
-  _serial.write(KISS_FEND);
-  writeByte(type);
-  for (uint16_t i = 0; i < len; i++) {
-    writeByte(data[i]);
-  }
-  _serial.write(KISS_FEND);
+  uint8_t prefix[] = { type };
+  writeEscapedFrame(prefix, sizeof(prefix), data, len);
 }
 
 void KissModem::writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len) {
-  _serial.write(KISS_FEND);
-  writeByte(KISS_CMD_SETHARDWARE);
-  writeByte(sub_cmd);
-  for (uint16_t i = 0; i < len; i++) {
-    writeByte(data[i]);
-  }
-  _serial.write(KISS_FEND);
+  uint8_t prefix[] = { KISS_CMD_SETHARDWARE, sub_cmd };
+  writeEscapedFrame(prefix, sizeof(prefix), data, len);
 }
 
 void KissModem::writeHardwareError(uint8_t error_code) {

@@ -28,6 +28,12 @@
 #define KISS_DEFAULT_SLOTTIME    10
 #define KISS_TX_TIMEOUT_FACTOR   3/2   // 1.5x estimated airtime
 
+// Max ms a USB-CDC write may block on a stalled host, so loop() never freezes (UART drains via FIFO, never hits this)
+#define KISS_WRITE_TIMEOUT_MS    50
+
+// Must fit a full escaped DATA frame (~514B) for all-or-nothing writes; 256B default drops max-size RX frames
+#define KISS_TX_BUFFER_SIZE      1024
+
 #define HW_CMD_GET_IDENTITY      0x01
 #define HW_CMD_GET_RANDOM        0x02
 #define HW_CMD_VERIFY_SIGNATURE  0x03
@@ -131,6 +137,10 @@ class KissModem {
   RadioConfig _config;
   bool _signal_report_enabled;
 
+  size_t escapedLength(uint8_t b) const;
+  size_t escapedLength(const uint8_t* data, size_t len) const;
+  bool canWriteFrame(size_t total_len) const;  // true only if the whole frame fits the TX buffer now
+  void writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len);
   void writeByte(uint8_t b);
   void writeFrame(uint8_t type, const uint8_t* data, uint16_t len);
   void writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len);
