@@ -13,15 +13,12 @@
 // No on-chip filesystem / identity is used (KISS_NO_CRYPTO build).
 class BluePillBoard : public STM32Board {
 public:
-  void begin() override {
-      STM32Board::begin();
-    pinMode(PB13, OUTPUT);
-    digitalWrite(PB13, HIGH);
-  }
-
-  const char* getManufacturerName() const override {
-    return "STM32F103 BluePill KISS";
-  }
+  // Implemented in target.cpp: forces the E22P EN line (PB13) high, and if the previous
+  // run ended in a HardFault (record left in the backup registers by the handler in
+  // main.cpp) embeds "HF#n pc=... cfsr=... lr=..." into the device name so the host logs
+  // it on the reconnect after the watchdog reboot.
+  void begin() override;
+  const char* getManufacturerName() const override;
 };
 
 extern BluePillBoard board;
