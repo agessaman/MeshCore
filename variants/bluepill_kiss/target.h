@@ -14,9 +14,24 @@
 class BluePillBoard : public STM32Board {
 public:
   void begin() override {
-      STM32Board::begin();
+    // Free PA15 (JTDI) for the TX LED: switch the debug port to SW-DP only (drops the
+    // 5-wire JTAG, keeps 2-wire SWD, so flashing/debug via ST-Link is unaffected). Must
+    // run before anything configures PA15. Reversible by reflashing without this call.
+    __HAL_RCC_AFIO_CLK_ENABLE();
+    __HAL_AFIO_REMAP_SWJ_NOJTAG();
+
+    STM32Board::begin();
+
+    // E22P EN line forced high (RadioLib does not drive it as an RF switch).
     pinMode(PB13, OUTPUT);
     digitalWrite(PB13, HIGH);
+
+#ifdef P_LORA_TX_LED
+    // TX-activity LED (active-low). STM32Board::onBeforeTransmit/onAfterTransmit toggle it;
+    // configure the pin here since the base class never does.
+    pinMode(P_LORA_TX_LED, OUTPUT);
+    digitalWrite(P_LORA_TX_LED, HIGH);  // off
+#endif
   }
 
   const char* getManufacturerName() const override {

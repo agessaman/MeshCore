@@ -23,6 +23,34 @@
 #define NOISE_FLOOR_CALIB_INTERVAL_MS 2000
 #define AGC_RESET_INTERVAL_MS 30000
 
+// Optional RX-activity LED: define KISS_RX_LED to a pin and it's pulsed (active-low) for
+// KISS_RX_LED_MS each time a packet is received. A LoRa RX is instantaneous to the
+// firmware, so the pulse just makes it visible.
+#if defined(KISS_RX_LED) && !defined(KISS_RX_LED_MS)
+#define KISS_RX_LED_MS 50
+#endif
+
+#ifdef KISS_RX_LED
+// One-shot active-low LED pulse: trigger() lights it; update(), called each loop, turns it
+// off after dur_ms. Encapsulates the timing so it isn't loose state in loop().
+struct PulseLed {
+  uint8_t pin;
+  uint32_t dur_ms;
+  uint32_t since_ms;
+  bool on;
+  void begin(uint8_t p, uint32_t d) {
+    pin = p; dur_ms = d; on = false;
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, HIGH);  // active-low: off
+  }
+  void trigger() { digitalWrite(pin, LOW); since_ms = millis(); on = true; }
+  void update() {
+    if (on && (uint32_t)(millis() - since_ms) >= dur_ms) { digitalWrite(pin, HIGH); on = false; }
+  }
+};
+static PulseLed rx_led;
+#endif
+
 StdRNG rng;
 mesh::LocalIdentity identity;
 KissModem* modem;
@@ -132,6 +160,10 @@ void setup() {
   modem->setGetStatsCallback(onGetStats);
   modem->begin();
 
+#ifdef KISS_RX_LED
+  rx_led.begin(KISS_RX_LED, KISS_RX_LED_MS);
+#endif
+
   board.onBootComplete();
 }
 
@@ -152,8 +184,15 @@ void loop() {
       int8_t snr = (int8_t)(radio_driver.getLastSNR() * 4);
       int8_t rssi = (int8_t)radio_driver.getLastRSSI();
       modem->onPacketReceived(snr, rssi, rx_buf, rx_len);
+#ifdef KISS_RX_LED
+      rx_led.trigger();
+#endif
     }
   }
+
+#ifdef KISS_RX_LED
+  rx_led.update();
+#endif
 
   if ((uint32_t)(millis() - next_noise_floor_calib_ms) >= NOISE_FLOOR_CALIB_INTERVAL_MS) {
     radio_driver.triggerNoiseFloorCalibrate(0);
