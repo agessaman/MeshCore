@@ -156,6 +156,12 @@ pio run -e Heltec_v3_repeater_observer_mqtt
 # Heltec V4
 pio run -e heltec_v4_repeater_observer_mqtt
 
+# Heltec Wireless Tracker v1.1 / v2
+pio run -e heltec_tracker_v1_1_repeater_observer_mqtt
+pio run -e heltec_tracker_v1_1_room_server_observer_mqtt
+pio run -e heltec_tracker_v2_repeater_observer_mqtt
+pio run -e heltec_tracker_v2_room_server_observer_mqtt
+
 # Station G2
 pio run -e Station_G2_repeater_observer_mqtt
 
