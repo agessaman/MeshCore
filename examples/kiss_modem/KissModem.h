@@ -31,6 +31,12 @@
 // Max ms a USB-CDC write may block on a stalled host, so loop() never freezes (UART drains via FIFO, never hits this)
 #define KISS_WRITE_TIMEOUT_MS    50
 
+// How long to keep re-attempting a host-awaited TX_DONE that wouldn't fit the TX buffer.
+// A flood advert triggers an RX rebroadcast storm that can keep the USB-CDC buffer full far
+// longer than KISS_WRITE_TIMEOUT_MS; retry across loop()s (non-blocking) until it lands.
+// Kept under the host's ~5s TX_DONE wait so we give up only after the host already has.
+#define KISS_TXDONE_DELIVER_MS   4000
+
 // Must fit a full escaped DATA frame (~514B) for all-or-nothing writes; 256B default drops max-size RX frames
 #define KISS_TX_BUFFER_SIZE      1024
 
@@ -100,7 +106,8 @@ enum TxState {
   TX_WAIT_CLEAR,
   TX_SLOT_WAIT,
   TX_DELAY,
-  TX_SENDING
+  TX_SENDING,
+  TX_DONE_PENDING   // radio done; retrying the host-awaited TX_DONE until the TX buffer accepts it
 };
 
 class KissModem {
@@ -128,6 +135,8 @@ class KissModem {
 
   TxState _tx_state;
   uint32_t _tx_timer;
+  uint8_t _tx_done_result;     // 0x01 success / 0x00 fail, latched for TX_DONE_PENDING retries
+  uint32_t _tx_done_deadline;  // millis() after which we stop retrying the TX_DONE and free the TX path
 
   SetRadioCallback _setRadioCallback;
   SetTxPowerCallback _setTxPowerCallback;
@@ -141,11 +150,13 @@ class KissModem {
   size_t escapedLength(const uint8_t* data, size_t len) const;
   bool canWriteFrame(size_t total_len) const;  // true only if the whole frame fits the TX buffer now
   // wait_for_space: spin up to KISS_WRITE_TIMEOUT_MS for buffer room (host-awaited replies);
-  // false drops immediately if it won't fit (RX data/notifications, recoverable over-air)
-  void writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len, bool wait_for_space);
+  // false drops immediately if it won't fit (RX data/notifications, recoverable over-air).
+  // Returns true if the frame was written, false if it didn't fit.
+  bool writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len, bool wait_for_space);
   void writeByte(uint8_t b);
-  void writeFrame(uint8_t type, const uint8_t* data, uint16_t len);
-  void writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len, bool wait_for_space = true);
+  bool writeFrame(uint8_t type, const uint8_t* data, uint16_t len);
+  bool writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len, bool wait_for_space = true);
+  void beginTxDone(uint8_t result);  // emit TX_DONE now, or enter TX_DONE_PENDING to retry if the buffer is full
   void writeHardwareError(uint8_t error_code);
   void processFrame();
   void handleHardwareCommand(uint8_t sub_cmd, const uint8_t* data, uint16_t len);

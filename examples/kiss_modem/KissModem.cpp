@@ -16,6 +16,8 @@ KissModem::KissModem(Stream& serial, mesh::LocalIdentity& identity, mesh::RNG& r
   _fullduplex = 0;
   _tx_state = TX_IDLE;
   _tx_timer = 0;
+  _tx_done_result = 0;
+  _tx_done_deadline = 0;
   _setRadioCallback = nullptr;
   _setTxPowerCallback = nullptr;
   _getCurrentRssiCallback = nullptr;
@@ -49,7 +51,7 @@ bool KissModem::canWriteFrame(size_t total_len) const {
   return available > 0 && (size_t)available >= total_len;
 }
 
-void KissModem::writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len, bool wait_for_space) {
+bool KissModem::writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, const uint8_t* data, uint16_t len, bool wait_for_space) {
   // All-or-nothing: only write if the whole escaped frame fits, so loop() never blocks and frames are never truncated
   size_t total_len = 2;  // frame delimiters
   total_len += escapedLength(prefix, prefix_len);
@@ -60,10 +62,10 @@ void KissModem::writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, cons
     // notification the host is blocked on (TX_DONE, command replies) has no over-air recovery;
     // give the host up to KISS_WRITE_TIMEOUT_MS to drain, then give up. We only poll the cheap
     // canWriteFrame() check and never call the blocking write() while full, so loop() is bounded.
-    if (!wait_for_space) return;
+    if (!wait_for_space) return false;
     uint32_t start = millis();
     do {
-      if ((uint32_t)(millis() - start) >= KISS_WRITE_TIMEOUT_MS) return;
+      if ((uint32_t)(millis() - start) >= KISS_WRITE_TIMEOUT_MS) return false;
     } while (!canWriteFrame(total_len));
   }
 
@@ -75,6 +77,7 @@ void KissModem::writeEscapedFrame(const uint8_t* prefix, size_t prefix_len, cons
     writeByte(data[i]);
   }
   _serial.write(KISS_FEND);
+  return true;
 }
 
 void KissModem::writeByte(uint8_t b) {
@@ -89,15 +92,15 @@ void KissModem::writeByte(uint8_t b) {
   }
 }
 
-void KissModem::writeFrame(uint8_t type, const uint8_t* data, uint16_t len) {
+bool KissModem::writeFrame(uint8_t type, const uint8_t* data, uint16_t len) {
   // RX data frame: droppable, host recovers over-air
   uint8_t prefix[] = { type };
-  writeEscapedFrame(prefix, sizeof(prefix), data, len, false);
+  return writeEscapedFrame(prefix, sizeof(prefix), data, len, false);
 }
 
-void KissModem::writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len, bool wait_for_space) {
+bool KissModem::writeHardwareFrame(uint8_t sub_cmd, const uint8_t* data, uint16_t len, bool wait_for_space) {
   uint8_t prefix[] = { KISS_CMD_SETHARDWARE, sub_cmd };
-  writeEscapedFrame(prefix, sizeof(prefix), data, len, wait_for_space);
+  return writeEscapedFrame(prefix, sizeof(prefix), data, len, wait_for_space);
 }
 
 void KissModem::writeHardwareError(uint8_t error_code) {
@@ -332,10 +335,7 @@ void KissModem::processTx() {
           _tx_timer = millis();
           _tx_state = TX_SENDING;
         } else {
-          uint8_t result = 0x00;
-          writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
-          _has_pending_tx = false;
-          _tx_state = TX_IDLE;
+          beginTxDone(0x00);
         }
       }
       break;
@@ -343,18 +343,37 @@ void KissModem::processTx() {
     case TX_SENDING:
       if (_radio.isSendComplete()) {
         _radio.onSendFinished();
-        uint8_t result = 0x01;
-        writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
-        _has_pending_tx = false;
-        _tx_state = TX_IDLE;
+        beginTxDone(0x01);
       } else if (millis() - _tx_timer >= _radio.getEstAirtimeFor(_pending_tx_len) * KISS_TX_TIMEOUT_FACTOR) {
         _radio.onSendFinished();
-        uint8_t result = 0x00;
-        writeHardwareFrame(HW_RESP_TX_DONE, &result, 1);
+        beginTxDone(0x00);
+      }
+      break;
+
+    case TX_DONE_PENDING:
+      // The host blocks on this TX_DONE and can't recover it over-air. Re-attempt the write
+      // every loop() (non-blocking) so it lands as soon as the host drains a few bytes of the
+      // TX buffer — processTx() runs before recvRaw() in loop(), so the retry wins the buffer
+      // race against the next RX frame. Give up only past the deadline (host has already timed out).
+      if (writeHardwareFrame(HW_RESP_TX_DONE, &_tx_done_result, 1, false)
+          || (int32_t)(millis() - _tx_done_deadline) >= 0) {
         _has_pending_tx = false;
         _tx_state = TX_IDLE;
       }
       break;
+  }
+}
+
+void KissModem::beginTxDone(uint8_t result) {
+  // Try once right away; if the TX buffer is full (e.g. RX rebroadcast storm), latch the result
+  // and retry across loop()s from TX_DONE_PENDING rather than dropping the host-awaited reply.
+  _tx_done_result = result;
+  if (writeHardwareFrame(HW_RESP_TX_DONE, &_tx_done_result, 1, false)) {
+    _has_pending_tx = false;
+    _tx_state = TX_IDLE;
+  } else {
+    _tx_done_deadline = millis() + KISS_TXDONE_DELIVER_MS;
+    _tx_state = TX_DONE_PENDING;
   }
 }
 
