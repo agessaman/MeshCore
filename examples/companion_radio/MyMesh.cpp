@@ -108,6 +108,19 @@
 #define DIRECT_SEND_PERHOP_EXTRA_MILLIS 250
 #define LAZY_CONTACTS_WRITE_DELAY       5000
 
+#ifndef DEFAULT_MULTI_ACKS
+#define DEFAULT_MULTI_ACKS 0
+#endif
+#ifndef DEFAULT_PATH_HASH_MODE
+#define DEFAULT_PATH_HASH_MODE 0
+#endif
+#ifndef DEFAULT_MANUAL_ADD_CONTACTS
+#define DEFAULT_MANUAL_ADD_CONTACTS 0
+#endif
+#ifndef DEFAULT_AUTOADD_CONFIG
+#define DEFAULT_AUTOADD_CONFIG 0
+#endif
+
 #define PUBLIC_GROUP_PSK                "izOH6cXN6mrJ5e26oRXNcg=="
 
 // these are _pushed_ to client app at any time
@@ -880,9 +893,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.sf = LORA_SF;
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
+  _prefs.multi_acks = DEFAULT_MULTI_ACKS;
+  _prefs.manual_add_contacts = DEFAULT_MANUAL_ADD_CONTACTS;
   _prefs.tx_power_dbm = LORA_TX_POWER;
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // No automatic GPS updates by default
+  _prefs.autoadd_config = DEFAULT_AUTOADD_CONFIG;
+  _prefs.path_hash_mode = DEFAULT_PATH_HASH_MODE;
   //_prefs.rx_delay_base = 10.0f;  enable once new algo fixed
 #if defined(USE_SX1262) || defined(USE_SX1268)
 #ifdef SX126X_RX_BOOSTED_GAIN
@@ -939,8 +956,12 @@ void MyMesh::begin(bool has_display) {
   _prefs.sf = constrain(_prefs.sf, 5, 12);
   _prefs.cr = constrain(_prefs.cr, 5, 8);
   _prefs.tx_power_dbm = constrain(_prefs.tx_power_dbm, -9, MAX_LORA_TX_POWER);
+  _prefs.multi_acks = constrain(_prefs.multi_acks, 0, 1);
+  _prefs.manual_add_contacts = constrain(_prefs.manual_add_contacts, 0, 1);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+  _prefs.autoadd_config &= AUTO_ADD_OVERWRITE_OLDEST | AUTO_ADD_CHAT | AUTO_ADD_REPEATER | AUTO_ADD_ROOM_SERVER | AUTO_ADD_SENSOR;
+  _prefs.path_hash_mode = constrain(_prefs.path_hash_mode, 0, 2);
   _prefs.radio_fem_rxgain = constrain(_prefs.radio_fem_rxgain, 0, 1);
 
 #ifdef BLE_PIN_CODE // 123456 by default
