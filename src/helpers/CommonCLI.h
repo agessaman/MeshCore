@@ -78,6 +78,16 @@
   #define COMMON_CLI_TMP_LEN              ((FLOOD_RETRY_LIST_TEXT_MAX > (PRV_KEY_SIZE * 2 + 4)) ? FLOOD_RETRY_LIST_TEXT_MAX : (PRV_KEY_SIZE * 2 + 4))
 #endif
 
+#ifndef FLOOD_CHANNEL_BLOCK_SLOTS
+  #define FLOOD_CHANNEL_BLOCK_SLOTS       15
+#endif
+#ifndef FLOOD_CHANNEL_BLOCK_NAME_LEN
+  #define FLOOD_CHANNEL_BLOCK_NAME_LEN    32
+#endif
+#ifndef FLOOD_CHANNEL_BLOCK_PREFIX_LEN
+  #define FLOOD_CHANNEL_BLOCK_PREFIX_LEN  4
+#endif
+
 #define DIRECT_RETRY_CR4_MIN_SNR_X4_DEFAULT  40
 #define DIRECT_RETRY_CR5_MIN_SNR_X4_DEFAULT  30
 #define DIRECT_RETRY_CR7_MIN_SNR_X4_DEFAULT  10
@@ -156,6 +166,7 @@ struct NodePrefs { // persisted to file
   uint8_t battery_alert_low_percent;
   uint8_t battery_alert_critical_percent;
   uint8_t direct_retry_recent_enabled;
+  uint8_t flood_channel_data_enabled;
 };
 
 class CommonCLICallbacks {
@@ -213,6 +224,22 @@ public:
   }
   virtual void deleteScheduledRadioParams(bool temporary, const char* selector, char* reply) {
     (void)temporary;
+    (void)selector;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
+                                    const char* name, char* reply) {
+    (void)index;
+    (void)secret;
+    (void)key_len;
+    (void)name;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void formatFloodChannelBlocks(const char* selector, char* reply) {
+    (void)selector;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void deleteFloodChannelBlock(const char* selector, char* reply) {
     (void)selector;
     strcpy(reply, "Error: unsupported");
   }

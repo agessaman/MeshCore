@@ -82,6 +82,8 @@
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
+#define FLOOD_CHANNEL_BLOCK_FILE      "/flood_ch_block"
+
 #ifndef REPEATERS_CHANNEL_KEY_HEX
   #define REPEATERS_CHANNEL_KEY_HEX "89db441e2814dccf0dbd2e8cc5f501a3"
 #endif
@@ -192,6 +194,25 @@ static bool buildRepeatersChannel(mesh::GroupChannel& channel) {
 
   mesh::Utils::sha256(channel.hash, sizeof(channel.hash), channel.secret, key_len);
   return true;
+}
+
+static File openFloodChannelBlockRead(FILESYSTEM* fs, const char* filename) {
+#if defined(RP2040_PLATFORM)
+  return fs->open(filename, "r");
+#else
+  return fs->open(filename);
+#endif
+}
+
+static File openFloodChannelBlockWrite(FILESYSTEM* fs, const char* filename) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  fs->remove(filename);
+  return fs->open(filename, FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  return fs->open(filename, "w");
+#else
+  return fs->open(filename, "w", true);
+#endif
 }
 
 static uint8_t batteryPercentFromMilliVolts(uint16_t batt_mv) {
@@ -603,12 +624,46 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
   }
 }
 
+bool MyMesh::floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const mesh::Packet* packet) const {
+  if (!entry.active || packet == NULL || !packet->isRouteFlood()) {
+    return false;
+  }
+  uint8_t type = packet->getPayloadType();
+  if (type != PAYLOAD_TYPE_GRP_TXT && type != PAYLOAD_TYPE_GRP_DATA) {
+    return false;
+  }
+  if (packet->payload_len <= PATH_HASH_SIZE + CIPHER_MAC_SIZE || packet->payload[0] != entry.hash_prefix[0]) {
+    return false;
+  }
+
+  uint8_t data[MAX_PACKET_PAYLOAD];
+  int len = mesh::Utils::MACThenDecrypt(entry.secret, data, &packet->payload[PATH_HASH_SIZE],
+                                        packet->payload_len - PATH_HASH_SIZE);
+  return len > 0;
+}
+
+bool MyMesh::shouldBlockFloodChannelForward(const mesh::Packet* packet) const {
+  for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
+    if (floodChannelBlockMatches(flood_channel_blocks[i], packet)) {
+      MESH_DEBUG_PRINTLN("allowPacketForward: flood.channel.block matched slot=%d name=%s",
+                         i + 1, flood_channel_blocks[i].name);
+      return true;
+    }
+  }
+  return false;
+}
+
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood()) {
     if (packet->getPathHashCount() >= _prefs.flood_max) return false;
     if (packet->getRouteType() == ROUTE_TYPE_FLOOD && packet->getPathHashCount() >= _prefs.flood_max_unscoped) return false;
     if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT && packet->getPathHashCount() >= _prefs.flood_max_advert) return false;
+    if (!_prefs.flood_channel_data_enabled && packet->getPayloadType() == PAYLOAD_TYPE_GRP_DATA) {
+      MESH_DEBUG_PRINTLN("allowPacketForward: flood.channel.data off, blocking GRP_DATA");
+      return false;
+    }
+    if (shouldBlockFloodChannelForward(packet)) return false;
   }
   if (packet->isRouteFlood() && recv_pkt_region == NULL) {
     MESH_DEBUG_PRINTLN("allowPacketForward: unknown transport code, or wildcard not allowed for FLOOD packet");
@@ -2066,6 +2121,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   region_load_active = false;
   memset(flood_retry_bridge_states, 0, sizeof(flood_retry_bridge_states));
   recv_pkt_region = NULL;
+  memset(flood_channel_blocks, 0, sizeof(flood_channel_blocks));
 
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
@@ -2115,6 +2171,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_retry_max_path = FLOOD_RETRY_ROOFTOP_MAX_PATH;
   _prefs.flood_retry_bridge_enabled = 0;
   _prefs.flood_retry_advert_enabled = FLOOD_RETRY_ADVERT_DEFAULT;
+  _prefs.flood_channel_data_enabled = 1;
   _prefs.battery_alert_enabled = 0;
   _prefs.battery_alert_low_percent = BATTERY_ALERT_LOW_PERCENT_DEFAULT;
   _prefs.battery_alert_critical_percent = BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT;
@@ -2158,6 +2215,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
+  loadFloodChannelBlocks();
 
   // establish default-scope
   {
@@ -2928,6 +2986,276 @@ void MyMesh::onDefaultRegionChanged(const RegionEntry* r) {
   } else {
     memset(default_scope.key, 0, sizeof(default_scope.key));
   }
+}
+
+void MyMesh::clearFloodChannelBlockEntry(FloodChannelBlockEntry& entry) {
+  memset(&entry, 0, sizeof(entry));
+}
+
+void MyMesh::deriveFloodChannelBlockPrefix(const uint8_t* secret, uint8_t key_len,
+                                           uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN]) const {
+  mesh::Utils::sha256(prefix, FLOOD_CHANNEL_BLOCK_PREFIX_LEN, secret, key_len);
+}
+
+void MyMesh::loadFloodChannelBlocks() {
+  memset(flood_channel_blocks, 0, sizeof(flood_channel_blocks));
+  if (_fs == NULL || !_fs->exists(FLOOD_CHANNEL_BLOCK_FILE)) {
+    return;
+  }
+
+  File file = openFloodChannelBlockRead(_fs, FLOOD_CHANNEL_BLOCK_FILE);
+  if (!file) {
+    return;
+  }
+
+  uint8_t magic[4];
+  uint8_t count = 0;
+  bool success = file.read(magic, sizeof(magic)) == sizeof(magic)
+      && memcmp(magic, "FCB1", sizeof(magic)) == 0
+      && file.read(&count, sizeof(count)) == sizeof(count);
+
+  for (int i = 0; success && i < count && i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
+    uint8_t active = 0;
+    uint8_t key_len = 0;
+    uint8_t hash_prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN];
+    uint8_t secret[PUB_KEY_SIZE];
+    char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
+
+    success = file.read(&active, sizeof(active)) == sizeof(active);
+    success = success && file.read(&key_len, sizeof(key_len)) == sizeof(key_len);
+    success = success && file.read(hash_prefix, sizeof(hash_prefix)) == sizeof(hash_prefix);
+    success = success && file.read(secret, sizeof(secret)) == sizeof(secret);
+    success = success && file.read((uint8_t*)name, sizeof(name)) == sizeof(name);
+    if (!success) {
+      break;
+    }
+
+    name[sizeof(name) - 1] = 0;
+    if (active && (key_len == CIPHER_KEY_SIZE || key_len == PUB_KEY_SIZE) && name[0] != 0) {
+      auto& entry = flood_channel_blocks[i];
+      entry.active = true;
+      entry.key_len = key_len;
+      memcpy(entry.secret, secret, sizeof(entry.secret));
+      if (entry.key_len == CIPHER_KEY_SIZE) {
+        memset(&entry.secret[CIPHER_KEY_SIZE], 0, PUB_KEY_SIZE - CIPHER_KEY_SIZE);
+      }
+      deriveFloodChannelBlockPrefix(entry.secret, entry.key_len, entry.hash_prefix);
+      StrHelper::strncpy(entry.name, name, sizeof(entry.name));
+    }
+  }
+
+  file.close();
+}
+
+bool MyMesh::saveFloodChannelBlocks() {
+  if (_fs == NULL) {
+    return false;
+  }
+
+  File file = openFloodChannelBlockWrite(_fs, FLOOD_CHANNEL_BLOCK_FILE);
+  if (!file) {
+    return false;
+  }
+
+  const uint8_t magic[4] = {'F', 'C', 'B', '1'};
+  uint8_t count = FLOOD_CHANNEL_BLOCK_SLOTS;
+  bool success = file.write(magic, sizeof(magic)) == sizeof(magic);
+  success = success && file.write(&count, sizeof(count)) == sizeof(count);
+
+  for (int i = 0; success && i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
+    const auto& entry = flood_channel_blocks[i];
+    uint8_t active = entry.active ? 1 : 0;
+    success = file.write(&active, sizeof(active)) == sizeof(active);
+    success = success && file.write(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len);
+    success = success && file.write(entry.hash_prefix, sizeof(entry.hash_prefix)) == sizeof(entry.hash_prefix);
+    success = success && file.write(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret);
+    success = success && file.write((const uint8_t*)entry.name, sizeof(entry.name)) == sizeof(entry.name);
+  }
+
+  file.close();
+  return success;
+}
+
+static void trimFloodChannelBlockSelector(const char* selector, char* dest, size_t dest_len) {
+  selector = skipLocalSpaces(selector);
+  StrHelper::strncpy(dest, selector == NULL ? "" : selector, dest_len);
+  size_t len = strlen(dest);
+  while (len > 0 && dest[len - 1] == ' ') {
+    dest[--len] = 0;
+  }
+}
+
+static bool parseFloodChannelBlockPrefixSelector(const char* selector,
+                                                 uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN]) {
+  char text[16];
+  trimFloodChannelBlockSelector(selector, text, sizeof(text));
+  if (strlen(text) != FLOOD_CHANNEL_BLOCK_PREFIX_LEN * 2) {
+    return false;
+  }
+  for (int i = 0; i < FLOOD_CHANNEL_BLOCK_PREFIX_LEN * 2; i++) {
+    if (!mesh::Utils::isHexChar(text[i])) {
+      return false;
+    }
+  }
+  return mesh::Utils::fromHex(prefix, FLOOD_CHANNEL_BLOCK_PREFIX_LEN, text);
+}
+
+int MyMesh::findFloodChannelBlockBySelector(const char* selector) const {
+  uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN];
+  if (parseFloodChannelBlockPrefixSelector(selector, prefix)) {
+    for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
+      const auto& entry = flood_channel_blocks[i];
+      if (entry.active && memcmp(entry.hash_prefix, prefix, sizeof(entry.hash_prefix)) == 0) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  int index = 0;
+  if (parsePositiveSelector(selector, index)) {
+    return (index >= 1 && index <= FLOOD_CHANNEL_BLOCK_SLOTS) ? index - 1 : -1;
+  }
+
+  char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
+  trimFloodChannelBlockSelector(selector, name, sizeof(name));
+  if (name[0] == 0) {
+    return -1;
+  }
+  for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
+    const auto& entry = flood_channel_blocks[i];
+    if (entry.active && strcmp(entry.name, name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+int MyMesh::findFloodChannelBlockSlot(const uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN], const char* name) const {
+  int free_slot = -1;
+  for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
+    const auto& entry = flood_channel_blocks[i];
+    if (entry.active) {
+      if (memcmp(entry.hash_prefix, prefix, FLOOD_CHANNEL_BLOCK_PREFIX_LEN) == 0 || strcmp(entry.name, name) == 0) {
+        return i;
+      }
+    } else if (free_slot < 0) {
+      free_slot = i;
+    }
+  }
+  return free_slot;
+}
+
+void MyMesh::formatFloodChannelBlockDetail(char* reply, int idx) const {
+  if (idx < 0 || idx >= FLOOD_CHANNEL_BLOCK_SLOTS) {
+    strcpy(reply, "Err - not found");
+    return;
+  }
+
+  const auto& entry = flood_channel_blocks[idx];
+  if (!entry.active) {
+    snprintf(reply, 160, "> %d empty", idx + 1);
+    return;
+  }
+
+  char prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN * 2 + 1];
+  mesh::Utils::toHex(prefix, entry.hash_prefix, FLOOD_CHANNEL_BLOCK_PREFIX_LEN);
+  snprintf(reply, 160, "> %d %s %u %s", idx + 1, prefix, (unsigned int)entry.key_len * 8, entry.name);
+}
+
+void MyMesh::setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
+                                  const char* name, char* reply) {
+  if ((key_len != CIPHER_KEY_SIZE && key_len != PUB_KEY_SIZE) || secret == NULL || name == NULL || name[0] == 0) {
+    strcpy(reply, "Err - bad params");
+    return;
+  }
+  if (index < 0 || index > FLOOD_CHANNEL_BLOCK_SLOTS) {
+    snprintf(reply, 160, "Err - index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+    return;
+  }
+
+  uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN];
+  deriveFloodChannelBlockPrefix(secret, key_len, prefix);
+  int slot = index > 0 ? index - 1 : findFloodChannelBlockSlot(prefix, name);
+  if (slot < 0 || slot >= FLOOD_CHANNEL_BLOCK_SLOTS) {
+    strcpy(reply, "Err - block list full");
+    return;
+  }
+
+  auto& entry = flood_channel_blocks[slot];
+  clearFloodChannelBlockEntry(entry);
+  entry.active = true;
+  entry.key_len = key_len;
+  memcpy(entry.secret, secret, PUB_KEY_SIZE);
+  if (entry.key_len == CIPHER_KEY_SIZE) {
+    memset(&entry.secret[CIPHER_KEY_SIZE], 0, PUB_KEY_SIZE - CIPHER_KEY_SIZE);
+  }
+  deriveFloodChannelBlockPrefix(entry.secret, entry.key_len, entry.hash_prefix);
+  StrHelper::strncpy(entry.name, name, sizeof(entry.name));
+
+  if (!saveFloodChannelBlocks()) {
+    strcpy(reply, "Err - save failed");
+    return;
+  }
+  formatFloodChannelBlockDetail(reply, slot);
+}
+
+void MyMesh::formatFloodChannelBlocks(const char* selector, char* reply) {
+  if (!selectorIsEmpty(selector)) {
+    int idx = findFloodChannelBlockBySelector(selector);
+    if (idx < 0) {
+      strcpy(reply, "Err - not found");
+    } else {
+      formatFloodChannelBlockDetail(reply, idx);
+    }
+    return;
+  }
+
+  char* out = reply;
+  size_t remaining = 160;
+  int written = snprintf(out, remaining, ">");
+  if (written < 0 || (size_t)written >= remaining) {
+    reply[0] = 0;
+    return;
+  }
+  out += written;
+  remaining -= written;
+
+  for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS && remaining > 1; i++) {
+    char display[8];
+    const auto& entry = flood_channel_blocks[i];
+    if (!entry.active) {
+      strcpy(display, "-");
+    } else {
+      StrHelper::strncpy(display, entry.name, sizeof(display));
+      if (strlen(entry.name) >= sizeof(display)) {
+        display[sizeof(display) - 2] = '~';
+        display[sizeof(display) - 1] = 0;
+      }
+    }
+    written = snprintf(out, remaining, " %d:%s", i + 1, display);
+    if (written < 0 || (size_t)written >= remaining) {
+      out[remaining - 1] = 0;
+      break;
+    }
+    out += written;
+    remaining -= written;
+  }
+}
+
+void MyMesh::deleteFloodChannelBlock(const char* selector, char* reply) {
+  int idx = findFloodChannelBlockBySelector(selector);
+  if (idx < 0 || idx >= FLOOD_CHANNEL_BLOCK_SLOTS || !flood_channel_blocks[idx].active) {
+    strcpy(reply, "Err - not found");
+    return;
+  }
+
+  clearFloodChannelBlockEntry(flood_channel_blocks[idx]);
+  if (!saveFloodChannelBlocks()) {
+    strcpy(reply, "Err - save failed");
+    return;
+  }
+  strcpy(reply, "OK");
 }
 
 void MyMesh::formatStatsReply(char *reply) {

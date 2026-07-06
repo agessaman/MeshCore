@@ -768,6 +768,74 @@ send text.flood checking ridge link
 
 ---
 
+#### Forward flood group data packets on repeaters
+**Usage:**
+- `get flood.channel.data`
+- `set flood.channel.data <on|off>`
+
+**Parameters:**
+- `on`: Retransmit received flood `GRP_DATA` channel packets.
+- `off`: Do not retransmit received flood `GRP_DATA` channel packets.
+
+**Default:** `on`
+
+**Forwarding behavior:** Repeater firmware only. The repeater still receives and
+logs the packet when logging is enabled; this only blocks retransmission.
+This is checked before `flood.channel.block` and applies to every flood
+`GRP_DATA` packet regardless of channel key. Flood group text (`GRP_TXT`) is
+unaffected.
+
+---
+
+#### Block selected flood channel packets on repeaters
+**Usage:**
+- `get flood.channel.block`
+- `get flood.channel.block.<n>`
+- `get flood.channel.block <name|8_hex_prefix>`
+- `set flood.channel.block <key> <name>`
+- `set flood.channel.block.<n> <key> <name>`
+- `set flood.channel.block #channel`
+- `set flood.channel.block.<n> #channel`
+- `del flood.channel.block.<n>`
+- `del flood.channel.block <name|8_hex_prefix>`
+
+**Parameters:**
+- `n`: Slot number from `1` to `15`.
+- `key`: 128-bit or 256-bit channel key as hex.
+- `#channel`: Public hashtag channel name; derives the 128-bit channel key from the hashtag and is stored as the row name.
+- `name`: Local label for hex-key rows. Not needed for `#channel`; any extra text after `#channel` is ignored.
+- `8_hex_prefix`: First 4 bytes of the derived channel hash, shown by single-entry `get`.
+
+**Slot behavior:** Without `.n`, `set flood.channel.block` updates an existing
+row with the same derived channel prefix or name, otherwise it uses the next
+empty slot. If all 15 slots are full, the command fails. With `.n`, the command
+writes that slot.
+
+**Forwarding behavior:** Repeater firmware only. This only affects received
+flood `GRP_TXT` and `GRP_DATA` channel packets. The repeater still receives and
+logs the packet, but it does not retransmit it when a configured block entry can
+validate/decode it. If `flood.channel.data` is `off`, all flood `GRP_DATA`
+packets are blocked before this per-channel check runs.
+
+**Matching behavior:** Each block entry stores the first 4 bytes of the derived
+channel hash for display and lookup. Current group packets carry only the first
+channel-hash byte, so that byte is used as a cheap prefilter. Only entries whose
+first hash byte matches the packet try MAC/decrypt with their stored key. If
+multiple blocked channels share the same first byte, the repeater tries each
+matching key until one validates; the packet is blocked only after a successful
+MAC/decrypt.
+
+**Examples:**
+```
+set flood.channel.block #test
+set flood.channel.block.2 9cd8fcf22a47333b591d96a2b848b73f #test
+get flood.channel.block
+get flood.channel.block #test
+del flood.channel.block.2
+```
+
+---
+
 ### ACL
 
 #### Add, update or remove permissions for a companion

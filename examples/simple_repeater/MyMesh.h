@@ -132,7 +132,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
     uint8_t progress_marker;
     bool active;
   };
+  struct FloodChannelBlockEntry {
+    bool active;
+    uint8_t key_len;
+    uint8_t hash_prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN];
+    uint8_t secret[PUB_KEY_SIZE];
+    char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
+  };
   mutable FloodRetryBridgeState flood_retry_bridge_states[MAX_FLOOD_RETRY_SLOTS];
+  FloodChannelBlockEntry flood_channel_blocks[FLOOD_CHANNEL_BLOCK_SLOTS];
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
   bool region_load_active;
@@ -193,6 +201,16 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void applySavedRadioParams();
   void processScheduledRadioSettings();
   bool isMillisTimerDue(unsigned long timestamp) const;
+  void loadFloodChannelBlocks();
+  bool saveFloodChannelBlocks();
+  void clearFloodChannelBlockEntry(FloodChannelBlockEntry& entry);
+  void deriveFloodChannelBlockPrefix(const uint8_t* secret, uint8_t key_len,
+                                     uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN]) const;
+  bool floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const mesh::Packet* packet) const;
+  bool shouldBlockFloodChannelForward(const mesh::Packet* packet) const;
+  int findFloodChannelBlockBySelector(const char* selector) const;
+  int findFloodChannelBlockSlot(const uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN], const char* name) const;
+  void formatFloodChannelBlockDetail(char* reply, int idx) const;
   bool hasScheduledRadioWorkDue() const;
   uint32_t limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_secs) const;
   uint32_t limitSleepToRtcTime(uint32_t timestamp, uint32_t sleep_secs) const;
@@ -323,6 +341,10 @@ public:
   void startRegionsLoad() override;
   bool saveRegions() override;
   void onDefaultRegionChanged(const RegionEntry* r) override;
+  void setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
+                            const char* name, char* reply) override;
+  void formatFloodChannelBlocks(const char* selector, char* reply) override;
+  void deleteFloodChannelBlock(const char* selector, char* reply) override;
 
   mesh::LocalIdentity& getSelfId() override { return self_id; }
 

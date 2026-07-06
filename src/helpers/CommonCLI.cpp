@@ -380,6 +380,69 @@ static bool parseFloodRetryPrefixList(uint8_t dest[][FLOOD_RETRY_PREFIX_LEN], ui
   return true;
 }
 
+static bool parseFloodChannelBlockKey(const char* text, uint8_t secret[PUB_KEY_SIZE], uint8_t& key_len) {
+  if (text == NULL || text[0] == 0) {
+    return false;
+  }
+
+  memset(secret, 0, PUB_KEY_SIZE);
+  if (text[0] == '#') {
+    if (!isValidName(text)) {
+      return false;
+    }
+    mesh::Utils::sha256(secret, CIPHER_KEY_SIZE, (const uint8_t*)text, strlen(text));
+    key_len = CIPHER_KEY_SIZE;
+    return true;
+  }
+
+  size_t hex_len = strlen(text);
+  if (!(hex_len == CIPHER_KEY_SIZE * 2 || hex_len == PUB_KEY_SIZE * 2)) {
+    return false;
+  }
+  for (size_t i = 0; i < hex_len; i++) {
+    if (!mesh::Utils::isHexChar(text[i])) {
+      return false;
+    }
+  }
+
+  key_len = (uint8_t)(hex_len / 2);
+  return mesh::Utils::fromHex(secret, key_len, text);
+}
+
+static bool parseFloodChannelBlockDotIndex(const char*& cursor, int& index) {
+  if (*cursor != '.') {
+    index = 0;
+    return true;
+  }
+
+  cursor++;
+  if (*cursor < '0' || *cursor > '9') {
+    return false;
+  }
+  int value = 0;
+  while (*cursor >= '0' && *cursor <= '9') {
+    value = (value * 10) + (*cursor - '0');
+    if (value > FLOOD_CHANNEL_BLOCK_SLOTS) {
+      return false;
+    }
+    cursor++;
+  }
+  if (value < 1) {
+    return false;
+  }
+  index = value;
+  return true;
+}
+
+static void copyTrimmedFloodChannelBlockName(char* dest, size_t dest_len, const char* src) {
+  src = skipSpacesConst(src);
+  StrHelper::strncpy(dest, src, dest_len);
+  size_t len = strlen(dest);
+  while (len > 0 && dest[len - 1] == ' ') {
+    dest[--len] = 0;
+  }
+}
+
 static void applyDirectRetryPreset(NodePrefs* prefs, uint8_t preset) {
   prefs->retry_preset = preset;
   if (preset == RETRY_PRESET_INFRA) {
@@ -547,6 +610,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->battery_alert_low_percent = BATTERY_ALERT_LOW_PERCENT_DEFAULT;
     _prefs->battery_alert_critical_percent = BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT;
     _prefs->direct_retry_recent_enabled = DIRECT_RETRY_RECENT_DEFAULT;
+    _prefs->flood_channel_data_enabled = 1;
     bool has_flood_retry_prefs = file.available() >= 2;
     if (has_flood_retry_prefs) {
       file.read((uint8_t *)&_prefs->flood_retry_attempts, sizeof(_prefs->flood_retry_attempts));     // 311
@@ -578,8 +642,11 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       if (file.available() >= (int)sizeof(_prefs->direct_retry_recent_enabled)) {
         file.read((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
       }
+      if (file.available() >= (int)sizeof(_prefs->flood_channel_data_enabled)) {
+        file.read((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
+      }
     }
-    // next: 672
+    // next: 673
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -639,6 +706,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->flood_retry_advert_enabled = constrain(_prefs->flood_retry_advert_enabled, 0, 1);
     _prefs->battery_alert_enabled = constrain(_prefs->battery_alert_enabled, 0, 1);
     _prefs->direct_retry_recent_enabled = constrain(_prefs->direct_retry_recent_enabled, 0, 1);
+    _prefs->flood_channel_data_enabled = constrain(_prefs->flood_channel_data_enabled, 0, 1);
     if (_prefs->battery_alert_low_percent < 1
         || _prefs->battery_alert_low_percent > 100
         || _prefs->battery_alert_critical_percent >= _prefs->battery_alert_low_percent) {
@@ -736,7 +804,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->battery_alert_low_percent, sizeof(_prefs->battery_alert_low_percent));
     file.write((uint8_t *)&_prefs->battery_alert_critical_percent, sizeof(_prefs->battery_alert_critical_percent));
     file.write((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
-    // next: 672
+    file.write((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
+    // next: 673
 
     file.close();
   }
@@ -1380,6 +1449,54 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error, must be 0-5000 ms");
     }
+  } else if (memcmp(config, "flood.channel.data ", 19) == 0) {
+    if (strcmp(&config[19], "on") == 0) {
+      _prefs->flood_channel_data_enabled = 1;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else if (strcmp(&config[19], "off") == 0) {
+      _prefs->flood_channel_data_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be on or off");
+    }
+  } else if (memcmp(config, "flood.channel.block", 19) == 0
+      && (config[19] == ' ' || config[19] == '.')) {
+    const char* cursor = &config[19];
+    int index = 0;
+    if (!parseFloodChannelBlockDotIndex(cursor, index)) {
+      sprintf(reply, "Error, index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+      return;
+    }
+    cursor = skipSpacesConst(cursor);
+
+    const char* key_start = cursor;
+    while (*cursor && *cursor != ' ') cursor++;
+    size_t key_len_text = cursor - key_start;
+    char key_text[PUB_KEY_SIZE * 2 + 1];
+    if (key_len_text == 0 || key_len_text >= sizeof(key_text)) {
+      strcpy(reply, "Error, use: set flood.channel.block[.n] <hex-key> <name>|#channel");
+      return;
+    }
+    memcpy(key_text, key_start, key_len_text);
+    key_text[key_len_text] = 0;
+
+    char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
+    if (key_text[0] == '#') {
+      StrHelper::strncpy(name, key_text, sizeof(name));
+    } else {
+      copyTrimmedFloodChannelBlockName(name, sizeof(name), cursor);
+    }
+    uint8_t secret[PUB_KEY_SIZE];
+    uint8_t decoded_key_len = 0;
+    if (!parseFloodChannelBlockKey(key_text, secret, decoded_key_len)) {
+      strcpy(reply, "Error, key must be 128/256-bit hex or #channel");
+    } else if (name[0] == 0 || !isValidName(name)) {
+      strcpy(reply, "Error, bad name");
+    } else {
+      _callbacks->setFloodChannelBlock(index, secret, decoded_key_len, name, reply);
+    }
   } else if (memcmp(config, "flood.retry.count ", 18) == 0) {
     int attempts = looksUnsignedInteger(&config[18]) ? _atoi(&config[18]) : -1;
     if (attempts >= 0 && attempts <= 15) {
@@ -1702,6 +1819,28 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->rx_delay_base));
   } else if (memcmp(config, "txdelay", 7) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->tx_delay_factor));
+  } else if (memcmp(config, "flood.channel.data", 18) == 0) {
+    sprintf(reply, "> %s", _prefs->flood_channel_data_enabled ? "on" : "off");
+  } else if (memcmp(config, "flood.channel.block", 19) == 0
+      && (config[19] == 0 || config[19] == ' ' || config[19] == '.')) {
+    const char* cursor = &config[19];
+    int index = 0;
+    if (!parseFloodChannelBlockDotIndex(cursor, index)) {
+      sprintf(reply, "Error, index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+      return;
+    }
+    cursor = skipSpacesConst(cursor);
+    char selector[8];
+    if (index > 0 && *cursor != 0) {
+      strcpy(reply, "Error, use index or selector");
+      return;
+    }
+    if (index > 0) {
+      snprintf(selector, sizeof(selector), "%d", index);
+      _callbacks->formatFloodChannelBlocks(selector, reply);
+    } else {
+      _callbacks->formatFloodChannelBlocks(cursor, reply);
+    }
   } else if (memcmp(config, "flood.max.advert", 16) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->flood_max_advert);
   } else if (memcmp(config, "flood.max.unscoped", 18) == 0) {
@@ -1880,6 +2019,28 @@ void CommonCLI::handleDelCmd(char* command, char* reply) {
     _callbacks->deleteScheduledRadioParams(true, skipSpacesConst(&config[11]), reply);
   } else if (memcmp(config, "radioat", 7) == 0 && (config[7] == 0 || config[7] == ' ')) {
     _callbacks->deleteScheduledRadioParams(false, skipSpacesConst(&config[7]), reply);
+  } else if (memcmp(config, "flood.channel.block", 19) == 0
+      && (config[19] == ' ' || config[19] == '.')) {
+    const char* cursor = &config[19];
+    int index = 0;
+    if (!parseFloodChannelBlockDotIndex(cursor, index)) {
+      sprintf(reply, "Error, index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+      return;
+    }
+    cursor = skipSpacesConst(cursor);
+    char selector[8];
+    if (index > 0 && *cursor != 0) {
+      strcpy(reply, "Error, use index or selector");
+      return;
+    }
+    if (index > 0) {
+      snprintf(selector, sizeof(selector), "%d", index);
+      _callbacks->deleteFloodChannelBlock(selector, reply);
+    } else if (*cursor != 0) {
+      _callbacks->deleteFloodChannelBlock(cursor, reply);
+    } else {
+      strcpy(reply, "Error, use: del flood.channel.block <index|name|prefix>");
+    }
   } else {
     strcpy(reply, "unknown del: ");
     StrHelper::strncpy(&reply[13], config, 160 - 14);

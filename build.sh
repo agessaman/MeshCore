@@ -527,7 +527,7 @@ prompt_for_radio_build_settings() {
 prompt_for_firmware_profile_settings() {
   local -a options=(
     "Keep target defaults"
-    "Cascade: path.hash.mode=2 / loop.detect=minimal / rxdelay=2 / agc.reset.interval=8 / advert.interval=0 / flood.advert.interval=83 / multi.acks=1"
+    "Cascade: path.hash.mode=2 / loop.detect=minimal / rxdelay=2 / agc.reset.interval=8 / advert.interval=0 / flood.advert.interval=83 / multi.acks=1 / companion.manual.add=1 / companion.autoadd=0"
   )
 
   clear_firmware_profile_overrides
