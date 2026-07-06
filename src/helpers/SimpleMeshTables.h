@@ -166,7 +166,7 @@ public:
   }
 #endif
 
-  bool hasSeen(const mesh::Packet* packet) override {
+  bool wasSeen(const mesh::Packet* packet) override {
     uint8_t hash[MAX_HASH_SIZE];
     packet->calculatePacketHash(hash);
 
@@ -179,9 +179,16 @@ public:
       return true;
     }
 
-    storeHash(hash);
-    recordRecentRepeater(packet);
     return false;
+  }
+
+  void markSeen(const mesh::Packet* packet) override {
+    uint8_t hash[MAX_HASH_SIZE];
+    packet->calculatePacketHash(hash);
+    if (!hasSeenHash(hash)) {
+      storeHash(hash);
+      recordRecentRepeater(packet);
+    }
   }
 
   void markSent(const mesh::Packet* packet) override {
@@ -199,7 +206,7 @@ public:
 
     uint8_t* sp = _hashes;
     for (int i = 0; i < MAX_PACKET_HASHES; i++, sp += MAX_HASH_SIZE) {
-      if (memcmp(hash, sp, MAX_HASH_SIZE) == 0) { 
+      if (memcmp(hash, sp, MAX_HASH_SIZE) == 0) {
         memset(sp, 0, MAX_HASH_SIZE);
         break;
       }

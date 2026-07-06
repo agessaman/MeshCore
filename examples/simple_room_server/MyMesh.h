@@ -157,7 +157,7 @@ protected:
     return set_radio_at == 0 && revert_radio_at != 0 ? pending_cr : _prefs.cr;
   }
 
-  bool filterRecvFloodPacket(mesh::Packet* pkt) override;
+  mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
 
   bool allowPacketForward(const mesh::Packet* packet) override;
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override;
