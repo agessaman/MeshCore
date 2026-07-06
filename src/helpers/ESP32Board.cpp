@@ -89,7 +89,7 @@ void ESP32Board::enterDeepSleep(uint32_t secs) {
   #ifdef P_LORA_NSS
   // Keep LoRa inactive during deepsleep
   digitalWrite(P_LORA_NSS, HIGH);
-#if CONFIG_IDF_TARGET_ESP32C3
+#if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C6)
   gpio_hold_en((gpio_num_t)P_LORA_NSS);
 #else
   rtc_gpio_hold_en((gpio_num_t)P_LORA_NSS);

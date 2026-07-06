@@ -69,8 +69,8 @@ void RadioLibWrapper::doResetAGC() {
 }
 
 void RadioLibWrapper::resetAGC() {
-  // make sure we're not mid-receive of packet!
-  if ((state & STATE_INT_READY) != 0 || isReceivingPacket()) return;
+  // make sure we're not mid-receiving and mid-sending of packet!
+  if ((state & STATE_INT_READY) != 0 || isReceivingPacket() || (state == STATE_TX_WAIT)) return;
 
   doResetAGC();
   state = STATE_IDLE;   // trigger a startReceive()
@@ -195,7 +195,10 @@ bool RadioLibWrapper::isChannelActive() {
     // try to read a non-existent packet and count a spurious recv error.
     state = STATE_IDLE;
     startRecv();
-    if (result != RADIOLIB_CHANNEL_FREE) return true;
+    if (result != RADIOLIB_CHANNEL_FREE) {
+      _board->n_cad_busy++;
+      return true;
+    }
   }
 
   return false;
