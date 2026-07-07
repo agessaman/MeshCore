@@ -77,7 +77,11 @@ set flood.retry.ignore none
 | `battery.alert.low` | Warning threshold percentage. Must be greater than `battery.alert.critical`. | `get battery.alert.low`, `set battery.alert.low <1-100>` | `set battery.alert.low 20` |
 | `battery.alert.critical` | Critical threshold percentage. Critical warnings repeat more often. | `get battery.alert.critical`, `set battery.alert.critical <0-99>` | `set battery.alert.critical 10` |
 | `recent.repeater` | Shows, seeds, or clears the recent repeater prefix/SNR table used by direct retry and bridge freshness checks. | `get recent.repeater`, `get recent.repeater <page>`, `set recent.repeater <prefix> <snr_db>`, `clear recent.repeater` | `set recent.repeater A1B2C3 -8.5` |
+| `flood.channel.data` | Turns forwarding of flood `GRP_DATA` channel packets on or off, subject to the channel block hop gate. | `get flood.channel.data`, `set flood.channel.data on/off` | `set flood.channel.data off` |
+| `flood.channel.block` | Blocks selected flood `GRP_TXT`/`GRP_DATA` channels when the key validates the packet. Add `h=<all|1-7|default>` for a per-channel hop override. | `get flood.channel.block`, `set flood.channel.block[.n] <key|#channel> [name] [h=...]`, `del flood.channel.block[.n]` | `set flood.channel.block #wardriving h=3` |
+| `flood.channel.block.hops` | Limits channel/data forwarding to short flood paths. `all` blocks matching packets at any hop count; `1`-`7` repeats packets at that hop count or lower and blocks longer matches. | `get flood.channel.block.hops`, `set flood.channel.block.hops <all|1-7>` | `set flood.channel.block.hops 3` |
 | `outpath` | Overrides the primary direct route used for replies to the current remote client. | `get outpath`, `set outpath <hops>`, `set outpath direct`, `set outpath clear`, `set outpath flood` | `set outpath A1B2C3,D4E5F6` |
+| `altpath` | Adds a secondary direct route for repeater replies to the current remote client. | `get altpath`, `set altpath <hops>`, `set altpath direct`, `set altpath clear`, `set altpath flood` | `set altpath 71CE82,BA09F0` |
 
 ## Other Keymind Commands
 
@@ -146,8 +150,8 @@ Serial CLI pages contain up to `128` rows. Remote LoRa CLI pages contain up to
 
 ## Direct Path Overrides
 
-`outpath` applies to the current remote client ACL entry. It needs remote
-client context, so it is not useful from the local serial CLI.
+`outpath` and `altpath` apply to the current remote client ACL entry. They need
+remote client context, so they are not useful from the local serial CLI.
 
 Set paths with comma-separated hop hashes. Each hop must be `2`, `4`, or `6`
 hex characters, and all hops in one path must use the same width.
@@ -158,12 +162,23 @@ set outpath A1B2C3,D4E5F6
 set outpath direct
 set outpath clear
 set outpath flood
+get altpath
+set altpath 71CE82,BA09F0
+set altpath clear
 ```
 
 `set outpath direct` sets a zero-hop direct route for a client reachable without
 repeaters. `set outpath clear` forgets the override and lets normal path
 discovery fill it again. `set outpath flood` forces replies to use flood packets
 until the client logs in again.
+
+When `outpath` is a valid direct path and `altpath` is also a valid, different
+direct path, repeater DM replies send two packets: one on `outpath` and one on
+`altpath`. The secondary `altpath` copy does not create its own direct-retry
+state, so retry tracking stays attached to the primary `outpath` packet.
+`altpath clear` disables the secondary direct reply. `altpath flood` is accepted
+for command symmetry, but it does not create a second flood reply; only a valid
+direct `altpath` sends the second packet.
 
 ## Direct Retry Settings
 

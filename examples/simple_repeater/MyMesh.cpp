@@ -624,8 +624,62 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
   }
 }
 
+static bool directPathsEqual(const uint8_t* a_path, uint8_t a_len, const uint8_t* b_path, uint8_t b_len) {
+  if (!mesh::Packet::isValidPathLen(a_len) || !mesh::Packet::isValidPathLen(b_len) || a_len != b_len) {
+    return false;
+  }
+  uint8_t hash_count = a_len & 63;
+  uint8_t hash_size = (a_len >> 6) + 1;
+  uint8_t byte_len = hash_count * hash_size;
+  return byte_len == 0 || memcmp(a_path, b_path, byte_len) == 0;
+}
+
+void MyMesh::sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size) {
+  if (packet == NULL) {
+    return;
+  }
+  if (client == NULL || !mesh::Packet::isValidPathLen(client->out_path_len)) {
+    sendFloodReply(packet, delay_millis, path_hash_size);
+    return;
+  }
+
+  mesh::Packet* alt = NULL;
+  if (mesh::Packet::isValidPathLen(client->alt_path_len)
+      && !directPathsEqual(client->out_path, client->out_path_len, client->alt_path, client->alt_path_len)) {
+    alt = obtainNewPacket();
+    if (alt != NULL) {
+      *alt = *packet;
+    } else {
+      MESH_DEBUG_PRINTLN("sendClientReply: altpath packet pool empty");
+    }
+  }
+
+  sendDirect(packet, client->out_path, client->out_path_len, delay_millis);
+  if (alt != NULL) {
+    uint8_t direct_retry_enabled = _prefs.direct_retry_enabled;
+    _prefs.direct_retry_enabled = 0;
+    sendDirect(alt, client->alt_path, client->alt_path_len, delay_millis);
+    _prefs.direct_retry_enabled = direct_retry_enabled;
+  }
+}
+
+uint8_t MyMesh::resolveFloodChannelBlockHops(uint8_t max_hops) const {
+  return max_hops == FLOOD_CHANNEL_BLOCK_HOPS_INHERIT ? _prefs.flood_channel_block_max_hops : max_hops;
+}
+
+bool MyMesh::floodChannelBlockHopApplies(const mesh::Packet* packet, uint8_t max_hops) const {
+  if (packet == NULL) {
+    return false;
+  }
+  max_hops = resolveFloodChannelBlockHops(max_hops);
+  return max_hops == FLOOD_CHANNEL_BLOCK_HOPS_ALL || packet->getPathHashCount() > max_hops;
+}
+
 bool MyMesh::floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const mesh::Packet* packet) const {
   if (!entry.active || packet == NULL || !packet->isRouteFlood()) {
+    return false;
+  }
+  if (!floodChannelBlockHopApplies(packet, entry.max_hops)) {
     return false;
   }
   uint8_t type = packet->getPayloadType();
@@ -645,8 +699,8 @@ bool MyMesh::floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const
 bool MyMesh::shouldBlockFloodChannelForward(const mesh::Packet* packet) const {
   for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
     if (floodChannelBlockMatches(flood_channel_blocks[i], packet)) {
-      MESH_DEBUG_PRINTLN("allowPacketForward: flood.channel.block matched slot=%d name=%s",
-                         i + 1, flood_channel_blocks[i].name);
+      MESH_DEBUG_PRINTLN("allowPacketForward: flood.channel.block matched slot=%d name=%s hops=%d",
+                         i + 1, flood_channel_blocks[i].name, packet->getPathHashCount());
       return true;
     }
   }
@@ -659,8 +713,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     if (packet->getPathHashCount() >= _prefs.flood_max) return false;
     if (packet->getRouteType() == ROUTE_TYPE_FLOOD && packet->getPathHashCount() >= _prefs.flood_max_unscoped) return false;
     if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT && packet->getPathHashCount() >= _prefs.flood_max_advert) return false;
-    if (!_prefs.flood_channel_data_enabled && packet->getPayloadType() == PAYLOAD_TYPE_GRP_DATA) {
-      MESH_DEBUG_PRINTLN("allowPacketForward: flood.channel.data off, blocking GRP_DATA");
+    if (!_prefs.flood_channel_data_enabled
+        && packet->getPayloadType() == PAYLOAD_TYPE_GRP_DATA
+        && floodChannelBlockHopApplies(packet, _prefs.flood_channel_block_max_hops)) {
+      MESH_DEBUG_PRINTLN("allowPacketForward: flood.channel.data off, blocking GRP_DATA hops=%d",
+                         packet->getPathHashCount());
       return false;
     }
     if (shouldBlockFloodChannelForward(packet)) return false;
@@ -1919,13 +1976,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       } else {
         mesh::Packet *reply =
             createDatagram(PAYLOAD_TYPE_RESPONSE, client->id, secret, reply_data, reply_len);
-        if (reply) {
-          if (mesh::Packet::isValidPathLen(client->out_path_len)) { // we have an out_path, so send DIRECT
-            sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
-          } else {
-            sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
-          }
-        }
+        sendClientReply(client, reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
       }
     } else {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
@@ -1952,13 +2003,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
                             PUB_KEY_SIZE);
 
         mesh::Packet *ack = createAck(ack_hash);
-        if (ack) {
-          if (mesh::Packet::isValidPathLen(client->out_path_len)) {
-            sendDirect(ack, client->out_path, client->out_path_len, TXT_ACK_DELAY);
-          } else {
-            sendFloodReply(ack, TXT_ACK_DELAY, packet->getPathHashSize());
-          }
-        }
+        sendClientReply(client, ack, TXT_ACK_DELAY, packet->getPathHashSize());
       }
 
       uint8_t temp[166];
@@ -1980,13 +2025,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         temp[4] = (TXT_TYPE_CLI_DATA << 2); // NOTE: legacy was: TXT_TYPE_PLAIN
 
         auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret, temp, 5 + text_len);
-        if (reply) {
-          if (mesh::Packet::isValidPathLen(client->out_path_len)) {
-            sendDirect(reply, client->out_path, client->out_path_len, CLI_REPLY_DELAY_MILLIS);
-          } else {
-            sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
-          }
-        }
+        sendClientReply(client, reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
       }
     } else {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
@@ -2172,6 +2211,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_retry_bridge_enabled = 0;
   _prefs.flood_retry_advert_enabled = FLOOD_RETRY_ADVERT_DEFAULT;
   _prefs.flood_channel_data_enabled = 1;
+  _prefs.flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
   _prefs.battery_alert_enabled = 0;
   _prefs.battery_alert_low_percent = BATTERY_ALERT_LOW_PERCENT_DEFAULT;
   _prefs.battery_alert_critical_percent = BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT;
@@ -3011,18 +3051,20 @@ void MyMesh::loadFloodChannelBlocks() {
   uint8_t magic[4];
   uint8_t count = 0;
   bool success = file.read(magic, sizeof(magic)) == sizeof(magic)
-      && memcmp(magic, "FCB1", sizeof(magic)) == 0
+      && memcmp(magic, "FCB2", sizeof(magic)) == 0
       && file.read(&count, sizeof(count)) == sizeof(count);
 
   for (int i = 0; success && i < count && i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
     uint8_t active = 0;
     uint8_t key_len = 0;
+    uint8_t max_hops = FLOOD_CHANNEL_BLOCK_HOPS_INHERIT;
     uint8_t hash_prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN];
     uint8_t secret[PUB_KEY_SIZE];
     char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
 
     success = file.read(&active, sizeof(active)) == sizeof(active);
     success = success && file.read(&key_len, sizeof(key_len)) == sizeof(key_len);
+    success = success && file.read(&max_hops, sizeof(max_hops)) == sizeof(max_hops);
     success = success && file.read(hash_prefix, sizeof(hash_prefix)) == sizeof(hash_prefix);
     success = success && file.read(secret, sizeof(secret)) == sizeof(secret);
     success = success && file.read((uint8_t*)name, sizeof(name)) == sizeof(name);
@@ -3035,6 +3077,9 @@ void MyMesh::loadFloodChannelBlocks() {
       auto& entry = flood_channel_blocks[i];
       entry.active = true;
       entry.key_len = key_len;
+      entry.max_hops = (max_hops == FLOOD_CHANNEL_BLOCK_HOPS_ALL
+          || max_hops == FLOOD_CHANNEL_BLOCK_HOPS_INHERIT
+          || (max_hops >= 1 && max_hops <= 7)) ? max_hops : FLOOD_CHANNEL_BLOCK_HOPS_INHERIT;
       memcpy(entry.secret, secret, sizeof(entry.secret));
       if (entry.key_len == CIPHER_KEY_SIZE) {
         memset(&entry.secret[CIPHER_KEY_SIZE], 0, PUB_KEY_SIZE - CIPHER_KEY_SIZE);
@@ -3057,7 +3102,7 @@ bool MyMesh::saveFloodChannelBlocks() {
     return false;
   }
 
-  const uint8_t magic[4] = {'F', 'C', 'B', '1'};
+  const uint8_t magic[4] = {'F', 'C', 'B', '2'};
   uint8_t count = FLOOD_CHANNEL_BLOCK_SLOTS;
   bool success = file.write(magic, sizeof(magic)) == sizeof(magic);
   success = success && file.write(&count, sizeof(count)) == sizeof(count);
@@ -3065,8 +3110,10 @@ bool MyMesh::saveFloodChannelBlocks() {
   for (int i = 0; success && i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
     const auto& entry = flood_channel_blocks[i];
     uint8_t active = entry.active ? 1 : 0;
+    uint8_t max_hops = entry.active ? entry.max_hops : FLOOD_CHANNEL_BLOCK_HOPS_INHERIT;
     success = file.write(&active, sizeof(active)) == sizeof(active);
     success = success && file.write(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len);
+    success = success && file.write(&max_hops, sizeof(max_hops)) == sizeof(max_hops);
     success = success && file.write(entry.hash_prefix, sizeof(entry.hash_prefix)) == sizeof(entry.hash_prefix);
     success = success && file.write(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret);
     success = success && file.write((const uint8_t*)entry.name, sizeof(entry.name)) == sizeof(entry.name);
@@ -3098,6 +3145,16 @@ static bool parseFloodChannelBlockPrefixSelector(const char* selector,
     }
   }
   return mesh::Utils::fromHex(prefix, FLOOD_CHANNEL_BLOCK_PREFIX_LEN, text);
+}
+
+static void formatFloodChannelBlockHops(char* dest, uint8_t max_hops) {
+  if (max_hops == FLOOD_CHANNEL_BLOCK_HOPS_ALL) {
+    strcpy(dest, "h=all");
+  } else if (max_hops == FLOOD_CHANNEL_BLOCK_HOPS_INHERIT) {
+    strcpy(dest, "h=def");
+  } else {
+    sprintf(dest, "h>%u", (unsigned int)max_hops);
+  }
 }
 
 int MyMesh::findFloodChannelBlockBySelector(const char* selector) const {
@@ -3154,23 +3211,31 @@ void MyMesh::formatFloodChannelBlockDetail(char* reply, int idx) const {
 
   const auto& entry = flood_channel_blocks[idx];
   if (!entry.active) {
-    snprintf(reply, 160, "> %d empty", idx + 1);
+    snprintf(reply, 150, "> %d empty", idx + 1);
     return;
   }
 
   char prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN * 2 + 1];
+  char hops[8];
   mesh::Utils::toHex(prefix, entry.hash_prefix, FLOOD_CHANNEL_BLOCK_PREFIX_LEN);
-  snprintf(reply, 160, "> %d %s %u %s", idx + 1, prefix, (unsigned int)entry.key_len * 8, entry.name);
+  formatFloodChannelBlockHops(hops, entry.max_hops);
+  snprintf(reply, 150, "> %d %s %u %s %s", idx + 1, prefix, (unsigned int)entry.key_len * 8, hops, entry.name);
 }
 
 void MyMesh::setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
-                                  const char* name, char* reply) {
+                                  const char* name, uint8_t max_hops, char* reply) {
   if ((key_len != CIPHER_KEY_SIZE && key_len != PUB_KEY_SIZE) || secret == NULL || name == NULL || name[0] == 0) {
     strcpy(reply, "Err - bad params");
     return;
   }
   if (index < 0 || index > FLOOD_CHANNEL_BLOCK_SLOTS) {
     snprintf(reply, 160, "Err - index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+    return;
+  }
+  if (max_hops != FLOOD_CHANNEL_BLOCK_HOPS_ALL
+      && max_hops != FLOOD_CHANNEL_BLOCK_HOPS_INHERIT
+      && (max_hops < 1 || max_hops > 7)) {
+    strcpy(reply, "Err - bad hops");
     return;
   }
 
@@ -3186,6 +3251,7 @@ void MyMesh::setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_
   clearFloodChannelBlockEntry(entry);
   entry.active = true;
   entry.key_len = key_len;
+  entry.max_hops = max_hops;
   memcpy(entry.secret, secret, PUB_KEY_SIZE);
   if (entry.key_len == CIPHER_KEY_SIZE) {
     memset(&entry.secret[CIPHER_KEY_SIZE], 0, PUB_KEY_SIZE - CIPHER_KEY_SIZE);
@@ -3212,8 +3278,24 @@ void MyMesh::formatFloodChannelBlocks(const char* selector, char* reply) {
   }
 
   char* out = reply;
-  size_t remaining = 160;
-  int written = snprintf(out, remaining, ">");
+  const size_t reply_limit = 150;
+  size_t remaining = reply_limit;
+  char hops[8];
+  formatFloodChannelBlockHops(hops, _prefs.flood_channel_block_max_hops);
+  size_t full_len = 2 + strlen(hops);
+  for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS; i++) {
+    const auto& entry = flood_channel_blocks[i];
+    size_t display_len = entry.active ? strlen(entry.name) : 1;
+    full_len += 1 + (i + 1 >= 10 ? 2 : 1) + 1 + display_len;
+    if (entry.active && entry.max_hops != FLOOD_CHANNEL_BLOCK_HOPS_INHERIT) {
+      char row_hops[8];
+      formatFloodChannelBlockHops(row_hops, entry.max_hops);
+      full_len += 1 + strlen(row_hops);
+    }
+  }
+  bool trim_names = full_len >= reply_limit;
+
+  int written = snprintf(out, remaining, "> %s", hops);
   if (written < 0 || (size_t)written >= remaining) {
     reply[0] = 0;
     return;
@@ -3222,18 +3304,30 @@ void MyMesh::formatFloodChannelBlocks(const char* selector, char* reply) {
   remaining -= written;
 
   for (int i = 0; i < FLOOD_CHANNEL_BLOCK_SLOTS && remaining > 1; i++) {
-    char display[8];
+    const char* display = "-";
+    char short_display[6];
     const auto& entry = flood_channel_blocks[i];
-    if (!entry.active) {
-      strcpy(display, "-");
-    } else {
-      StrHelper::strncpy(display, entry.name, sizeof(display));
-      if (strlen(entry.name) >= sizeof(display)) {
-        display[sizeof(display) - 2] = '~';
-        display[sizeof(display) - 1] = 0;
+    if (entry.active) {
+      char row_hops[8];
+      row_hops[0] = 0;
+      if (entry.max_hops != FLOOD_CHANNEL_BLOCK_HOPS_INHERIT) {
+        formatFloodChannelBlockHops(row_hops, entry.max_hops);
       }
+      if (trim_names) {
+        StrHelper::strncpy(short_display, entry.name, sizeof(short_display));
+        if (strlen(entry.name) >= sizeof(short_display)) {
+          short_display[sizeof(short_display) - 2] = '~';
+          short_display[sizeof(short_display) - 1] = 0;
+        }
+        display = short_display;
+      } else {
+        display = entry.name;
+      }
+      written = snprintf(out, remaining, " %d:%s%s%s", i + 1, display,
+                         row_hops[0] ? "/" : "", row_hops);
+    } else {
+      written = snprintf(out, remaining, " %d:%s", i + 1, display);
     }
-    written = snprintf(out, remaining, " %d:%s", i + 1, display);
     if (written < 0 || (size_t)written >= remaining) {
       out[remaining - 1] = 0;
       break;
@@ -3478,14 +3572,23 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     reply[0] = 0;
   } else if (strcmp(command, "get outpath") == 0
           || strcmp(command, "set outpath") == 0
-          || strncmp(command, "set outpath ", 12) == 0) {
+          || strncmp(command, "set outpath ", 12) == 0
+          || strcmp(command, "get altpath") == 0
+          || strcmp(command, "set altpath") == 0
+          || strncmp(command, "set altpath ", 12) == 0) {
     bool is_get = strncmp(command, "get ", 4) == 0;
+    bool is_alt = strncmp(command + 4, "altpath", 7) == 0;
     if (sender == NULL) {
       strcpy(reply, "Err - command needs remote client context");
-    } else if (is_get) {
-      formatPathReply(sender->out_path, sender->out_path_len, reply, 160);
     } else {
-      char* spec = command + 11;  // length of "set outpath"
+      uint8_t* stored_path = is_alt ? sender->alt_path : sender->out_path;
+      uint8_t* stored_path_len = is_alt ? &sender->alt_path_len : &sender->out_path_len;
+      if (is_get) {
+        formatPathReply(stored_path, *stored_path_len, reply, 160);
+        return;
+      }
+
+      char* spec = command + 11;  // length of "set outpath" or "set altpath"
       if (*spec == ' ') spec++;
 
       uint8_t path[MAX_PATH_SIZE];
@@ -3495,13 +3598,13 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
         strcpy(reply, err ? err : "Err - invalid path");
       } else {
         if (path_len == OUT_PATH_UNKNOWN || path_len == OUT_PATH_FORCE_FLOOD) {
-          memset(sender->out_path, 0, sizeof(sender->out_path));
-          sender->out_path_len = path_len;
+          memset(stored_path, 0, MAX_PATH_SIZE);
+          *stored_path_len = path_len;
         } else {
-          sender->out_path_len = mesh::Packet::copyPath(sender->out_path, path, path_len);
+          *stored_path_len = mesh::Packet::copyPath(stored_path, path, path_len);
         }
         dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
-        formatPathReply(sender->out_path, sender->out_path_len, reply, 160);
+        formatPathReply(stored_path, *stored_path_len, reply, 160);
       }
     }
   } else if (strncmp(command, "send text.flood ", 16) == 0) {

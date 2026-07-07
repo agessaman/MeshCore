@@ -781,9 +781,11 @@ send text.flood checking ridge link
 
 **Forwarding behavior:** Repeater firmware only. The repeater still receives and
 logs the packet when logging is enabled; this only blocks retransmission.
-This is checked before `flood.channel.block` and applies to every flood
-`GRP_DATA` packet regardless of channel key. Flood group text (`GRP_TXT`) is
-unaffected.
+This is checked before `flood.channel.block` and applies to flood `GRP_DATA`
+packets regardless of channel key, subject to `flood.channel.block.hops`.
+Flood group text (`GRP_TXT`) is unaffected by this setting.
+
+`get flood.channel.data` includes the active hop gate as `h=all` or `h>N`.
 
 ---
 
@@ -792,10 +794,12 @@ unaffected.
 - `get flood.channel.block`
 - `get flood.channel.block.<n>`
 - `get flood.channel.block <name|8_hex_prefix>`
-- `set flood.channel.block <key> <name>`
-- `set flood.channel.block.<n> <key> <name>`
-- `set flood.channel.block #channel`
-- `set flood.channel.block.<n> #channel`
+- `get flood.channel.block.hops`
+- `set flood.channel.block <key> <name> [h=<all|1-7|default>]`
+- `set flood.channel.block.<n> <key> <name> [h=<all|1-7|default>]`
+- `set flood.channel.block #channel [h=<all|1-7|default>]`
+- `set flood.channel.block.<n> #channel [h=<all|1-7|default>]`
+- `set flood.channel.block.hops <all|1-7>`
 - `del flood.channel.block.<n>`
 - `del flood.channel.block <name|8_hex_prefix>`
 
@@ -803,8 +807,11 @@ unaffected.
 - `n`: Slot number from `1` to `15`.
 - `key`: 128-bit or 256-bit channel key as hex.
 - `#channel`: Public hashtag channel name; derives the 128-bit channel key from the hashtag and is stored as the row name.
-- `name`: Local label for hex-key rows. Not needed for `#channel`; any extra text after `#channel` is ignored.
+- `name`: Local label for hex-key rows. Not needed for `#channel`; extra text after `#channel` is ignored unless it is a hop setting.
 - `8_hex_prefix`: First 4 bytes of the derived channel hash, shown by single-entry `get`.
+- `all`: Block matching flood channel packets at any received flood hop count.
+- `1-7`: Maximum received flood path hash count to repeat. Matching packets over this hop count are blocked.
+- `default`: Row inherits the global `flood.channel.block.hops` setting.
 
 **Slot behavior:** Without `.n`, `set flood.channel.block` updates an existing
 row with the same derived channel prefix or name, otherwise it uses the next
@@ -815,7 +822,26 @@ writes that slot.
 flood `GRP_TXT` and `GRP_DATA` channel packets. The repeater still receives and
 logs the packet, but it does not retransmit it when a configured block entry can
 validate/decode it. If `flood.channel.data` is `off`, all flood `GRP_DATA`
-packets are blocked before this per-channel check runs.
+packets over the hop gate are blocked before this per-channel check runs.
+
+**Hop gate:** `flood.channel.block.hops` defaults to `all`, which preserves the
+original behavior. When set to `N` from `1` to `7`, both `flood.channel.data off`
+and block rows that inherit the global setting only block packets whose received
+flood path hash count is greater than `N`; packets at `N` hops or lower can
+still repeat. For example, `set flood.channel.block.hops 1` repeats zero-hop and
+one-hop matches but blocks two-hop and longer matches.
+
+Each block row can override the global hop gate with `h=<all|1-7|default>`.
+For example, `set flood.channel.block #wardriving h=3` blocks `#wardriving`
+matches above three hops, while `set flood.channel.block #bot h=7` blocks
+`#bot` matches above seven hops. Use `h=default` to make the row inherit the
+global setting again.
+
+`get flood.channel.block` includes the global default first, then adds per-row
+overrides as `/h>N` or `/h=all`; inherited rows do not show a suffix. Single-row
+`get` replies include that row's stored hop mode as `h=def`, `h=all`, or `h>N`.
+List replies truncate displayed row names only when the full list would exceed
+the remote-management response limit.
 
 **Matching behavior:** Each block entry stores the first 4 bytes of the derived
 channel hash for display and lookup. Current group packets carry only the first
@@ -829,7 +855,11 @@ MAC/decrypt.
 ```
 set flood.channel.block #test
 set flood.channel.block.2 9cd8fcf22a47333b591d96a2b848b73f #test
+set flood.channel.block.hops 3
+set flood.channel.block #wardriving h=3
+set flood.channel.block #bot h=7
 get flood.channel.block
+get flood.channel.block.hops
 get flood.channel.block #test
 del flood.channel.block.2
 ```

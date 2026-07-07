@@ -87,6 +87,8 @@
 #ifndef FLOOD_CHANNEL_BLOCK_PREFIX_LEN
   #define FLOOD_CHANNEL_BLOCK_PREFIX_LEN  4
 #endif
+#define FLOOD_CHANNEL_BLOCK_HOPS_ALL      0xFF
+#define FLOOD_CHANNEL_BLOCK_HOPS_INHERIT  0xFE
 
 #define DIRECT_RETRY_CR4_MIN_SNR_X4_DEFAULT  40
 #define DIRECT_RETRY_CR5_MIN_SNR_X4_DEFAULT  30
@@ -167,6 +169,7 @@ struct NodePrefs { // persisted to file
   uint8_t battery_alert_critical_percent;
   uint8_t direct_retry_recent_enabled;
   uint8_t flood_channel_data_enabled;
+  uint8_t flood_channel_block_max_hops;
 };
 
 class CommonCLICallbacks {
@@ -228,11 +231,12 @@ public:
     strcpy(reply, "Error: unsupported");
   }
   virtual void setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
-                                    const char* name, char* reply) {
+                                    const char* name, uint8_t max_hops, char* reply) {
     (void)index;
     (void)secret;
     (void)key_len;
     (void)name;
+    (void)max_hops;
     strcpy(reply, "Error: unsupported");
   }
   virtual void formatFloodChannelBlocks(const char* selector, char* reply) {

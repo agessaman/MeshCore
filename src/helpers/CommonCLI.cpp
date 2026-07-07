@@ -325,6 +325,98 @@ static void formatFloodRetryPathGate(char* dest, uint8_t path_gate) {
   }
 }
 
+static bool parseFloodChannelBlockHops(const char* value, uint8_t& max_hops) {
+  if (value == NULL) {
+    return false;
+  }
+  value = skipSpacesConst(value);
+  if (strcmp(value, "all") == 0) {
+    max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    return true;
+  }
+  return parseUint8Strict(value, 1, 7, max_hops);
+}
+
+static bool parseFloodChannelBlockRowHops(const char* value, uint8_t& max_hops) {
+  if (value == NULL) {
+    return false;
+  }
+  value = skipSpacesConst(value);
+  if (strcmp(value, "default") == 0 || strcmp(value, "def") == 0 || strcmp(value, "inherit") == 0) {
+    max_hops = FLOOD_CHANNEL_BLOCK_HOPS_INHERIT;
+    return true;
+  }
+  return parseFloodChannelBlockHops(value, max_hops);
+}
+
+static bool parseFloodChannelBlockHopAssignment(const char* text, bool allow_bare, uint8_t& max_hops) {
+  char token[16];
+  text = skipSpacesConst(text);
+  if (text == NULL || *text == 0) {
+    return false;
+  }
+
+  size_t len = 0;
+  while (text[len] && text[len] != ' ' && len + 1 < sizeof(token)) {
+    token[len] = text[len];
+    len++;
+  }
+  token[len] = 0;
+
+  const char* value = NULL;
+  if (strncmp(token, "h=", 2) == 0) {
+    value = token + 2;
+  } else if (strncmp(token, "hops=", 5) == 0) {
+    value = token + 5;
+  } else if (allow_bare) {
+    value = token;
+  } else {
+    return false;
+  }
+  return parseFloodChannelBlockRowHops(value, max_hops);
+}
+
+static bool looksFloodChannelBlockHopAssignment(const char* text) {
+  text = skipSpacesConst(text);
+  if (text == NULL || *text == 0) {
+    return false;
+  }
+  return (*text >= '0' && *text <= '9')
+      || strncmp(text, "h=", 2) == 0
+      || strncmp(text, "hops=", 5) == 0
+      || strncmp(text, "all", 3) == 0
+      || strncmp(text, "def", 3) == 0
+      || strncmp(text, "default", 7) == 0
+      || strncmp(text, "inherit", 7) == 0;
+}
+
+static bool trimFloodChannelBlockHopSuffix(char* name, uint8_t& max_hops) {
+  size_t len = strlen(name);
+  while (len > 0 && name[len - 1] == ' ') {
+    name[--len] = 0;
+  }
+  char* token = strrchr(name, ' ');
+  if (token == NULL) {
+    return true;
+  }
+  if (strncmp(token + 1, "h=", 2) != 0 && strncmp(token + 1, "hops=", 5) != 0) {
+    return true;
+  }
+  if (!parseFloodChannelBlockHopAssignment(token + 1, false, max_hops)) {
+    return false;
+  }
+  *token = 0;
+  return strlen(name) > 0;
+}
+
+static void formatFloodChannelBlockHops(char* dest, uint8_t max_hops) {
+  if (max_hops == FLOOD_CHANNEL_BLOCK_HOPS_ALL) {
+    strcpy(dest, "h=all");
+  } else {
+    sprintf(dest, "h>%u", (unsigned int)max_hops);
+  }
+}
+
 static void formatFloodRetryPrefixList(char* dest, const uint8_t prefixes[][FLOOD_RETRY_PREFIX_LEN],
                                        uint8_t max_prefixes) {
   char* out = dest;
@@ -611,6 +703,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->battery_alert_critical_percent = BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT;
     _prefs->direct_retry_recent_enabled = DIRECT_RETRY_RECENT_DEFAULT;
     _prefs->flood_channel_data_enabled = 1;
+    _prefs->flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
     bool has_flood_retry_prefs = file.available() >= 2;
     if (has_flood_retry_prefs) {
       file.read((uint8_t *)&_prefs->flood_retry_attempts, sizeof(_prefs->flood_retry_attempts));     // 311
@@ -645,8 +738,11 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       if (file.available() >= (int)sizeof(_prefs->flood_channel_data_enabled)) {
         file.read((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
       }
+      if (file.available() >= (int)sizeof(_prefs->flood_channel_block_max_hops)) {
+        file.read((uint8_t *)&_prefs->flood_channel_block_max_hops, sizeof(_prefs->flood_channel_block_max_hops));
+      }
     }
-    // next: 673
+    // next: 674
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -707,6 +803,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->battery_alert_enabled = constrain(_prefs->battery_alert_enabled, 0, 1);
     _prefs->direct_retry_recent_enabled = constrain(_prefs->direct_retry_recent_enabled, 0, 1);
     _prefs->flood_channel_data_enabled = constrain(_prefs->flood_channel_data_enabled, 0, 1);
+    if (_prefs->flood_channel_block_max_hops != FLOOD_CHANNEL_BLOCK_HOPS_ALL
+        && (_prefs->flood_channel_block_max_hops < 1 || _prefs->flood_channel_block_max_hops > 7)) {
+      _prefs->flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    }
     if (_prefs->battery_alert_low_percent < 1
         || _prefs->battery_alert_low_percent > 100
         || _prefs->battery_alert_critical_percent >= _prefs->battery_alert_low_percent) {
@@ -805,7 +905,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->battery_alert_critical_percent, sizeof(_prefs->battery_alert_critical_percent));
     file.write((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
     file.write((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
-    // next: 673
+    file.write((uint8_t *)&_prefs->flood_channel_block_max_hops, sizeof(_prefs->flood_channel_block_max_hops));
+    // next: 674
 
     file.close();
   }
@@ -1461,6 +1562,15 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error, must be on or off");
     }
+  } else if (memcmp(config, "flood.channel.block.hops ", 25) == 0) {
+    uint8_t max_hops;
+    if (parseFloodChannelBlockHops(&config[25], max_hops)) {
+      _prefs->flood_channel_block_max_hops = max_hops;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be all or 1-7");
+    }
   } else if (memcmp(config, "flood.channel.block", 19) == 0
       && (config[19] == ' ' || config[19] == '.')) {
     const char* cursor = &config[19];
@@ -1483,10 +1593,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     key_text[key_len_text] = 0;
 
     char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
+    uint8_t block_hops = FLOOD_CHANNEL_BLOCK_HOPS_INHERIT;
     if (key_text[0] == '#') {
       StrHelper::strncpy(name, key_text, sizeof(name));
+      const char* extra = skipSpacesConst(cursor);
+      if (*extra && looksFloodChannelBlockHopAssignment(extra)
+          && !parseFloodChannelBlockHopAssignment(extra, true, block_hops)) {
+        strcpy(reply, "Error, hops must be all, default, or 1-7");
+        return;
+      }
     } else {
       copyTrimmedFloodChannelBlockName(name, sizeof(name), cursor);
+      if (!trimFloodChannelBlockHopSuffix(name, block_hops)) {
+        strcpy(reply, "Error, bad name or hops");
+        return;
+      }
     }
     uint8_t secret[PUB_KEY_SIZE];
     uint8_t decoded_key_len = 0;
@@ -1495,7 +1616,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else if (name[0] == 0 || !isValidName(name)) {
       strcpy(reply, "Error, bad name");
     } else {
-      _callbacks->setFloodChannelBlock(index, secret, decoded_key_len, name, reply);
+      _callbacks->setFloodChannelBlock(index, secret, decoded_key_len, name, block_hops, reply);
     }
   } else if (memcmp(config, "flood.retry.count ", 18) == 0) {
     int attempts = looksUnsignedInteger(&config[18]) ? _atoi(&config[18]) : -1;
@@ -1820,7 +1941,13 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "txdelay", 7) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->tx_delay_factor));
   } else if (memcmp(config, "flood.channel.data", 18) == 0) {
-    sprintf(reply, "> %s", _prefs->flood_channel_data_enabled ? "on" : "off");
+    char hops[8];
+    formatFloodChannelBlockHops(hops, _prefs->flood_channel_block_max_hops);
+    sprintf(reply, "> %s %s", _prefs->flood_channel_data_enabled ? "on" : "off", hops);
+  } else if (memcmp(config, "flood.channel.block.hops", 24) == 0) {
+    char hops[8];
+    formatFloodChannelBlockHops(hops, _prefs->flood_channel_block_max_hops);
+    sprintf(reply, "> %s", hops);
   } else if (memcmp(config, "flood.channel.block", 19) == 0
       && (config[19] == 0 || config[19] == ' ' || config[19] == '.')) {
     const char* cursor = &config[19];

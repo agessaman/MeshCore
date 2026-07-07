@@ -135,6 +135,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   struct FloodChannelBlockEntry {
     bool active;
     uint8_t key_len;
+    uint8_t max_hops;
     uint8_t hash_prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN];
     uint8_t secret[PUB_KEY_SIZE];
     char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
@@ -206,6 +207,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void clearFloodChannelBlockEntry(FloodChannelBlockEntry& entry);
   void deriveFloodChannelBlockPrefix(const uint8_t* secret, uint8_t key_len,
                                      uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN]) const;
+  uint8_t resolveFloodChannelBlockHops(uint8_t max_hops) const;
+  bool floodChannelBlockHopApplies(const mesh::Packet* packet, uint8_t max_hops) const;
   bool floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const mesh::Packet* packet) const;
   bool shouldBlockFloodChannelForward(const mesh::Packet* packet) const;
   int findFloodChannelBlockBySelector(const char* selector) const;
@@ -291,6 +294,7 @@ protected:
   void onControlDataRecv(mesh::Packet* packet) override;
 
   void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
+  void sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
@@ -342,7 +346,7 @@ public:
   bool saveRegions() override;
   void onDefaultRegionChanged(const RegionEntry* r) override;
   void setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
-                            const char* name, char* reply) override;
+                            const char* name, uint8_t max_hops, char* reply) override;
   void formatFloodChannelBlocks(const char* selector, char* reply) override;
   void deleteFloodChannelBlock(const char* selector, char* reply) override;
 
