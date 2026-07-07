@@ -704,6 +704,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->direct_retry_recent_enabled = DIRECT_RETRY_RECENT_DEFAULT;
     _prefs->flood_channel_data_enabled = 1;
     _prefs->flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    _prefs->flood_channel_data_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
     bool has_flood_retry_prefs = file.available() >= 2;
     if (has_flood_retry_prefs) {
       file.read((uint8_t *)&_prefs->flood_retry_attempts, sizeof(_prefs->flood_retry_attempts));     // 311
@@ -740,6 +741,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       }
       if (file.available() >= (int)sizeof(_prefs->flood_channel_block_max_hops)) {
         file.read((uint8_t *)&_prefs->flood_channel_block_max_hops, sizeof(_prefs->flood_channel_block_max_hops));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_channel_data_max_hops)) {
+        file.read((uint8_t *)&_prefs->flood_channel_data_max_hops, sizeof(_prefs->flood_channel_data_max_hops));
       }
     }
     // next: 674
@@ -806,6 +810,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     if (_prefs->flood_channel_block_max_hops != FLOOD_CHANNEL_BLOCK_HOPS_ALL
         && (_prefs->flood_channel_block_max_hops < 1 || _prefs->flood_channel_block_max_hops > 7)) {
       _prefs->flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    }
+    if (_prefs->flood_channel_data_max_hops != FLOOD_CHANNEL_BLOCK_HOPS_ALL
+        && (_prefs->flood_channel_data_max_hops < 1 || _prefs->flood_channel_data_max_hops > 7)) {
+      _prefs->flood_channel_data_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
     }
     if (_prefs->battery_alert_low_percent < 1
         || _prefs->battery_alert_low_percent > 100
@@ -906,6 +914,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
     file.write((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
     file.write((uint8_t *)&_prefs->flood_channel_block_max_hops, sizeof(_prefs->flood_channel_block_max_hops));
+    file.write((uint8_t *)&_prefs->flood_channel_data_max_hops, sizeof(_prefs->flood_channel_data_max_hops));
     // next: 674
 
     file.close();
@@ -1550,6 +1559,15 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error, must be 0-5000 ms");
     }
+  } else if (memcmp(config, "flood.channel.data.hops ", 24) == 0) {
+    uint8_t max_hops;
+    if (parseFloodChannelBlockHops(&config[24], max_hops)) {
+      _prefs->flood_channel_data_max_hops = max_hops;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be all or 1-7");
+    }
   } else if (memcmp(config, "flood.channel.data ", 19) == 0) {
     if (strcmp(&config[19], "on") == 0) {
       _prefs->flood_channel_data_enabled = 1;
@@ -1940,9 +1958,13 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->rx_delay_base));
   } else if (memcmp(config, "txdelay", 7) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->tx_delay_factor));
-  } else if (memcmp(config, "flood.channel.data", 18) == 0) {
+  } else if (strcmp(config, "flood.channel.data.hops") == 0) {
     char hops[8];
-    formatFloodChannelBlockHops(hops, _prefs->flood_channel_block_max_hops);
+    formatFloodChannelBlockHops(hops, _prefs->flood_channel_data_max_hops);
+    sprintf(reply, "> %s", hops);
+  } else if (strcmp(config, "flood.channel.data") == 0) {
+    char hops[8];
+    formatFloodChannelBlockHops(hops, _prefs->flood_channel_data_max_hops);
     sprintf(reply, "> %s %s", _prefs->flood_channel_data_enabled ? "on" : "off", hops);
   } else if (memcmp(config, "flood.channel.block.hops", 24) == 0) {
     char hops[8];

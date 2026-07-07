@@ -531,7 +531,7 @@ send text.flood checking ridge link
 **Parameters:**
   - `state`: `on`|`off`
 
-**Default:** `on`
+**Default:** `flood.channel.data on`; `flood.channel.data.hops h=all`
 
 ---
 
@@ -771,19 +771,28 @@ send text.flood checking ridge link
 #### Forward flood group data packets on repeaters
 **Usage:**
 - `get flood.channel.data`
+- `get flood.channel.data.hops`
 - `set flood.channel.data <on|off>`
+- `set flood.channel.data.hops <all|1-7>`
 
 **Parameters:**
 - `on`: Retransmit received flood `GRP_DATA` channel packets.
 - `off`: Do not retransmit received flood `GRP_DATA` channel packets.
+- `all`: When `flood.channel.data` is `off`, block `GRP_DATA` at any received flood hop count.
+- `1-7`: When `flood.channel.data` is `off`, repeat `GRP_DATA` at this hop count or lower and block longer paths.
 
-**Default:** `on`
+**Default:** `flood.channel.data on`; `flood.channel.data.hops h=all`
 
 **Forwarding behavior:** Repeater firmware only. The repeater still receives and
 logs the packet when logging is enabled; this only blocks retransmission.
 This is checked before `flood.channel.block` and applies to flood `GRP_DATA`
-packets regardless of channel key, subject to `flood.channel.block.hops`.
-Flood group text (`GRP_TXT`) is unaffected by this setting.
+packets regardless of channel key. Flood group text (`GRP_TXT`) is unaffected by
+this setting.
+
+`flood.channel.data.hops` is separate from `flood.channel.block.hops`.
+`flood.channel.block.hops` does not restrict unkeyed `GRP_DATA` packets. With
+the default `flood.channel.data on`, `GRP_DATA` repeats normally even when
+`flood.channel.block.hops` is set for keyed channel blocks.
 
 `get flood.channel.data` includes the active hop gate as `h=all` or `h>N`.
 
@@ -818,22 +827,29 @@ row with the same derived channel prefix or name, otherwise it uses the next
 empty slot. If all 15 slots are full, the command fails. With `.n`, the command
 writes that slot.
 
+**Default row:** Repeater firmware seeds a new block list with
+`#wardriving h=4` in slot 1. This is a normal row, so it can be changed with
+`set flood.channel.block #wardriving h=<all|1-7|default>` or removed with
+`del flood.channel.block #wardriving`. Once the block list has been saved, the
+firmware uses the saved list and does not recreate the default after deletion.
+
 **Forwarding behavior:** Repeater firmware only. This only affects received
 flood `GRP_TXT` and `GRP_DATA` channel packets. The repeater still receives and
 logs the packet, but it does not retransmit it when a configured block entry can
-validate/decode it. If `flood.channel.data` is `off`, all flood `GRP_DATA`
-packets over the hop gate are blocked before this per-channel check runs.
+validate/decode it. If `flood.channel.data` is `off`, `GRP_DATA` packets are
+checked against the separate `flood.channel.data.hops` gate before this
+per-channel check runs.
 
 **Hop gate:** `flood.channel.block.hops` defaults to `all`, which preserves the
-original behavior. When set to `N` from `1` to `7`, both `flood.channel.data off`
-and block rows that inherit the global setting only block packets whose received
-flood path hash count is greater than `N`; packets at `N` hops or lower can
-still repeat. For example, `set flood.channel.block.hops 1` repeats zero-hop and
-one-hop matches but blocks two-hop and longer matches.
+original behavior. When set to `N` from `1` to `7`, block rows that inherit the
+global setting only block packets whose received flood path hash count is
+greater than `N`; packets at `N` hops or lower can still repeat. For example,
+`set flood.channel.block.hops 1` repeats zero-hop and one-hop matches but blocks
+two-hop and longer matches.
 
 Each block row can override the global hop gate with `h=<all|1-7|default>`.
-For example, `set flood.channel.block #wardriving h=3` blocks `#wardriving`
-matches above three hops, while `set flood.channel.block #bot h=7` blocks
+For example, the seeded `#wardriving h=4` row blocks `#wardriving` matches
+above four hops, while `set flood.channel.block #bot h=7` blocks
 `#bot` matches above seven hops. Use `h=default` to make the row inherit the
 global setting again.
 
@@ -856,7 +872,7 @@ MAC/decrypt.
 set flood.channel.block #test
 set flood.channel.block.2 9cd8fcf22a47333b591d96a2b848b73f #test
 set flood.channel.block.hops 3
-set flood.channel.block #wardriving h=3
+set flood.channel.block #wardriving h=4
 set flood.channel.block #bot h=7
 get flood.channel.block
 get flood.channel.block.hops
@@ -1383,6 +1399,9 @@ set flood.retry.bucket 2 none
 
 **Default:** `15` with the `rooftop` preset
 
+**Note:** Direct-routed type 2 text packets always use 21 retry attempts,
+regardless of this setting or the short-path cap.
+
 **Examples:**
 ```
 get direct.retry.count
@@ -1405,6 +1424,9 @@ set direct.retry.count 15
 
 **Explanation:**
 - The first retry waits `base` milliseconds after the failed echo window.
+- The failed echo window includes a packet-length add-on. TRACE and
+  ANON_REQ/type 7 packets keep the existing 4x line-time add-on. TXT_MSG/type 2
+  packets use 7x. Other direct retry packets use 6x.
 - For non-TRACE direct paths shorter than 6 remaining hops, the effective wait is scaled by `hops / 6`.
 - Non-TRACE direct paths with 6 or more remaining hops use the configured value unchanged.
 - TRACE retries shorter than 16 remaining hops use `hops / 16`; 16 or more remaining hops use the configured value unchanged.
@@ -1433,6 +1455,9 @@ set direct.retry.base 500
 
 **Explanation:**
 - Retry delay is `base + attempt_index * step`.
+- This is added after the failed echo window. TRACE and ANON_REQ/type 7 packets
+  keep the existing 4x packet-length add-on. TXT_MSG/type 2 packets use 7x.
+  Other direct retry packets use 6x.
 - For non-TRACE direct paths shorter than 6 remaining hops, that computed delay is scaled by `hops / 6`.
 - Non-TRACE direct paths with 6 or more remaining hops use the computed delay unchanged.
 - TRACE retries shorter than 16 remaining hops use `hops / 16`; 16 or more remaining hops use the computed delay unchanged.

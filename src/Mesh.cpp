@@ -4,7 +4,7 @@
 namespace mesh {
 
 static const uint8_t DIRECT_RETRY_MAX_ATTEMPTS_DEFAULT = 15;
-static const uint8_t DIRECT_RETRY_MAX_ATTEMPTS_HARD_MAX = 15;
+static const uint8_t DIRECT_RETRY_MAX_ATTEMPTS_HARD_MAX = 21;
 static const uint8_t FLOOD_RETRY_MAX_ATTEMPTS_DEFAULT = 15;
 static const uint8_t FLOOD_RETRY_MAX_ATTEMPTS_HARD_MAX = 15;
 static const uint8_t FLOOD_RETRY_MAX_PATH_DEFAULT = 1;

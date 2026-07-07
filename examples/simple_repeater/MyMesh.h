@@ -204,11 +204,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool isMillisTimerDue(unsigned long timestamp) const;
   void loadFloodChannelBlocks();
   bool saveFloodChannelBlocks();
+  void seedDefaultFloodChannelBlocks();
   void clearFloodChannelBlockEntry(FloodChannelBlockEntry& entry);
   void deriveFloodChannelBlockPrefix(const uint8_t* secret, uint8_t key_len,
                                      uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN]) const;
   uint8_t resolveFloodChannelBlockHops(uint8_t max_hops) const;
   bool floodChannelBlockHopApplies(const mesh::Packet* packet, uint8_t max_hops) const;
+  bool floodChannelDataHopApplies(const mesh::Packet* packet) const;
   bool floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const mesh::Packet* packet) const;
   bool shouldBlockFloodChannelForward(const mesh::Packet* packet) const;
   int findFloodChannelBlockBySelector(const char* selector) const;

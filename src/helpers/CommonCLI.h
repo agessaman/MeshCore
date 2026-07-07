@@ -170,6 +170,7 @@ struct NodePrefs { // persisted to file
   uint8_t direct_retry_recent_enabled;
   uint8_t flood_channel_data_enabled;
   uint8_t flood_channel_block_max_hops;
+  uint8_t flood_channel_data_max_hops;
 };
 
 class CommonCLICallbacks {

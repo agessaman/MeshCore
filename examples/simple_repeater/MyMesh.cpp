@@ -83,6 +83,10 @@
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
 #define FLOOD_CHANNEL_BLOCK_FILE      "/flood_ch_block"
+#define DEFAULT_FLOOD_CHANNEL_BLOCK_NAME  "#wardriving"
+#ifndef DEFAULT_FLOOD_CHANNEL_BLOCK_HOPS
+  #define DEFAULT_FLOOD_CHANNEL_BLOCK_HOPS 4
+#endif
 
 #ifndef REPEATERS_CHANNEL_KEY_HEX
   #define REPEATERS_CHANNEL_KEY_HEX "89db441e2814dccf0dbd2e8cc5f501a3"
@@ -675,6 +679,14 @@ bool MyMesh::floodChannelBlockHopApplies(const mesh::Packet* packet, uint8_t max
   return max_hops == FLOOD_CHANNEL_BLOCK_HOPS_ALL || packet->getPathHashCount() > max_hops;
 }
 
+bool MyMesh::floodChannelDataHopApplies(const mesh::Packet* packet) const {
+  if (packet == NULL) {
+    return false;
+  }
+  uint8_t max_hops = _prefs.flood_channel_data_max_hops;
+  return max_hops == FLOOD_CHANNEL_BLOCK_HOPS_ALL || packet->getPathHashCount() > max_hops;
+}
+
 bool MyMesh::floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const mesh::Packet* packet) const {
   if (!entry.active || packet == NULL || !packet->isRouteFlood()) {
     return false;
@@ -715,7 +727,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT && packet->getPathHashCount() >= _prefs.flood_max_advert) return false;
     if (!_prefs.flood_channel_data_enabled
         && packet->getPayloadType() == PAYLOAD_TYPE_GRP_DATA
-        && floodChannelBlockHopApplies(packet, _prefs.flood_channel_block_max_hops)) {
+        && floodChannelDataHopApplies(packet)) {
       MESH_DEBUG_PRINTLN("allowPacketForward: flood.channel.data off, blocking GRP_DATA hops=%d",
                          packet->getPathHashCount());
       return false;
@@ -992,7 +1004,14 @@ uint32_t MyMesh::getDirectRetryEchoDelay(const mesh::Packet* packet) const {
 
   // Wait roughly long enough for our TX, the next hop's receive/forward window, and its echo back.
   uint32_t bits = ((uint32_t)packet->getRawLength()) * 8;
-  uint32_t scaled_wait_millis = (uint32_t)((((float)bits) * 4.0f) / kbps);
+  uint8_t payload_type = packet->getPayloadType();
+  float length_factor = 6.0f;
+  if (payload_type == PAYLOAD_TYPE_TRACE || payload_type == PAYLOAD_TYPE_ANON_REQ) {
+    length_factor = 4.0f;
+  } else if (payload_type == PAYLOAD_TYPE_TXT_MSG) {
+    length_factor = 7.0f;
+  }
+  uint32_t scaled_wait_millis = (uint32_t)((((float)bits) * length_factor) / kbps);
   return base_wait_millis + scaled_wait_millis;
 }
 
@@ -1011,6 +1030,10 @@ static uint8_t decodeDirectRetryTraceHashSize(uint8_t flags, uint8_t route_bytes
 }
 
 uint8_t MyMesh::getDirectRetryMaxAttempts(const mesh::Packet* packet) const {
+  if (packet != NULL && packet->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
+    return 21;
+  }
+
   uint8_t configured_attempts = getDirectRetryConfiguredMaxAttempts();
   uint8_t total_hops = 0;
 
@@ -2212,6 +2235,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_retry_advert_enabled = FLOOD_RETRY_ADVERT_DEFAULT;
   _prefs.flood_channel_data_enabled = 1;
   _prefs.flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+  _prefs.flood_channel_data_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
   _prefs.battery_alert_enabled = 0;
   _prefs.battery_alert_low_percent = BATTERY_ALERT_LOW_PERCENT_DEFAULT;
   _prefs.battery_alert_critical_percent = BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT;
@@ -3037,9 +3061,28 @@ void MyMesh::deriveFloodChannelBlockPrefix(const uint8_t* secret, uint8_t key_le
   mesh::Utils::sha256(prefix, FLOOD_CHANNEL_BLOCK_PREFIX_LEN, secret, key_len);
 }
 
+void MyMesh::seedDefaultFloodChannelBlocks() {
+  auto& entry = flood_channel_blocks[0];
+  clearFloodChannelBlockEntry(entry);
+  entry.active = true;
+  entry.key_len = CIPHER_KEY_SIZE;
+  entry.max_hops = DEFAULT_FLOOD_CHANNEL_BLOCK_HOPS;
+  mesh::Utils::sha256(entry.secret, CIPHER_KEY_SIZE,
+                      (const uint8_t*)DEFAULT_FLOOD_CHANNEL_BLOCK_NAME,
+                      strlen(DEFAULT_FLOOD_CHANNEL_BLOCK_NAME));
+  memset(&entry.secret[CIPHER_KEY_SIZE], 0, PUB_KEY_SIZE - CIPHER_KEY_SIZE);
+  deriveFloodChannelBlockPrefix(entry.secret, entry.key_len, entry.hash_prefix);
+  StrHelper::strncpy(entry.name, DEFAULT_FLOOD_CHANNEL_BLOCK_NAME, sizeof(entry.name));
+}
+
 void MyMesh::loadFloodChannelBlocks() {
   memset(flood_channel_blocks, 0, sizeof(flood_channel_blocks));
-  if (_fs == NULL || !_fs->exists(FLOOD_CHANNEL_BLOCK_FILE)) {
+  if (_fs == NULL) {
+    return;
+  }
+  if (!_fs->exists(FLOOD_CHANNEL_BLOCK_FILE)) {
+    seedDefaultFloodChannelBlocks();
+    saveFloodChannelBlocks();
     return;
   }
 
