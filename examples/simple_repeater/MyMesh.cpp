@@ -317,7 +317,7 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     MESH_DEBUG_PRINTLN("Login success!");
     client->last_timestamp = sender_timestamp;
     client->last_activity = getRTCClock()->getCurrentTime();
-    client->permissions &= ~0x03;
+    client->permissions &= ~PERM_ACL_ROLE_MASK;
     client->permissions |= perms;
     memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
 
@@ -334,7 +334,7 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
   memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   reply_data[4] = RESP_SERVER_LOGIN_OK;
   reply_data[5] = 0;  // Legacy: was recommended keep-alive interval (secs / 16)
-  reply_data[6] = client->isAdmin() ? 1 : 0;
+  reply_data[6] = (client->isAdmin() || client->isRegionMgr()) ? 1 : 0;
   reply_data[7] = client->permissions;
   getRNG()->random(&reply_data[8], 4);   // random blob to help packet-hash uniqueness
   reply_data[12] = FIRMWARE_VER_LEVEL;  // New field
@@ -1981,7 +1981,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     } else {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
     }
-  } else if (type == PAYLOAD_TYPE_TXT_MSG && len > 5 && client->isAdmin()) { // a CLI command
+  } else if (type == PAYLOAD_TYPE_TXT_MSG && len > 5 && (client->isAdmin() || client->isRegionMgr())) { // a CLI command
     uint32_t sender_timestamp;
     memcpy(&sender_timestamp, data, 4); // timestamp (by sender's RTC clock - which could be wrong)
     uint8_t flags = (data[4] >> 2);        // message attempt number, and other flags
@@ -3485,6 +3485,25 @@ static void formatPathReply(const uint8_t* path, uint8_t path_len, char* out, si
   snprintf(out, out_len, "> hs=%u hops=%u hex=%s", (uint32_t)hash_size, (uint32_t)hop_count, hex);
 }
 
+// Whitelist helper for region manager command perms
+static bool isRegionMgrAllowed(const char* cmd) {
+  while (*cmd == ' ') cmd++; // skip leading spaces
+  // region commands (read + write region map)
+  if (memcmp(cmd, "region", 6) == 0) return true;
+  // read-only getters / status
+  if (memcmp(cmd, "get ", 4) == 0) return true;
+  if (memcmp(cmd, "ver", 3) == 0) return true;
+  if (memcmp(cmd, "board", 5) == 0) return true;
+  // "neighbors" (plural) is read-only; reject "neighbor.remove" by checking next char
+  if (memcmp(cmd, "neighbors", 9) == 0) return true;
+  // bare "clock" is read-only; "clock sync" must be denied
+  if (memcmp(cmd, "clock", 5) == 0 && memcmp(cmd, "clock sync", 10) != 0) return true;
+  // sensor reads only
+  if (memcmp(cmd, "sensor get ", 11) == 0) return true;
+  if (memcmp(cmd, "sensor list", 11) == 0) return true;
+  return false;
+}
+
 void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *command, char *reply) {
   char* reply_start = reply;
   int recent_page = 1;
@@ -3528,6 +3547,15 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
     command += 3;
+  }
+
+  // Region managers are limited to read-only queries and region commands
+  // Admins are unrestricted
+  if (sender && !sender->isAdmin() && sender->isRegionMgr()) {
+    if (!isRegionMgrAllowed(command)) {
+      strcpy(reply, "Err - not permitted");
+      return;
+    }
   }
 
   // handle ACL related commands
