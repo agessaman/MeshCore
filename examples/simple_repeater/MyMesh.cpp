@@ -1004,13 +1004,7 @@ uint32_t MyMesh::getDirectRetryEchoDelay(const mesh::Packet* packet) const {
 
   // Wait roughly long enough for our TX, the next hop's receive/forward window, and its echo back.
   uint32_t bits = ((uint32_t)packet->getRawLength()) * 8;
-  uint8_t payload_type = packet->getPayloadType();
-  float length_factor = 6.0f;
-  if (payload_type == PAYLOAD_TYPE_TRACE || payload_type == PAYLOAD_TYPE_ANON_REQ) {
-    length_factor = 4.0f;
-  } else if (payload_type == PAYLOAD_TYPE_TXT_MSG) {
-    length_factor = 7.0f;
-  }
+  float length_factor = (float)getDirectRetryPacketAirtimeFactor(packet);
   uint32_t scaled_wait_millis = (uint32_t)((((float)bits) * length_factor) / kbps);
   return base_wait_millis + scaled_wait_millis;
 }

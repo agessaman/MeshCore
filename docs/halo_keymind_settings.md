@@ -183,7 +183,7 @@ direct `altpath` sends the second packet.
 
 ## Direct Retry Settings
 
-Direct retry applies to direct-routed packets. A queued resend is canceled when the next-hop echo is heard.
+Direct retry applies to direct-routed packets. A queued resend is canceled when the next-hop echo is heard. Repeaters expose the settings below; non-repeater firmware uses the same packet-type timing rules with fixed shared base/step timing.
 
 | Setting | What it does | How to use | Example |
 | --- | --- | --- | --- |

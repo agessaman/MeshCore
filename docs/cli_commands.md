@@ -1399,8 +1399,8 @@ set flood.retry.bucket 2 none
 
 **Default:** `15` with the `rooftop` preset
 
-**Note:** Direct-routed type 2 text packets always use 21 retry attempts,
-regardless of this setting or the short-path cap.
+**Note:** Direct-routed type 2 text packets always use 21 retry attempts in the
+shared retry logic, regardless of this setting or the repeater short-path cap.
 
 **Examples:**
 ```
@@ -1427,6 +1427,8 @@ set direct.retry.count 15
 - The failed echo window includes a packet-length add-on. TRACE and
   ANON_REQ/type 7 packets keep the existing 4x line-time add-on. TXT_MSG/type 2
   packets use 7x. Other direct retry packets use 6x.
+- Non-repeater firmware uses the same packet-type add-ons with the shared
+  fixed base retry timing.
 - For non-TRACE direct paths shorter than 6 remaining hops, the effective wait is scaled by `hops / 6`.
 - Non-TRACE direct paths with 6 or more remaining hops use the configured value unchanged.
 - TRACE retries shorter than 16 remaining hops use `hops / 16`; 16 or more remaining hops use the configured value unchanged.
@@ -1458,6 +1460,8 @@ set direct.retry.base 500
 - This is added after the failed echo window. TRACE and ANON_REQ/type 7 packets
   keep the existing 4x packet-length add-on. TXT_MSG/type 2 packets use 7x.
   Other direct retry packets use 6x.
+- Non-repeater firmware uses the same packet-type add-ons with the shared
+  fixed retry step.
 - For non-TRACE direct paths shorter than 6 remaining hops, that computed delay is scaled by `hops / 6`.
 - Non-TRACE direct paths with 6 or more remaining hops use the computed delay unchanged.
 - TRACE retries shorter than 16 remaining hops use `hops / 16`; 16 or more remaining hops use the computed delay unchanged.

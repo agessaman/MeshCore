@@ -151,6 +151,16 @@ protected:
   virtual uint32_t getDirectRetryEchoDelay(const Packet* packet) const;
 
   /**
+   * \returns  packet-airtime multiplier used by the direct-retry echo window.
+   */
+  uint8_t getDirectRetryPacketAirtimeFactor(const Packet* packet) const;
+
+  /**
+   * \returns  packet-airtime add-on used by the direct-retry echo window.
+   */
+  uint32_t getDirectRetryPacketAirtimeDelay(const Packet* packet) const;
+
+  /**
    * \returns  maximum number of retry transmissions after the initial direct TX.
    */
   virtual uint8_t getDirectRetryMaxAttempts(const Packet* packet) const;

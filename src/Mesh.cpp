@@ -228,17 +228,37 @@ bool Mesh::allowDirectRetry(const Packet* packet, const uint8_t* next_hop_hash, 
   (void)next_hop_hash_len;
   return true;
 }
+uint8_t Mesh::getDirectRetryPacketAirtimeFactor(const Packet* packet) const {
+  if (packet == NULL) {
+    return 6;
+  }
+
+  uint8_t payload_type = packet->getPayloadType();
+  if (payload_type == PAYLOAD_TYPE_TRACE || payload_type == PAYLOAD_TYPE_ANON_REQ) {
+    return 4;
+  }
+  if (payload_type == PAYLOAD_TYPE_TXT_MSG) {
+    return 7;
+  }
+  return 6;
+}
+uint32_t Mesh::getDirectRetryPacketAirtimeDelay(const Packet* packet) const {
+  if (packet == NULL || _radio == NULL) {
+    return 0;
+  }
+
+  return _radio->getEstAirtimeFor(packet->getRawLength()) * (uint32_t)getDirectRetryPacketAirtimeFactor(packet);
+}
 uint32_t Mesh::getDirectRetryEchoDelay(const Packet* packet) const {
-  (void)packet;
-  // Keep the base fallback aligned with the repeater's minimum retry wait.
-  return 200;
+  return 200 + getDirectRetryPacketAirtimeDelay(packet);
 }
 uint8_t Mesh::getDirectRetryMaxAttempts(const Packet* packet) const {
-  (void)packet;
+  if (packet != NULL && packet->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
+    return 21;
+  }
   return DIRECT_RETRY_MAX_ATTEMPTS_DEFAULT;
 }
 uint32_t Mesh::getDirectRetryAttemptDelay(const Packet* packet, uint8_t attempt_idx) {
-  (void)packet;
   uint32_t base = getDirectRetryEchoDelay(packet);
   // Keep the historical linear spacing while allowing the base wait to vary by platform/profile.
   return base + ((uint32_t)attempt_idx * 100UL);
