@@ -57,9 +57,11 @@ static const size_t COM_PREFS_TAIL_BYTES = 5;
 
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
+  _fs = fs;   // cached for the provision command family (CommonCLI_Provision.cpp)
+
   bool is_fresh_install = false;
   bool is_upgrade = false;
-  
+
   if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs");   // new filename
   } else if (fs->exists("/node_prefs")) {
@@ -694,6 +696,9 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 }
 
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
+    // Provision paste-capture and the 'provision' command family (fork-owned,
+    // CommonCLI_Provision.cpp) run first so capture mode sees every serial line.
+    if (handleProvisionCommand(sender_timestamp, command, reply)) return;
     // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
     // live in CommonCLI_Observer.cpp.
     if (handleObserverCommand(sender_timestamp, command, reply)) return;

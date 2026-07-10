@@ -783,6 +783,24 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _alerter.begin(&_prefs, _cli.getObserverPrefs(), this, this);
   _alerter.setBridge(bridge);
 #endif
+
+  // Boot-time provisioning: if a /provision file is present and not yet applied,
+  // run it with serial privileges and reboot so every setting (radio params,
+  // bridge config) takes effect from a clean start. Placed at the very end of
+  // begin() so set-command callbacks (advert timers, bridge restarts) are safe
+  // to fire. autoApplyProvisionFile() writes /provision_done before running the
+  // file, so this cannot reboot-loop.
+  {
+    char reply[160];
+    if (_cli.autoApplyProvisionFile(reply)) {
+      Serial.print("Provision auto-apply: "); Serial.println(reply);
+      Serial.flush();
+      delay(500);
+      _cli.getBoard()->reboot();   // does not return
+    } else if (reply[0]) {
+      Serial.println(reply);
+    }
+  }
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {
@@ -950,6 +968,14 @@ void MyMesh::formatPacketStatsReply(char *reply) {
 }
 
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
+  // While 'provision begin' capture is active, serial lines must reach CommonCLI
+  // untouched (they get written to /provision, not executed) — skip the app-level
+  // command intercepts below.
+  if (sender_timestamp == 0 && _cli.provisionCaptureActive()) {
+    _cli.handleCommand(sender_timestamp, command, reply);
+    return;
+  }
+
   if (region_load_active) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
       region_map = temp_map;  // copy over the temp instance as new current map

@@ -391,6 +391,20 @@ class CommonCLI {
 #endif
   bool _com_prefs_needs_upgrade = false;  // old-format /com_prefs detected; rewrite once after load
 
+  // Provisioning (/provision defaults package) — implementation lives in the
+  // fork-owned CommonCLI_Provision.cpp. _fs is cached by loadPrefs() so the
+  // provision command family can reach the filesystem without re-plumbing
+  // every handleCommand call site. No persisted struct layout is involved.
+  FILESYSTEM* _fs = nullptr;
+  bool _prov_capture = false;             // serial 'provision begin' paste-capture active
+  bool _prov_capture_got_header = false;  // first non-blank captured line validated
+  uint16_t _prov_capture_lines = 0;
+  uint32_t _prov_capture_bytes = 0;
+
+  bool handleProvisionCommand(uint32_t sender_timestamp, char* command, char* reply);
+  void provisionCaptureLine(const char* line, char* reply);
+  void runProvisionFile(uint32_t sender_timestamp, char* reply);
+
   mesh::RTCClock* getRTCClock() { return _rtc; }
   void savePrefs();
   void loadPrefsInt(FILESYSTEM* _fs, const char* filename);
@@ -420,6 +434,16 @@ public:
   void loadPrefs(FILESYSTEM* _fs);
   void savePrefs(FILESYSTEM* _fs);
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
+
+  // Provisioning hooks (see CommonCLI_Provision.cpp / PROVISIONING.md):
+  // provisionCaptureActive() — apps must route serial lines straight to
+  // handleCommand while true, bypassing app-level command intercepts, so the
+  // lines are captured to /provision instead of executed.
+  // autoApplyProvisionFile() — boot-time hook; runs /provision with serial
+  // privileges unless the /provision_done marker exists. Returns true if the
+  // file ran (reply holds the summary) and the caller should reboot.
+  bool provisionCaptureActive() const { return _prov_capture; }
+  bool autoApplyProvisionFile(char* reply);
   mesh::MainBoard* getBoard() { return _board; }
   uint8_t buildAdvertData(uint8_t node_type, uint8_t* app_data);
 #ifdef WITH_MQTT_BRIDGE
