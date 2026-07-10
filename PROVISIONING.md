@@ -103,6 +103,32 @@ Between `begin` and `end`, console lines are written to `/provision` instead
 of executed. The header line is validated first and the same size/line caps
 apply. `provision end` closes the file **without** applying it.
 
+**Zero-interaction first flash (ESP32 only)** — bake the file into the `.bin`:
+
+```
+tools/append_provision.py firmware.bin region_defaults.txt
+```
+
+This appends a small trailer (magic + length + the text file + CRC32) after
+the app image; esptool flashes the whole file, so the trailer lands in the
+app partition right behind the image. On boot, if the node has neither
+`/provision` nor the applied-marker, the firmware validates the trailer
+(CRC and provision header) and copies the payload to `/provision` — the
+normal boot auto-apply then runs it. `provision` status reports
+`trailer: present` when the running image carries one.
+
+Trailer notes:
+
+- Re-running the tool on an already-trailered `.bin` **replaces** the trailer.
+- `provision remove` + reboot **re-provisions from the trailer** (both the
+  file and the marker are gone, so extraction runs again). The same applies
+  after `erase`. This makes the trailer behave like factory defaults.
+- The trailer does not survive an OTA update: the new image is written to the
+  other OTA slot without a trailer. Settings already applied persist, of
+  course — only the re-provision-on-remove behavior is lost.
+- ESP32-only: nRF52 DFU zips are signed against the exact image, and RP2040
+  UF2 has no equivalent side channel. Use paste capture or `fetch` there.
+
 ### Interaction with newer-firmware config
 
 If `/mqtt_prefs` on the node was written by a newer firmware version than the

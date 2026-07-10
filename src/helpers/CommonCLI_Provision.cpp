@@ -26,6 +26,12 @@
 #include <HTTPClient.h>
 #endif
 
+#ifdef ESP_PLATFORM
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
+#include <esp_image_format.h>
+#endif
+
 #define PROVISION_FILE      "/provision"
 #define PROVISION_MARKER    "/provision_done"
 #define PROVISION_MAX_SIZE  4096
@@ -148,6 +154,124 @@ static bool provisionReadLine(File& f, char* buf, size_t buf_size, bool* truncat
 }
 
 // ---------------------------------------------------------------------------
+// .bin-appended provision trailer (Phase 4, ESP32 only)
+//
+// tools/append_provision.py appends [magic "MCPV1\0"][uint16-LE payload len]
+// [payload][uint32-LE CRC32(payload)] to a built app .bin. esptool flashes the
+// whole file, so the trailer lands in the app partition immediately after the
+// image. At boot, if neither /provision nor /provision_done exists, the trailer
+// is validated and its payload written to /provision; the normal auto-apply
+// then takes over. ESP32-only by design: nRF52 DFU zips are signed against the
+// exact image and RP2040 UF2 has no equivalent side channel.
+
+#ifdef ESP_PLATFORM
+
+static const uint8_t PROVISION_TRAILER_MAGIC[6] = { 'M', 'C', 'P', 'V', '1', 0 };
+
+// Standard CRC-32 (zlib/binascii-compatible: poly 0xEDB88320, init/final ~0).
+// Local bitwise implementation so the firmware never depends on which ROM CRC
+// variant a given Arduino core exposes; payload is <=4KB and runs once at boot.
+static uint32_t provCrc32(const uint8_t* data, size_t len) {
+  uint32_t crc = 0xFFFFFFFFu;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int b = 0; b < 8; b++) {
+      crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+  }
+  return ~crc;
+}
+
+// Walk the segment table of the app image in `part` to find where the flashed
+// .bin ends: header + segments, padded so the checksum is the last byte of a
+// 16-byte boundary, plus the appended SHA256 if the image carries one.
+static bool provImageEnd(const esp_partition_t* part, uint32_t* end_out) {
+  esp_image_header_t hdr;
+  if (esp_partition_read(part, 0, &hdr, sizeof(hdr)) != ESP_OK) return false;
+  if (hdr.magic != ESP_IMAGE_HEADER_MAGIC) return false;
+  if (hdr.segment_count == 0 || hdr.segment_count > ESP_IMAGE_MAX_SEGMENTS) return false;
+  uint32_t off = sizeof(esp_image_header_t);
+  for (int i = 0; i < hdr.segment_count; i++) {
+    esp_image_segment_header_t seg;
+    if (esp_partition_read(part, off, &seg, sizeof(seg)) != ESP_OK) return false;
+    off += sizeof(seg) + seg.data_len;
+    if (off > part->size) return false;
+  }
+  off = (off + 16) & ~15u;              // pad; checksum byte ends the 16-byte block
+  if (hdr.hash_appended == 1) off += 32; // appended SHA256 digest
+  if (off > part->size) return false;
+  *end_out = off;
+  return true;
+}
+
+// Locate a trailer after the running image. Returns the partition offset of the
+// 8-byte trailer header (magic+len) via *off_out, or false if absent/implausible.
+static bool provFindTrailer(const esp_partition_t** part_out, uint32_t* off_out, uint16_t* plen_out) {
+  const esp_partition_t* part = esp_ota_get_running_partition();
+  if (part == NULL) return false;
+  uint32_t off;
+  if (!provImageEnd(part, &off)) return false;
+  uint8_t hdr[8];
+  if (off + sizeof(hdr) > part->size) return false;
+  if (esp_partition_read(part, off, hdr, sizeof(hdr)) != ESP_OK) return false;
+  if (memcmp(hdr, PROVISION_TRAILER_MAGIC, sizeof(PROVISION_TRAILER_MAGIC)) != 0) return false;
+  uint16_t plen = (uint16_t)hdr[6] | ((uint16_t)hdr[7] << 8);
+  if (plen == 0 || plen > PROVISION_MAX_SIZE) return false;
+  if (off + sizeof(hdr) + plen + 4 > part->size) return false;
+  *part_out = part;
+  *off_out = off;
+  *plen_out = plen;
+  return true;
+}
+
+static bool provisionTrailerPresent() {
+  const esp_partition_t* part;
+  uint32_t off;
+  uint16_t plen;
+  return provFindTrailer(&part, &off, &plen);
+}
+
+// Validate the trailer (CRC + provision header) and write its payload to
+// /provision. Returns true if /provision was written.
+static bool provisionExtractTrailer(FILESYSTEM* fs) {
+  const esp_partition_t* part;
+  uint32_t off;
+  uint16_t plen;
+  if (!provFindTrailer(&part, &off, &plen)) return false;
+
+  uint8_t* payload = (uint8_t*)malloc(plen + 1);
+  if (!payload) return false;
+  bool ok = false;
+  uint8_t crcb[4];
+  if (esp_partition_read(part, off + 8, payload, plen) == ESP_OK &&
+      esp_partition_read(part, off + 8 + plen, crcb, sizeof(crcb)) == ESP_OK) {
+    uint32_t crc_read = (uint32_t)crcb[0] | ((uint32_t)crcb[1] << 8) |
+                        ((uint32_t)crcb[2] << 16) | ((uint32_t)crcb[3] << 24);
+    if (provCrc32(payload, plen) == crc_read) {
+      payload[plen] = 0;
+      // Same guard as fetch: only seed /provision from a plausible package.
+      const char* p = (const char*)payload;
+      while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+      if (provParseHeader(p) == PROVISION_VERSION) {
+        File f = provOpenWrite(fs, PROVISION_FILE);
+        if (f) {
+          f.write(payload, plen);
+          f.close();
+          ok = true;
+        }
+      }
+    }
+  }
+  free(payload);
+  if (ok) {
+    MESH_DEBUG_PRINTLN("provision: seeded /provision from app image trailer (%u bytes)", (unsigned)plen);
+  }
+  return ok;
+}
+
+#endif  // ESP_PLATFORM
+
+// ---------------------------------------------------------------------------
 // core runner
 
 void CommonCLI::runProvisionFile(uint32_t sender_timestamp, char* reply) {
@@ -227,6 +351,15 @@ void CommonCLI::runProvisionFile(uint32_t sender_timestamp, char* reply) {
 bool CommonCLI::autoApplyProvisionFile(char* reply) {
   reply[0] = 0;
   if (_fs == NULL) return false;
+#ifdef ESP_PLATFORM
+  // Zero-interaction first flash: if the flashed .bin carries a provision
+  // trailer and this node has neither a file nor the applied-marker, seed
+  // /provision from the trailer so the auto-apply below runs it. Note this
+  // means 'provision remove' + reboot re-provisions from the trailer.
+  if (!_fs->exists(PROVISION_FILE) && !_fs->exists(PROVISION_MARKER)) {
+    provisionExtractTrailer(_fs);
+  }
+#endif
   if (!_fs->exists(PROVISION_FILE) || _fs->exists(PROVISION_MARKER)) return false;
 
   // Marker FIRST: if a command below crashes or resets the device mid-apply, the
@@ -456,9 +589,14 @@ bool CommonCLI::handleProvisionCommand(uint32_t sender_timestamp, char* command,
   if (*args == 0) {
     // status
     bool marker = _fs->exists(PROVISION_MARKER);
+#ifdef ESP_PLATFORM
+    const char* trailer = provisionTrailerPresent() ? "; trailer: present" : "";
+#else
+    const char* trailer = "";
+#endif
     File f = provOpenRead(_fs);
     if (!f) {
-      sprintf(reply, "no /provision; marker: %s", marker ? "present" : "absent");
+      sprintf(reply, "no /provision; marker: %s%s", marker ? "present" : "absent", trailer);
     } else {
       uint32_t size = f.size();
       // header version lives on the first non-blank line
@@ -474,11 +612,11 @@ bool CommonCLI::handleProvisionCommand(uint32_t sender_timestamp, char* command,
       }
       f.close();
       if (ver >= 0) {
-        sprintf(reply, "/provision: %u bytes, v%d; marker: %s", (unsigned)size, ver,
-                marker ? "present" : "absent");
+        sprintf(reply, "/provision: %u bytes, v%d; marker: %s%s", (unsigned)size, ver,
+                marker ? "present" : "absent", trailer);
       } else {
-        sprintf(reply, "/provision: %u bytes, BAD HEADER; marker: %s", (unsigned)size,
-                marker ? "present" : "absent");
+        sprintf(reply, "/provision: %u bytes, BAD HEADER; marker: %s%s", (unsigned)size,
+                marker ? "present" : "absent", trailer);
       }
     }
   } else if (strcmp(args, "show") == 0 || memcmp(args, "show ", 5) == 0) {
