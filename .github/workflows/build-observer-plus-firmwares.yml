@@ -17,6 +17,15 @@ name: Build MQTT Observer+ Firmwares (keymind channel)
 #     below wins because PLATFORMIO_BUILD_FLAGS append after ini flags —
 #     verified by building and checking the embedded URL string)
 #
+# NOTE ON DISPATCH: GitHub does not index a workflow_dispatch-only workflow
+# that exists only on a non-default branch and has never run, so this workflow
+# will not appear in the Actions UI / `gh workflow list` (and cannot be
+# dispatched) until its push trigger fires once. That is intentional here —
+# "staged, not enabled" means nothing can fire it yet. Uncommenting the push
+# trigger below and pushing both registers it and runs the first build; from
+# then on `gh workflow run build-observer-plus-firmwares.yml --ref
+# mqtt-observer-plus` also works for manual builds.
+#
 # TO ENABLE THE CHANNEL:
 #   1. Uncomment the `push:` trigger below.
 #   2. Flip SYNC_FLASHER to "true" — but FIRST the flasher repo
