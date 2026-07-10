@@ -1,0 +1,291 @@
+name: Build MQTT Observer+ Firmwares (keymind channel)
+
+# ============================================================================
+# STATUS: STAGED BUT NOT ENABLED — manual dispatch only.
+#
+# This is the experimental "plus" channel (mqtt-observer-plus = flex +
+# mcarper/keymindCascade). It mirrors build-observer-firmwares.yml with the
+# channel isolated end-to-end:
+#   - rolling release tag:   observer-mqtt-plus-latest   (NEVER share the
+#     stable tag: each workflow prunes old assets within its tag by build
+#     hash, so a shared tag would have the channels deleting each other's
+#     binaries)
+#   - firmware version:      v1.16.0-plus (filenames + embedded `ver`)
+#   - device pull-OTA:       OTA_MANIFEST_BASE overridden to .../v-plus so
+#     `ota update` on a plus node can never "update" it back onto the stable
+#     channel (the per-env platformio.ini bakes .../v; the env-injected flag
+#     below wins because PLATFORMIO_BUILD_FLAGS append after ini flags —
+#     verified by building and checking the embedded URL string)
+#
+# TO ENABLE THE CHANNEL:
+#   1. Uncomment the `push:` trigger below.
+#   2. Flip SYNC_FLASHER to "true" — but FIRST the flasher repo
+#      (agessaman/flasher.meshcore.io) needs channel support; until it does,
+#      the sync step below fails closed on purpose so the stable config.json
+#      cannot be clobbered. Flasher-side prerequisites:
+#        - update-firmware.py: a --channel/--config argument writing a
+#          plus-specific config (e.g. config-plus.json), not config.json
+#        - SPA: a channel picker (Observer / Observer+ experimental)
+#        - gen-slim-manifests.py output dir flasher/v-plus (arg already
+#          parameterized; wired below)
+#        - a plus changelog target (CHANGELOG-plus.md) — the stable
+#          CHANGELOG.md tracks the flex branch only
+#
+# Until SYNC_FLASHER is enabled, the per-base build counter has no writer, so
+# every manual dispatch publishes as build .1 — fine for hand-flashed testing
+# off the release page.
+# ============================================================================
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  # ENABLE: uncomment to build+publish on every push to the plus branch.
+  # push:
+  #   branches:
+  #     - mqtt-observer-plus
+  #   # Keep in step with build-observer-firmwares.yml's paths-ignore.
+  #   paths-ignore:
+  #     - '**.md'
+  #     - 'docs/**'
+  #     - 'scripts/gen_changelog.py'
+  #     - '.github/**'
+  #     - '.gitignore'
+  #     - '.gitattributes'
+  #     - '.editorconfig'
+  #     - 'LICENSE'
+  #     - '.vscode/**'
+  #     - '.claude/**'
+  #     - 'mesh-america/**'
+
+# Shared with build-observer-firmwares.yml and sync-flasher-content.yml so no
+# two workflows ever push to the flasher repo at the same time.
+concurrency:
+  group: flasher-publish
+  cancel-in-progress: false
+
+env:
+  # Channel-tagged version: embedded in firmware filenames and (with the
+  # -observer tag + build number appended by build.sh) in `ver`/MQTT/SNMP.
+  FIRMWARE_VERSION: v1.16.0-plus
+  # Rolling release tag for this channel — distinct from observer-mqtt-latest.
+  RELEASE_TAG: observer-mqtt-plus-latest
+  # Channel-isolated pull-OTA manifest base baked into these binaries
+  # (overrides the .../v default from the per-env platformio.ini flags).
+  OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/v-plus
+  # Fail-closed flasher-repo sync gate; see "TO ENABLE" above.
+  SYNC_FLASHER: "false"
+
+jobs:
+
+  # Discover the *_observer_mqtt envs and shard them across runners — same
+  # env set as the stable channel; only version/flags/tag differ.
+  enumerate:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      build_number: ${{ steps.buildnum.outputs.n }}
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Split observer envs into shards
+        id: split
+        shell: bash
+        run: |
+          SHARDS=14
+          ENVS=$(grep -rhoE '^\[env:[^]]*observer_mqtt\]' platformio.ini variants/*/platformio.ini \
+                 | sed -E 's/^\[env:(.*)\]$/\1/' | sort -u)
+          echo "Discovered envs:"; echo "$ENVS"
+          MATRIX=$(echo "$ENVS" | awk -v n="$SHARDS" '
+              { shard[NR % n] = shard[NR % n] " " $0 }
+              END { for (i = 0; i < n; i++) { sub(/^ /, "", shard[i]);
+                    printf "{\"idx\":%d,\"envs\":\"%s\"}\n", i, shard[i] } }' \
+              | jq -cs .)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+      - name: Compute plus-channel build number
+        id: buildnum
+        shell: bash
+        run: |
+          # Plus-channel counter, separate from the stable channel's. The
+          # flasher-sync step is the sole writer; while SYNC_FLASHER is off
+          # this 404s -> N=1 every run (documented above).
+          COUNTER_URL="https://observer.gessaman.com/observer-plus-build-counter.json"
+          CUR=$(curl -fsSL "$COUNTER_URL" 2>/dev/null || echo '{}')
+          PREV_BASE=$(echo "$CUR" | jq -r '.baseVersion // ""')
+          PREV_BUILD=$(echo "$CUR" | jq -r '.build // 0')
+          if [ "$PREV_BASE" = "$FIRMWARE_VERSION" ]; then
+            N=$((PREV_BUILD + 1))
+          else
+            N=1
+          fi
+          echo "Base $FIRMWARE_VERSION; previous build $PREV_BUILD (base $PREV_BASE) -> N=$N"
+          echo "n=$N" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: enumerate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.enumerate.outputs.matrix) }}
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Cache PlatformIO Toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-toolchains-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-toolchains-${{ runner.os }}-
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Build Shard ${{ matrix.shard.idx }}
+        env:
+          FIRMWARE_BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
+          # Channel isolation for device pull-OTA: appended after the per-env
+          # ini flags, so this definition of OTA_MANIFEST_BASE wins. build.sh
+          # appends its own version/OTA_VARIANT flags to this variable.
+          PLATFORMIO_BUILD_FLAGS: -D OTA_MANIFEST_BASE='"${{ env.OTA_MANIFEST_BASE_URL }}"'
+        run: /usr/bin/env bash build.sh build-firmware ${{ matrix.shard.envs }}
+
+      - name: Upload Shard Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fw-plus-${{ matrix.shard.idx }}
+          path: out
+          if-no-files-found: error
+
+  release:
+    needs: [enumerate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+        # Shallow on purpose — see the stable workflow's note: build.sh named
+        # the assets from a shallow clone's 7-char short hash.
+
+      - name: Download All Shard Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten into out/
+        run: |
+          mkdir -p out
+          find artifacts -type f -name '*.bin' -exec cp -f {} out/ \;
+          find artifacts -type f -name '*.partsig' -exec cp -f {} out/ \;
+          echo "Collected binaries:"; ls -1 out
+
+      - name: Compute Short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to Rolling Release (tag pinned; assets replaced in place)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --prerelease \
+              --title "MQTT Observer+ Firmwares (experimental keymind channel)" \
+              --notes "Rolling build of the EXPERIMENTAL observer+ channel (mqtt-observer-plus = observer + mcarper keymind transmission-reliability work). Flashing between this and the stable observer channel preserves MQTT and core settings; downgrading to stable resets a handful of radio toggles (cad, fem rxgain, rx boost) and retry settings to defaults. The git short hash is embedded in each asset filename."
+          fi
+
+          gh release upload "$RELEASE_TAG" $(find out -maxdepth 1 -type f ! -name '*.partsig') --clobber
+
+          # Prune old assets within THIS tag only, retaining the most recent
+          # KEEP_BUILDS build hashes (same logic + rationale as the stable
+          # workflow: a flasher tab opened mid-cycle must not 404).
+          KEEP_BUILDS=2
+          keep_hashes=$(gh release view "$RELEASE_TAG" --json assets \
+              -q '.assets[] | "\(.createdAt) \(.name)"' \
+            | sort -r \
+            | while read -r _ts name; do
+                printf '%s' "$name" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}'
+              done \
+            | awk '!seen[$0]++' | head -n "$KEEP_BUILDS")
+          echo "Retaining build hashes:"; echo "$keep_hashes"
+          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' \
+            | while read -r asset; do
+                ah=$(printf '%s' "$asset" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}' || true)
+                if [ -n "$ah" ] && grep -qxF "$ah" <<<"$keep_hashes"; then
+                  continue
+                fi
+                gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
+              done
+
+      # ----------------------------------------------------------------------
+      # Flasher-repo sync: OFF until the flasher supports channels (see header).
+      # Fails closed if enabled prematurely so the stable config.json can never
+      # be clobbered by this channel.
+      # ----------------------------------------------------------------------
+      - name: Checkout Flasher Repo
+        if: env.SYNC_FLASHER == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: agessaman/flasher.meshcore.io
+          token: ${{ secrets.FLASHER_DISPATCH_TOKEN }}
+          path: flasher
+
+      - name: Update Flasher Config (plus channel)
+        if: env.SYNC_FLASHER == 'true'
+        run: |
+          # FAIL-CLOSED GUARD: running update-firmware.py as-is would rewrite
+          # the STABLE channel's config.json. Replace this block with the
+          # channel-aware invocation once the flasher repo supports it, e.g.:
+          #   python3 flasher/scripts/update-firmware.py \
+          #     --config flasher/config-plus.json \
+          #     "${{ steps.sha.outputs.short }}" "$GITHUB_WORKSPACE/firmware-notes.html"
+          echo "ERROR: flasher repo has no plus-channel support yet (see workflow header)." >&2
+          exit 1
+
+      - name: Generate Slim Per-Variant Manifests + Persist Build Counter (plus channel)
+        if: env.SYNC_FLASHER == 'true'
+        env:
+          BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
+        run: |
+          # Channel-isolated manifest namespace: these are what OTA_MANIFEST_BASE_URL
+          # points plus binaries at, so `ota update` stays within the channel.
+          python3 flasher/scripts/gen-slim-manifests.py \
+            --config flasher/config-plus.json \
+            --out-dir flasher/v-plus \
+            --base-version "$FIRMWARE_VERSION" \
+            --build "$BUILD_NUMBER" \
+            --partsig-dir out
+          printf '{\n  "baseVersion": "%s",\n  "build": %s\n}\n' \
+            "$FIRMWARE_VERSION" "$BUILD_NUMBER" > flasher/observer-plus-build-counter.json
+          echo "Build $FIRMWARE_VERSION.$BUILD_NUMBER"
+
+      - name: Generate Changelog (plus channel)
+        if: env.SYNC_FLASHER == 'true'
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --unshallow --quiet
+          fi
+          # Plus channel keeps its own changelog; the stable CHANGELOG.md
+          # tracks the flex branch only.
+          python3 scripts/gen_changelog.py flasher/CHANGELOG-plus.md
+
+      # (No docs sync: the stable channel owns the flasher's docs pages.)
+
+      - name: Commit & Push Flasher Config
+        if: env.SYNC_FLASHER == 'true'
+        working-directory: flasher
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No flasher changes to commit."
+            exit 0
+          fi
+          git config user.name "meshcore-bot"
+          git config user.email "noreply@gessaman.com"
+          git commit -m "Update observer+ firmware to ${{ steps.sha.outputs.short }} (build ${FIRMWARE_VERSION}.${{ needs.enumerate.outputs.build_number }})"
+          git push
