@@ -1244,6 +1244,14 @@ collect_esp32_artifacts() {
   pio run -t mergebin -e "$env_name" || return $?
   copy_build_output ".pio/build/${env_name}/firmware.bin" "${OUTPUT_DIR}/${firmware_filename}.bin" || return $?
   copy_build_output ".pio/build/${env_name}/firmware-merged.bin" "${OUTPUT_DIR}/${firmware_filename}-merged.bin" || return $?
+
+  # Emit the partition-table signature for OTA partition-compatibility checks.
+  # Keyed by env name so the slim-manifest generator can find it; the firmware
+  # computes the same signature at runtime from its flashed table. Best-effort:
+  # local builds without the script's deps just skip it.
+  if [ -f ".pio/build/${env_name}/partitions.bin" ]; then
+    python3 scripts/partition_signature.py ".pio/build/${env_name}/partitions.bin" > "${OUTPUT_DIR}/${env_name}.partsig" 2>/dev/null || true
+  fi
 }
 
 collect_nrf52_artifacts() {
@@ -1391,6 +1399,24 @@ build_firmware() {
   firmware_version_string="${firmware_version}-${commit_hash}"
   firmware_filename=$(get_firmware_filename "$env_name" "$firmware_version_string")
 
+  # Fork CI hooks (consumed by .github/workflows/build-observer*-firmwares.yml).
+  # Tag the *embedded* version for observer builds (v1.0.0-observer-abcdef) so
+  # `ver`, the MQTT firmware_version, and SNMP identify the fork, and stamp the
+  # per-base published-build counter (FIRMWARE_BUILD_NUMBER) as a 4th version
+  # component so `ota check` can show how many builds behind a node is. The
+  # *filename* stays untagged/un-numbered so assets remain <env>-v<base>-<hash>.
+  # OTA_VARIANT is the env name — it selects the slim per-variant manifest
+  # (<OTA_MANIFEST_BASE>/<OTA_VARIANT>.json) that the observer pull-OTA fetches.
+  local embedded_variant_tag=""
+  case "$env_name" in
+    *observer*) embedded_variant_tag="-observer" ;;
+  esac
+  local embedded_build_suffix=""
+  if [ -n "${FIRMWARE_BUILD_NUMBER:-}" ]; then
+    embedded_build_suffix=".${FIRMWARE_BUILD_NUMBER}"
+  fi
+  local embedded_version_string="${firmware_version}${embedded_build_suffix}${embedded_variant_tag}-${commit_hash}"
+
   if [ "$RESUME_BUILD_OUTPUT" == "1" ] && build_artifacts_exist "$env_platform" "$firmware_filename"; then
     echo "Skipping ${env_name}; existing artifacts found for ${firmware_filename}."
     return 0
@@ -1403,7 +1429,7 @@ build_firmware() {
     original_platformio_build_flags=""
   fi
 
-  export PLATFORMIO_BUILD_FLAGS="${original_platformio_build_flags} -DFIRMWARE_BUILD_DATE='\"${firmware_build_date}\"' -DFIRMWARE_VERSION='\"${firmware_version_string}\"'"
+  export PLATFORMIO_BUILD_FLAGS="${original_platformio_build_flags} -DFIRMWARE_BUILD_DATE='\"${firmware_build_date}\"' -DFIRMWARE_VERSION='\"${embedded_version_string}\"' -DOTA_VARIANT='\"${env_name}\"'"
   disable_debug_flags
   apply_debug_overrides
   apply_radio_overrides
