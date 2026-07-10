@@ -64,6 +64,7 @@ public:
   virtual uint8_t getStartupReason() const = 0;
   virtual bool getBootloaderVersion(char* version, size_t max_len) { return false; }
   virtual bool startOTAUpdate(const char* id, char reply[]) { return false; }   // not supported
+  virtual bool stopOTAUpdate(char reply[]) { return false; }   // not supported
   // Pull-based OTA: fetch the firmware build for this variant from a baked-in manifest and flash it.
   // current_ver is the running firmware version string (used to skip if already up to date); when
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.
@@ -77,11 +78,14 @@ public:
 
   // Power management interface (boards with power management override these)
   virtual bool isExternalPowered() { return false; }
+  virtual bool isUsbDataConnected() { return false; }
   virtual uint16_t getBootVoltage() { return 0; }
   virtual uint32_t getResetReason() const { return 0; }
   virtual const char* getResetReasonString(uint32_t reason) { return "Not available"; }
   virtual uint8_t getShutdownReason() const { return 0; }
   virtual const char* getShutdownReasonString(uint8_t reason) { return "Not available"; }
+
+  inline static uint32_t n_cad_busy = 0;
 };
 
 /**

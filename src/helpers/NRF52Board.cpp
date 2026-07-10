@@ -1,19 +1,38 @@
 #if defined(NRF52_PLATFORM)
 #include "NRF52Board.h"
+#include <target.h>
 
 #include <bluefruit.h>
+#include "ble_gap.h"
+#include "ble_hci.h"
 #include <nrf_soc.h>
+#ifdef USE_TINYUSB
+#include <Adafruit_TinyUSB.h>
+#endif
 
 static BLEDfu bledfu;
+static uint16_t ota_conn_handle = BLE_CONN_HANDLE_INVALID;
+static bool ota_active = false;
+static bool ota_ble_started = false;
+
+static void format_ota_reply(char reply[]) {
+  uint8_t mac_addr[6];
+  memset(mac_addr, 0, sizeof(mac_addr));
+  Bluefruit.getAddr(mac_addr);
+  sprintf(reply, "OK - mac: %02X:%02X:%02X:%02X:%02X:%02X", mac_addr[5], mac_addr[4], mac_addr[3],
+          mac_addr[2], mac_addr[1], mac_addr[0]);
+}
 
 static void connect_callback(uint16_t conn_handle) {
-  (void)conn_handle;
+  ota_conn_handle = conn_handle;
   MESH_DEBUG_PRINTLN("BLE client connected");
 }
 
 static void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
-  (void)conn_handle;
   (void)reason;
+  if (ota_conn_handle == conn_handle) {
+    ota_conn_handle = BLE_CONN_HANDLE_INVALID;
+  }
 
   MESH_DEBUG_PRINTLN("BLE client disconnected");
 }
@@ -251,6 +270,18 @@ bool NRF52Board::isExternalPowered() {
   }
 }
 
+bool NRF52Board::isUsbDataConnected() {
+#if defined(USE_TINYUSB)
+  #if defined(CFG_TUD_CDC) && CFG_TUD_CDC
+  return tud_mounted() && tud_cdc_connected();
+  #else
+  return tud_mounted();
+  #endif
+#else
+  return false;
+#endif
+}
+
 void NRF52Board::sleep(uint32_t secs) {
   // Clear FPU interrupt flags to avoid insomnia
   // see errata 87 for details https://docs.nordicsemi.com/bundle/errata_nRF52840_Rev3/page/ERR/nRF52840/Rev3/latest/anomaly_840_87.html
@@ -297,6 +328,37 @@ float NRF52Board::getMCUTemperature() {
   return temp * 0.25f; // Convert to *C
 }
 
+void NRF52Board::powerOff() {
+  // Power off the display if any
+#ifdef DISPLAY_CLASS
+  display.turnOff();
+#endif
+
+  // Power off LoRa
+  radio_driver.powerOff();
+
+  // Keep LoRa inactive during deepsleep
+  digitalWrite(P_LORA_NSS, HIGH);
+
+  // Power off GPS if any
+  if(sensors.getLocationProvider() != NULL) {
+    sensors.getLocationProvider()->stop();
+  }
+
+  // Flush serial buffers
+  Serial.flush();
+  delay(100);
+
+  // Enter SYSTEMOFF
+  uint8_t sd_enabled = 0;
+  sd_softdevice_is_enabled(&sd_enabled);
+  if (sd_enabled) { // SoftDevice is enabled
+    sd_power_system_off();
+  } else { // SoftDevice is not enable
+    NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
+  }
+}
+
 bool NRF52Board::getBootloaderVersion(char* out, size_t max_len) {
     static const char BOOTLOADER_MARKER[] = "UF2 Bootloader ";
     const uint8_t* flash = (const uint8_t*)0x000FB000; // earliest known info.txt location is 0xFB90B, latest is 0xFCC4B
@@ -317,13 +379,27 @@ bool NRF52Board::getBootloaderVersion(char* out, size_t max_len) {
 }
 
 bool NRF52Board::startOTAUpdate(const char *id, char reply[]) {
-  // Config the peripheral connection with maximum bandwidth
-  // more SRAM required by SoftDevice
-  // Note: All config***() function must be called before begin()
-  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  Bluefruit.configPrphConn(92, BLE_GAP_EVENT_LENGTH_MIN, 16, 16);
+  (void)id;
 
-  Bluefruit.begin(1, 0);
+  if (ota_active) {
+    format_ota_reply(reply);
+    return true;
+  }
+
+  if (!ota_ble_started) {
+    // Config the peripheral connection with maximum bandwidth
+    // more SRAM required by SoftDevice
+    // Note: All config***() function must be called before begin()
+    Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+    Bluefruit.configPrphConn(92, BLE_GAP_EVENT_LENGTH_MIN, 16, 16);
+
+    Bluefruit.begin(1, 0);
+    ota_ble_started = true;
+
+    // To be consistent OTA DFU should be added first if it exists
+    bledfu.begin();
+  }
+
   // Set max power. Accepted values are: -40, -30, -20, -16, -12, -8, -4, 0, 4
   Bluefruit.setTxPower(4);
   // Set the BLE device name
@@ -332,8 +408,8 @@ bool NRF52Board::startOTAUpdate(const char *id, char reply[]) {
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
 
-  // To be consistent OTA DFU should be added first if it exists
-  bledfu.begin();
+  Bluefruit.Advertising.clearData();
+  Bluefruit.ScanResponse.clearData();
 
   // Set up and start advertising
   // Advertising packet
@@ -355,12 +431,27 @@ bool NRF52Board::startOTAUpdate(const char *id, char reply[]) {
   Bluefruit.Advertising.setFastTimeout(30);   // number of seconds in fast mode
   Bluefruit.Advertising.start(0);             // 0 = Don't stop advertising after n seconds
 
-  uint8_t mac_addr[6];
-  memset(mac_addr, 0, sizeof(mac_addr));
-  Bluefruit.getAddr(mac_addr);
-  sprintf(reply, "OK - mac: %02X:%02X:%02X:%02X:%02X:%02X", mac_addr[5], mac_addr[4], mac_addr[3],
-          mac_addr[2], mac_addr[1], mac_addr[0]);
+  ota_active = true;
+  format_ota_reply(reply);
 
+  return true;
+}
+
+bool NRF52Board::stopOTAUpdate(char reply[]) {
+  if (!ota_active) {
+    strcpy(reply, "OK - OTA not running");
+    return true;
+  }
+
+  Bluefruit.Advertising.restartOnDisconnect(false);
+  Bluefruit.Advertising.stop();
+  if (ota_conn_handle != BLE_CONN_HANDLE_INVALID) {
+    sd_ble_gap_disconnect(ota_conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+    ota_conn_handle = BLE_CONN_HANDLE_INVALID;
+  }
+  ota_active = false;
+
+  strcpy(reply, "OK - OTA stopped");
   return true;
 }
 #endif

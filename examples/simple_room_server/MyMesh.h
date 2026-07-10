@@ -143,10 +143,6 @@ protected:
     return _prefs.airtime_factor;
   }
 
-  bool getCADEnabled() const override {
-    return _prefs.cad_enabled;
-  }
-
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
   void logRx(mesh::Packet* pkt, int len, float score) override;
   void logTx(mesh::Packet* pkt, int len) override;
@@ -160,14 +156,20 @@ protected:
   int getInterferenceThreshold() const override {
     return _prefs.interference_threshold;
   }
+  bool getCADEnabled() const override {
+    return _prefs.cad_enabled;
+  }
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
   }
   uint8_t getExtraAckTransmitCount() const override {
     return _prefs.multi_acks;
   }
+  uint8_t getDefaultTxCodingRate() const override {
+    return set_radio_at == 0 && revert_radio_at != 0 ? pending_cr : _prefs.cr;
+  }
 
-  bool filterRecvFloodPacket(mesh::Packet* pkt) override;
+  mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
 
   bool allowPacketForward(const mesh::Packet* packet) override;
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override;
@@ -324,4 +326,12 @@ public:
     return bridge->ntpDiag(reply, reply_size, verbose);
   }
 #endif
+  uint32_t getPowerSaveSleepSeconds(uint32_t max_secs) const;
+
+  // To check if there is pending work
+  bool hasPendingWork() const;
+
+private:
+  bool isMillisTimerDue(unsigned long timestamp) const;
+  uint32_t limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_secs) const;
 };

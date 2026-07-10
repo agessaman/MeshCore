@@ -6,6 +6,10 @@
 #include <CayenneLPP.h>
 #include <target.h>
 
+#ifndef MESH_ENABLE_RECENT_REPEATERS
+  #define MESH_ENABLE_RECENT_REPEATERS  1
+#endif
+
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #include <InternalFileSystem.h>
 #elif defined(RP2040_PLATFORM)
@@ -88,11 +92,32 @@ struct NeighbourInfo {
 
 #define PACKET_LOG_FILE  "/packet_log"
 
+#ifndef MAX_SCHEDULED_RADIO_SETTINGS_PER_TYPE
+  #define MAX_SCHEDULED_RADIO_SETTINGS_PER_TYPE 3
+#endif
+
+#define MAX_SCHEDULED_RADIO_SETTINGS (MAX_SCHEDULED_RADIO_SETTINGS_PER_TYPE * 2)
+
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
+  struct ScheduledRadioSetting {
+    bool active;
+    bool temporary;
+    bool started;
+    float freq;
+    float bw;
+    uint8_t sf;
+    uint8_t cr;
+    uint32_t start_time;
+    uint32_t end_time;
+  };
+
   FILESYSTEM* _fs;
   uint32_t last_millis;
   uint64_t uptime_millis;
   unsigned long next_local_advert, next_flood_advert;
+  unsigned long next_battery_alert_check;
+  unsigned long last_battery_alert_sent;
+  bool battery_alert_sent;
   bool _logging;
   NodePrefs _prefs;
   ClientACL  acl;
@@ -107,6 +132,24 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RegionEntry* recv_pkt_region;
   TransportKey default_scope;
   RateLimiter discover_limiter, anon_limiter;
+  struct FloodRetryBridgeState {
+    uint8_t key[MAX_HASH_SIZE];
+    uint8_t source_bucket;
+    uint8_t target_mask;
+    uint8_t heard_mask;
+    uint8_t progress_marker;
+    bool active;
+  };
+  struct FloodChannelBlockEntry {
+    bool active;
+    uint8_t key_len;
+    uint8_t max_hops;
+    uint8_t hash_prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN];
+    uint8_t secret[PUB_KEY_SIZE];
+    char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
+  };
+  mutable FloodRetryBridgeState flood_retry_bridge_states[MAX_FLOOD_RETRY_SLOTS];
+  FloodChannelBlockEntry flood_channel_blocks[FLOOD_CHANNEL_BLOCK_SLOTS];
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
   bool region_load_active;
@@ -115,12 +158,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
 #endif
   CayenneLPP telemetry;
-  unsigned long set_radio_at, revert_radio_at;
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
-  float pending_freq;
-  float pending_bw;
-  uint8_t pending_sf;
-  uint8_t pending_cr;
+  float active_bw;  // live BW, including temporary radio overrides
+  uint8_t active_sf;  // live SF, including temporary radio overrides
+  uint8_t active_cr;   // live CR, including temporary radio overrides
+  ScheduledRadioSetting scheduled_radio_settings[MAX_SCHEDULED_RADIO_SETTINGS];
   int  matching_peer_indexes[MAX_CLIENTS];
 #if defined(WITH_RS232_BRIDGE)
   RS232Bridge bridge;
@@ -136,6 +178,30 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   AlertReporter _alerter;
 #endif
 
+  bool extractDirectRetryPrefix(const mesh::Packet* packet, uint8_t* prefix, uint8_t& prefix_len) const;
+  int8_t getDirectRetryMinSNRX4() const;
+  uint8_t getDirectRetryCodingRateForSNR(int8_t snr_x4) const;
+  uint8_t getDirectRetryConfiguredMaxAttempts() const;
+  uint32_t getDirectRetryAttemptStepMillis() const;
+  bool hasFloodRetryPrefixes() const;
+  bool floodRetryPrefixMatches(const mesh::Packet* packet) const;
+  bool floodRetryLastHopMatches(const mesh::Packet* packet) const;
+  bool floodRetryPrefixIgnored(const uint8_t* prefix, uint8_t prefix_len) const;
+  uint8_t floodRetryEffectivePathLength(const mesh::Packet* packet, uint8_t max_hops = 0xFF) const;
+  bool floodRetryPrefixFresh(const uint8_t* prefix, uint8_t prefix_len) const;
+  int floodRetryBucketForPrefix(const uint8_t* prefix, uint8_t prefix_len, bool require_fresh,
+                                bool include_other) const;
+  int floodRetryBucketForPathHop(const uint8_t* prefix, uint8_t prefix_len, uint8_t hop,
+                                 uint8_t progress_marker) const;
+  int floodRetrySourceBucket(const mesh::Packet* packet) const;
+  uint8_t floodRetryBridgeTargetMask(uint8_t source_bucket) const;
+  uint8_t floodRetryBridgeHeardMask(const mesh::Packet* packet, uint8_t source_bucket,
+                                    uint8_t progress_marker) const;
+  FloodRetryBridgeState* floodRetryBridgeStateFor(const mesh::Packet* packet, bool create) const;
+  void clearFloodRetryBridgeState(const mesh::Packet* packet);
+  void refreshFloodRetryHeardRecent(const mesh::Packet* packet);
+  void formatFloodRetryPath(char* dest, size_t dest_len, const mesh::Packet* packet) const;
+  bool formatFloodRetryHeard(char* dest, size_t dest_len, const mesh::Packet* packet) const;
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
@@ -143,17 +209,48 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   mesh::Packet* createSelfAdvert();
+  bool sendRepeatersFloodText(const char* text);
+  void checkBatteryAlert();
+  void printRecentRepeatersSerial();
 
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
+  void applyRadioParams(float freq, float bw, uint8_t sf, uint8_t cr);
+  void applySavedRadioParams();
+  void processScheduledRadioSettings();
+  bool isMillisTimerDue(unsigned long timestamp) const;
+  void loadFloodChannelBlocks();
+  bool saveFloodChannelBlocks();
+  void seedDefaultFloodChannelBlocks();
+  void clearFloodChannelBlockEntry(FloodChannelBlockEntry& entry);
+  void deriveFloodChannelBlockPrefix(const uint8_t* secret, uint8_t key_len,
+                                     uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN]) const;
+  uint8_t resolveFloodChannelBlockHops(uint8_t max_hops) const;
+  bool floodChannelBlockHopApplies(const mesh::Packet* packet, uint8_t max_hops) const;
+  bool floodChannelDataHopApplies(const mesh::Packet* packet) const;
+  bool floodChannelBlockMatches(const FloodChannelBlockEntry& entry, const mesh::Packet* packet) const;
+  bool shouldBlockFloodChannelForward(const mesh::Packet* packet) const;
+  int findFloodChannelBlockBySelector(const char* selector) const;
+  int findFloodChannelBlockSlot(const uint8_t prefix[FLOOD_CHANNEL_BLOCK_PREFIX_LEN], const char* name) const;
+  void formatFloodChannelBlockDetail(char* reply, int idx) const;
+  bool hasScheduledRadioWorkDue() const;
+  uint32_t limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_secs) const;
+  uint32_t limitSleepToRtcTime(uint32_t timestamp, uint32_t sleep_secs) const;
+  uint32_t limitSleepToScheduledRadioWork(uint32_t sleep_secs) const;
+  bool hasStartedScheduledTempRadio() const;
+  int findFreeScheduledRadioSlot() const;
+  int countScheduledRadioSettings(bool temporary) const;
+  int findScheduledRadioSettingByIndex(bool temporary, int wanted) const;
+  int getScheduledRadioSettingIndex(bool temporary, int slot_idx) const;
+  bool scheduledRadioConflicts(bool temporary, uint32_t start_time, uint32_t end_time) const;
+  void clearScheduledRadioSetting(int idx, bool restore_if_started);
+  void formatScheduledRadioDuration(char* dest, size_t dest_len, uint32_t target_time) const;
+  void formatRadioParamTuple(char* dest, size_t dest_len, const ScheduledRadioSetting& setting) const;
+  void formatScheduledRadioSetting(char* reply, int setting_idx, int display_idx) const;
 
 protected:
   float getAirtimeBudgetFactor() const override {
     return _prefs.airtime_factor;
-  }
-
-  bool getCADEnabled() const override {
-    return _prefs.cad_enabled;
   }
 
   bool allowPacketForward(const mesh::Packet* packet) override;
@@ -167,9 +264,30 @@ protected:
 
   uint32_t getRetransmitDelay(const mesh::Packet* packet) override;
   uint32_t getDirectRetransmitDelay(const mesh::Packet* packet) override;
+  uint8_t getDefaultTxCodingRate() const override { return active_cr; }
+  bool allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) const override;
+  bool maybeShortCircuitDirect(mesh::Packet* packet) override;
+  void configureDirectRetryPacket(mesh::Packet* retry, const mesh::Packet* original, uint8_t retry_attempt) override;
+  uint32_t getDirectRetryEchoDelay(const mesh::Packet* packet) const override;
+  uint8_t getDirectRetryMaxAttempts(const mesh::Packet* packet) const override;
+  uint32_t getDirectRetryAttemptDelay(const mesh::Packet* packet, uint8_t attempt_idx) override;
+  void onDirectRetryEvent(const char* event, const mesh::Packet* packet, uint32_t delay_millis, uint8_t retry_attempt,
+                          const uint8_t* target_hash = NULL, uint8_t target_hash_len = 0,
+                          int16_t payload_type = -1) override;
+  void onDirectRetryFailed(const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) override;
+  void onDirectRetrySucceeded(const uint8_t* next_hop_hash, uint8_t next_hop_hash_len, int8_t snr_x4) override;
+  bool allowFloodRetry(const mesh::Packet* packet) const override;
+  void onFloodRetryEvent(const char* event, const mesh::Packet* packet, uint32_t delay_millis, uint8_t retry_attempt) override;
+  bool hasFloodRetryTargetPrefix(const mesh::Packet* packet) const override;
+  uint8_t getFloodRetryMaxPathLength(const mesh::Packet* packet) const override;
+  uint8_t getFloodRetryMaxAttempts(const mesh::Packet* packet) const override;
+  bool isFloodRetryEchoTarget(const mesh::Packet* packet, uint8_t progress_marker) const override;
 
   int getInterferenceThreshold() const override {
     return _prefs.interference_threshold;
+  }
+  bool getCADEnabled() const override {
+    return _prefs.cad_enabled;
   }
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
@@ -189,7 +307,7 @@ protected:
   }
 #endif
 
-  bool filterRecvFloodPacket(mesh::Packet* pkt) override;
+  mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
 
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override;
   int searchPeersByHash(const uint8_t* hash) override;
@@ -200,6 +318,7 @@ protected:
   void onControlDataRecv(mesh::Packet* packet) override;
 
   void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
+  void sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
@@ -228,6 +347,10 @@ public:
   bool sendAlertText(const char* text) override { return _alerter.sendText(text); }
 #endif
   bool resolveAlertScope(TransportKey& dest) override;
+  void addScheduledRadioParams(bool temporary, float freq, float bw, uint8_t sf, uint8_t cr,
+                               uint32_t start_time, uint32_t end_time, char* reply) override;
+  void formatScheduledRadioParams(bool temporary, const char* selector, char* reply) override;
+  void deleteScheduledRadioParams(bool temporary, const char* selector, char* reply) override;
   bool formatFileSystem() override;
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
   void updateAdvertTimer() override;
@@ -247,17 +370,28 @@ public:
   void formatRadioStatsReply(char *reply) override;
   void formatRadioDiagReply(char *reply) override;
   void formatPacketStatsReply(char *reply) override;
+  void formatRecentRepeatersReply(char *reply, int page) override;
+  bool setRecentRepeater(const uint8_t* prefix, uint8_t prefix_len, int8_t snr_x4) override;
+  void clearRecentRepeaters() override;
   void startRegionsLoad() override;
   bool saveRegions() override;
   void onDefaultRegionChanged(const RegionEntry* r) override;
+  void setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
+                            const char* name, uint8_t max_hops, char* reply) override;
+  void formatFloodChannelBlocks(const char* selector, char* reply) override;
+  void deleteFloodChannelBlock(const char* selector, char* reply) override;
 
   mesh::LocalIdentity& getSelfId() override { return self_id; }
 
   void saveIdentity(const mesh::LocalIdentity& new_id) override;
   void clearStats() override;
 
-  void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
+  void handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char* command, char* reply);
+  void handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
+    handleCommand(sender_timestamp, NULL, command, reply);
+  }
   void loop();
+  uint32_t getPowerSaveSleepSeconds(uint32_t max_secs) const;
 
 #if defined(WITH_BRIDGE)
   void setBridgeState(bool enable) override {
@@ -353,7 +487,6 @@ public:
   // To check if there is pending work
   bool hasPendingWork() const;
 
-#if defined(USE_SX1262) || defined(USE_SX1268)
-  void setRxBoostedGain(bool enable) override;
-#endif
+  bool setRxBoostedGain(bool enable) override;
+
 };

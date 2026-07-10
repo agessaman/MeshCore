@@ -25,7 +25,7 @@ namespace mesh {
 #define PAYLOAD_TYPE_GRP_DATA    0x06    // an (unverified) group datagram (prefixed with channel hash, MAC) (enc data: data_type(uint16), data_len, blob)
 #define PAYLOAD_TYPE_ANON_REQ    0x07    // generic request (prefixed with dest_hash, ephemeral pub_key, MAC) (enc data: ...)
 #define PAYLOAD_TYPE_PATH        0x08    // returned path (prefixed with dest/src hashes, MAC) (enc data: path, extra)
-#define PAYLOAD_TYPE_TRACE       0x09    // trace a path, collecting SNI for each hop
+#define PAYLOAD_TYPE_TRACE       0x09    // trace a path, collecting SNR for each hop
 #define PAYLOAD_TYPE_MULTIPART   0x0A    // packet is one of a set of packets
 #define PAYLOAD_TYPE_CONTROL     0x0B    // a control/discovery packet
 //...
@@ -49,6 +49,7 @@ public:
   uint8_t path[MAX_PATH_SIZE];
   uint8_t payload[MAX_PACKET_PAYLOAD];
   int8_t _snr;
+  uint8_t tx_cr;  // volatile local-only TX coding-rate override; not serialized
 
   /**
    * \brief calculate the hash of payload + type

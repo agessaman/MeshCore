@@ -59,16 +59,16 @@ public:
     for (int i = 0; i < pool_size; i++) { _ages[i].pkt = NULL; _ages[i].scheduled_for = 0; }
   }
 
-  void queueOutbound(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) override {
+  bool queueOutbound(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) override {
     int free_count = getFreeCount();
     if (free_count < _emergency_floor
         || (free_count < _rx_reserve && priority > MAX_PROTECTED_PRI)) {
       MESH_DEBUG_PRINTLN("RxReservePacketManager: pool below RX reserve, shedding outbound (pri %d)", (int)priority);
       free(packet);
-      return;
+      return false;
     }
     recordAge(packet, scheduled_for);
-    StaticPoolPacketManager::queueOutbound(packet, priority, scheduled_for);
+    return StaticPoolPacketManager::queueOutbound(packet, priority, scheduled_for);
   }
 
   mesh::Packet* getNextOutbound(uint32_t now) override {

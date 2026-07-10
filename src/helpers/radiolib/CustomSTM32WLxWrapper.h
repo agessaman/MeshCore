@@ -17,6 +17,10 @@ public:
     updatePreamble(sf);
   }
 
+  bool setCodingRate(uint8_t cr) override {
+    return ((CustomSTM32WLx *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE;
+  }
+
   bool isReceivingPacket() override { 
     return ((CustomSTM32WLx *)_radio)->isReceiving();
   }

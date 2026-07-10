@@ -310,8 +310,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   return true;
 }
 
-bool MyMesh::filterRecvFloodPacket(mesh::Packet* pkt) {
-  // just try to determine region for packet (apply later in allowPacketForward())
+mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   if (pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD) {
     recv_pkt_region = region_map.findMatch(pkt, REGION_DENY_FLOOD);
   } else if (pkt->getRouteType() == ROUTE_TYPE_FLOOD) {
@@ -323,8 +322,7 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* pkt) {
   } else {
     recv_pkt_region = NULL;
   }
-  // do normal processing
-  return false;
+  return Mesh::onRecvPacket(pkt);
 }
 
 void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const mesh::Identity &sender,
@@ -650,6 +648,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _logging = false;
   region_load_active = false;
   set_radio_at = revert_radio_at = 0;
+  recv_pkt_region = NULL;
 
   // defaults
   memset(&_prefs, 0, sizeof(_prefs));
@@ -672,6 +671,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_max = 64;
   _prefs.flood_max_unscoped = 64;
   _prefs.flood_max_advert = 8;
+  _prefs.flood_channel_data_enabled = 1;
   _prefs.interference_threshold = 0; // disabled
   _prefs.radio_fem_rxgain = 1;       // LoRa FEM RX gain on by default (FEM boards)
   _prefs.cad_enabled = 0;            // hardware CAD before TX (off by default; 'set cad on')
@@ -683,6 +683,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.gps_enabled = 0;
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
+  _prefs.radio_fem_rxgain = 1;
 
   // Observer defaults (alert.*, etc.) moved to applyMQTTDefaults() — they live
   // in /mqtt_prefs now, not NodePrefs.
@@ -1129,4 +1130,50 @@ void MyMesh::loop() {
 #ifdef WITH_MQTT_BRIDGE
   _alerter.onLoop(now);
 #endif
+}
+
+bool MyMesh::isMillisTimerDue(unsigned long timestamp) const {
+  return timestamp && millisHasNowPassed(timestamp);
+}
+
+uint32_t MyMesh::limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep_secs) const {
+  if (!timestamp || sleep_secs == 0) {
+    return sleep_secs;
+  }
+  unsigned long now = millis();
+  if ((long)(now - timestamp) >= 0) {
+    return 0;
+  }
+  unsigned long remaining_ms = timestamp - now;
+  uint32_t remaining_secs = (remaining_ms + 999UL) / 1000UL;
+  return remaining_secs < sleep_secs ? remaining_secs : sleep_secs;
+}
+
+uint32_t MyMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
+  if (max_secs == 0 || hasPendingWork()) {
+    return 0;
+  }
+
+  uint32_t sleep_secs = max_secs;
+  if (acl.getNumClients() > 0) {
+    sleep_secs = limitSleepToMillisTimer(next_push, sleep_secs);
+  }
+  sleep_secs = limitSleepToMillisTimer(next_flood_advert, sleep_secs);
+  sleep_secs = limitSleepToMillisTimer(next_local_advert, sleep_secs);
+  sleep_secs = limitSleepToMillisTimer(set_radio_at, sleep_secs);
+  sleep_secs = limitSleepToMillisTimer(revert_radio_at, sleep_secs);
+  sleep_secs = limitSleepToMillisTimer(dirty_contacts_expiry, sleep_secs);
+  return sleep_secs;
+}
+
+// To check if there is pending work
+bool MyMesh::hasPendingWork() const {
+#if defined(WITH_BRIDGE)
+  if (bridge && bridge->isRunning()) return true; // bridge needs WiFi radio, can't sleep
+#endif
+  if (_mgr->getOutboundTotal() > 0) return true;
+  if (acl.getNumClients() > 0 && isMillisTimerDue(next_push)) return true;
+  if (isMillisTimerDue(next_flood_advert) || isMillisTimerDue(next_local_advert)) return true;
+  if (isMillisTimerDue(set_radio_at) || isMillisTimerDue(revert_radio_at)) return true;
+  return isMillisTimerDue(dirty_contacts_expiry);
 }

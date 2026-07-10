@@ -62,6 +62,8 @@
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 #define CMD_SEND_RAW_PACKET           65
+#define CMD_GET_RADIO_FEM_RXGAIN      66
+#define CMD_SET_RADIO_FEM_RXGAIN      67
 
 // Stats sub-types for CMD_GET_STATS
 #define STATS_TYPE_CORE               0
@@ -105,6 +107,19 @@
 #define DIRECT_SEND_PERHOP_FACTOR       6.0f
 #define DIRECT_SEND_PERHOP_EXTRA_MILLIS 250
 #define LAZY_CONTACTS_WRITE_DELAY       5000
+
+#ifndef DEFAULT_MULTI_ACKS
+#define DEFAULT_MULTI_ACKS 0
+#endif
+#ifndef DEFAULT_PATH_HASH_MODE
+#define DEFAULT_PATH_HASH_MODE 0
+#endif
+#ifndef DEFAULT_MANUAL_ADD_CONTACTS
+#define DEFAULT_MANUAL_ADD_CONTACTS 0
+#endif
+#ifndef DEFAULT_AUTOADD_CONFIG
+#define DEFAULT_AUTOADD_CONFIG 0
+#endif
 
 #define PUBLIC_GROUP_PSK                "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -264,6 +279,9 @@ bool MyMesh::getCADEnabled() const {
 
 int MyMesh::getInterferenceThreshold() const {
   return 0; // disabled for now, until currentRSSI() problem is resolved
+}
+bool MyMesh::getCADEnabled() const {
+  return true; // hardware CAD before TX (no CLI toggle on companion; enabled by default)
 }
 
 int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
@@ -858,7 +876,7 @@ void MyMesh::onSendTimeout() {}
 
 MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store, AbstractUITask* ui)
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
-      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui) {
+      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui), _iter(0) {
   _iter_started = false;
   _cli_rescue = false;
   offline_queue_len = 0;
@@ -879,9 +897,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.sf = LORA_SF;
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
+  _prefs.multi_acks = DEFAULT_MULTI_ACKS;
+  _prefs.manual_add_contacts = DEFAULT_MANUAL_ADD_CONTACTS;
   _prefs.tx_power_dbm = LORA_TX_POWER;
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // No automatic GPS updates by default
+  _prefs.autoadd_config = DEFAULT_AUTOADD_CONFIG;
+  _prefs.path_hash_mode = DEFAULT_PATH_HASH_MODE;
   //_prefs.rx_delay_base = 10.0f;  enable once new algo fixed
 #if defined(USE_SX1262) || defined(USE_SX1268)
 #ifdef SX126X_RX_BOOSTED_GAIN
@@ -890,6 +912,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.rx_boosted_gain = 1; // enabled by default
 #endif
 #endif
+  _prefs.radio_fem_rxgain = 1;
 }
 
 void MyMesh::begin(bool has_display) {
@@ -937,8 +960,13 @@ void MyMesh::begin(bool has_display) {
   _prefs.sf = constrain(_prefs.sf, 5, 12);
   _prefs.cr = constrain(_prefs.cr, 5, 8);
   _prefs.tx_power_dbm = constrain(_prefs.tx_power_dbm, -9, MAX_LORA_TX_POWER);
+  _prefs.multi_acks = constrain(_prefs.multi_acks, 0, 1);
+  _prefs.manual_add_contacts = constrain(_prefs.manual_add_contacts, 0, 1);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+  _prefs.autoadd_config &= AUTO_ADD_OVERWRITE_OLDEST | AUTO_ADD_CHAT | AUTO_ADD_REPEATER | AUTO_ADD_ROOM_SERVER | AUTO_ADD_SENSOR;
+  _prefs.path_hash_mode = constrain(_prefs.path_hash_mode, 0, 2);
+  _prefs.radio_fem_rxgain = constrain(_prefs.radio_fem_rxgain, 0, 1);
 
 #ifdef BLE_PIN_CODE // 123456 by default
   if (_prefs.ble_pin == 0) {
@@ -968,6 +996,7 @@ void MyMesh::begin(bool has_display) {
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
+  board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
   // NOTE: no FEM LNA wiring here — companion has its own NodePrefs without
@@ -1548,6 +1577,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       memcpy(anon.id.pub_key, pub_key, PUB_KEY_SIZE);
       anon.out_path_len = 0;   // default to zero-hop direct
       anon.type = ADV_TYPE_NONE;  // unknown
+      anon.lastmod = getRTCClock()->getCurrentTime();
 
       if (addContact(anon)) recipient = &anon;
     }
@@ -1827,6 +1857,30 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
+  } else if (cmd_frame[0] == CMD_GET_RADIO_FEM_RXGAIN) {
+    if (!board.canControlLoRaFemLna()) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+    } else {
+      out_frame[0] = RESP_CODE_OK;
+      uint8_t value = board.isLoRaFemLnaEnabled() ? 1 : 0;
+      memcpy(&out_frame[1], &value, 1);
+      _serial->writeFrame(out_frame, 2);
+    }
+  } else if (cmd_frame[0] == CMD_SET_RADIO_FEM_RXGAIN && len >= 2) {
+    uint8_t value = cmd_frame[1];
+    if (!board.canControlLoRaFemLna()) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+    } else if (value <= 1) {
+      _prefs.radio_fem_rxgain = value;
+      if (board.setLoRaFemLnaEnabled(value != 0)) {
+        savePrefs();
+        writeOKFrame();
+      } else {
+        writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+      }
+    } else {
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    }
   } else if (cmd_frame[0] == CMD_GET_ADVERT_PATH && len >= PUB_KEY_SIZE+2) {
     // FUTURE use:  uint8_t reserved = cmd_frame[1];
     uint8_t *pub_key = &cmd_frame[2];
@@ -1987,6 +2041,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         sendPacket(pkt, priority, 0);
         writeOKFrame();
       } else {
+        releasePacket(pkt);
         writeErrFrame(ERR_CODE_ILLEGAL_ARG);
       }
     } else {
@@ -2192,15 +2247,7 @@ void MyMesh::checkSerialInterface() {
              && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
   ) {
     ContactInfo contact;
-    bool found = false;
-    while (_iter.hasNext(this, contact)) {
-      if (contact.type != ADV_TYPE_NONE) {
-        found = true;
-        break;
-      }
-    }
-
-    if (found) {
+    if (_iter.hasNext(this, contact)) {
       if (contact.lastmod > _iter_filter_since) { // apply the 'since' filter
         writeContactRespFrame(RESP_CODE_CONTACT, contact);
         if (contact.lastmod > _most_recent_lastmod) {

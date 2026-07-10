@@ -4,6 +4,10 @@
 #include "RadioLibWrappers.h"
 #include "LR11x0Reset.h"
 
+#ifndef USE_LR1110
+#define USE_LR1110
+#endif
+
 class CustomLR1110Wrapper : public RadioLibWrapper {
 public:
   CustomLR1110Wrapper(CustomLR1110& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
@@ -16,6 +20,10 @@ public:
     updatePreamble(sf);
   }
 
+  bool setCodingRate(uint8_t cr) override {
+    return ((CustomLR1110 *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE;
+  }
+
   void doResetAGC() override { lr11x0ResetAGC((LR11x0 *)_radio, ((CustomLR1110 *)_radio)->getFreqMHz()); }
   bool isReceivingPacket() override {
     return ((CustomLR1110 *)_radio)->isReceiving();
@@ -24,6 +32,11 @@ public:
     float rssi = -110;
     ((CustomLR1110 *)_radio)->getRssiInst(&rssi);
     return rssi;
+  }
+
+  uint32_t getEstAirtimeFor(int len_bytes) override {
+    auto airtime = RadioLibWrapper::getEstAirtimeFor(len_bytes);
+    return airtime < 200 ? 200 : airtime;   // at least 200 millis
   }
 
   void onSendFinished() override {
@@ -36,8 +49,8 @@ public:
 
   uint8_t getSpreadingFactor() const override { return ((CustomLR1110 *)_radio)->getSpreadingFactor(); }
   
-  void setRxBoostedGainMode(bool en) override {
-    ((CustomLR1110 *)_radio)->setRxBoostedGainMode(en);
+  bool setRxBoostedGainMode(bool en) override {
+    return ((CustomLR1110 *)_radio)->setRxBoostedGainMode(en) == RADIOLIB_ERR_NONE;
   }
   bool getRxBoostedGainMode() const override {
     return ((CustomLR1110 *)_radio)->getRxBoostedGainMode();

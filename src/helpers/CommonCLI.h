@@ -20,6 +20,85 @@
 #define LOOP_DETECT_MODERATE  2
 #define LOOP_DETECT_STRICT    3
 
+#define RETRY_PRESET_INFRA    0
+#define RETRY_PRESET_ROOFTOP  1
+#define RETRY_PRESET_MOBILE   2
+#define RETRY_PRESET_CUSTOM   0xFF
+
+#define DIRECT_RETRY_INFRA_BASE_MS      275
+#define DIRECT_RETRY_INFRA_COUNT          4
+#define DIRECT_RETRY_INFRA_STEP_MS      150
+#define DIRECT_RETRY_INFRA_MARGIN_X4     60
+
+#define DIRECT_RETRY_ROOFTOP_BASE_MS    175
+#define DIRECT_RETRY_ROOFTOP_COUNT       15
+#define DIRECT_RETRY_ROOFTOP_STEP_MS    100
+#define DIRECT_RETRY_ROOFTOP_MARGIN_X4   20
+
+#define DIRECT_RETRY_MOBILE_BASE_MS     175
+#define DIRECT_RETRY_MOBILE_COUNT        15
+#define DIRECT_RETRY_MOBILE_STEP_MS      50
+#define DIRECT_RETRY_MOBILE_MARGIN_X4     0
+#define DIRECT_RETRY_RECENT_DEFAULT       1
+
+#define FLOOD_RETRY_INFRA_COUNT           1
+#define FLOOD_RETRY_INFRA_MAX_PATH        1
+
+#define FLOOD_RETRY_ROOFTOP_COUNT         3
+#define FLOOD_RETRY_ROOFTOP_MAX_PATH      2
+
+#define FLOOD_RETRY_MOBILE_COUNT         15
+#define FLOOD_RETRY_MOBILE_MAX_PATH       1
+#define FLOOD_RETRY_ADVERT_DEFAULT        0
+
+#define BATTERY_ALERT_LOW_PERCENT_DEFAULT       20
+#define BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT  10
+
+#ifndef FLOOD_RETRY_PREFIX_SLOTS
+  #define FLOOD_RETRY_PREFIX_SLOTS        8
+#endif
+#ifndef FLOOD_RETRY_PREFIX_LEN
+  #define FLOOD_RETRY_PREFIX_LEN          3
+#endif
+#ifndef FLOOD_RETRY_BRIDGE_BUCKETS
+  #define FLOOD_RETRY_BRIDGE_BUCKETS      6
+#endif
+#ifndef FLOOD_RETRY_BUCKET_PREFIXES
+  #define FLOOD_RETRY_BUCKET_PREFIXES     17
+#endif
+#ifndef FLOOD_RETRY_IGNORE_PREFIXES
+  #define FLOOD_RETRY_IGNORE_PREFIXES     8
+#endif
+#ifndef FLOOD_RETRY_LIST_PREFIXES
+  #define FLOOD_RETRY_LIST_PREFIXES       ((FLOOD_RETRY_IGNORE_PREFIXES > FLOOD_RETRY_BUCKET_PREFIXES) ? FLOOD_RETRY_IGNORE_PREFIXES : FLOOD_RETRY_BUCKET_PREFIXES)
+#endif
+#ifndef FLOOD_RETRY_LIST_TEXT_MAX
+  #define FLOOD_RETRY_LIST_TEXT_MAX       (FLOOD_RETRY_LIST_PREFIXES * FLOOD_RETRY_PREFIX_LEN * 2 + FLOOD_RETRY_LIST_PREFIXES)
+#endif
+#ifndef COMMON_CLI_TMP_LEN
+  #define COMMON_CLI_TMP_LEN              ((FLOOD_RETRY_LIST_TEXT_MAX > (PRV_KEY_SIZE * 2 + 4)) ? FLOOD_RETRY_LIST_TEXT_MAX : (PRV_KEY_SIZE * 2 + 4))
+#endif
+
+#ifndef FLOOD_CHANNEL_BLOCK_SLOTS
+  #define FLOOD_CHANNEL_BLOCK_SLOTS       15
+#endif
+#ifndef FLOOD_CHANNEL_BLOCK_NAME_LEN
+  #define FLOOD_CHANNEL_BLOCK_NAME_LEN    32
+#endif
+#ifndef FLOOD_CHANNEL_BLOCK_PREFIX_LEN
+  #define FLOOD_CHANNEL_BLOCK_PREFIX_LEN  4
+#endif
+#define FLOOD_CHANNEL_BLOCK_HOPS_ALL      0xFF
+#define FLOOD_CHANNEL_BLOCK_HOPS_INHERIT  0xFE
+
+#define DIRECT_RETRY_CR4_MIN_SNR_X4_DEFAULT  40
+#define DIRECT_RETRY_CR5_MIN_SNR_X4_DEFAULT  30
+#define DIRECT_RETRY_CR7_MIN_SNR_X4_DEFAULT  10
+#define DIRECT_RETRY_CR8_MAX_SNR_X4_DEFAULT  10
+
+#define DIRECT_RETRY_PREFS_MAGIC_0  0xD1
+#define DIRECT_RETRY_PREFS_MAGIC_1  0x52
+
 struct NodePrefs { // persisted to file
   float airtime_factor;
   char node_name[32];
@@ -29,7 +108,6 @@ struct NodePrefs { // persisted to file
   int8_t tx_power_dbm;
   uint8_t disable_fwd;
   uint8_t advert_interval;       // minutes / 2
-  uint8_t rx_boosted_gain;       // power settings (file offset 79)
   uint8_t flood_advert_interval; // hours
   float rx_delay_base;
   float tx_delay_factor;
@@ -46,7 +124,6 @@ struct NodePrefs { // persisted to file
   uint8_t flood_max_advert;
   uint8_t interference_threshold;
   uint8_t agc_reset_interval; // secs / 4
-  uint8_t path_hash_mode;   // which path mode to use when sending
   // Bridge settings
   uint8_t bridge_enabled; // boolean
   uint16_t bridge_delay;  // milliseconds (default 500 ms)
@@ -56,6 +133,7 @@ struct NodePrefs { // persisted to file
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
   uint8_t powersaving_enabled; // boolean
+  uint8_t reboot_interval; // hours, 0-255 (default 0=disable)
   // Gps settings
   uint8_t gps_enabled;
   uint32_t gps_interval; // in seconds
@@ -63,18 +141,46 @@ struct NodePrefs { // persisted to file
   uint32_t discovery_mod_timestamp;
   float adc_multiplier;
   char owner_info[120];
-
+  // NOTE: member order below matches mcarper/keymindCascade (upstream/dev order).
+  // It is in-memory only — /com_prefs is read/written field-by-field in loadPrefsInt/
+  // savePrefs, whose canonical file order (identical to the flex fleet's through
+  // offset 294, keymind retry tail at 295+) is what devices actually persist.
+  uint8_t rx_boosted_gain; // power settings
+  uint8_t radio_fem_rxgain; // LoRa FEM RX gain setting
+  uint8_t path_hash_mode;   // which path mode to use when sending
   uint8_t loop_detect;
-
-  // Restored from upstream (dropped by the 22eb9b87 revert). Persisted at the same
-  // /com_prefs offsets upstream uses (293, 294) so the file stays upstream-aligned.
-  uint8_t radio_fem_rxgain;  // LoRa FEM RX-gain (LNA); default on. Hardware driving is
-                             // wired per-board in the FEM-restore change; persisted here.
-  uint8_t cad_enabled;       // hardware Channel Activity Detection before TX; default off
+  uint8_t cad_enabled;      // hardware Channel Activity Detection before TX (boolean)
+  uint8_t retry_preset;
+  uint8_t direct_retry_attempts;
+  uint16_t direct_retry_base_ms;
+  uint16_t direct_retry_step_ms;
+  uint16_t direct_retry_snr_margin_x4;
+  int8_t direct_retry_cr4_snr_x4;
+  int8_t direct_retry_cr5_snr_x4;
+  int8_t direct_retry_cr7_snr_x4;
+  int8_t direct_retry_cr8_snr_x4;
+  uint8_t direct_retry_enabled;
+  uint8_t direct_retry_cr_enabled;
+  uint8_t direct_retry_prefs_magic[2];
+  uint8_t flood_retry_attempts;
+  uint8_t flood_retry_max_path;
+  uint8_t flood_retry_prefixes[FLOOD_RETRY_PREFIX_SLOTS][FLOOD_RETRY_PREFIX_LEN];
+  uint8_t flood_retry_bridge_enabled;
+  uint8_t flood_retry_bridge_buckets[FLOOD_RETRY_BRIDGE_BUCKETS][FLOOD_RETRY_BUCKET_PREFIXES][FLOOD_RETRY_PREFIX_LEN];
+  uint8_t flood_retry_ignore_prefixes[FLOOD_RETRY_IGNORE_PREFIXES][FLOOD_RETRY_PREFIX_LEN];
+  uint8_t flood_retry_advert_enabled;
+  uint8_t battery_alert_enabled;
+  uint8_t battery_alert_low_percent;
+  uint8_t battery_alert_critical_percent;
+  uint8_t direct_retry_recent_enabled;
+  uint8_t flood_channel_data_enabled;
+  uint8_t flood_channel_block_max_hops;
+  uint8_t flood_channel_data_max_hops;
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) were moved out of
   // NodePrefs into MQTTPrefs (persisted to /mqtt_prefs) so this struct stays
-  // aligned with upstream. See struct MQTTPrefs below.
+  // aligned with upstream (plus the keymind retry/flood tail above). See
+  // struct MQTTPrefs below.
 };
 
 #ifdef WITH_MQTT_BRIDGE
@@ -295,10 +401,60 @@ public:
   virtual void formatRadioStatsReply(char *reply) = 0;
   virtual void formatRadioDiagReply(char *reply) { strcpy(reply, "Not supported"); }
   virtual void formatPacketStatsReply(char *reply) = 0;
+  virtual void formatRecentRepeatersReply(char *reply, int page) {
+    (void)page;
+    if (reply != NULL) reply[0] = 0;
+  }
+  virtual bool setRecentRepeater(const uint8_t* prefix, uint8_t prefix_len, int8_t snr_x4) {
+    (void)prefix;
+    (void)prefix_len;
+    (void)snr_x4;
+    return false;
+  }
+  virtual void clearRecentRepeaters() {
+  }
   virtual mesh::LocalIdentity& getSelfId() = 0;
   virtual void saveIdentity(const mesh::LocalIdentity& new_id) = 0;
   virtual void clearStats() = 0;
   virtual void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) = 0;
+  virtual void addScheduledRadioParams(bool temporary, float freq, float bw, uint8_t sf, uint8_t cr,
+                                       uint32_t start_time, uint32_t end_time, char* reply) {
+    (void)temporary;
+    (void)freq;
+    (void)bw;
+    (void)sf;
+    (void)cr;
+    (void)start_time;
+    (void)end_time;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void formatScheduledRadioParams(bool temporary, const char* selector, char* reply) {
+    (void)temporary;
+    (void)selector;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void deleteScheduledRadioParams(bool temporary, const char* selector, char* reply) {
+    (void)temporary;
+    (void)selector;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void setFloodChannelBlock(int index, const uint8_t* secret, uint8_t key_len,
+                                    const char* name, uint8_t max_hops, char* reply) {
+    (void)index;
+    (void)secret;
+    (void)key_len;
+    (void)name;
+    (void)max_hops;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void formatFloodChannelBlocks(const char* selector, char* reply) {
+    (void)selector;
+    strcpy(reply, "Error: unsupported");
+  }
+  virtual void deleteFloodChannelBlock(const char* selector, char* reply) {
+    (void)selector;
+    strcpy(reply, "Error: unsupported");
+  }
 
   virtual void startRegionsLoad() {
     // no op by default
@@ -349,8 +505,8 @@ public:
     return false; // WITH_MQTT_BRIDGE builds override
   };
 
-  virtual void setRxBoostedGain(bool enable) {
-    // no op by default
+  virtual bool setRxBoostedGain(bool enable) {
+    return false; // CommonCLI reports unsupported if not overridden by wrapper
   };
 
   // Fault-alert channel hooks (see NodePrefs::alert_*). The default no-op
@@ -380,7 +536,7 @@ class CommonCLI {
   SensorManager* _sensors;
   RegionMap* _region_map;
   ClientACL* _acl;
-  char tmp[PRV_KEY_SIZE*2 + 4];
+  char tmp[COMMON_CLI_TMP_LEN];
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
   LegacyObserverTail _legacy_tail;
@@ -402,6 +558,7 @@ class CommonCLI {
   void handleRegionCmd(char* command, char* reply);
   void handleGetCmd(uint32_t sender_timestamp, char* command, char* reply);
   void handleSetCmd(uint32_t sender_timestamp, char* command, char* reply);
+  void handleDelCmd(char* command, char* reply);
 
   // Observer/MQTT/WiFi/timezone/alert/SNMP CLI handling lives in the fork-owned
   // CommonCLI_Observer.cpp to keep these branches out of the upstream-tracked

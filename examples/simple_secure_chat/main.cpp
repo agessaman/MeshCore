@@ -135,7 +135,7 @@ class MyMesh : public BaseChatMesh, ContactVisitor {
     File file = _fs->open("/contacts", "w", true);
 #endif
     if (file) {
-      ContactsIterator iter;
+      ContactsIterator iter = startContactsIterator();
       ContactInfo c;
       uint8_t unused = 0;
       uint32_t reserved = 0;
@@ -200,6 +200,10 @@ protected:
 
   bool allowPacketForward(const mesh::Packet* packet) override {
     return true;
+  }
+
+  uint8_t getDefaultTxCodingRate() const override {
+    return LORA_CR;
   }
 
   void onDiscoveredContact(ContactInfo& contact, bool is_new, uint8_t path_len, const uint8_t* path) override {

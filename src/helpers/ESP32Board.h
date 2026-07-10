@@ -14,11 +14,15 @@
 #include <Wire.h>
 #include "soc/rtc.h"
 #include "esp_system.h"
+#include <driver/rtc_io.h>
+
+class AsyncWebServer;
 
 class ESP32Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;
   bool inhibit_sleep = false;
+  AsyncWebServer* ota_server = nullptr;
   static inline portMUX_TYPE sleepMux = portMUX_INITIALIZER_UNLOCKED;
 
 public:
@@ -62,8 +66,15 @@ public:
     return raw / 4;
   }
 
+  virtual void powerOff() override;
+  void enterDeepSleep(uint32_t secs);
+
   uint32_t getIRQGpio() override {
+  #ifdef P_LORA_DIO_1
     return P_LORA_DIO_1; // default for SX1262
+  #else
+    return -1;
+  #endif
   }
 
   void sleep(uint32_t secs) override {
@@ -73,13 +84,21 @@ public:
       return;
     }
 
-    // Set GPIO wakeup
-    gpio_num_t wakeupPin = (gpio_num_t)getIRQGpio();    
-
     // Configure timer wakeup
     if (secs > 0) {
       esp_sleep_enable_timer_wakeup(secs * 1000000ULL); // Wake up periodically to do scheduled jobs
     }
+
+    uint32_t irqGpio = getIRQGpio();
+    if (irqGpio == static_cast<uint32_t>(-1)) {
+      if (secs > 0) {
+        esp_light_sleep_start();
+      }
+      return;
+    }
+
+    // Set GPIO wakeup
+    gpio_num_t wakeupPin = (gpio_num_t)irqGpio;
 
     // Disable CPU interrupt servicing
     portENTER_CRITICAL(&sleepMux);
@@ -151,29 +170,85 @@ public:
   }
 
   bool startOTAUpdate(const char* id, char reply[]) override;
+  bool stopOTAUpdate(char reply[]) override;
   bool otaFromManifest(const char* current_ver, bool dry_run, char reply[]) override;
   // Heavy body (TLS + JSON / HTTPUpdate). Runs in a dedicated large-stack task
   // spawned by otaFromManifest() — public only so that task entry point can call
   // it; not meant to be invoked directly.
   bool otaFromManifestImpl(const char* current_ver, bool dry_run, char reply[]);
 
+  bool isUsbDataConnected() override {
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+    return (bool)Serial;
+#else
+    return false;
+#endif
+  }
+
   void setInhibitSleep(bool inhibit) {
     inhibit_sleep = inhibit;
   }
+
+  uint32_t getResetReason() const override {
+    return esp_reset_reason();
+  }
+
+  // https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32/api-reference/system/system.html
+  const char* getResetReasonString(uint32_t reason) {
+    switch (reason) {
+      case ESP_RST_UNKNOWN:
+        return "Unknown or first boot";
+      case ESP_RST_POWERON:
+        return "Power-on reset";
+      case ESP_RST_EXT:
+        return "External reset";
+      case ESP_RST_SW:
+        return "Software reset";
+      case ESP_RST_PANIC:
+        return "Panic / exception reset";
+      case ESP_RST_INT_WDT:
+        return "Interrupt watchdog reset";
+      case ESP_RST_TASK_WDT:
+        return "Task watchdog reset";
+      case ESP_RST_WDT:
+        return "Other watchdog reset";
+      case ESP_RST_DEEPSLEEP:
+        return "Wake from deep sleep";
+      case ESP_RST_BROWNOUT:
+        return "Brownout (low voltage)";
+      case ESP_RST_SDIO:
+        return "SDIO reset";
+      default:
+        static char buf[40];
+        snprintf(buf, sizeof(buf), "Unknown reset reason (%d)", reason);
+        return buf;
+    }
+  }
 };
+
+static RTC_NOINIT_ATTR uint32_t _rtc_backup_time;
+static RTC_NOINIT_ATTR uint32_t _rtc_backup_magic;
+#define RTC_BACKUP_MAGIC  0xAA55CC33
+#define RTC_TIME_MIN      1772323200  // 1 Mar 2026
 
 class ESP32RTCClock : public mesh::RTCClock {
 public:
   ESP32RTCClock() { }
   void begin() {
     esp_reset_reason_t reason = esp_reset_reason();
-    if (reason == ESP_RST_POWERON) {
-      // start with some date/time in the recent past
-      struct timeval tv;
-      tv.tv_sec = 1715770351;  // 15 May 2024, 8:50pm
+    if (reason == ESP_RST_DEEPSLEEP) {
+      return;  // ESP-IDF preserves system time across deep sleep
+    }
+    // All other resets (power-on, crash, WDT, brownout) lose system time.
+    // Restore from RTC backup if valid, otherwise use hardcoded seed.
+    struct timeval tv;
+    if (_rtc_backup_magic == RTC_BACKUP_MAGIC && _rtc_backup_time > RTC_TIME_MIN) {
+      tv.tv_sec = _rtc_backup_time;
+    } else {
+      tv.tv_sec = RTC_TIME_MIN;
+    }
     tv.tv_usec = 0;
     settimeofday(&tv, NULL);
-  }
   }
   uint32_t getCurrentTime() override {
     time_t _now;
@@ -185,6 +260,16 @@ public:
     tv.tv_sec = time;
     tv.tv_usec = 0;
     settimeofday(&tv, NULL);
+    _rtc_backup_time = time;
+    _rtc_backup_magic = RTC_BACKUP_MAGIC;
+  }
+  void tick() override {
+    time_t now;
+    time(&now);
+    if (now > RTC_TIME_MIN && (uint32_t)now != _rtc_backup_time) {
+      _rtc_backup_time = (uint32_t)now;
+      _rtc_backup_magic = RTC_BACKUP_MAGIC;
+    }
   }
 };
 

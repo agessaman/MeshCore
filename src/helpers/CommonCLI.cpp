@@ -6,6 +6,32 @@
 #include <RTClib.h>
 #include <Utils.h>
 
+#if defined(NRF52_PLATFORM)
+#include <nrf.h>
+#include <nrf_soc.h>
+
+#ifndef DFU_MAGIC_UF2_RESET
+#define DFU_MAGIC_UF2_RESET 0x57
+#endif
+
+static void resetToUf2Bootloader() {
+  uint8_t sd_enabled = 0;
+  sd_softdevice_is_enabled(&sd_enabled);
+
+  if (sd_enabled) {
+    sd_power_gpregret_clr(0, 0xFF);
+    sd_power_gpregret_set(0, DFU_MAGIC_UF2_RESET);
+  } else {
+    NRF_POWER->GPREGRET = DFU_MAGIC_UF2_RESET;
+  }
+
+  NVIC_SystemReset();
+}
+#endif
+
+#define STR_HELPER(x) #x
+#define STR(x) STR_HELPER(x)
+
 #ifndef BRIDGE_MAX_BAUD
 #define BRIDGE_MAX_BAUD 115200
 #endif
@@ -20,6 +46,8 @@
 #include "MQTTDefaults.h"
 #endif
 
+#define RECENT_REPEATER_PREFIX_MAX_BYTES  3
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -30,6 +58,30 @@ static uint32_t _atoi(const char* sp) {
   return n;
 }
 
+static bool parseRecentRepeaterGet(const char* config, int& page) {
+  if (strncmp(config, "recent.repeater", 15) != 0) {
+    return false;
+  }
+
+  const char* cursor = &config[15];
+  if (*cursor == 's') {
+    cursor++;
+  }
+  if (*cursor != 0 && *cursor != ' ') {
+    return false;
+  }
+
+  while (*cursor == ' ') cursor++;
+  if (strncmp(cursor, "page", 4) == 0 && (cursor[4] == 0 || cursor[4] == ' ')) {
+    cursor += 4;
+    while (*cursor == ' ') cursor++;
+  }
+
+  page = 1;
+  if (*cursor) page = _atoi(cursor);
+  if (page < 1) page = 1;
+  return true;
+}
 
 static bool isValidName(const char *n) {
   while (*n) {
@@ -49,12 +101,538 @@ static const size_t LEGACY_MQTT_GAP_6SLOT = 306 + 6 * 186;  // 1422
 static const size_t LEGACY_MQTT_GAP_3SLOT = 306 + 3 * 186;  // 864
 static const size_t LEGACY_OBS_TAIL_MAX = 124;  // rx_boosted(1) + flood(2) + snmp(25) + watchdog(1) + alert block(95)
 
-// Bytes savePrefs() writes after owner_info (offsets 290-294): rx_boosted_gain,
-// flood_max_unscoped, flood_max_advert, radio_fem_rxgain, cad_enabled. loadPrefsInt()
-// treats any larger remainder as a legacy MQTT-gap file — keep this in sync with the
-// trailing writes in savePrefs() whenever an upstream merge appends /com_prefs fields.
-static const size_t COM_PREFS_TAIL_BYTES = 5;
+static bool looksNumeric(const char* s) {
+  if (s == NULL) return false;
+  while (*s == ' ') s++;
+  if (*s == '-' || *s == '+') s++;
+  bool saw_digit = false;
+  bool saw_dot = false;
+  while (*s) {
+    if (*s >= '0' && *s <= '9') {
+      saw_digit = true;
+    } else if (*s == '.' && !saw_dot) {
+      saw_dot = true;
+    } else if (*s == ' ') {
+      while (*s == ' ') s++;
+      return saw_digit && *s == 0;
+    } else {
+      break;
+    }
+    s++;
+  }
+  return saw_digit && *s == 0;
+}
 
+static bool looksUnsignedInteger(const char* s) {
+  if (s == NULL) return false;
+  while (*s == ' ') s++;
+  bool saw_digit = false;
+  while (*s) {
+    if (*s >= '0' && *s <= '9') {
+      saw_digit = true;
+    } else if (*s == ' ') {
+      while (*s == ' ') s++;
+      return saw_digit && *s == 0;
+    } else {
+      return false;
+    }
+    s++;
+  }
+  return saw_digit;
+}
+
+static bool parseUint8Strict(const char* value, uint8_t min_value, uint8_t max_value, uint8_t& result) {
+  if (value == NULL || *value == 0) {
+    return false;
+  }
+
+  uint16_t parsed = 0;
+  const char* sp = value;
+  while (*sp) {
+    if (*sp < '0' || *sp > '9') {
+      return false;
+    }
+    parsed = (uint16_t)((parsed * 10) + (*sp - '0'));
+    if (parsed > max_value) {
+      return false;
+    }
+    sp++;
+  }
+  if (parsed < min_value) {
+    return false;
+  }
+  result = (uint8_t)parsed;
+  return true;
+}
+
+static bool bwMatches(float bw, float allowed) {
+  float diff = bw - allowed;
+  if (diff < 0.0f) diff = -diff;
+  return diff <= 0.001f;
+}
+
+static bool isValidLoRaBandwidth(float bw) {
+#if defined(USE_LR1110)
+  return bwMatches(bw, 62.5f)
+      || bwMatches(bw, 125.0f)
+      || bwMatches(bw, 250.0f)
+      || bwMatches(bw, 500.0f);
+#elif defined(USE_LLCC68) || defined(USE_SX1272)
+  return bwMatches(bw, 125.0f)
+      || bwMatches(bw, 250.0f)
+      || bwMatches(bw, 500.0f);
+#else
+  return bwMatches(bw, 7.8f)
+      || bwMatches(bw, 10.4f)
+      || bwMatches(bw, 15.6f)
+      || bwMatches(bw, 20.8f)
+      || bwMatches(bw, 31.25f)
+      || bwMatches(bw, 41.7f)
+      || bwMatches(bw, 62.5f)
+      || bwMatches(bw, 125.0f)
+      || bwMatches(bw, 250.0f)
+      || bwMatches(bw, 500.0f);
+#endif
+}
+
+static float defaultLoRaBandwidth() {
+#ifdef LORA_BW
+  if (isValidLoRaBandwidth((float)LORA_BW)) {
+    return (float)LORA_BW;
+  }
+#endif
+  return 125.0f;
+}
+
+static const char* skipSpacesConst(const char* s) {
+  while (s != NULL && *s == ' ') s++;
+  return s;
+}
+
+static bool parseUint32Strict(const char* s, uint32_t& out) {
+  if (!looksUnsignedInteger(s)) {
+    return false;
+  }
+
+  uint64_t n = 0;
+  s = skipSpacesConst(s);
+  while (*s >= '0' && *s <= '9') {
+    n = (n * 10) + (uint32_t)(*s - '0');
+    if (n > 0xFFFFFFFFULL) {
+      return false;
+    }
+    s++;
+  }
+  out = (uint32_t)n;
+  return true;
+}
+
+static int countSeparatedParts(const char* s, char separator) {
+  if (s == NULL || *s == 0) {
+    return 0;
+  }
+
+  int count = 1;
+  while (*s) {
+    if (*s++ == separator) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static bool parseScheduledRadioArgs(const char* args, bool temporary, float& freq, float& bw,
+                                    uint8_t& sf, uint8_t& cr, uint32_t& start_time,
+                                    uint32_t& end_time) {
+  const int expected_parts = temporary ? 6 : 5;
+  args = skipSpacesConst(args);
+  if (countSeparatedParts(args, ',') != expected_parts) {
+    return false;
+  }
+  char local[96];
+  if (strlen(args) >= sizeof(local)) {
+    return false;
+  }
+  StrHelper::strncpy(local, args, sizeof(local));
+  const char* parts[6];
+  int num = mesh::Utils::parseTextParts(local, parts, expected_parts, ',');
+  if (num != expected_parts) {
+    return false;
+  }
+
+  uint32_t sf_u32 = 0;
+  uint32_t cr_u32 = 0;
+  if (!looksNumeric(parts[0]) || !looksNumeric(parts[1])
+      || !parseUint32Strict(parts[2], sf_u32)
+      || !parseUint32Strict(parts[3], cr_u32)
+      || !parseUint32Strict(parts[4], start_time)) {
+    return false;
+  }
+  if (sf_u32 > 255 || cr_u32 > 255) {
+    return false;
+  }
+
+  freq = atof(parts[0]);
+  bw = atof(parts[1]);
+  sf = (uint8_t)sf_u32;
+  cr = (uint8_t)cr_u32;
+  if (temporary && !parseUint32Strict(parts[5], end_time)) {
+    return false;
+  }
+  if (!temporary) {
+    end_time = 0;
+  }
+  return true;
+}
+
+static int16_t parseSnrDbX4(const char* s) {
+  float db = atof(s);
+  return (int16_t)(db * 4.0f + (db >= 0.0f ? 0.5f : -0.5f));
+}
+
+static void formatSnrDbX4(char* dest, size_t dest_len, int16_t snr_x4) {
+  int16_t v = snr_x4;
+  const char* sign = "";
+  if (v < 0) {
+    sign = "-";
+    v = -v;
+  }
+  snprintf(dest, dest_len, "%s%d.%02d", sign, v / 4, (v % 4) * 25);
+}
+
+static const char* retryPresetName(uint8_t preset) {
+  switch (preset) {
+    case RETRY_PRESET_INFRA: return "infra";
+    case RETRY_PRESET_ROOFTOP: return "rooftop";
+    case RETRY_PRESET_MOBILE: return "mobile";
+    default: return "custom";
+  }
+}
+
+static void markDirectRetryPrefsValid(NodePrefs* prefs) {
+  prefs->direct_retry_prefs_magic[0] = DIRECT_RETRY_PREFS_MAGIC_0;
+  prefs->direct_retry_prefs_magic[1] = DIRECT_RETRY_PREFS_MAGIC_1;
+}
+
+static void applyFloodRetryPreset(NodePrefs* prefs, uint8_t preset) {
+  if (preset == RETRY_PRESET_INFRA) {
+    prefs->flood_retry_attempts = FLOOD_RETRY_INFRA_COUNT;
+    prefs->flood_retry_max_path = FLOOD_RETRY_INFRA_MAX_PATH;
+  } else if (preset == RETRY_PRESET_MOBILE) {
+    prefs->flood_retry_attempts = FLOOD_RETRY_MOBILE_COUNT;
+    prefs->flood_retry_max_path = FLOOD_RETRY_MOBILE_MAX_PATH;
+  } else {
+    prefs->flood_retry_attempts = FLOOD_RETRY_ROOFTOP_COUNT;
+    prefs->flood_retry_max_path = FLOOD_RETRY_ROOFTOP_MAX_PATH;
+  }
+}
+
+static bool parseFloodRetryPathGate(const char* value, uint8_t& path_gate) {
+  if (value == NULL) {
+    return false;
+  }
+  if (strcmp(value, "off") == 0 || strcmp(value, "disabled") == 0 || strcmp(value, "disable") == 0) {
+    path_gate = FLOOD_RETRY_PATH_GATE_DISABLED;
+    return true;
+  }
+  return parseUint8Strict(value, 0, 63, path_gate);
+}
+
+static void formatFloodRetryPathGate(char* dest, uint8_t path_gate) {
+  if (path_gate == FLOOD_RETRY_PATH_GATE_DISABLED) {
+    strcpy(dest, "off");
+  } else {
+    sprintf(dest, "%u", (unsigned int)path_gate);
+  }
+}
+
+static bool parseFloodChannelBlockHops(const char* value, uint8_t& max_hops) {
+  if (value == NULL) {
+    return false;
+  }
+  value = skipSpacesConst(value);
+  if (strcmp(value, "all") == 0) {
+    max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    return true;
+  }
+  return parseUint8Strict(value, 1, 7, max_hops);
+}
+
+static bool parseFloodChannelBlockRowHops(const char* value, uint8_t& max_hops) {
+  if (value == NULL) {
+    return false;
+  }
+  value = skipSpacesConst(value);
+  if (strcmp(value, "default") == 0 || strcmp(value, "def") == 0 || strcmp(value, "inherit") == 0) {
+    max_hops = FLOOD_CHANNEL_BLOCK_HOPS_INHERIT;
+    return true;
+  }
+  return parseFloodChannelBlockHops(value, max_hops);
+}
+
+static bool parseFloodChannelBlockHopAssignment(const char* text, bool allow_bare, uint8_t& max_hops) {
+  char token[16];
+  text = skipSpacesConst(text);
+  if (text == NULL || *text == 0) {
+    return false;
+  }
+
+  size_t len = 0;
+  while (text[len] && text[len] != ' ' && len + 1 < sizeof(token)) {
+    token[len] = text[len];
+    len++;
+  }
+  token[len] = 0;
+
+  const char* value = NULL;
+  if (strncmp(token, "h=", 2) == 0) {
+    value = token + 2;
+  } else if (strncmp(token, "hops=", 5) == 0) {
+    value = token + 5;
+  } else if (allow_bare) {
+    value = token;
+  } else {
+    return false;
+  }
+  return parseFloodChannelBlockRowHops(value, max_hops);
+}
+
+static bool looksFloodChannelBlockHopAssignment(const char* text) {
+  text = skipSpacesConst(text);
+  if (text == NULL || *text == 0) {
+    return false;
+  }
+  return (*text >= '0' && *text <= '9')
+      || strncmp(text, "h=", 2) == 0
+      || strncmp(text, "hops=", 5) == 0
+      || strncmp(text, "all", 3) == 0
+      || strncmp(text, "def", 3) == 0
+      || strncmp(text, "default", 7) == 0
+      || strncmp(text, "inherit", 7) == 0;
+}
+
+static bool trimFloodChannelBlockHopSuffix(char* name, uint8_t& max_hops) {
+  size_t len = strlen(name);
+  while (len > 0 && name[len - 1] == ' ') {
+    name[--len] = 0;
+  }
+  char* token = strrchr(name, ' ');
+  if (token == NULL) {
+    return true;
+  }
+  if (strncmp(token + 1, "h=", 2) != 0 && strncmp(token + 1, "hops=", 5) != 0) {
+    return true;
+  }
+  if (!parseFloodChannelBlockHopAssignment(token + 1, false, max_hops)) {
+    return false;
+  }
+  *token = 0;
+  return strlen(name) > 0;
+}
+
+static void formatFloodChannelBlockHops(char* dest, uint8_t max_hops) {
+  if (max_hops == FLOOD_CHANNEL_BLOCK_HOPS_ALL) {
+    strcpy(dest, "h=all");
+  } else {
+    sprintf(dest, "h>%u", (unsigned int)max_hops);
+  }
+}
+
+static void formatFloodRetryPrefixList(char* dest, const uint8_t prefixes[][FLOOD_RETRY_PREFIX_LEN],
+                                       uint8_t max_prefixes) {
+  char* out = dest;
+  bool first = true;
+  for (int i = 0; i < max_prefixes; i++) {
+    const uint8_t* prefix = prefixes[i];
+    if (prefix[0] == 0 && prefix[1] == 0 && prefix[2] == 0) {
+      continue;
+    }
+    if (!first) {
+      *out++ = ',';
+    }
+    mesh::Utils::toHex(out, prefix, FLOOD_RETRY_PREFIX_LEN);
+    out += FLOOD_RETRY_PREFIX_LEN * 2;
+    first = false;
+  }
+  *out = 0;
+}
+
+static bool parseFloodRetryPrefixList(uint8_t dest[][FLOOD_RETRY_PREFIX_LEN], uint8_t max_prefixes, const char* value) {
+  if (max_prefixes > FLOOD_RETRY_LIST_PREFIXES) {
+    return false;
+  }
+  uint8_t parsed[FLOOD_RETRY_LIST_PREFIXES][FLOOD_RETRY_PREFIX_LEN];
+  memset(parsed, 0, sizeof(parsed));
+  if (value == NULL || value[0] == 0 || strcmp(value, "none") == 0 || strcmp(value, "off") == 0) {
+    memcpy(dest, parsed, max_prefixes * FLOOD_RETRY_PREFIX_LEN);
+    return true;
+  }
+
+  char local[FLOOD_RETRY_LIST_TEXT_MAX];
+  StrHelper::strncpy(local, value, sizeof(local));
+  const char* parts[FLOOD_RETRY_LIST_PREFIXES + 1];
+  int num = mesh::Utils::parseTextParts(local, parts, FLOOD_RETRY_LIST_PREFIXES + 1);
+  if (num > max_prefixes) {
+    return false;
+  }
+  for (int i = 0; i < num; i++) {
+    if (strlen(parts[i]) != FLOOD_RETRY_PREFIX_LEN * 2) {
+      return false;
+    }
+    for (int j = 0; j < FLOOD_RETRY_PREFIX_LEN * 2; j++) {
+      if (!mesh::Utils::isHexChar(parts[i][j])) {
+        return false;
+      }
+    }
+    if (!mesh::Utils::fromHex(parsed[i], FLOOD_RETRY_PREFIX_LEN, parts[i])
+        || (parsed[i][0] == 0 && parsed[i][1] == 0 && parsed[i][2] == 0)) {
+      return false;
+    }
+  }
+  memcpy(dest, parsed, max_prefixes * FLOOD_RETRY_PREFIX_LEN);
+  return true;
+}
+
+static bool parseFloodChannelBlockKey(const char* text, uint8_t secret[PUB_KEY_SIZE], uint8_t& key_len) {
+  if (text == NULL || text[0] == 0) {
+    return false;
+  }
+
+  memset(secret, 0, PUB_KEY_SIZE);
+  if (text[0] == '#') {
+    if (!isValidName(text)) {
+      return false;
+    }
+    mesh::Utils::sha256(secret, CIPHER_KEY_SIZE, (const uint8_t*)text, strlen(text));
+    key_len = CIPHER_KEY_SIZE;
+    return true;
+  }
+
+  size_t hex_len = strlen(text);
+  if (!(hex_len == CIPHER_KEY_SIZE * 2 || hex_len == PUB_KEY_SIZE * 2)) {
+    return false;
+  }
+  for (size_t i = 0; i < hex_len; i++) {
+    if (!mesh::Utils::isHexChar(text[i])) {
+      return false;
+    }
+  }
+
+  key_len = (uint8_t)(hex_len / 2);
+  return mesh::Utils::fromHex(secret, key_len, text);
+}
+
+static bool parseFloodChannelBlockDotIndex(const char*& cursor, int& index) {
+  if (*cursor != '.') {
+    index = 0;
+    return true;
+  }
+
+  cursor++;
+  if (*cursor < '0' || *cursor > '9') {
+    return false;
+  }
+  int value = 0;
+  while (*cursor >= '0' && *cursor <= '9') {
+    value = (value * 10) + (*cursor - '0');
+    if (value > FLOOD_CHANNEL_BLOCK_SLOTS) {
+      return false;
+    }
+    cursor++;
+  }
+  if (value < 1) {
+    return false;
+  }
+  index = value;
+  return true;
+}
+
+static void copyTrimmedFloodChannelBlockName(char* dest, size_t dest_len, const char* src) {
+  src = skipSpacesConst(src);
+  StrHelper::strncpy(dest, src, dest_len);
+  size_t len = strlen(dest);
+  while (len > 0 && dest[len - 1] == ' ') {
+    dest[--len] = 0;
+  }
+}
+
+static void applyDirectRetryPreset(NodePrefs* prefs, uint8_t preset) {
+  prefs->retry_preset = preset;
+  if (preset == RETRY_PRESET_INFRA) {
+    prefs->direct_retry_attempts = DIRECT_RETRY_INFRA_COUNT;
+    prefs->direct_retry_base_ms = DIRECT_RETRY_INFRA_BASE_MS;
+    prefs->direct_retry_step_ms = DIRECT_RETRY_INFRA_STEP_MS;
+    prefs->direct_retry_snr_margin_x4 = DIRECT_RETRY_INFRA_MARGIN_X4;
+  } else if (preset == RETRY_PRESET_MOBILE) {
+    prefs->direct_retry_attempts = DIRECT_RETRY_MOBILE_COUNT;
+    prefs->direct_retry_base_ms = DIRECT_RETRY_MOBILE_BASE_MS;
+    prefs->direct_retry_step_ms = DIRECT_RETRY_MOBILE_STEP_MS;
+    prefs->direct_retry_snr_margin_x4 = DIRECT_RETRY_MOBILE_MARGIN_X4;
+  } else {
+    prefs->retry_preset = RETRY_PRESET_ROOFTOP;
+    prefs->direct_retry_attempts = DIRECT_RETRY_ROOFTOP_COUNT;
+    prefs->direct_retry_base_ms = DIRECT_RETRY_ROOFTOP_BASE_MS;
+    prefs->direct_retry_step_ms = DIRECT_RETRY_ROOFTOP_STEP_MS;
+    prefs->direct_retry_snr_margin_x4 = DIRECT_RETRY_ROOFTOP_MARGIN_X4;
+  }
+  applyFloodRetryPreset(prefs, prefs->retry_preset);
+  markDirectRetryPrefsValid(prefs);
+}
+
+static void setDefaultDirectRetryPrefs(NodePrefs* prefs) {
+  applyDirectRetryPreset(prefs, RETRY_PRESET_ROOFTOP);
+  prefs->direct_retry_cr_enabled = 1;
+  prefs->direct_retry_cr4_snr_x4 = DIRECT_RETRY_CR4_MIN_SNR_X4_DEFAULT;
+  prefs->direct_retry_cr5_snr_x4 = DIRECT_RETRY_CR5_MIN_SNR_X4_DEFAULT;
+  prefs->direct_retry_cr7_snr_x4 = DIRECT_RETRY_CR7_MIN_SNR_X4_DEFAULT;
+  prefs->direct_retry_cr8_snr_x4 = DIRECT_RETRY_CR8_MAX_SNR_X4_DEFAULT;
+  prefs->direct_retry_enabled = 1;
+  prefs->direct_retry_recent_enabled = DIRECT_RETRY_RECENT_DEFAULT;
+  markDirectRetryPrefsValid(prefs);
+}
+
+static bool directRetryPrefsValid(const NodePrefs* prefs) {
+  return prefs->direct_retry_prefs_magic[0] == DIRECT_RETRY_PREFS_MAGIC_0
+      && prefs->direct_retry_prefs_magic[1] == DIRECT_RETRY_PREFS_MAGIC_1;
+}
+
+static bool parseRetryPreset(const char* s, uint8_t& preset) {
+  if (strcmp(s, "infra") == 0 || strcmp(s, "0") == 0) {
+    preset = RETRY_PRESET_INFRA;
+    return true;
+  }
+  if (strcmp(s, "rooftop") == 0 || strcmp(s, "1") == 0) {
+    preset = RETRY_PRESET_ROOFTOP;
+    return true;
+  }
+  if (strcmp(s, "mobile") == 0 || strcmp(s, "2") == 0) {
+    preset = RETRY_PRESET_MOBILE;
+    return true;
+  }
+  return false;
+}
+
+static bool parseHashPrefix(const char* text, uint8_t* prefix, uint8_t& prefix_len) {
+  size_t hex_len = strlen(text);
+  if (hex_len == 0 || (hex_len & 1) || hex_len > RECENT_REPEATER_PREFIX_MAX_BYTES * 2) {
+    return false;
+  }
+  for (size_t i = 0; i < hex_len; i++) {
+    if (!mesh::Utils::isHexChar(text[i])) {
+      return false;
+    }
+  }
+  prefix_len = hex_len / 2;
+  return mesh::Utils::fromHex(prefix, prefix_len, text);
+}
+
+static void formatSnrDbX4Short(char* dest, size_t dest_len, int16_t snr_x4) {
+  formatSnrDbX4(dest, dest_len, snr_x4);
+  size_t len = strlen(dest);
+  if (len > 3 && dest[len - 1] == '0') {
+    dest[len - 1] = 0;
+  }
+}
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   bool is_fresh_install = false;
@@ -144,7 +722,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->bridge_channel, sizeof(_prefs->bridge_channel));                 // 135
     file.read((uint8_t *)&_prefs->bridge_secret, sizeof(_prefs->bridge_secret));                   // 136
     file.read((uint8_t *)&_prefs->powersaving_enabled, sizeof(_prefs->powersaving_enabled));       // 152
-    file.read(pad, 3);                                                                             // 153
+    file.read((uint8_t *)&_prefs->reboot_interval, sizeof(_prefs->reboot_interval));               // 153
+    file.read(pad, 2);                                                                             // 154
     file.read((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.read((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.read((uint8_t *)&_prefs->advert_loc_policy, sizeof (_prefs->advert_loc_policy));          // 161
@@ -160,10 +739,14 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     // (upstream defaults: FEM RX gain on, CAD off) — overwritten below if present.
     _prefs->radio_fem_rxgain = 1;
     _prefs->cad_enabled = 0;
-    // A remainder larger than the new-format tail means an old fork file with the
-    // legacy MQTT gap; detect and recover it below.
+    // A remainder larger than the smallest legacy MQTT gap (864) means an old fork
+    // file with the zero-filled gap; detect and recover it below. Anything smaller
+    // (upstream/flex 5-byte tails, or the ~384-byte keymind retry tail) takes the
+    // normal path: guarded 290-294 reads, then the keymind retry tail whose absence
+    // in shorter files is detected via direct_retry_prefs_magic.
     size_t extra = file.available();
-    if (extra > COM_PREFS_TAIL_BYTES) {
+    bool has_flood_retry_prefs = false;  // set when the keymind flood-retry tail is read below
+    if (extra > LEGACY_MQTT_GAP_3SLOT) {
       _com_prefs_needs_upgrade = true;
       size_t gap = 0;
       if (extra > LEGACY_MQTT_GAP_6SLOT && extra <= LEGACY_MQTT_GAP_6SLOT + LEGACY_OBS_TAIL_MAX) {
@@ -274,6 +857,73 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       if (file.available() >= (int)sizeof(_prefs->cad_enabled)) {        // 294
         file.read((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));
       }
+    // next: 295
+    file.read((uint8_t *)&_prefs->retry_preset, sizeof(_prefs->retry_preset));                     // 295
+    file.read((uint8_t *)&_prefs->direct_retry_attempts, sizeof(_prefs->direct_retry_attempts));   // 296
+    file.read((uint8_t *)&_prefs->direct_retry_base_ms, sizeof(_prefs->direct_retry_base_ms));     // 297
+    file.read((uint8_t *)&_prefs->direct_retry_step_ms, sizeof(_prefs->direct_retry_step_ms));     // 299
+    file.read((uint8_t *)&_prefs->direct_retry_snr_margin_x4, sizeof(_prefs->direct_retry_snr_margin_x4)); // 301
+    file.read((uint8_t *)&_prefs->direct_retry_cr4_snr_x4, sizeof(_prefs->direct_retry_cr4_snr_x4)); // 303
+    file.read((uint8_t *)&_prefs->direct_retry_cr5_snr_x4, sizeof(_prefs->direct_retry_cr5_snr_x4)); // 304
+    file.read((uint8_t *)&_prefs->direct_retry_cr7_snr_x4, sizeof(_prefs->direct_retry_cr7_snr_x4)); // 305
+    file.read((uint8_t *)&_prefs->direct_retry_cr8_snr_x4, sizeof(_prefs->direct_retry_cr8_snr_x4)); // 306
+    file.read((uint8_t *)&_prefs->direct_retry_enabled, sizeof(_prefs->direct_retry_enabled));       // 307
+    file.read((uint8_t *)&_prefs->direct_retry_cr_enabled, sizeof(_prefs->direct_retry_cr_enabled)); // 308
+    file.read((uint8_t *)&_prefs->direct_retry_prefs_magic, sizeof(_prefs->direct_retry_prefs_magic)); // 309
+    memset(_prefs->flood_retry_prefixes, 0, sizeof(_prefs->flood_retry_prefixes));
+    _prefs->flood_retry_bridge_enabled = 0;
+    memset(_prefs->flood_retry_bridge_buckets, 0, sizeof(_prefs->flood_retry_bridge_buckets));
+    memset(_prefs->flood_retry_ignore_prefixes, 0, sizeof(_prefs->flood_retry_ignore_prefixes));
+    _prefs->flood_retry_advert_enabled = FLOOD_RETRY_ADVERT_DEFAULT;
+    _prefs->battery_alert_enabled = 0;
+    _prefs->battery_alert_low_percent = BATTERY_ALERT_LOW_PERCENT_DEFAULT;
+    _prefs->battery_alert_critical_percent = BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT;
+    _prefs->direct_retry_recent_enabled = DIRECT_RETRY_RECENT_DEFAULT;
+    _prefs->flood_channel_data_enabled = 1;
+    _prefs->flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    _prefs->flood_channel_data_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    has_flood_retry_prefs = file.available() >= 2;
+    if (has_flood_retry_prefs) {
+      file.read((uint8_t *)&_prefs->flood_retry_attempts, sizeof(_prefs->flood_retry_attempts));     // 311
+      file.read((uint8_t *)&_prefs->flood_retry_max_path, sizeof(_prefs->flood_retry_max_path));     // 312
+      if (file.available() >= (int)sizeof(_prefs->flood_retry_prefixes)) {
+        file.read((uint8_t *)&_prefs->flood_retry_prefixes[0][0], sizeof(_prefs->flood_retry_prefixes));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_retry_bridge_enabled)) {
+        file.read((uint8_t *)&_prefs->flood_retry_bridge_enabled, sizeof(_prefs->flood_retry_bridge_enabled));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_retry_bridge_buckets)) {
+        file.read((uint8_t *)&_prefs->flood_retry_bridge_buckets[0][0][0], sizeof(_prefs->flood_retry_bridge_buckets));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_retry_ignore_prefixes)) {
+        file.read((uint8_t *)&_prefs->flood_retry_ignore_prefixes[0][0], sizeof(_prefs->flood_retry_ignore_prefixes));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_retry_advert_enabled)) {
+        file.read((uint8_t *)&_prefs->flood_retry_advert_enabled, sizeof(_prefs->flood_retry_advert_enabled));
+      }
+      if (file.available() >= (int)sizeof(_prefs->battery_alert_enabled)) {
+        file.read((uint8_t *)&_prefs->battery_alert_enabled, sizeof(_prefs->battery_alert_enabled));
+      }
+      if (file.available() >= (int)sizeof(_prefs->battery_alert_low_percent)) {
+        file.read((uint8_t *)&_prefs->battery_alert_low_percent, sizeof(_prefs->battery_alert_low_percent));
+      }
+      if (file.available() >= (int)sizeof(_prefs->battery_alert_critical_percent)) {
+        file.read((uint8_t *)&_prefs->battery_alert_critical_percent, sizeof(_prefs->battery_alert_critical_percent));
+      }
+      if (file.available() >= (int)sizeof(_prefs->direct_retry_recent_enabled)) {
+        file.read((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_channel_data_enabled)) {
+        file.read((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_channel_block_max_hops)) {
+        file.read((uint8_t *)&_prefs->flood_channel_block_max_hops, sizeof(_prefs->flood_channel_block_max_hops));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_channel_data_max_hops)) {
+        file.read((uint8_t *)&_prefs->flood_channel_data_max_hops, sizeof(_prefs->flood_channel_data_max_hops));
+      }
+    }
+    // next: 674
     }
 
     // sanitise bad pref values
@@ -282,7 +932,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->direct_tx_delay_factor = constrain(_prefs->direct_tx_delay_factor, 0, 2.0f);
     _prefs->airtime_factor = constrain(_prefs->airtime_factor, 0, 9.0f);
     _prefs->freq = constrain(_prefs->freq, 150.0f, 2500.0f);
-    _prefs->bw = constrain(_prefs->bw, 7.8f, 500.0f);
+    _prefs->bw = isValidLoRaBandwidth(_prefs->bw) ? _prefs->bw : defaultLoRaBandwidth();
     _prefs->sf = constrain(_prefs->sf, 5, 12);
     _prefs->cr = constrain(_prefs->cr, 5, 8);
     _prefs->tx_power_dbm = constrain(_prefs->tx_power_dbm, -9, 30);
@@ -290,8 +940,6 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->adc_multiplier = constrain(_prefs->adc_multiplier, 0.0f, 10.0f);
     _prefs->path_hash_mode = constrain(_prefs->path_hash_mode, 0, 2);   // NOTE: mode 3 reserved for future
     _prefs->loop_detect = constrain(_prefs->loop_detect, 0, 3);          // LOOP_DETECT_OFF..LOOP_DETECT_STRICT
-    _prefs->radio_fem_rxgain = constrain(_prefs->radio_fem_rxgain, 0, 1); // boolean
-    _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1);          // boolean
 
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
@@ -301,11 +949,56 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->bridge_channel = constrain(_prefs->bridge_channel, 0, 14);
 
     _prefs->powersaving_enabled = constrain(_prefs->powersaving_enabled, 0, 1);
+    _prefs->reboot_interval = constrain(_prefs->reboot_interval, 0, 255);
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
 
     _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
+    _prefs->radio_fem_rxgain = constrain(_prefs->radio_fem_rxgain, 0, 1); // boolean
+    _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1); // boolean
+    if (!directRetryPrefsValid(_prefs)) {
+      setDefaultDirectRetryPrefs(_prefs);
+      memset(_prefs->flood_retry_prefixes, 0, sizeof(_prefs->flood_retry_prefixes));
+      _prefs->flood_retry_bridge_enabled = 0;
+      memset(_prefs->flood_retry_bridge_buckets, 0, sizeof(_prefs->flood_retry_bridge_buckets));
+      memset(_prefs->flood_retry_ignore_prefixes, 0, sizeof(_prefs->flood_retry_ignore_prefixes));
+      _prefs->flood_retry_advert_enabled = FLOOD_RETRY_ADVERT_DEFAULT;
+    } else if (!has_flood_retry_prefs) {
+      applyFloodRetryPreset(_prefs, _prefs->retry_preset);
+    }
+    if (_prefs->retry_preset > RETRY_PRESET_MOBILE && _prefs->retry_preset != RETRY_PRESET_CUSTOM) {
+      _prefs->retry_preset = RETRY_PRESET_CUSTOM;
+    }
+    _prefs->direct_retry_attempts = constrain(_prefs->direct_retry_attempts, 1, 15);
+    _prefs->direct_retry_base_ms = constrain(_prefs->direct_retry_base_ms, 10, 5000);
+    _prefs->direct_retry_step_ms = constrain(_prefs->direct_retry_step_ms, 0, 5000);
+    _prefs->direct_retry_snr_margin_x4 = constrain(_prefs->direct_retry_snr_margin_x4, 0, 160);
+    _prefs->direct_retry_enabled = constrain(_prefs->direct_retry_enabled, 0, 1);
+    _prefs->direct_retry_cr_enabled = constrain(_prefs->direct_retry_cr_enabled, 0, 1);
+    _prefs->flood_retry_attempts = constrain(_prefs->flood_retry_attempts, 0, 15);
+    if (_prefs->flood_retry_max_path != FLOOD_RETRY_PATH_GATE_DISABLED) {
+      _prefs->flood_retry_max_path = constrain(_prefs->flood_retry_max_path, 0, 63);
+    }
+    _prefs->flood_retry_bridge_enabled = constrain(_prefs->flood_retry_bridge_enabled, 0, 1);
+    _prefs->flood_retry_advert_enabled = constrain(_prefs->flood_retry_advert_enabled, 0, 1);
+    _prefs->battery_alert_enabled = constrain(_prefs->battery_alert_enabled, 0, 1);
+    _prefs->direct_retry_recent_enabled = constrain(_prefs->direct_retry_recent_enabled, 0, 1);
+    _prefs->flood_channel_data_enabled = constrain(_prefs->flood_channel_data_enabled, 0, 1);
+    if (_prefs->flood_channel_block_max_hops != FLOOD_CHANNEL_BLOCK_HOPS_ALL
+        && (_prefs->flood_channel_block_max_hops < 1 || _prefs->flood_channel_block_max_hops > 7)) {
+      _prefs->flood_channel_block_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    }
+    if (_prefs->flood_channel_data_max_hops != FLOOD_CHANNEL_BLOCK_HOPS_ALL
+        && (_prefs->flood_channel_data_max_hops < 1 || _prefs->flood_channel_data_max_hops > 7)) {
+      _prefs->flood_channel_data_max_hops = FLOOD_CHANNEL_BLOCK_HOPS_ALL;
+    }
+    if (_prefs->battery_alert_low_percent < 1
+        || _prefs->battery_alert_low_percent > 100
+        || _prefs->battery_alert_critical_percent >= _prefs->battery_alert_low_percent) {
+      _prefs->battery_alert_low_percent = BATTERY_ALERT_LOW_PERCENT_DEFAULT;
+      _prefs->battery_alert_critical_percent = BATTERY_ALERT_CRITICAL_PERCENT_DEFAULT;
+    }
 
     file.close();
   }
@@ -359,7 +1052,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->bridge_channel, sizeof(_prefs->bridge_channel));                 // 135
     file.write((uint8_t *)&_prefs->bridge_secret, sizeof(_prefs->bridge_secret));                   // 136
     file.write((uint8_t *)&_prefs->powersaving_enabled, sizeof(_prefs->powersaving_enabled));       // 152
-    file.write(pad, 3);                                                                             // 153
+    file.write((uint8_t *)&_prefs->reboot_interval, sizeof(_prefs->reboot_interval));               // 153
+    file.write(pad, 2);                                                                             // 154
     file.write((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.write((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
@@ -367,13 +1061,42 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.write((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     // MQTT/observer settings are stored in /mqtt_prefs, not here. No zero-gap is
-    // written anymore — /com_prefs holds only the (non-observer) fields below.
-    // These trailing writes are COM_PREFS_TAIL_BYTES; keep the two in sync.
-    file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));      // 290
-    file.write((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped)); // 291
-    file.write((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));    // 292
-    file.write((uint8_t *)&_prefs->radio_fem_rxgain, sizeof(_prefs->radio_fem_rxgain));    // 293
-    file.write((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));              // 294
+    // written anymore — /com_prefs holds the upstream fields plus the keymind
+    // retry tail below (loadPrefsInt reads the same sequence; keep in sync).
+    file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));               // 290
+    file.write((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped));         // 291
+    file.write((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));             // 292
+    file.write((uint8_t *)&_prefs->radio_fem_rxgain, sizeof(_prefs->radio_fem_rxgain));             // 293
+    file.write((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));                       // 294
+    // next: 295
+    markDirectRetryPrefsValid(_prefs);
+    file.write((uint8_t *)&_prefs->retry_preset, sizeof(_prefs->retry_preset));                     // 295
+    file.write((uint8_t *)&_prefs->direct_retry_attempts, sizeof(_prefs->direct_retry_attempts));   // 296
+    file.write((uint8_t *)&_prefs->direct_retry_base_ms, sizeof(_prefs->direct_retry_base_ms));     // 297
+    file.write((uint8_t *)&_prefs->direct_retry_step_ms, sizeof(_prefs->direct_retry_step_ms));     // 299
+    file.write((uint8_t *)&_prefs->direct_retry_snr_margin_x4, sizeof(_prefs->direct_retry_snr_margin_x4)); // 301
+    file.write((uint8_t *)&_prefs->direct_retry_cr4_snr_x4, sizeof(_prefs->direct_retry_cr4_snr_x4)); // 303
+    file.write((uint8_t *)&_prefs->direct_retry_cr5_snr_x4, sizeof(_prefs->direct_retry_cr5_snr_x4)); // 304
+    file.write((uint8_t *)&_prefs->direct_retry_cr7_snr_x4, sizeof(_prefs->direct_retry_cr7_snr_x4)); // 305
+    file.write((uint8_t *)&_prefs->direct_retry_cr8_snr_x4, sizeof(_prefs->direct_retry_cr8_snr_x4)); // 306
+    file.write((uint8_t *)&_prefs->direct_retry_enabled, sizeof(_prefs->direct_retry_enabled));       // 307
+    file.write((uint8_t *)&_prefs->direct_retry_cr_enabled, sizeof(_prefs->direct_retry_cr_enabled)); // 308
+    file.write((uint8_t *)&_prefs->direct_retry_prefs_magic, sizeof(_prefs->direct_retry_prefs_magic)); // 309
+    file.write((uint8_t *)&_prefs->flood_retry_attempts, sizeof(_prefs->flood_retry_attempts));       // 311
+    file.write((uint8_t *)&_prefs->flood_retry_max_path, sizeof(_prefs->flood_retry_max_path));       // 312
+    file.write((uint8_t *)&_prefs->flood_retry_prefixes[0][0], sizeof(_prefs->flood_retry_prefixes)); // 313
+    file.write((uint8_t *)&_prefs->flood_retry_bridge_enabled, sizeof(_prefs->flood_retry_bridge_enabled));
+    file.write((uint8_t *)&_prefs->flood_retry_bridge_buckets[0][0][0], sizeof(_prefs->flood_retry_bridge_buckets));
+    file.write((uint8_t *)&_prefs->flood_retry_ignore_prefixes[0][0], sizeof(_prefs->flood_retry_ignore_prefixes));
+    file.write((uint8_t *)&_prefs->flood_retry_advert_enabled, sizeof(_prefs->flood_retry_advert_enabled));
+    file.write((uint8_t *)&_prefs->battery_alert_enabled, sizeof(_prefs->battery_alert_enabled));
+    file.write((uint8_t *)&_prefs->battery_alert_low_percent, sizeof(_prefs->battery_alert_low_percent));
+    file.write((uint8_t *)&_prefs->battery_alert_critical_percent, sizeof(_prefs->battery_alert_critical_percent));
+    file.write((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
+    file.write((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
+    file.write((uint8_t *)&_prefs->flood_channel_block_max_hops, sizeof(_prefs->flood_channel_block_max_hops));
+    file.write((uint8_t *)&_prefs->flood_channel_data_max_hops, sizeof(_prefs->flood_channel_data_max_hops));
+    // next: 674
 
     file.close();
   }
@@ -701,11 +1424,17 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       _board->powerOff();  // doesn't return
     } else if (memcmp(command, "reboot", 6) == 0) {
       _board->reboot();  // doesn't return
+    } else if (sender_timestamp == 0 && memcmp(command, "uf2reset", 8) == 0 && (command[8] == 0 || command[8] == ' ')) {
+#if defined(NRF52_PLATFORM)
+      resetToUf2Bootloader();  // doesn't return
+#else
+      strcpy(reply, "ERR: unsupported");
+#endif
     } else if (memcmp(command, "clkreboot", 9) == 0) {
       // Reset clock
       getRTCClock()->setCurrentTime(1715770351);  // 15 May 2024, 8:50pm
       _board->reboot();  // doesn't return
-     } else if (memcmp(command, "advert.zerohop", 14) == 0 && (command[14] == 0 || command[14] == ' ')) {
+    } else if (memcmp(command, "advert.zerohop", 14) == 0 && (command[14] == 0 || command[14] == ' ')) {
       // send zerohop advert
       _callbacks->sendSelfAdvertisement(1500, false);  // longer delay, give CLI response time to be sent first
       strcpy(reply, "OK - zerohop advert sent");
@@ -731,9 +1460,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
               (int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
               (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
-    } else if (memcmp(command, "start ota", 9) == 0) {
-      // Manual OTA: bring up the ElegantOTA SoftAP for a hand-uploaded binary.
+    } else if (memcmp(command, "start ota", 9) == 0 && (command[9] == 0 || command[9] == ' ')) {
+      // Manual OTA: bring up the ElegantOTA server for a hand-uploaded binary.
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
+        strcpy(reply, "Error");
+      }
+    } else if (memcmp(command, "stop ota", 8) == 0 && (command[8] == 0 || command[8] == ' ')) {
+      if (!_board->stopOTAUpdate(reply)) {
         strcpy(reply, "Error");
       }
     } else if (memcmp(command, "clock", 5) == 0) {
@@ -773,7 +1506,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       uint8_t sf  = num > 2 ? atoi(parts[2]) : 0;
       uint8_t cr  = num > 3 ? atoi(parts[3]) : 0;
       int temp_timeout_mins  = num > 4 ? atoi(parts[4]) : 0;
-      if (freq >= 150.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f && temp_timeout_mins > 0) {
+      if (freq >= 150.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && isValidLoRaBandwidth(bw) && temp_timeout_mins > 0) {
         _callbacks->applyTempRadioParams(freq, bw, sf, cr, temp_timeout_mins);
         sprintf(reply, "OK - temp params for %d mins", temp_timeout_mins);
       } else {
@@ -787,10 +1520,15 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "clear stats", 11) == 0) {
       _callbacks->clearStats();
       strcpy(reply, "(OK - stats reset)");
+    } else if (memcmp(command, "clear recent.repeater", 21) == 0 && (command[21] == 0 || command[21] == ' ')) {
+      _callbacks->clearRecentRepeaters();
+      strcpy(reply, "OK");
     } else if (memcmp(command, "get ", 4) == 0) {
       handleGetCmd(sender_timestamp, command, reply);
     } else if (memcmp(command, "set ", 4) == 0) {
       handleSetCmd(sender_timestamp, command, reply);
+    } else if (memcmp(command, "del ", 4) == 0) {
+      handleDelCmd(command, reply);
     } else if (sender_timestamp == 0 && strcmp(command, "erase") == 0) {
       bool s = _callbacks->formatFileSystem();
       sprintf(reply, "File system erase: %s", s ? "OK" : "Err");
@@ -925,13 +1663,21 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #endif
     } else if (memcmp(command, "powersaving on", 14) == 0) {
 #if defined(NRF52_PLATFORM)
-      _prefs->powersaving_enabled = 1;
-      savePrefs();
-      strcpy(reply, "on - Immediate effect");
+      if (sender_timestamp == 0 || _board->isUsbDataConnected()) {
+        strcpy(reply, "Error: USB serial connected");
+      } else {
+        _prefs->powersaving_enabled = 1;
+        savePrefs();
+        strcpy(reply, "on - Immediate effect");
+      }
 #elif defined(ESP32) && !defined(WITH_BRIDGE)
-      _prefs->powersaving_enabled = 1;
-      savePrefs();
-      strcpy(reply, "on - After 2 minutes");
+      if (sender_timestamp == 0 || _board->isUsbDataConnected()) {
+        strcpy(reply, "Error: USB serial connected");
+      } else {
+        _prefs->powersaving_enabled = 1;
+        savePrefs();
+        strcpy(reply, "on - After 2 minutes");
+      }
 #elif defined(WITH_BRIDGE)
       strcpy(reply, "Bridge not supported");
 #else
@@ -947,6 +1693,36 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       } else {
         strcpy(reply, "off");
       }
+    } else if (memcmp(command, "sensor", 6) == 0) {
+      // I2C
+#if defined(ENV_PIN_SDA) && defined(ENV_PIN_SCL)
+      sprintf(reply, "I2C Wire1: SDA=%s,SCL=%s\r\n", STR(ENV_PIN_SDA), STR(ENV_PIN_SCL));
+#elif defined(PIN_BOARD_SDA) && defined(PIN_BOARD_SCL)
+      sprintf(reply, "I2C Wire: SDA=%s, SCL=%s\r\n", STR(PIN_BOARD_SDA), STR(PIN_BOARD_SCL));
+#elif defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
+      sprintf(reply, "I2C Wire: SDA=%s, SCL=%s\r\n", STR(PIN_WIRE_SDA), STR(PIN_WIRE_SCL));
+#else
+      sprintf(reply, "I2C GPIOs not defined\r\n");
+#endif
+
+      // GPS
+#if defined(PIN_GPS_RX) && defined(PIN_GPS_TX)
+      sprintf(reply + strlen(reply), "GPS Serial: RX=%s, TX=%s", STR(PIN_GPS_RX), STR(PIN_GPS_TX));
+#if defined(ENV_INCLUDE_GPS) && ENV_INCLUDE_GPS > 0
+      sprintf(reply + strlen(reply), ". Configured");
+#else
+      sprintf(reply + strlen(reply), ". Not configured");
+#endif
+#else
+      sprintf(reply + strlen(reply), "GPS Serial not defined");
+#endif
+    } else if (memcmp(command, "powerlog", 8) == 0) {
+      sprintf(reply, "Last reset reason: %s", _board->getResetReasonString(_board->getResetReason()));
+#if defined(NRF52_PLATFORM)
+      sprintf(reply + strlen(reply), "\r\nLast shutdown reason: %s",
+              _board->getShutdownReasonString(_board->getShutdownReason()));
+      sprintf(reply + strlen(reply), "\r\nLast boot voltage: %u mV", _board->getBootVoltage());
+#endif
     } else if (memcmp(command, "log start", 9) == 0) {
       _callbacks->setLoggingOn(true);
       strcpy(reply, "   logging on");
@@ -1000,28 +1776,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->cad_enabled = memcmp(&config[4], "on", 2) == 0;
     savePrefs();
     strcpy(reply, "OK");
-  } else if (memcmp(config, "radio.fem.rxgain ", 17) == 0) {
-    if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
-    } else if (memcmp(&config[17], "on", 2) == 0) {
-      if (_board->setLoRaFemLnaEnabled(true)) {
-        _prefs->radio_fem_rxgain = 1;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM RX gain on");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
-      }
-    } else if (memcmp(&config[17], "off", 3) == 0) {
-      if (_board->setLoRaFemLnaEnabled(false)) {
-        _prefs->radio_fem_rxgain = 0;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM RX gain off");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
-      }
-    } else {
-      strcpy(reply, "Error: state must be on or off");
-    }
   } else if (memcmp(config, "agc.reset.interval ", 19) == 0) {
     _prefs->agc_reset_interval = atoi(&config[19]) / 4;
     savePrefs();
@@ -1083,13 +1837,37 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->disable_fwd = memcmp(&config[7], "off", 3) == 0;
     savePrefs();
     strcpy(reply, _prefs->disable_fwd ? "OK - repeat is now OFF" : "OK - repeat is now ON");
-#if defined(USE_SX1262) || defined(USE_SX1268) || defined(USE_LR1110)
   } else if (memcmp(config, "radio.rxgain ", 13) == 0) {
-    _prefs->rx_boosted_gain = memcmp(&config[13], "on", 2) == 0;
-    strcpy(reply, "OK");
+    bool enabled = memcmp(&config[13], "on", 2) == 0;
+    _prefs->rx_boosted_gain = enabled;
     savePrefs();
-    _callbacks->setRxBoostedGain(_prefs->rx_boosted_gain);
-#endif
+    if (_callbacks->setRxBoostedGain(enabled)) {
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: unsupported");
+    }
+  } else if (memcmp(config, "radio.fem.rxgain ", 17) == 0) {
+    if (!_board->canControlLoRaFemLna()) {
+      strcpy(reply, "Error: unsupported");
+    } else if (memcmp(&config[17], "on", 2) == 0) {
+      if (_board->setLoRaFemLnaEnabled(true)) {
+        _prefs->radio_fem_rxgain = 1;
+        savePrefs();
+        strcpy(reply, "OK - LoRa FEM RX gain on");
+      } else {
+        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+      }
+    } else if (memcmp(&config[17], "off", 3) == 0) {
+      if (_board->setLoRaFemLnaEnabled(false)) {
+        _prefs->radio_fem_rxgain = 0;
+        savePrefs();
+        strcpy(reply, "OK - LoRa FEM RX gain off");
+      } else {
+        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+      }
+    } else {
+      strcpy(reply, "Error: state must be on or off");
+    }
   } else if (memcmp(config, "radio ", 6) == 0) {
     strcpy(tmp, &config[6]);
     const char *parts[4];
@@ -1098,7 +1876,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     float bw    = num > 1 ? strtof(parts[1], nullptr) : 0.0f;
     uint8_t sf  = num > 2 ? atoi(parts[2]) : 0;
     uint8_t cr  = num > 3 ? atoi(parts[3]) : 0;
-    if (freq >= 150.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f) {
+    if (freq >= 150.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && isValidLoRaBandwidth(bw)) {
       _prefs->sf = sf;
       _prefs->cr = cr;
       _prefs->freq = freq;
@@ -1107,6 +1885,28 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "OK - reboot to apply");
     } else {
       strcpy(reply, "Error, invalid radio params");
+    }
+  } else if (memcmp(config, "radioat ", 8) == 0) {
+    float freq, bw;
+    uint8_t sf, cr;
+    uint32_t start_time, end_time;
+    if (!parseScheduledRadioArgs(&config[8], false, freq, bw, sf, cr, start_time, end_time)) {
+      strcpy(reply, "Error, use: set radioat f,bw,sf,cr,start");
+    } else if (freq < 150.0f || freq > 2500.0f || sf < 5 || sf > 12 || cr < 5 || cr > 8 || !isValidLoRaBandwidth(bw)) {
+      strcpy(reply, "Error, invalid radio params");
+    } else {
+      _callbacks->addScheduledRadioParams(false, freq, bw, sf, cr, start_time, end_time, reply);
+    }
+  } else if (memcmp(config, "tempradioat ", 12) == 0) {
+    float freq, bw;
+    uint8_t sf, cr;
+    uint32_t start_time, end_time;
+    if (!parseScheduledRadioArgs(&config[12], true, freq, bw, sf, cr, start_time, end_time)) {
+      strcpy(reply, "Error, use: set tempradioat f,bw,sf,cr,start,end");
+    } else if (freq < 150.0f || freq > 2500.0f || sf < 5 || sf > 12 || cr < 5 || cr > 8 || !isValidLoRaBandwidth(bw)) {
+      strcpy(reply, "Error, invalid radio params");
+    } else {
+      _callbacks->addScheduledRadioParams(true, freq, bw, sf, cr, start_time, end_time, reply);
     }
   } else if (memcmp(config, "lat ", 4) == 0) {
     _prefs->node_lat = atof(&config[4]);
@@ -1169,6 +1969,292 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "OK");
     } else {
       strcpy(reply, "Error, must be 0-2");
+    }
+  } else if (memcmp(config, "retry.preset ", 13) == 0) {
+    uint8_t preset;
+    if (parseRetryPreset(&config[13], preset)) {
+      applyDirectRetryPreset(_prefs, preset);
+      savePrefs();
+      sprintf(reply, "OK - %s", retryPresetName(_prefs->retry_preset));
+    } else {
+      strcpy(reply, "Error, must be infra, rooftop, or mobile");
+    }
+  } else if (memcmp(config, "direct.retry ", 13) == 0) {
+    if (strcmp(&config[13], "on") == 0) {
+      _prefs->direct_retry_enabled = 1;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else if (strcmp(&config[13], "off") == 0) {
+      _prefs->direct_retry_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be on or off");
+    }
+  } else if (memcmp(config, "direct.retry.heard ", 19) == 0) {
+    if (strcmp(&config[19], "on") == 0) {
+      _prefs->direct_retry_recent_enabled = 1;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else if (strcmp(&config[19], "off") == 0) {
+      _prefs->direct_retry_recent_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be on or off");
+    }
+  } else if (memcmp(config, "direct.retry.margin ", 20) == 0) {
+    if (!looksNumeric(&config[20])) {
+      strcpy(reply, "Error, must be 0-40 dB");
+    } else {
+      int16_t margin_x4 = parseSnrDbX4(&config[20]);
+      if (margin_x4 >= 0 && margin_x4 <= 160) {
+        _prefs->direct_retry_snr_margin_x4 = (uint16_t)margin_x4;
+        _prefs->retry_preset = RETRY_PRESET_CUSTOM;
+        savePrefs();
+        strcpy(reply, "OK");
+      } else {
+        strcpy(reply, "Error, must be 0-40 dB");
+      }
+    }
+  } else if (memcmp(config, "direct.retry.count ", 19) == 0) {
+    int attempts = looksUnsignedInteger(&config[19]) ? _atoi(&config[19]) : -1;
+    if (attempts >= 1 && attempts <= 15) {
+      _prefs->direct_retry_attempts = (uint8_t)attempts;
+      _prefs->retry_preset = RETRY_PRESET_CUSTOM;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be 1-15");
+    }
+  } else if (memcmp(config, "direct.retry.base ", 18) == 0) {
+    int base_ms = looksUnsignedInteger(&config[18]) ? _atoi(&config[18]) : -1;
+    if (base_ms >= 10 && base_ms <= 5000) {
+      _prefs->direct_retry_base_ms = (uint16_t)base_ms;
+      _prefs->retry_preset = RETRY_PRESET_CUSTOM;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be 10-5000 ms");
+    }
+  } else if (memcmp(config, "direct.retry.step ", 18) == 0) {
+    int step_ms = looksUnsignedInteger(&config[18]) ? _atoi(&config[18]) : -1;
+    if (step_ms >= 0 && step_ms <= 5000) {
+      _prefs->direct_retry_step_ms = (uint16_t)step_ms;
+      _prefs->retry_preset = RETRY_PRESET_CUSTOM;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be 0-5000 ms");
+    }
+  } else if (memcmp(config, "flood.channel.data.hops ", 24) == 0) {
+    uint8_t max_hops;
+    if (parseFloodChannelBlockHops(&config[24], max_hops)) {
+      _prefs->flood_channel_data_max_hops = max_hops;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be all or 1-7");
+    }
+  } else if (memcmp(config, "flood.channel.data ", 19) == 0) {
+    if (strcmp(&config[19], "on") == 0) {
+      _prefs->flood_channel_data_enabled = 1;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else if (strcmp(&config[19], "off") == 0) {
+      _prefs->flood_channel_data_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be on or off");
+    }
+  } else if (memcmp(config, "flood.channel.block.hops ", 25) == 0) {
+    uint8_t max_hops;
+    if (parseFloodChannelBlockHops(&config[25], max_hops)) {
+      _prefs->flood_channel_block_max_hops = max_hops;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be all or 1-7");
+    }
+  } else if (memcmp(config, "flood.channel.block", 19) == 0
+      && (config[19] == ' ' || config[19] == '.')) {
+    const char* cursor = &config[19];
+    int index = 0;
+    if (!parseFloodChannelBlockDotIndex(cursor, index)) {
+      sprintf(reply, "Error, index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+      return;
+    }
+    cursor = skipSpacesConst(cursor);
+
+    const char* key_start = cursor;
+    while (*cursor && *cursor != ' ') cursor++;
+    size_t key_len_text = cursor - key_start;
+    char key_text[PUB_KEY_SIZE * 2 + 1];
+    if (key_len_text == 0 || key_len_text >= sizeof(key_text)) {
+      strcpy(reply, "Error, use: set flood.channel.block[.n] <hex-key> <name>|#channel");
+      return;
+    }
+    memcpy(key_text, key_start, key_len_text);
+    key_text[key_len_text] = 0;
+
+    char name[FLOOD_CHANNEL_BLOCK_NAME_LEN];
+    uint8_t block_hops = FLOOD_CHANNEL_BLOCK_HOPS_INHERIT;
+    if (key_text[0] == '#') {
+      StrHelper::strncpy(name, key_text, sizeof(name));
+      const char* extra = skipSpacesConst(cursor);
+      if (*extra && looksFloodChannelBlockHopAssignment(extra)
+          && !parseFloodChannelBlockHopAssignment(extra, true, block_hops)) {
+        strcpy(reply, "Error, hops must be all, default, or 1-7");
+        return;
+      }
+    } else {
+      copyTrimmedFloodChannelBlockName(name, sizeof(name), cursor);
+      if (!trimFloodChannelBlockHopSuffix(name, block_hops)) {
+        strcpy(reply, "Error, bad name or hops");
+        return;
+      }
+    }
+    uint8_t secret[PUB_KEY_SIZE];
+    uint8_t decoded_key_len = 0;
+    if (!parseFloodChannelBlockKey(key_text, secret, decoded_key_len)) {
+      strcpy(reply, "Error, key must be 128/256-bit hex or #channel");
+    } else if (name[0] == 0 || !isValidName(name)) {
+      strcpy(reply, "Error, bad name");
+    } else {
+      _callbacks->setFloodChannelBlock(index, secret, decoded_key_len, name, block_hops, reply);
+    }
+  } else if (memcmp(config, "flood.retry.count ", 18) == 0) {
+    int attempts = looksUnsignedInteger(&config[18]) ? _atoi(&config[18]) : -1;
+    if (attempts >= 0 && attempts <= 15) {
+      _prefs->flood_retry_attempts = (uint8_t)attempts;
+      _prefs->retry_preset = RETRY_PRESET_CUSTOM;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be 0-15");
+    }
+  } else if (memcmp(config, "flood.retry.path ", 17) == 0) {
+    uint8_t path_gate;
+    if (parseFloodRetryPathGate(&config[17], path_gate)) {
+      _prefs->flood_retry_max_path = path_gate;
+      _prefs->retry_preset = RETRY_PRESET_CUSTOM;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be 0-63 or off");
+    }
+  } else if (memcmp(config, "flood.retry.prefixes ", 21) == 0) {
+    if (parseFloodRetryPrefixList(_prefs->flood_retry_prefixes, FLOOD_RETRY_PREFIX_SLOTS, &config[21])) {
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      sprintf(reply, "Error, use up to %u comma-separated 3-byte hex prefixes",
+              (unsigned int)FLOOD_RETRY_PREFIX_SLOTS);
+    }
+  } else if (memcmp(config, "flood.retry.ignore ", 19) == 0) {
+    if (parseFloodRetryPrefixList(_prefs->flood_retry_ignore_prefixes,
+                                  FLOOD_RETRY_IGNORE_PREFIXES, &config[19])) {
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      sprintf(reply, "Error, use up to %u comma-separated 3-byte hex prefixes",
+              (unsigned int)FLOOD_RETRY_IGNORE_PREFIXES);
+    }
+  } else if (memcmp(config, "flood.retry.advert ", 19) == 0) {
+    if (strcmp(&config[19], "on") == 0) {
+      _prefs->flood_retry_advert_enabled = 1;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else if (strcmp(&config[19], "off") == 0) {
+      _prefs->flood_retry_advert_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be on or off");
+    }
+  } else if (memcmp(config, "flood.retry.bridge ", 19) == 0) {
+    if (strcmp(&config[19], "on") == 0) {
+      _prefs->flood_retry_bridge_enabled = 1;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else if (strcmp(&config[19], "off") == 0) {
+      _prefs->flood_retry_bridge_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, must be on or off");
+    }
+  } else if (memcmp(config, "flood.retry.bucket ", 19) == 0) {
+    const char* params = &config[19];
+    uint8_t bucket = atoi(params);
+    const char* list = strchr(params, ' ');
+    if (bucket < 1 || bucket > FLOOD_RETRY_BRIDGE_BUCKETS || list == NULL || *(list + 1) == 0) {
+      sprintf(reply, "Error, usage: set flood.retry.bucket <1-%d> <prefixes|none>", FLOOD_RETRY_BRIDGE_BUCKETS);
+    } else if (parseFloodRetryPrefixList(_prefs->flood_retry_bridge_buckets[bucket - 1],
+                                         FLOOD_RETRY_BUCKET_PREFIXES, list + 1)) {
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      sprintf(reply, "Error, use up to %u comma-separated 3-byte hex prefixes",
+              (unsigned int)FLOOD_RETRY_BUCKET_PREFIXES);
+    }
+  } else if (memcmp(config, "direct.retry.cr ", 16) == 0) {
+    if (strcmp(&config[16], "off") == 0) {
+      _prefs->direct_retry_cr_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(tmp, &config[16]);
+      const char *parts[4];
+      int num = mesh::Utils::parseTextParts(tmp, parts, 4, ',');
+      if (num == 4 && looksNumeric(parts[0]) && looksNumeric(parts[1]) && looksNumeric(parts[2]) && looksNumeric(parts[3])) {
+        int16_t cr4 = parseSnrDbX4(parts[0]);
+        int16_t cr5 = parseSnrDbX4(parts[1]);
+        int16_t cr7 = parseSnrDbX4(parts[2]);
+        int16_t cr8 = parseSnrDbX4(parts[3]);
+        if (cr4 >= -128 && cr4 <= 127 && cr5 >= -128 && cr5 <= 127 && cr7 >= -128 && cr7 <= 127 && cr8 >= -128 && cr8 <= 127) {
+          _prefs->direct_retry_cr4_snr_x4 = (int8_t)cr4;
+          _prefs->direct_retry_cr5_snr_x4 = (int8_t)cr5;
+          _prefs->direct_retry_cr7_snr_x4 = (int8_t)cr7;
+          _prefs->direct_retry_cr8_snr_x4 = (int8_t)cr8;
+          _prefs->direct_retry_cr_enabled = 1;
+          savePrefs();
+          strcpy(reply, "OK");
+        } else {
+          strcpy(reply, "Error, SNR must fit -32.00..31.75 dB");
+        }
+      } else {
+        strcpy(reply, "Error, use CR4,CR5,CR7,CR8 SNRs or off");
+      }
+    }
+  } else if (memcmp(config, "recent.repeater ", 16) == 0) {
+    strcpy(tmp, &config[16]);
+    const char *parts[2];
+    int num = mesh::Utils::parseTextParts(tmp, parts, 2, ' ');
+    uint8_t prefix[MAX_HASH_SIZE];
+    uint8_t prefix_len = 0;
+    int16_t snr_x4 = 12;  // default to +3.0 dB when omitted or invalid
+    if (num < 1 || !parseHashPrefix(parts[0], prefix, prefix_len)) {
+      strcpy(reply, "Error, use: set recent.repeater <hex> [snr_db]");
+    } else if (num > 1 && !looksNumeric(parts[1])) {
+      strcpy(reply, "Error, SNR must be numeric");
+    } else {
+      if (num > 1) {
+        snr_x4 = parseSnrDbX4(parts[1]);
+      }
+      if (snr_x4 < -128 || snr_x4 > 127) {
+        strcpy(reply, "Error, SNR must fit -32.00..31.75 dB");
+      } else if (_callbacks->setRecentRepeater(prefix, prefix_len, (int8_t)snr_x4)) {
+        char prefix_hex[RECENT_REPEATER_PREFIX_MAX_BYTES * 2 + 1];
+        char snr[12];
+        mesh::Utils::toHex(prefix_hex, prefix, prefix_len);
+        prefix_hex[prefix_len * 2] = 0;
+        formatSnrDbX4Short(snr, sizeof(snr), snr_x4);
+        sprintf(reply, "OK - set %s at %s SNR", prefix_hex, snr);
+      } else {
+        strcpy(reply, "Error, table rejected prefix");
+      }
     }
   } else if (memcmp(config, "owner.info ", 11) == 0) {
     config += 11;
@@ -1288,8 +2374,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       }
     } else {
       _prefs->adc_multiplier = 0.0f;
-      strcpy(reply, "Error: unsupported by this board");
+      strcpy(reply, "Error: unsupported");
     };
+  } else if (memcmp(config, "reboot.interval ", 16) == 0) {
+    int hours = _atoi(&config[16]);
+    if (hours == 0) {
+      _prefs->reboot_interval = 0;
+      savePrefs();
+      strcpy(reply, "reboot.interval disabled");
+    } else if (hours < 1 || 255 < hours) {
+      strcpy(reply, "Error: interval range is 1-255 hours");
+    } else {
+      _prefs->reboot_interval = hours;
+      savePrefs();
+      sprintf(reply, "OK - reboot.interval set to %d", _prefs->reboot_interval);
+    }
   } else {
     sprintf(reply, "unknown config: %s", config);
   }
@@ -1299,6 +2398,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   const char* config = &command[4];
   // Observer/MQTT/WiFi/timezone/alert/SNMP commands live in CommonCLI_Observer.cpp.
   if (handleObserverGetCmd(sender_timestamp, config, reply)) return;
+  int recent_page = 1;
   if (memcmp(config, "dutycycle", 9) == 0) {
     float dc = 100.0f / (_prefs->airtime_factor + 1.0f);
     int dc_int = (int)dc;
@@ -1309,13 +2409,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "int.thresh", 10) == 0) {
     sprintf(reply, "> %d", (uint32_t) _prefs->interference_threshold);
   } else if (memcmp(config, "cad", 3) == 0) {
-    sprintf(reply, "> %s", _prefs->cad_enabled ? "on" : "off");
-  } else if (memcmp(config, "radio.fem.rxgain", 16) == 0) {
-    if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
-    } else {
-      sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
-    }
+    sprintf(reply, "> %s. # channel busy: %u", _prefs->cad_enabled ? "on" : "off", _board->n_cad_busy);
   } else if (memcmp(config, "agc.reset.interval", 18) == 0) {
     sprintf(reply, "> %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
   } else if (memcmp(config, "multi.acks", 10) == 0) {
@@ -1341,10 +2435,18 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lat));
   } else if (memcmp(config, "lon", 3) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lon));
-#if defined(USE_SX1262) || defined(USE_SX1268) || defined(USE_LR1110)
   } else if (memcmp(config, "radio.rxgain", 12) == 0) {
     sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
-#endif
+  } else if (memcmp(config, "radio.fem.rxgain", 16) == 0) {
+    if (!_board->canControlLoRaFemLna()) {
+      strcpy(reply, "Error: unsupported");
+    } else {
+      sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
+    }
+  } else if (memcmp(config, "tempradioat", 11) == 0 && (config[11] == 0 || config[11] == ' ')) {
+    _callbacks->formatScheduledRadioParams(true, skipSpacesConst(&config[11]), reply);
+  } else if (memcmp(config, "radioat", 7) == 0 && (config[7] == 0 || config[7] == ' ')) {
+    _callbacks->formatScheduledRadioParams(false, skipSpacesConst(&config[7]), reply);
   } else if (memcmp(config, "radio", 5) == 0) {
     char freq[16], bw[16];
     strcpy(freq, StrHelper::ftoa(_prefs->freq));
@@ -1354,6 +2456,38 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->rx_delay_base));
   } else if (memcmp(config, "txdelay", 7) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->tx_delay_factor));
+  } else if (strcmp(config, "flood.channel.data.hops") == 0) {
+    char hops[8];
+    formatFloodChannelBlockHops(hops, _prefs->flood_channel_data_max_hops);
+    sprintf(reply, "> %s", hops);
+  } else if (strcmp(config, "flood.channel.data") == 0) {
+    char hops[8];
+    formatFloodChannelBlockHops(hops, _prefs->flood_channel_data_max_hops);
+    sprintf(reply, "> %s %s", _prefs->flood_channel_data_enabled ? "on" : "off", hops);
+  } else if (memcmp(config, "flood.channel.block.hops", 24) == 0) {
+    char hops[8];
+    formatFloodChannelBlockHops(hops, _prefs->flood_channel_block_max_hops);
+    sprintf(reply, "> %s", hops);
+  } else if (memcmp(config, "flood.channel.block", 19) == 0
+      && (config[19] == 0 || config[19] == ' ' || config[19] == '.')) {
+    const char* cursor = &config[19];
+    int index = 0;
+    if (!parseFloodChannelBlockDotIndex(cursor, index)) {
+      sprintf(reply, "Error, index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+      return;
+    }
+    cursor = skipSpacesConst(cursor);
+    char selector[8];
+    if (index > 0 && *cursor != 0) {
+      strcpy(reply, "Error, use index or selector");
+      return;
+    }
+    if (index > 0) {
+      snprintf(selector, sizeof(selector), "%d", index);
+      _callbacks->formatFloodChannelBlocks(selector, reply);
+    } else {
+      _callbacks->formatFloodChannelBlocks(cursor, reply);
+    }
   } else if (memcmp(config, "flood.max.advert", 16) == 0) {
     sprintf(reply, "> %d", (uint32_t)_prefs->flood_max_advert);
   } else if (memcmp(config, "flood.max.unscoped", 18) == 0) {
@@ -1362,6 +2496,59 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %d", (uint32_t)_prefs->flood_max);
   } else if (memcmp(config, "direct.txdelay", 14) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->direct_tx_delay_factor));
+  } else if (memcmp(config, "retry.preset", 12) == 0) {
+    sprintf(reply, "> %s", retryPresetName(_prefs->retry_preset));
+  } else if (memcmp(config, "direct.retry", 12) == 0 && (config[12] == 0 || config[12] == ' ')) {
+    sprintf(reply, "> %s", _prefs->direct_retry_enabled ? "on" : "off");
+  } else if (memcmp(config, "direct.retry.heard", 18) == 0) {
+    sprintf(reply, "> %s", _prefs->direct_retry_recent_enabled ? "on" : "off");
+  } else if (memcmp(config, "direct.retry.margin", 19) == 0) {
+    char margin[12];
+    formatSnrDbX4(margin, sizeof(margin), _prefs->direct_retry_snr_margin_x4);
+    sprintf(reply, "> %s", margin);
+  } else if (memcmp(config, "direct.retry.count", 18) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->direct_retry_attempts);
+  } else if (memcmp(config, "direct.retry.base", 17) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->direct_retry_base_ms);
+  } else if (memcmp(config, "direct.retry.step", 17) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->direct_retry_step_ms);
+  } else if (memcmp(config, "flood.retry.count", 17) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->flood_retry_attempts);
+  } else if (memcmp(config, "flood.retry.path", 16) == 0) {
+    char path_gate[8];
+    formatFloodRetryPathGate(path_gate, _prefs->flood_retry_max_path);
+    sprintf(reply, "> %s", path_gate);
+  } else if (memcmp(config, "flood.retry.prefixes", 20) == 0) {
+    formatFloodRetryPrefixList(tmp, _prefs->flood_retry_prefixes, FLOOD_RETRY_PREFIX_SLOTS);
+    sprintf(reply, "> %s", tmp[0] ? tmp : "none");
+  } else if (memcmp(config, "flood.retry.ignore", 18) == 0) {
+    formatFloodRetryPrefixList(tmp, _prefs->flood_retry_ignore_prefixes, FLOOD_RETRY_IGNORE_PREFIXES);
+    sprintf(reply, "> %s", tmp[0] ? tmp : "none");
+  } else if (memcmp(config, "flood.retry.advert", 18) == 0) {
+    sprintf(reply, "> %s", _prefs->flood_retry_advert_enabled ? "on" : "off");
+  } else if (memcmp(config, "flood.retry.bridge", 18) == 0) {
+    sprintf(reply, "> %s", _prefs->flood_retry_bridge_enabled ? "on" : "off");
+  } else if (memcmp(config, "flood.retry.bucket.", 19) == 0) {
+    uint8_t bucket = atoi(&config[19]);
+    if (bucket >= 1 && bucket <= FLOOD_RETRY_BRIDGE_BUCKETS) {
+      formatFloodRetryPrefixList(tmp, _prefs->flood_retry_bridge_buckets[bucket - 1], FLOOD_RETRY_BUCKET_PREFIXES);
+      sprintf(reply, "> %s", tmp[0] ? tmp : "none");
+    } else {
+      sprintf(reply, "Error, bucket 1-%d", FLOOD_RETRY_BRIDGE_BUCKETS);
+    }
+  } else if (memcmp(config, "direct.retry.cr", 15) == 0) {
+    if (!_prefs->direct_retry_cr_enabled) {
+      strcpy(reply, "> off");
+    } else {
+      char cr4[12], cr5[12], cr7[12], cr8[12];
+      formatSnrDbX4(cr4, sizeof(cr4), _prefs->direct_retry_cr4_snr_x4);
+      formatSnrDbX4(cr5, sizeof(cr5), _prefs->direct_retry_cr5_snr_x4);
+      formatSnrDbX4(cr7, sizeof(cr7), _prefs->direct_retry_cr7_snr_x4);
+      formatSnrDbX4(cr8, sizeof(cr8), _prefs->direct_retry_cr8_snr_x4);
+      sprintf(reply, "> %s,%s,%s,%s", cr4, cr5, cr7, cr8);
+    }
+  } else if (parseRecentRepeaterGet(config, recent_page)) {
+    _callbacks->formatRecentRepeatersReply(reply, recent_page);
   } else if (memcmp(config, "owner.info", 10) == 0) {
     *reply++ = '>';
     *reply++ = ' ';
@@ -1429,12 +2616,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
           strcpy(reply, "> unknown");
       }
   #else
-      strcpy(reply, "ERROR: unsupported");
+      strcpy(reply, "Error: unsupported");
   #endif
   } else if (memcmp(config, "adc.multiplier", 14) == 0) {
     float adc_mult = _board->getAdcMultiplier();
     if (adc_mult == 0.0f) {
-      strcpy(reply, "Error: unsupported by this board");
+      strcpy(reply, "Error: unsupported");
     } else {
       sprintf(reply, "> %.3f", adc_mult);
     }
@@ -1452,21 +2639,57 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     strcpy(reply, "ERROR: Power management not supported");
 #endif
   } else if (memcmp(config, "pwrmgt.bootreason", 17) == 0) {
-#ifdef NRF52_POWER_MANAGEMENT
     sprintf(reply, "> Reset: %s; Shutdown: %s",
       _board->getResetReasonString(_board->getResetReason()),
       _board->getShutdownReasonString(_board->getShutdownReason()));
-#else
-    strcpy(reply, "ERROR: Power management not supported");
-#endif
   } else if (memcmp(config, "pwrmgt.bootmv", 13) == 0) {
 #ifdef NRF52_POWER_MANAGEMENT
     sprintf(reply, "> %u mV", _board->getBootVoltage());
 #else
     strcpy(reply, "ERROR: Power management not supported");
 #endif
+  } else if (memcmp(config, "reboot.interval", 15) == 0) {
+    if (_prefs->reboot_interval == 0) {
+      strcpy(reply, "disabled");
+    } else {
+      sprintf(reply, "> %d", (uint8_t)_prefs->reboot_interval);
+    }
   } else {
     sprintf(reply, "??: %s", config);
+  }
+}
+
+void CommonCLI::handleDelCmd(char* command, char* reply) {
+  const char* config = &command[4];
+  if (memcmp(config, "tempradioat", 11) == 0 && (config[11] == 0 || config[11] == ' ')) {
+    _callbacks->deleteScheduledRadioParams(true, skipSpacesConst(&config[11]), reply);
+  } else if (memcmp(config, "radioat", 7) == 0 && (config[7] == 0 || config[7] == ' ')) {
+    _callbacks->deleteScheduledRadioParams(false, skipSpacesConst(&config[7]), reply);
+  } else if (memcmp(config, "flood.channel.block", 19) == 0
+      && (config[19] == ' ' || config[19] == '.')) {
+    const char* cursor = &config[19];
+    int index = 0;
+    if (!parseFloodChannelBlockDotIndex(cursor, index)) {
+      sprintf(reply, "Error, index 1-%d", FLOOD_CHANNEL_BLOCK_SLOTS);
+      return;
+    }
+    cursor = skipSpacesConst(cursor);
+    char selector[8];
+    if (index > 0 && *cursor != 0) {
+      strcpy(reply, "Error, use index or selector");
+      return;
+    }
+    if (index > 0) {
+      snprintf(selector, sizeof(selector), "%d", index);
+      _callbacks->deleteFloodChannelBlock(selector, reply);
+    } else if (*cursor != 0) {
+      _callbacks->deleteFloodChannelBlock(cursor, reply);
+    } else {
+      strcpy(reply, "Error, use: del flood.channel.block <index|name|prefix>");
+    }
+  } else {
+    strcpy(reply, "unknown del: ");
+    StrHelper::strncpy(&reply[13], config, 160 - 14);
   }
 }
 

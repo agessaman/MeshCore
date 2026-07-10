@@ -28,11 +28,34 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 **Usage:** 
 - `reboot`
 
+**Note:** No reply is sent.
+
+---
+
+### Power-off the node
+**Usage:**
+- `poweroff`, or
+- `shutdown`
+
+**Note:** No reply is sent.
+
+---
+
+### Enter the UF2 bootloader (nRF52 only)
+**Usage:**
+- `uf2reset`
+
+**Serial Only:** Yes
+
+**Note:** Reboots directly into the UF2 bootloader on supported nRF52 boards.
+
 ---
 
 ### Reset the clock and reboot
 **Usage:**
 - `clkreboot`
+
+**Note:** No reply is sent.
 
 ---
 
@@ -69,9 +92,10 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
-### Start an Over-The-Air (OTA) firmware update
+### Start or stop an Over-The-Air (OTA) firmware update
 **Usage:**
 - `start ota`
+- `stop ota`
 
 ---
 
@@ -189,7 +213,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Parameters:**
 - `freq`: Frequency in MHz
-- `bw`: Bandwidth in kHz
+- `bw`: Bandwidth in kHz. Most targets allow `7.8`, `10.4`, `15.6`, `20.8`, `31.25`, `41.7`, `62.5`, `125`, `250`, `500`. LR1110 targets allow `62.5`, `125`, `250`, `500`.
 - `sf`: Spreading factor (5-12)
 - `cr`: Coding rate (5-8)
 
@@ -222,13 +246,39 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 - `tempradio <freq>,<bw>,<sf>,<cr>,<timeout_mins>`
 
 **Parameters:**
-- `freq`: Frequency in MHz (300-2500)
-- `bw`: Bandwidth in kHz (7.8-500)
+- `freq`: Frequency in MHz (150-2500)
+- `bw`: Bandwidth in kHz (same allowed values as `set radio`)
 - `sf`: Spreading factor (5-12)
 - `cr`: Coding rate (5-8)
 - `timeout_mins`: Duration in minutes (must be > 0)
 
 **Note:** This is not saved to preferences and will clear on reboot
+
+---
+
+#### Schedule radio parameter changes
+**Usage:**
+- `set radioat <freq>,<bw>,<sf>,<cr>,<start_time>`
+- `get radioat [n|all]`
+- `del radioat [n|all]`
+- `set tempradioat <freq>,<bw>,<sf>,<cr>,<start_time>,<end_time>`
+- `get tempradioat [n|all]`
+- `del tempradioat [n|all]`
+
+**Parameters:**
+- `freq`: Frequency in MHz (150-2500)
+- `bw`: Bandwidth in kHz (same allowed values as `set radio`)
+- `sf`: Spreading factor (5-12)
+- `cr`: Coding rate (5-8)
+- `start_time`: Unix epoch time when the setting starts
+- `end_time`: Unix epoch time when a temporary setting reverts
+- `n`: Scheduled entry number from `get radioat` or `get tempradioat`
+
+**Notes:**
+- `get radioat` and `get tempradioat` list all entries when `n` is omitted.
+- `del radioat` and `del tempradioat` delete all entries when `n` is omitted.
+- Each queue supports 3 entries. Scheduled entries are not saved across reboot.
+- `radioat` saves the new radio preferences when it fires. `tempradioat` applies temporarily, then reverts to the saved radio preferences.
 
 ---
 
@@ -258,6 +308,20 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 **Default:** `on`
 
 **Temporary Note:** If you upgraded from an older version to 1.14.1 without erasing flash, this setting is `off` because of [#2118](https://github.com/meshcore-dev/MeshCore/issues/2118)
+
+---
+
+#### View or change the LoRa FEM receive-path gain state on supported boards
+**Usage:**
+- `get radio.fem.rxgain`
+- `set radio.fem.rxgain <state>`
+
+**Parameters:**
+- `state`: `on`|`off`
+
+**Notes:**
+- This controls the external LoRa FEM receive-path LNA where the board supports it.
+- This is separate from `radio.rxgain`, which controls the radio chip receive gain mode.
 
 ---
 
@@ -384,8 +448,53 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+#### Send a repeater flood text
+**Usage:**
+- `send text.flood <message>`
+
+**Parameters:**
+- `message`: Text to send to the shared `#repeaters` flood channel, prefixed with this node's name. Any `:` in the node name is sent as `;` so the prefix delimiter stays unambiguous.
+
+**Example:**
+```
+send text.flood checking ridge link
+```
+
+---
+
+#### View or change battery alert state
+**Usage:**
+- `get battery.alert`
+- `set battery.alert <on|off>`
+
+**Default:** `off`
+
+**Note:** When enabled, the repeater checks battery level once per minute and sends low-battery warnings to the `#repeaters` flood channel.
+
+---
+
+#### View or change battery alert thresholds
+**Usage:**
+- `get battery.alert.low`
+- `set battery.alert.low <1-100>`
+- `get battery.alert.critical`
+- `set battery.alert.critical <0-99>`
+
+**Defaults:**
+- `battery.alert.low`: `20`
+- `battery.alert.critical`: `10`
+
+**Note:** The low threshold must be greater than the critical threshold.
+
+---
+
 #### View this node's public key
 **Usage:** `get public.key`
+
+---
+
+#### View this node's firmware version
+**Usage:** `ver`
 
 ---
 
@@ -406,7 +515,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Default:** `off`
 
-**Note:** When enabled, device enters sleep mode between radio transmissions
+**Note:** When enabled, device enters sleep mode between radio transmissions. Enabling is refused from the local serial console or while an active USB serial data connection is detected; USB power alone does not block power saving.
 
 ---
 
@@ -420,7 +529,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 **Parameters:**
   - `state`: `on`|`off`
 
-**Default:** `on`
+**Default:** `flood.channel.data on`; `flood.channel.data.hops h=all`
 
 ---
 
@@ -557,6 +666,20 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+#### Enable or disable hardware Channel Activity Detection (CAD)
+**Usage:**
+- `get cad`
+- `set cad <on|off>`
+
+**Description:** When enabled, the radio performs a hardware Channel Activity Detection scan before transmitting and defers if the channel is busy. Runs independently of `int.thresh` — either, both, or none may be active.
+
+**Parameters:**
+- `on|off`: Enable or disable hardware CAD
+
+**Default:** `off`
+
+---
+
 #### View or change the AGC Reset Interval
 **Usage:**
 - `get agc.reset.interval`
@@ -643,6 +766,131 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Note:** An alternative to `region denyf *`, setting `flood.max.unscoped` to a lower value such as `3` would allow for local unscoped messages to propagate, while preventing noisy neighbors from flooding a local region.
 
+---
+
+#### Limit the number of hops for an advert flood message
+**Usage:**
+- `get flood.max.advert`
+- `set flood.max.advert <value>`
+
+**Parameters:**
+- `value`: Maximum flood hop count (0-64) for an advert packet
+
+**Default:** `8`
+
+---
+
+#### Forward flood group data packets on repeaters
+**Usage:**
+- `get flood.channel.data`
+- `get flood.channel.data.hops`
+- `set flood.channel.data <on|off>`
+- `set flood.channel.data.hops <all|1-7>`
+
+**Parameters:**
+- `on`: Retransmit received flood `GRP_DATA` channel packets.
+- `off`: Do not retransmit received flood `GRP_DATA` channel packets.
+- `all`: When `flood.channel.data` is `off`, block `GRP_DATA` at any received flood hop count.
+- `1-7`: When `flood.channel.data` is `off`, repeat `GRP_DATA` at this hop count or lower and block longer paths.
+
+**Default:** `flood.channel.data on`; `flood.channel.data.hops h=all`
+
+**Forwarding behavior:** Repeater firmware only. The repeater still receives and
+logs the packet when logging is enabled; this only blocks retransmission.
+This is checked before `flood.channel.block` and applies to flood `GRP_DATA`
+packets regardless of channel key. Flood group text (`GRP_TXT`) is unaffected by
+this setting.
+
+`flood.channel.data.hops` is separate from `flood.channel.block.hops`.
+`flood.channel.block.hops` does not restrict unkeyed `GRP_DATA` packets. With
+the default `flood.channel.data on`, `GRP_DATA` repeats normally even when
+`flood.channel.block.hops` is set for keyed channel blocks.
+
+`get flood.channel.data` includes the active hop gate as `h=all` or `h>N`.
+
+---
+
+#### Block selected flood channel packets on repeaters
+**Usage:**
+- `get flood.channel.block`
+- `get flood.channel.block.<n>`
+- `get flood.channel.block <name|8_hex_prefix>`
+- `get flood.channel.block.hops`
+- `set flood.channel.block <key> <name> [h=<all|1-7|default>]`
+- `set flood.channel.block.<n> <key> <name> [h=<all|1-7|default>]`
+- `set flood.channel.block #channel [h=<all|1-7|default>]`
+- `set flood.channel.block.<n> #channel [h=<all|1-7|default>]`
+- `set flood.channel.block.hops <all|1-7>`
+- `del flood.channel.block.<n>`
+- `del flood.channel.block <name|8_hex_prefix>`
+
+**Parameters:**
+- `n`: Slot number from `1` to `15`.
+- `key`: 128-bit or 256-bit channel key as hex.
+- `#channel`: Public hashtag channel name; derives the 128-bit channel key from the hashtag and is stored as the row name.
+- `name`: Local label for hex-key rows. Not needed for `#channel`; extra text after `#channel` is ignored unless it is a hop setting.
+- `8_hex_prefix`: First 4 bytes of the derived channel hash, shown by single-entry `get`.
+- `all`: Block matching flood channel packets at any received flood hop count.
+- `1-7`: Maximum received flood path hash count to repeat. Matching packets over this hop count are blocked.
+- `default`: Row inherits the global `flood.channel.block.hops` setting.
+
+**Slot behavior:** Without `.n`, `set flood.channel.block` updates an existing
+row with the same derived channel prefix or name, otherwise it uses the next
+empty slot. If all 15 slots are full, the command fails. With `.n`, the command
+writes that slot.
+
+**Default row:** Repeater firmware seeds a new block list with
+`#wardriving h=4` in slot 1. This is a normal row, so it can be changed with
+`set flood.channel.block #wardriving h=<all|1-7|default>` or removed with
+`del flood.channel.block #wardriving`. Once the block list has been saved, the
+firmware uses the saved list and does not recreate the default after deletion.
+
+**Forwarding behavior:** Repeater firmware only. This only affects received
+flood `GRP_TXT` and `GRP_DATA` channel packets. The repeater still receives and
+logs the packet, but it does not retransmit it when a configured block entry can
+validate/decode it. If `flood.channel.data` is `off`, `GRP_DATA` packets are
+checked against the separate `flood.channel.data.hops` gate before this
+per-channel check runs.
+
+**Hop gate:** `flood.channel.block.hops` defaults to `all`, which preserves the
+original behavior. When set to `N` from `1` to `7`, block rows that inherit the
+global setting only block packets whose received flood path hash count is
+greater than `N`; packets at `N` hops or lower can still repeat. For example,
+`set flood.channel.block.hops 1` repeats zero-hop and one-hop matches but blocks
+two-hop and longer matches.
+
+Each block row can override the global hop gate with `h=<all|1-7|default>`.
+For example, the seeded `#wardriving h=4` row blocks `#wardriving` matches
+above four hops, while `set flood.channel.block #bot h=7` blocks
+`#bot` matches above seven hops. Use `h=default` to make the row inherit the
+global setting again.
+
+`get flood.channel.block` includes the global default first, then adds per-row
+overrides as `/h>N` or `/h=all`; inherited rows do not show a suffix. Single-row
+`get` replies include that row's stored hop mode as `h=def`, `h=all`, or `h>N`.
+List replies truncate displayed row names only when the full list would exceed
+the remote-management response limit.
+
+**Matching behavior:** Each block entry stores the first 4 bytes of the derived
+channel hash for display and lookup. Current group packets carry only the first
+channel-hash byte, so that byte is used as a cheap prefilter. Only entries whose
+first hash byte matches the packet try MAC/decrypt with their stored key. If
+multiple blocked channels share the same first byte, the repeater tries each
+matching key until one validates; the packet is blocked only after a successful
+MAC/decrypt.
+
+**Examples:**
+```
+set flood.channel.block #test
+set flood.channel.block.2 9cd8fcf22a47333b591d96a2b848b73f #test
+set flood.channel.block.hops 3
+set flood.channel.block #wardriving h=4
+set flood.channel.block #bot h=7
+get flood.channel.block
+get flood.channel.block.hops
+get flood.channel.block #test
+del flood.channel.block.2
+```
 
 ---
 
@@ -930,6 +1178,442 @@ region save
 - Adds nested `#NorthAmerica` hierarchy
 - Enables flooding for all child regions automatically
 - Useful for global networks with specific regional rules
+
+---
+### Direct Retry
+
+Direct retry resends direct-routed packets when the downstream echo is not heard. It applies to direct messages, ACK packets, multipart packets carrying ACK payloads, and TRACE packets.
+
+#### View or change direct retry state
+**Usage:**
+- `get direct.retry`
+- `set direct.retry <state>`
+
+**Parameters:**
+- `state`: `on`|`off`
+
+**Default:** `on`
+
+**Notes:**
+- New installs and older preference files without direct retry settings default to `on` with the `rooftop` preset.
+
+**Examples:**
+```
+get direct.retry
+set direct.retry on
+set direct.retry off
+```
+
+---
+
+#### View or change direct retry heard-table gate
+**Usage:**
+- `get direct.retry.heard`
+- `set direct.retry.heard <state>`
+
+**Parameters:**
+- `state`: `on`|`off`
+
+**Default:** `on`
+
+**Note:** When enabled, the recent repeater table is the direct retry eligibility
+gate. Prefixes missing from the table are assumed reachable; prefixes in the
+table below the active SNR gate are blocked.
+
+**Examples:**
+```
+get direct.retry.heard
+set direct.retry.heard on
+set direct.retry.heard off
+```
+
+---
+
+#### View or apply a retry preset
+**Usage:**
+- `get retry.preset`
+- `set retry.preset <preset>`
+
+**Parameters:**
+- `preset`: `infra`|`rooftop`|`mobile`
+
+**Notes:**
+- Applies shared direct retry and flood retry defaults.
+- `infra`: fewer, slower retries for stable fixed infrastructure.
+- `rooftop`: default long retry window for weak rooftop links.
+- `mobile`: long retry count with shorter spacing for moving or changing links; flood retry count is `15`.
+- Changing `direct.retry.count`, `direct.retry.base`, `direct.retry.step`, `direct.retry.margin`, `flood.retry.count`, or `flood.retry.path` makes the preset report as `custom`.
+
+**Examples:**
+```
+get retry.preset
+set retry.preset infra
+set retry.preset rooftop
+set retry.preset mobile
+```
+
+---
+
+### Flood Retry
+
+Flood retry resends flood-routed packets when the same packet is not heard from
+another qualifying repeater.
+
+#### View or change flood retry count
+**Usage:**
+- `get flood.retry.count`
+- `set flood.retry.count <count>`
+
+**Parameters:**
+- `count`: Base retry attempts after the original send, from `0` to `15`. `0` disables flood retry.
+
+**Note:** Actual attempts are capped at `15`. Hop 1 flood retries use `count * 2`; hop 2 flood retries use `count * 1.5`, rounded up.
+
+**Defaults:**
+- `infra`: `1`
+- `rooftop`: `3`
+- `mobile`: `15`
+
+**Examples:**
+```
+get flood.retry.count
+set flood.retry.count 0
+set flood.retry.count 15
+```
+
+---
+
+#### View or change flood retry path gate
+**Usage:**
+- `get flood.retry.path`
+- `set flood.retry.path <count|off>`
+
+**Parameters:**
+- `count`: Maximum flood path hash count eligible for retry, from `0` to `63`.
+- `off`: Disable the path-length gate.
+
+**Defaults:**
+- `infra`: `1`
+- `rooftop`: `2`
+- `mobile`: `1`
+
+**Examples:**
+```
+get flood.retry.path
+set flood.retry.path 1
+set flood.retry.path off
+```
+
+---
+
+#### View or change flood retry advert handling
+**Usage:**
+- `get flood.retry.advert`
+- `set flood.retry.advert <on|off>`
+
+**Parameters:**
+- `on`: Retry node advert floods.
+- `off`: Do not retry node advert floods.
+
+**Default:** `off`
+
+**Examples:**
+```
+get flood.retry.advert
+set flood.retry.advert off
+```
+
+---
+
+#### View or change flood retry target prefixes
+**Usage:**
+- `get flood.retry.prefixes`
+- `set flood.retry.prefixes <prefixes|none|off>`
+
+**Parameters:**
+- `prefixes`: Comma-separated 3-byte path hash prefixes, up to 8 entries.
+- `none` or `off`: Clear the list.
+
+**Note:** When set, non-bridge flood retry only accepts same-packet echoes whose
+last hop matches one of these prefixes. When unset, any non-ignored last hop can
+cancel the retry.
+
+**Examples:**
+```
+get flood.retry.prefixes
+set flood.retry.prefixes A58296,860CCA,425E5C
+set flood.retry.prefixes none
+```
+
+---
+
+#### View or change flood retry ignored prefixes
+**Usage:**
+- `get flood.retry.ignore`
+- `set flood.retry.ignore <prefixes|none|off>`
+
+**Parameters:**
+- `prefixes`: Comma-separated 3-byte path hash prefixes, up to 8 entries.
+- `none` or `off`: Clear the list.
+
+**Note:** Non-bridge flood retry does not cancel on same-packet echoes whose
+last hop matches this list. Bridge mode also excludes these prefixes from bucket
+and `other` hits.
+
+**Examples:**
+```
+get flood.retry.ignore
+set flood.retry.ignore 71CE82,C7618C
+set flood.retry.ignore none
+```
+
+---
+
+#### View or change flood retry bridge mode
+**Usage:**
+- `get flood.retry.bridge`
+- `set flood.retry.bridge <on|off>`
+
+**Note:** Bridge mode retries until each configured fresh bucket, plus the non-source `other` bucket, has been heard or the retry count is exhausted.
+
+**Examples:**
+```
+get flood.retry.bridge
+set flood.retry.bridge on
+```
+
+---
+
+#### View or change flood retry bridge buckets
+**Usage:**
+- `get flood.retry.bucket.<n>`
+- `set flood.retry.bucket <n> <prefixes|none|off>`
+
+**Parameters:**
+- `n`: Bucket number from `1` to `6`.
+- `prefixes`: Comma-separated 3-byte path hash prefixes, up to 17 entries per bucket.
+- `none` or `off`: Clear the bucket.
+
+**Examples:**
+```
+get flood.retry.bucket.1
+set flood.retry.bucket 1 71CE82,C7618C
+set flood.retry.bucket 2 none
+```
+
+---
+
+#### View or change direct retry count
+**Usage:**
+- `get direct.retry.count`
+- `set direct.retry.count <count>`
+
+**Parameters:**
+- `count`: Maximum retry attempts after the original send, from `1` to `15`.
+
+**Default:** `15` with the `rooftop` preset
+
+**Note:** Direct-routed type 2 text packets always use 21 retry attempts in the
+shared retry logic, regardless of this setting or the repeater short-path cap.
+
+**Examples:**
+```
+get direct.retry.count
+set direct.retry.count 1
+set direct.retry.count 4
+set direct.retry.count 15
+```
+
+---
+
+#### View or change direct retry base delay
+**Usage:**
+- `get direct.retry.base`
+- `set direct.retry.base <ms>`
+
+**Parameters:**
+- `ms`: First retry wait in milliseconds, from `10` to `5000`.
+
+**Default:** `175` with the `rooftop` preset
+
+**Explanation:**
+- The first retry waits `base` milliseconds after the failed echo window.
+- The failed echo window includes a packet-length add-on. TRACE and
+  ANON_REQ/type 7 packets keep the existing 4x line-time add-on. TXT_MSG/type 2
+  packets use 7x. Other direct retry packets use 6x.
+- Non-repeater firmware uses the same packet-type add-ons with the shared
+  fixed base retry timing.
+- For non-TRACE direct paths shorter than 6 remaining hops, the effective wait is scaled by `hops / 6`.
+- Non-TRACE direct paths with 6 or more remaining hops use the configured value unchanged.
+- TRACE retries shorter than 16 remaining hops use `hops / 16`; 16 or more remaining hops use the configured value unchanged.
+- Larger values reduce channel pressure and give slow repeaters more time.
+- Smaller values recover faster but create tighter retry bursts.
+
+**Examples:**
+```
+get direct.retry.base
+set direct.retry.base 175
+set direct.retry.base 275
+set direct.retry.base 500
+```
+
+---
+
+#### View or change direct retry step delay
+**Usage:**
+- `get direct.retry.step`
+- `set direct.retry.step <ms>`
+
+**Parameters:**
+- `ms`: Extra milliseconds added for each subsequent retry, from `0` to `5000`.
+
+**Default:** `100` with the `rooftop` preset
+
+**Explanation:**
+- Retry delay is `base + attempt_index * step`.
+- This is added after the failed echo window. TRACE and ANON_REQ/type 7 packets
+  keep the existing 4x packet-length add-on. TXT_MSG/type 2 packets use 7x.
+  Other direct retry packets use 6x.
+- Non-repeater firmware uses the same packet-type add-ons with the shared
+  fixed retry step.
+- For non-TRACE direct paths shorter than 6 remaining hops, that computed delay is scaled by `hops / 6`.
+- Non-TRACE direct paths with 6 or more remaining hops use the computed delay unchanged.
+- TRACE retries shorter than 16 remaining hops use `hops / 16`; 16 or more remaining hops use the computed delay unchanged.
+- With `base=175` and `step=100`, non-TRACE paths with 6 or more remaining hops wait about `175`, `275`, `375`, `475` ms, and so on.
+- `step=0` keeps every retry at the same delay.
+- Larger steps spread retries over time and are safer on busy channels.
+
+**Examples:**
+```
+get direct.retry.step
+set direct.retry.step 0
+set direct.retry.step 50
+set direct.retry.step 100
+set direct.retry.step 250
+```
+
+---
+
+#### View or change direct retry SNR margin
+**Usage:**
+- `get direct.retry.margin`
+- `set direct.retry.margin <snr_db>`
+
+**Parameters:**
+- `snr_db`: Extra SNR margin above the SF receive floor, from `0` to `40`.
+
+**Default:** `5.00` with the `rooftop` preset
+
+**Notes:**
+- Unknown repeaters are still retried.
+- Known repeaters below the receive floor plus this margin are skipped.
+- Failed attempts lower the recent repeater SNR estimate by `0.25 dB`.
+
+**Examples:**
+```
+get direct.retry.margin
+set direct.retry.margin 0
+set direct.retry.margin 2.5
+set direct.retry.margin 5
+set direct.retry.margin 10
+```
+
+---
+
+#### View or change adaptive direct retry coding rate
+**Usage:**
+- `get direct.retry.cr`
+- `set direct.retry.cr off`
+- `set direct.retry.cr <cr4_min>,<cr5_min>,<cr7_min>,<cr8_max>`
+
+**Parameters:**
+- `cr4_min`: Minimum SNR in dB to retry at CR4.
+- `cr5_min`: Minimum SNR in dB to retry at CR5.
+- `cr7_min`: Minimum SNR in dB to retry at CR7.
+- `cr8_max`: Maximum SNR in dB that forces CR8.
+
+**Default:** `10.00,7.50,2.50,2.50`
+
+**Explanation:**
+- Higher SNR uses faster coding rates.
+- Lower SNR uses more robust coding rates.
+- Repeater retry attempts escalate from the adaptive starting CR. CR4 starts as CR4, CR5, CR7, CR7, then CR8. CR5 starts as CR5, CR7, CR7, then CR8. CR7 gets two attempts, then CR8.
+- Repeater adaptive CR selection intentionally skips CR6.
+- Non-repeater retry packets start at the current radio CR and follow the same escalation pattern, clamped at CR8. With the normal CR5 radio setting this is CR5, CR7, CR7, then CR8.
+- `off` disables per-packet retry CR overrides and uses the current radio CR.
+- Direct path retry packets sent at CR4 or CR5 temporarily use a shorter 16-symbol preamble, then restore the radio's default preamble.
+- Unknown repeaters start at `+3.00 dB` for adaptive CR selection.
+- A failed unknown repeater is seeded at `+2.75 dB`.
+- Each later failure lowers the SNR estimate by `0.25 dB`.
+
+**Examples:**
+```
+get direct.retry.cr
+set direct.retry.cr off
+set direct.retry.cr 10.0,7.5,2.5,2.5
+set direct.retry.cr 12.0,8.0,4.0,1.0
+set direct.retry.cr 8.0,5.0,1.5,0
+set direct.retry.cr 6.0,3.0,0,-2.0
+set direct.retry.cr 20.0,12.0,6.0,2.0
+set direct.retry.cr 4.0,2.0,0,-4.0
+```
+
+**Example profiles:**
+- Conservative weak-link profile:
+```
+set direct.retry.cr 12.0,8.0,4.0,1.0
+```
+- Balanced rooftop profile:
+```
+set direct.retry.cr 10.0,7.5,2.5,2.5
+```
+- Faster strong-link profile:
+```
+set direct.retry.cr 6.0,3.0,0,-2.0
+```
+- Very cautious noisy-link profile:
+```
+set direct.retry.cr 20.0,12.0,6.0,2.0
+```
+
+---
+
+#### View, seed, or clear the recent repeater table
+**Usage:**
+- `get recent.repeater`
+- `get recent.repeater <page>`
+- `get recent.repeaters <page>`
+- `set recent.repeater <prefix> [snr_db]`
+- `clear recent.repeater`
+
+**Parameters:**
+- `prefix`: Repeater path-hash prefix as hex.
+- `snr_db`: Optional SNR in dB. If omitted or invalid, defaults to `3.0`.
+- `page`: 1-based result page.
+
+**Output order:**
+- `get recent.repeater` lists 3-byte prefixes first, then 2-byte prefixes, then 1-byte prefixes.
+- Within each prefix length, entries are sorted from highest SNR to lowest SNR.
+
+**SNR details:**
+- Recent repeater SNR is stored internally in quarter-dB units.
+- Heard repeater samples update an existing table entry with a weighted blend: `75%` existing SNR and `25%` new heard SNR, rounded up.
+- Direct retry success also feeds the heard echo SNR back into the same weighted table.
+- Direct retry failure is not weighted: each final echo-timeout failure lowers that repeater's SNR by `0.25 dB`.
+- Unknown repeaters start at `+3.00 dB` for adaptive CR selection.
+- If an unknown repeater fails, it is seeded into the table at `+2.75 dB`.
+- `set recent.repeater <prefix> [snr_db]` seeds a missing prefix or adds another weighted sample for an existing prefix.
+- Successful `set recent.repeater` replies include the stored prefix and SNR, for example `OK - set A1B2C3 at 3.0 SNR`.
+
+**Examples:**
+```
+get recent.repeater
+get recent.repeater 2
+set recent.repeater A1B2C3 8.5
+set recent.repeater 71CE82 -3.25
+set recent.repeater A1B2C3
+clear recent.repeater
+```
 
 ---
 ### GPS (When GPS support is compiled in)

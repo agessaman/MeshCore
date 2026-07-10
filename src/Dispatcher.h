@@ -47,6 +47,14 @@ public:
   virtual bool startSendRaw(const uint8_t* bytes, int len) = 0;
 
   /**
+   * \brief  Sets LoRa coding rate for subsequent transmits/receives.
+   * \returns true if the radio accepted the coding rate.
+  */
+  virtual bool setCodingRate(uint8_t cr) { return false; }
+  virtual uint16_t getDefaultPreambleLength() const { return 0; }
+  virtual bool setPreambleLength(uint16_t len) { return false; }
+
+  /**
    * \returns true if the previous 'startSendRaw()' completed successfully.
   */
   virtual bool isSendComplete() = 0;
@@ -101,7 +109,7 @@ public:
   virtual Packet* allocNew() = 0;
   virtual void free(Packet* packet) = 0;
 
-  virtual void queueOutbound(Packet* packet, uint8_t priority, uint32_t scheduled_for) = 0;
+  virtual bool queueOutbound(Packet* packet, uint8_t priority, uint32_t scheduled_for) = 0;
   virtual Packet* getNextOutbound(uint32_t now) = 0;    // by priority
   virtual int getOutboundCount(uint32_t now) const = 0;
   virtual int getOutboundTotal() const = 0;
@@ -137,6 +145,8 @@ class Dispatcher {
   unsigned long outbound_expiry, outbound_start, total_air_time, rx_air_time;
   unsigned long last_watchdog_recovery;
   unsigned long last_radio_active_ms;   // updated on any TX or RX event; used by watchdog
+  uint16_t outbound_restore_preamble_len;
+  uint8_t outbound_restore_cr;
   unsigned long next_tx_time;
   unsigned long cad_busy_start;
   unsigned long radio_nonrx_start;
@@ -149,6 +159,7 @@ class Dispatcher {
   unsigned long duty_cycle_window_ms;
 
   void processRecvPacket(Packet* pkt);
+  void restoreOutboundTxOverrides();
   void updateTxBudget();
 
 protected:
@@ -161,6 +172,8 @@ protected:
     : _radio(&radio), _ms(&ms), _mgr(&mgr)
   {
     outbound = NULL;
+    outbound_restore_preamble_len = 0;
+    outbound_restore_cr = 0;
     total_air_time = rx_air_time = 0;
     next_tx_time = ms.getMillis();
     cad_busy_start = 0;
@@ -182,12 +195,15 @@ protected:
   virtual void logRx(Packet* packet, int len, float score) { }   // hooks for custom logging
   virtual void logTx(Packet* packet, int len) { }
   virtual void logTxFail(Packet* packet, int len) { }
+  virtual void onSendComplete(Packet* packet) { }
+  virtual void onSendFail(Packet* packet) { }
   virtual const char* getLogDateTime() { return ""; }
 
   virtual float getAirtimeBudgetFactor() const;
   virtual int calcRxDelay(float score, uint32_t air_time) const;
   virtual uint32_t getCADFailRetryDelay() const;
   virtual uint32_t getCADFailMaxDuration() const;
+  virtual uint8_t getDefaultTxCodingRate() const { return 0; }
   virtual int getInterferenceThreshold() const { return 0; }    // disabled by default
   virtual bool getCADEnabled() const { return false; }    // hardware CAD disabled by default
   virtual int getAGCResetInterval() const { return 0; }    // disabled by default
@@ -195,6 +211,9 @@ protected:
 #ifdef WITH_MQTT_BRIDGE
   virtual uint32_t getRadioWatchdogMillis() const;  // observer-only radio recovery
 #endif
+  const Packet* getOutboundInFlight() const { return outbound; }
+  bool queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t delay_millis);
+  bool tryParsePacket(Packet* pkt, const uint8_t* raw, int len);
 
 public:
   void begin();
@@ -202,7 +221,7 @@ public:
 
   Packet* obtainNewPacket();
   void releasePacket(Packet* packet);
-  void sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
+  bool sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
 
   unsigned long getTotalAirTime() const { return total_air_time; }
   unsigned long getReceiveAirTime() const {return rx_air_time; }
@@ -221,8 +240,6 @@ public:
   // helper methods
   bool millisHasNowPassed(unsigned long timestamp) const;
   unsigned long futureMillis(int millis_from_now) const;
-
-  bool tryParsePacket(Packet* pkt, const uint8_t* raw, int len);
 
 private:
   void checkRecv();

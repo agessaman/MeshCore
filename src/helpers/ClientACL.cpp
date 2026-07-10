@@ -1,5 +1,7 @@
 #include "ClientACL.h"
 
+static const uint8_t CONTACT_RECORD_VERSION_ALT_PATH = 1;
+
 static File openWrite(FILESYSTEM* _fs, const char* filename) {
   #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
     _fs->remove(filename);
@@ -28,6 +30,7 @@ void ClientACL::load(FILESYSTEM* fs, const mesh::LocalIdentity& self_id) {
         uint8_t unused[2];
 
         memset(&c, 0, sizeof(c));
+        c.alt_path_len = OUT_PATH_UNKNOWN;
 
         bool success = (file.read(pub_key, 32) == 32);
         success = success && (file.read((uint8_t *) &c.permissions, 1) == 1);
@@ -36,6 +39,10 @@ void ClientACL::load(FILESYSTEM* fs, const mesh::LocalIdentity& self_id) {
         success = success && (file.read((uint8_t *)&c.out_path_len, 1) == 1);
         success = success && (file.read(c.out_path, 64) == 64);
         success = success && (file.read(c.shared_secret, PUB_KEY_SIZE) == PUB_KEY_SIZE); // will be recalculated below
+        if (success && unused[0] >= CONTACT_RECORD_VERSION_ALT_PATH) {
+          success = success && (file.read((uint8_t *)&c.alt_path_len, 1) == 1);
+          success = success && (file.read(c.alt_path, 64) == 64);
+        }
 
         if (!success) break; // EOF
 
@@ -57,7 +64,8 @@ void ClientACL::save(FILESYSTEM* fs, bool (*filter)(ClientInfo*)) {
   File file = openWrite(_fs, "/s_contacts");
   if (file) {
     uint8_t unused[2];
-    memset(unused, 0, sizeof(unused));
+    unused[0] = CONTACT_RECORD_VERSION_ALT_PATH;
+    unused[1] = 0;
 
     for (int i = 0; i < num_clients; i++) {
       auto c = &clients[i];
@@ -70,6 +78,8 @@ void ClientACL::save(FILESYSTEM* fs, bool (*filter)(ClientInfo*)) {
       success = success && (file.write((uint8_t *)&c->out_path_len, 1) == 1);
       success = success && (file.write(c->out_path, 64) == 64);
       success = success && (file.write(c->shared_secret, PUB_KEY_SIZE) == PUB_KEY_SIZE);
+      success = success && (file.write((uint8_t *)&c->alt_path_len, 1) == 1);
+      success = success && (file.write(c->alt_path, 64) == 64);
 
       if (!success) break; // write failed
     }
@@ -99,7 +109,8 @@ ClientInfo* ClientACL::putClient(const mesh::Identity& id, uint8_t init_perms) {
   ClientInfo* oldest = &clients[MAX_CLIENTS - 1];
   for (int i = 0; i < num_clients; i++) {
     if (id.matches(clients[i].id)) return &clients[i];  // already known
-    if (!clients[i].isAdmin() && clients[i].last_activity < min_time) {
+    if (  (!clients[i].isAdmin() && !clients[i].isRegionMgr()) 
+	  && clients[i].last_activity < min_time) {
       oldest = &clients[i];
       min_time = oldest->last_activity;
     }
@@ -115,6 +126,7 @@ ClientInfo* ClientACL::putClient(const mesh::Identity& id, uint8_t init_perms) {
   c->permissions = init_perms;
   c->id = id;
   c->out_path_len = OUT_PATH_UNKNOWN;
+  c->alt_path_len = OUT_PATH_UNKNOWN;
   return c;
 }
 

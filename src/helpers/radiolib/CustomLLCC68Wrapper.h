@@ -16,6 +16,10 @@ public:
     updatePreamble(sf);
   }
 
+  bool setCodingRate(uint8_t cr) override {
+    return ((CustomLLCC68 *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE;
+  }
+
   bool isReceivingPacket() override { 
     return ((CustomLLCC68 *)_radio)->isReceiving();
   }
@@ -33,8 +37,8 @@ public:
 
   void doResetAGC() override { sx126xResetAGC((SX126x *)_radio); }
 
-  void setRxBoostedGainMode(bool en) override {
-    ((CustomLLCC68 *)_radio)->setRxBoostedGainMode(en);
+  bool setRxBoostedGainMode(bool en) override {
+    return ((CustomLLCC68 *)_radio)->setRxBoostedGainMode(en) == RADIOLIB_ERR_NONE;
   }
   bool getRxBoostedGainMode() const override {
     return ((CustomLLCC68 *)_radio)->getRxBoostedGainMode();
