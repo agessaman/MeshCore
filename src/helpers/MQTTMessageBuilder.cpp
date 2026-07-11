@@ -107,9 +107,7 @@ int MQTTMessageBuilder::buildPacketMessage(
   snprintf(len_str, sizeof(len_str), "%d", len);
   snprintf(packet_type_str, sizeof(packet_type_str), "%d", packet_type);
   snprintf(payload_len_str, sizeof(payload_len_str), "%d", payload_len);
-  snprintf(snr_str, sizeof(snr_str), "%.1f", snr);
-  snprintf(rssi_str, sizeof(rssi_str), "%d", rssi);
-  
+
   root["origin"] = origin;
   root["origin_id"] = origin_id;
   root["timestamp"] = timestamp;
@@ -122,8 +120,18 @@ int MQTTMessageBuilder::buildPacketMessage(
   root["route"] = route;
   root["payload_len"] = payload_len_str;
   root["raw"] = raw;
-  root["SNR"] = snr_str;
-  root["RSSI"] = rssi_str;
+  // Only emit SNR/RSSI when a real radio measurement is available. Callers with no raw
+  // radio data pass sentinels (<= -900); omitting the fields is honest about the gap,
+  // whereas the previous hardcoded 12.5/-65 fabricated plausible-looking values that
+  // polluted downstream RF analytics. Real measurements are always within sane ranges.
+  if (snr > -900.0f) {
+    snprintf(snr_str, sizeof(snr_str), "%.1f", snr);
+    root["SNR"] = snr_str;
+  }
+  if (rssi > -900) {
+    snprintf(rssi_str, sizeof(rssi_str), "%d", rssi);
+    root["RSSI"] = rssi_str;
+  }
   root["hash"] = hash;
   
   if (path && strlen(path) > 0) {
@@ -226,8 +234,8 @@ int MQTTMessageBuilder::buildPacketJSON(
     packet_type, route_str,
     packet->payload_len,
     raw_hex,
-    12.5f, // SNR - using reasonable default
-    -65,   // RSSI - using reasonable default
+    -999.0f, // SNR unknown — this overload reconstructs from the packet with no raw radio
+    -999,    // RSSI unknown — emitted by omitting the fields (was a fabricated 12.5/-65)
     hash_str,
     packet->isRouteDirect() ? path_str : nullptr,
     buffer, buffer_size
