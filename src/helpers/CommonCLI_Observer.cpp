@@ -695,6 +695,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       start = (int)_atoi(start_arg);
     }
     formatMQTTPresetListReply(reply, 160, start);
+  } else if (memcmp(config, "mqtt.stats", 10) == 0) {
+    MQTTBridge::formatMqttStatsReply(reply, 160);
   } else if (memcmp(config, "mqtt.status", 11) == 0) {
     MQTTBridge::formatMqttStatusReply(reply, 160, &_mqtt_prefs);
   } else if (memcmp(config, "mqtt.packets", 12) == 0) {
@@ -790,8 +792,11 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
         unsigned long h = (uptime_sec % 86400) / 3600;
         unsigned long m = (uptime_sec % 3600) / 60;
         unsigned long s = uptime_sec % 60;
+        // reply points at the caller's char[160] command buffer (see main.cpp);
+        // compute the actual remaining space instead of assuming 128.
+        const size_t kReplyBufSize = 160;
         size_t len = strlen(reply);
-        const size_t reply_remaining = 128;
+        const size_t reply_remaining = (len < kReplyBufSize) ? (kReplyBufSize - len) : 0;
         if (d > 0) {
           snprintf(reply + len, reply_remaining, ", uptime: %lud %luh %lum %lus", d, h, m, s);
         } else if (h > 0) {

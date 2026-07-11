@@ -250,6 +250,45 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
   snprintf(buf + pos, bufsize - pos, ", q:%d", q);
 }
 
+// On-demand publish-health + heap snapshot for the `get mqtt.stats` CLI command.
+// Same data as the (MQTT_MEMORY_DEBUG-only) periodic logMemoryStatus() line, but
+// returned as a reply instead of logged. Per-slot "sN=ok/err": ok = cumulative
+// accepted publishes, err = cumulative failures (socket error / network timeout).
+// Outbox should read ~0 (QoS0 publishes synchronously); a rising err isolates a
+// broker whose uplink is dropping writes.
+void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
+  if (buf == nullptr || bufsize == 0) return;
+  if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) {
+    snprintf(buf, bufsize, "> (bridge not running)");
+    return;
+  }
+  MQTTBridge* b = s_mqtt_bridge_instance;
+
+  int q = 0;
+#ifdef ESP_PLATFORM
+  if (b->_packet_queue_handle != nullptr) {
+    q = (int)uxQueueMessagesWaiting(b->_packet_queue_handle);
+  }
+#else
+  q = b->_queue_count;
+#endif
+
+  size_t outbox_total = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (b->_slots[i].client) outbox_total += b->_slots[i].client->getOutboxSize();
+  }
+
+  int pos = snprintf(buf, bufsize, "> Free=%d Max=%d q:%d/%d Outbox=%u |",
+                     (int)ESP.getFreeHeap(), (int)ESP.getMaxAllocHeap(),
+                     q, MAX_QUEUE_SIZE, (unsigned)outbox_total);
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS && pos < (int)bufsize - 1; i++) {
+    if (!b->_slots[i].enabled || !b->_slots[i].client) continue;
+    pos += snprintf(buf + pos, bufsize - pos, " s%d=%lu/%lu", i + 1,
+                    b->_slots[i].client->getPublishOk(),
+                    b->_slots[i].client->getPublishErr());
+  }
+}
+
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
 
@@ -898,6 +937,19 @@ void MQTTBridge::mqttTaskLoop() {
     #endif
 
     unsigned long now = millis();
+
+    // Periodic heap + publish-health snapshot. Gated behind MQTT_MEMORY_DEBUG (a
+    // dedicated diagnostics flag, NOT enabled on production or plain MQTT_DEBUG builds)
+    // so it stays off by default — the same data is available on demand via the
+    // `get mqtt.stats` CLI command (formatMqttStatsReply / logMemoryStatus()).
+    #ifdef MQTT_MEMORY_DEBUG
+    static unsigned long last_mem_log = 0;
+    if (now - last_mem_log >= 30000) {
+      last_mem_log = now;
+      logMemoryStatus();
+    }
+    #endif
+
     bool wifi_just_connected = handleWiFiConnection(now);
     if (wifi_just_connected) {
       // WiFi recovered — reset last_reconnect_attempt for disconnected slots so they
@@ -1119,8 +1171,18 @@ void MQTTBridge::initSlotClients() {
     slot.client->onConnect([this, index](bool sessionPresent) {
       MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
       _slots[index].connected = true;
-      _slots[index].reconnect_backoff = 0;
-      _slots[index].max_backoff_failures = 0;
+      // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
+      // A CONNACK alone doesn't prove the link is healthy — a broker that
+      // accepts and then drops within seconds would reset the ladder every
+      // cycle and retry at the 10 s rung forever, and each retry is a full
+      // TLS session alloc/free (~40 KB of internal-heap churn, a known
+      // fragmentation driver). The ladder is instead cleared by
+      // maintainSlotConnection() once the connection has stayed up for
+      // BACKOFF_STABLE_RESET_MS, so flapping endpoints keep their earned
+      // backoff level. The breaker itself does clear now: while connected
+      // the diag/status must not claim the slot gave up, and the next
+      // disconnect should be governed by the (still-elevated) ladder.
+      _slots[index].connected_at_ms = millis();
       _slots[index].circuit_breaker_tripped = false;
       _slots[index].last_tls_err = 0;
       _slots[index].last_tls_stack_err = 0;
@@ -1140,6 +1202,7 @@ void MQTTBridge::initSlotClients() {
         _slots[index].current_outage_started_ms = millis();
       }
       _slots[index].connected = false;
+      _slots[index].connected_at_ms = 0;  // stability clock only runs while connected
       updateCachedConnectionStatus();
     });
     slot.client->onError([this, index](esp_mqtt_error_codes error) {
@@ -1453,7 +1516,20 @@ void MQTTBridge::maintainSlotConnections() {
 void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted) {
   MQTTSlot& slot = _slots[index];
 
-  if (slot.connected) {
+  // Forgive past failures only after the connection has proven stable.
+  // 2 minutes covers at least one keepalive round-trip (keepalive is 75 s),
+  // so a link that can't survive a single keepalive period never resets the
+  // ladder. Flapping endpoints therefore stay at their earned backoff rung
+  // (worst case the 300 s rung / 30-minute breaker probes) instead of
+  // hammering full TLS handshakes at the 10 s rung — see the onConnect
+  // handler in initSlotClients() for why this doesn't happen on CONNACK.
+  static const unsigned long BACKOFF_STABLE_RESET_MS = 120000UL;
+  if (slot.connected &&
+      (slot.reconnect_backoff != 0 || slot.max_backoff_failures != 0) &&
+      slot.connected_at_ms != 0 &&
+      (now_millis - slot.connected_at_ms) >= BACKOFF_STABLE_RESET_MS) {
+    MQTT_DEBUG_PRINTLN("MQTT%d stable for %lus - clearing reconnect backoff (was level %d)",
+        index + 1, (now_millis - slot.connected_at_ms) / 1000UL, slot.reconnect_backoff);
     slot.reconnect_backoff = 0;
     slot.max_backoff_failures = 0;
   }
@@ -1462,15 +1538,19 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   bool slot_uses_jwt = (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) ||
                        (!slot.preset && slot.audience[0] != '\0');
   if (slot_uses_jwt) {
+    // Renew (and below, reconnect) this many seconds before the token's exp
+    // claim. Scaled to the slot's token lifetime — see tokenRenewalBufferSecs
+    // for why a flat 60 s lost the renewal race against brokers that enforce
+    // exp on live sessions (waev's 55-minute tokens).
+    const unsigned long renewal_buffer = tokenRenewalBufferSecs(slotTokenLifetime(index));
     bool token_needs_renewal = false;
     if (!time_synced) {
       token_needs_renewal = (slot.token_expires_at == 0);
     } else {
-      const unsigned long RENEWAL_BUFFER = 60;
       token_needs_renewal = (slot.token_expires_at == 0) ||
                            !(slot.token_expires_at >= 1000000000) ||
                            (current_time >= slot.token_expires_at) ||
-                           (current_time >= (slot.token_expires_at - RENEWAL_BUFFER));
+                           (current_time >= (slot.token_expires_at - renewal_buffer));
     }
 
     // Throttle renewal attempts to once per minute
@@ -1485,12 +1565,16 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       if (createSlotAuthToken(index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d token renewed", index + 1);
 
-        const unsigned long DISCONNECT_THRESHOLD = 60;
+        // Bounce the connection while WE control the timing whenever the old
+        // token is inside the renewal buffer — waiting for the broker to
+        // enforce exp mid-session means a FIN plus a trip through the backoff
+        // ladder instead of one clean reconnect. Same buffer as the renewal
+        // trigger above, so a renewal implies a proactive reconnect.
         bool old_token_expired_or_imminent = !time_synced ||
                                             (old_token_expires_at == 0) ||
                                             (current_time >= old_token_expires_at) ||
                                             (time_synced && old_token_expires_at >= 1000000000 &&
-                                             current_time >= (old_token_expires_at - DISCONNECT_THRESHOLD));
+                                             current_time >= (old_token_expires_at - renewal_buffer));
 
         if (old_token_expired_or_imminent || !slot.client->connected()) {
           // Disconnect + reconnect with fresh credentials, reusing existing client
@@ -1608,6 +1692,43 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   }
 }
 
+// Effective JWT lifetime for a slot: the preset's token_lifetime (or the 24 h
+// default for custom/audience slots), minus the per-slot expiry stagger that
+// keeps multiple JWT slots from renewing/reconnecting simultaneously. This is
+// the exact value createSlotAuthToken() puts in the token's exp claim, so the
+// renewal scheduling in maintainSlotConnection() can be derived from it.
+unsigned long MQTTBridge::slotTokenLifetime(int index) const {
+  const MQTTSlot& slot = _slots[index];
+  unsigned long base_lifetime = 86400; // default 24h
+  if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT && slot.preset->token_lifetime > 0) {
+    base_lifetime = slot.preset->token_lifetime;
+  }
+  // Stagger token expiry per slot to avoid simultaneous renewal/reconnect.
+  // Use 5% of lifetime per slot, capped at 300s, so short-lived tokens aren't over-reduced.
+  unsigned long stagger = index * min((unsigned long)300, base_lifetime / 20);
+  return base_lifetime - stagger;
+}
+
+// How early (seconds before the token's exp claim) to renew the token AND
+// proactively bounce the connection with fresh credentials. exp and the
+// renewal schedule are locked together (both derive from slotTokenLifetime),
+// so this buffer is the ONLY margin between "device re-authenticates" and
+// "broker enforces exp and FIN-closes the session mid-stream" — shortening a
+// preset's token_lifetime moves both times together and cannot widen it.
+// The old flat 60 s lost that race whenever the device clock ran slow, or a
+// single renewal attempt failed (the 60 s renewal throttle then ate the whole
+// margin) — observed on the waev preset, whose 55-minute tokens are the only
+// ones short enough for brokers to enforce exp against a live session.
+// lifetime/10 with a 60 s floor and 300 s cap: 24 h tokens renew 5 min early
+// (unchanged in practice), waev renews ~5 min early with ~5 throttled retry
+// windows, and degenerate short lifetimes still renew inside their validity.
+unsigned long MQTTBridge::tokenRenewalBufferSecs(unsigned long lifetime_secs) {
+  unsigned long buffer = lifetime_secs / 10;
+  if (buffer < 60) buffer = 60;
+  if (buffer > 300) buffer = 300;
+  return buffer;
+}
+
 bool MQTTBridge::createSlotAuthToken(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
@@ -1615,10 +1736,8 @@ bool MQTTBridge::createSlotAuthToken(int index) {
 
   // Determine JWT audience: preset takes priority, then custom slot audience field
   const char* audience = nullptr;
-  unsigned long base_lifetime = 86400; // default 24h
   if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) {
     audience = slot.preset->jwt_audience;
-    if (slot.preset->token_lifetime > 0) base_lifetime = slot.preset->token_lifetime;
   } else if (slot.audience[0] != '\0') {
     audience = slot.audience;
   }
@@ -1648,10 +1767,7 @@ bool MQTTBridge::createSlotAuthToken(int index) {
   const char* email = (_obs->mqtt_email[0] != '\0') ? _obs->mqtt_email : nullptr;
 
   unsigned long current_time = time(nullptr);
-  // Stagger token expiry per slot to avoid simultaneous renewal/reconnect
-  // Use 5% of lifetime per slot, capped at 300s, so short-lived tokens aren't over-reduced
-  unsigned long stagger = index * min((unsigned long)300, base_lifetime / 20);
-  unsigned long expires_in = base_lifetime - stagger;
+  unsigned long expires_in = slotTokenLifetime(index);  // preset/default lifetime minus per-slot stagger
   bool time_synced = (current_time >= 1000000000);
 
   if (JWTHelper::createAuthToken(
@@ -1678,14 +1794,23 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
     return false;
   }
 
-  // QoS 0 for the high-rate packet/raw publish paths: no PUBACK, no outbox store,
-  // no per-message heap alloc — critical for non-PSRAM fragmentation. QoS 1 is used
-  // only for low-rate retained status messages where delivery matters.
+  // Publish path by QoS:
+  //  - QoS 0 (high-rate packets/raw): SYNCHRONOUS (async=false → esp_mqtt_client_publish),
+  //    which writes straight to the socket. The async/outbox path drains only one queued
+  //    item per esp-mqtt task loop (~1 msg/s/conn, gated by the 1s poll_read), so under
+  //    even light packet load the outbox pins at its cap and drops ~20-30%. A synchronous
+  //    write bypasses that drain ceiling entirely and does not store in the outbox. It can
+  //    block the (Core-0, prio-1) MQTT task on a stalled socket, but only up to
+  //    network_timeout_ms (lowered in optimizeMqttClientConfig); mesh RX (Core 1) and the
+  //    WiFi/TCP stack (higher-prio system tasks) are unaffected, and a failed write flips
+  //    the slot to disconnected so subsequent packets skip it.
+  //  - QoS 1 (low-rate retained status): async, so it keeps the durable outbox + retransmit.
   //
-  // esp_mqtt_client_enqueue return convention: QoS 0 returns msg_id == 0 on success
-  // (no tracking since there's no PUBACK); QoS 1/2 return a positive msg_id. Negative
-  // values (-1 generic failure, -2 outbox full) are the only actual failures.
-  int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), true);
+  // Return convention: QoS 0 sync publish returns msg_id == 0 on success (no PUBACK
+  // tracking). Negative values (-1 write/failure) are the only actual failures; the queue
+  // retry/drop path below handles them.
+  bool async = (qos > 0);
+  int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), async);
   if (result < 0) {
     // QoS0 packet/raw publishes are best-effort and may be retried from the
     // bridge queue; avoid logging transient first-attempt failures here.
@@ -3344,6 +3469,23 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
 
   client->setBufferSize(MQTT_CLIENT_BUFFER_SIZE);
 
+  // Bound how long a synchronous QoS0 publish (see publishToSlot) can block the MQTT
+  // task on a stalled/half-open socket before esp-mqtt aborts the write. Default is 10s;
+  // 2.5s lets a first stall resolve fast (write fails → slot flips to disconnected →
+  // subsequent packets skip it) without holding up publishing to the other slots. Mesh
+  // RX (Core 1) and the WiFi/TCP stack are unaffected by this block regardless.
+  client->setNetworkTimeout(2500);
+
+  // Dormant safety net: cap the esp-mqtt outbox for any residual async QoS0 path. QoS0
+  // packets now publish synchronously (store=false, no outbox), so this normally never
+  // engages, but it bounds internal-heap growth if a QoS0 message ever takes the async
+  // path. Non-PSRAM (outbox on internal heap) gets the tighter cap.
+#if defined(BOARD_HAS_PSRAM)
+  client->setOutboxLimit(16384);
+#else
+  client->setOutboxLimit(8192);
+#endif
+
   // Access ESP-IDF config to optimize additional settings
   esp_mqtt_client_config_t* config = client->getMqttConfig();
   if (config) {
@@ -3361,8 +3503,31 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
 }
 
 void MQTTBridge::logMemoryStatus() {
-  MQTT_DEBUG_PRINTLN("Memory: Free=%d, Max=%d, Queue=%d/%d",
-                     ESP.getFreeHeap(), ESP.getMaxAllocHeap(), _queue_count, MAX_QUEUE_SIZE);
+  // QoS0 packets now publish synchronously, so the outbox stays ~0 and is only a sanity
+  // check (a non-zero total would mean the QoS1 status path is backing up or the dormant
+  // async cap engaged). The live signal is per-slot publish health: ok = cumulative
+  // accepted writes, err = cumulative failures (socket error / network_timeout on a
+  // stalled link). A rising err on a slot means that broker's uplink is dropping packets;
+  // ok climbing with err flat is healthy delivery.
+  char pub_detail[200];
+  size_t pos = 0;
+  size_t outbox_total = 0;
+  pub_detail[0] = '\0';
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].client) {
+      outbox_total += _slots[i].client->getOutboxSize();
+      if (_slots[i].enabled) {
+        pos += snprintf(pub_detail + pos, sizeof(pub_detail) - pos, "%ss%d=%lu/%lu",
+                        pos ? " " : "", i + 1,
+                        _slots[i].client->getPublishOk(),
+                        _slots[i].client->getPublishErr());
+        if (pos >= sizeof(pub_detail)) break;
+      }
+    }
+  }
+  MQTT_DEBUG_PRINTLN("Memory: Free=%d, Max=%d, Queue=%d/%d, Outbox=%u | pub(ok/err) %s",
+                     ESP.getFreeHeap(), ESP.getMaxAllocHeap(), _queue_count, MAX_QUEUE_SIZE,
+                     (unsigned)outbox_total, pub_detail);
 }
 
 // ---------------------------------------------------------------------------

@@ -48,6 +48,17 @@ PsychicMqttClient &PsychicMqttClient::setKeepAlive(int keepAlive)
     return *this;
 }
 
+PsychicMqttClient &PsychicMqttClient::setNetworkTimeout(int timeoutMs)
+{
+#if ESP_IDF_VERSION_MAJOR == 5
+    _mqtt_cfg.network.timeout_ms = timeoutMs;
+#else
+    _mqtt_cfg.network_timeout_ms = timeoutMs;
+#endif
+    _config_dirty = true;
+    return *this;
+}
+
 PsychicMqttClient &PsychicMqttClient::setAutoReconnect(bool reconnect)
 {
 #if ESP_IDF_VERSION_MAJOR == 5
@@ -529,17 +540,44 @@ int PsychicMqttClient::publish(const char *topic, int qos, bool retain, const ch
 
     if (async)
     {
+        // QoS0 async publishes are stored in the esp-mqtt outbox (store=true) so that
+        // packet topics keep flowing — enqueue(store=false) produced false-failure
+        // semantics that stalled the packet path. The outbox has no size bound of its
+        // own (esp-mqtt frees entries only on send-ack or time-based expiry), so on a
+        // stalled uplink QoS0 frames pile up on internal heap without limit. Cap it
+        // here: if the outbox is already at/over _outbox_limit, drop this QoS0 message
+        // and report -2 ("outbox full") so the caller can retry/drop. QoS1/2 (durable,
+        // low-rate) are never gated.
+        if (qos == 0 && _outbox_limit > 0 && _client != nullptr &&
+            esp_mqtt_client_get_outbox_size(_client) >= _outbox_limit)
+        {
+            _outbox_drops++;
+            static unsigned long last_full_log = 0;
+            unsigned long now = millis();
+            if (now - last_full_log > 5000)
+            {
+                ESP_LOGW(TAG, "Outbox at cap (%u bytes); dropping QoS0 message to topic %s",
+                         (unsigned)_outbox_limit, topic);
+                last_full_log = now;
+            }
+            return -2;
+        }
+
         ESP_LOGV(TAG, "Enqueuing message to topic %s with QoS %d", topic, qos);
-        // Hotfix: restore legacy outbox behavior for QoS0 async publishes.
-        // This avoids false-failure semantics from enqueue(store=false) on some
-        // connected paths where packet topics stop flowing.
         bool store_in_outbox = true;
-        return esp_mqtt_client_enqueue(_client, topic, payload, length, qos, retain, store_in_outbox);
+        int result = esp_mqtt_client_enqueue(_client, topic, payload, length, qos, retain, store_in_outbox);
+        if (result < 0) _publish_err++; else _publish_ok++;
+        return result;
     }
     else
     {
         ESP_LOGV(TAG, "Publishing message to topic %s with QoS %d", topic, qos);
-        return esp_mqtt_client_publish(_client, topic, payload, length, qos, retain);
+        // Synchronous write (used for QoS0 packet publishes). A negative result is a real
+        // send failure (socket error / network_timeout on a stalled link), tracked here so
+        // callers can surface delivery health without per-message logging.
+        int result = esp_mqtt_client_publish(_client, topic, payload, length, qos, retain);
+        if (result < 0) _publish_err++; else _publish_ok++;
+        return result;
     }
 }
 
@@ -555,6 +593,40 @@ const char *PsychicMqttClient::getClientId()
 esp_mqtt_client_config_t *PsychicMqttClient::getMqttConfig()
 {
     return &_mqtt_cfg;
+}
+
+PsychicMqttClient &PsychicMqttClient::setOutboxLimit(size_t bytes)
+{
+    _outbox_limit = bytes;
+    return *this;
+}
+
+size_t PsychicMqttClient::getOutboxSize()
+{
+    if (_client == nullptr)
+        return 0;
+    int size = esp_mqtt_client_get_outbox_size(_client);
+    return size > 0 ? (size_t)size : 0;
+}
+
+size_t PsychicMqttClient::getOutboxLimit()
+{
+    return _outbox_limit;
+}
+
+unsigned long PsychicMqttClient::getOutboxDrops()
+{
+    return _outbox_drops;
+}
+
+unsigned long PsychicMqttClient::getPublishOk()
+{
+    return _publish_ok;
+}
+
+unsigned long PsychicMqttClient::getPublishErr()
+{
+    return _publish_err;
 }
 
 void PsychicMqttClient::_onMqttEventStatic(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
