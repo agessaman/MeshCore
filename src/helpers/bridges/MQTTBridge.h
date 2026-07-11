@@ -89,6 +89,8 @@ private:
     uint8_t reconnect_backoff;      // 0..4 index into backoff table
     uint8_t max_backoff_failures;   // consecutive failures at max backoff level
     bool circuit_breaker_tripped;   // true = stop reconnecting until reconfigured
+    unsigned long connected_at_ms;  // millis() of last successful connect (0 = not connected);
+                                    // gates the stability-based backoff reset in maintenance
     unsigned long last_reconnect_attempt;
     unsigned long last_log_time;    // Throttle disconnect log messages
     unsigned long last_deferred_log_ms; // Throttle "connect deferred" log spam (Phase 1)
@@ -338,6 +340,8 @@ private:
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
+  unsigned long slotTokenLifetime(int index) const; // effective JWT lifetime (preset/default minus slot stagger), seconds
+  static unsigned long tokenRenewalBufferSecs(unsigned long lifetime_secs); // how early to renew+reconnect before exp
   bool publishToSlot(int index, const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
   bool publishToAllSlots(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
   void publishStatusToSlot(int index);
@@ -464,6 +468,9 @@ public:
    *  (for LoRa). Returns false if the bridge is not running. */
   bool ntpDiag(char* reply, size_t reply_size, bool verbose);
   static void formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs);
+  /** On-demand publish-health + heap snapshot for `get mqtt.stats` (per-slot ok/err,
+   *  outbox size, free/max heap, queue depth). */
+  static void formatMqttStatsReply(char* buf, size_t bufsize);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
   static bool isConfigValid(const MQTTPrefs* obs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
