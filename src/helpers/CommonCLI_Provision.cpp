@@ -35,7 +35,7 @@
 #define PROVISION_FILE      "/provision"
 #define PROVISION_MARKER    "/provision_done"
 #define PROVISION_MAX_SIZE  4096
-#define PROVISION_MAX_LINE  159   // matches the 160-byte serial command buffer
+#define PROVISION_MAX_LINE  255   // matches the 256-byte serial command buffer
 #define PROVISION_VERSION   1
 
 static const char PROVISION_HEADER_PREFIX[] = "#meshcore-provision v";
@@ -297,11 +297,17 @@ void CommonCLI::runProvisionFile(uint32_t sender_timestamp, char* reply) {
   bool truncated;
   bool got_header = false;
   int applied = 0, failed = 0, skipped = 0;
+  int line_no = 0, first_fail_line = 0;
 
   while (provisionReadLine(f, line, sizeof(line), &truncated)) {
+    line_no++;
     if (truncated) {
       failed++;
-      MESH_DEBUG_PRINTLN("provision: line too long, skipped");
+      if (!first_fail_line) first_fail_line = line_no;
+      if (sender_timestamp == 0) {
+        Serial.print("provision: line "); Serial.print(line_no);
+        Serial.println(" too long, skipped");
+      }
       continue;
     }
     const char* p = line;
@@ -340,12 +346,30 @@ void CommonCLI::runProvisionFile(uint32_t sender_timestamp, char* reply) {
     line_reply[0] = 0;
     handleCommand(sender_timestamp, cmd, line_reply);
     MESH_DEBUG_PRINTLN("provision: '%s' -> %s", p, line_reply);
-    if (provisionReplyIsError(line_reply)) failed++; else applied++;
+    if (provisionReplyIsError(line_reply)) {
+      failed++;
+      if (!first_fail_line) first_fail_line = line_no;
+      // Failures are visible on the serial console (which includes boot
+      // auto-apply); remote invokers get the first failing line number in the
+      // summary and can inspect it with 'provision show'.
+      if (sender_timestamp == 0) {
+        Serial.print("provision: line "); Serial.print(line_no);
+        Serial.print(" failed: "); Serial.print(p);
+        Serial.print("  -> "); Serial.println(line_reply);
+      }
+    } else {
+      applied++;
+    }
   }
   f.close();
 
   if (!got_header) { strcpy(reply, "Err - /provision is empty"); return; }
-  sprintf(reply, "Provision: %d applied, %d failed, %d skipped", applied, failed, skipped);
+  if (first_fail_line) {
+    sprintf(reply, "Provision: %d applied, %d failed (first at line %d), %d skipped",
+            applied, failed, first_fail_line, skipped);
+  } else {
+    sprintf(reply, "Provision: %d applied, %d failed, %d skipped", applied, failed, skipped);
+  }
 }
 
 bool CommonCLI::autoApplyProvisionFile(char* reply) {
@@ -398,7 +422,7 @@ void CommonCLI::provisionCaptureLine(const char* line, char* reply) {
   }
 
   size_t len = strlen(line);
-  if (len > PROVISION_MAX_LINE) {   // can't happen via the 160-char serial buffer, but be safe
+  if (len > PROVISION_MAX_LINE) {   // can't happen via the 256-byte serial buffer, but be safe
     _prov_capture = false;
     _fs->remove(PROVISION_FILE);
     strcpy(reply, "Err - line too long; capture aborted");
@@ -428,6 +452,11 @@ void CommonCLI::provisionCaptureLine(const char* line, char* reply) {
 // fetch (Phase 2 — WITH_MQTT_BRIDGE builds are all ESP32-family)
 
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+
+// Embedded CA root bundle (same weak symbols the OTA/tls.bundletest paths use);
+// absent on builds that don't link src/certs/x509_crt_bundle.bin.
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_src_certs_x509_crt_bundle_bin_start") __attribute__((weak));
+extern const uint8_t rootca_crt_bundle_end[] asm("_binary_src_certs_x509_crt_bundle_bin_end") __attribute__((weak));
 
 #define PROV_FETCH_TOO_BIG  -1000   // local sentinel, distinct from HTTPClient errors
 
@@ -475,14 +504,14 @@ static void handleProvisionFetch(FILESYSTEM* fs, const char* args, char* reply) 
   while (*args == ' ') args++;
   if (*args == 0) { strcpy(reply, "Err - usage: provision fetch <url> [insecure]"); return; }
   if (WiFi.status() != WL_CONNECTED) {
-    strcpy(reply, "Err - WiFi not connected (set wifi.ssid / set wifi.pwd first)");
+    strcpy(reply, "Err - WiFi not connected (set wifi.ssid / set wifi.pwd, wait a few seconds, retry)");
     return;
   }
 
   char url[PROVISION_MAX_LINE + 1];
   const char* sp = strchr(args, ' ');
   size_t ulen = sp ? (size_t)(sp - args) : strlen(args);
-  if (ulen >= sizeof(url)) { strcpy(reply, "Err - url too long"); return; }
+  if (ulen + 6 >= sizeof(url)) { strcpy(reply, "Err - url too long"); return; }  // +6: room for "?dl=1"
   memcpy(url, args, ulen);
   url[ulen] = 0;
   bool insecure = (sp != NULL) && (strstr(sp, "insecure") != NULL);
@@ -490,6 +519,17 @@ static void handleProvisionFetch(FILESYSTEM* fs, const char* args, char* reply) 
   bool is_https = strncmp(url, "https://", 8) == 0;
   bool is_http = strncmp(url, "http://", 7) == 0;
   if (!is_https && !is_http) { strcpy(reply, "Err - url must be http:// or https://"); return; }
+
+  // Dropbox share links serve an HTML preview page unless dl=1; adjust so the
+  // fetch gets the raw file (the header check would reject the HTML anyway).
+  if (strstr(url, "dropbox.com/") != NULL) {
+    char* dl = strstr(url, "dl=0");
+    if (dl != NULL) {
+      dl[3] = '1';
+    } else if (strstr(url, "dl=1") == NULL) {
+      strcat(url, strchr(url, '?') ? "&dl=1" : "?dl=1");
+    }
+  }
 
   char* buf = (char*)malloc(PROVISION_MAX_SIZE + 1);
   if (!buf) { strcpy(reply, "Err - out of memory"); return; }
@@ -504,14 +544,32 @@ static void handleProvisionFetch(FILESYSTEM* fs, const char* args, char* reply) 
     client.setInsecure();
     code = provisionHttpGet(client, url, buf, PROVISION_MAX_SIZE, &total);
   } else {
-    // Validate against the CA roots already bundled for the MQTT presets; try each.
-    const char* const roots[] = { GTS_ROOT_R4, ISRG_ROOT_X1 };
-    code = HTTPC_ERROR_CONNECTION_REFUSED;
-    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+    size_t bundle_len = 0;
+    if (rootca_crt_bundle_start != nullptr && rootca_crt_bundle_end != nullptr &&
+        rootca_crt_bundle_end > rootca_crt_bundle_start) {
+      bundle_len = (size_t)(rootca_crt_bundle_end - rootca_crt_bundle_start);
+    }
+    if (bundle_len > 0) {
+      // Validate against the full embedded CA root bundle (same trust store the
+      // OTA update path uses), so any publicly-CA'd host works.
       WiFiClientSecure client;
-      client.setCACert(roots[i]);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+      client.setCACertBundle(rootca_crt_bundle_start, bundle_len);
+#else
+      client.setCACertBundle(rootca_crt_bundle_start);
+#endif
       code = provisionHttpGet(client, url, buf, PROVISION_MAX_SIZE, &total);
-      if (code > 0 || code == PROV_FETCH_TOO_BIG) break;   // got an HTTP response, TLS was fine
+    } else {
+      // No embedded bundle in this build: fall back to the CA roots bundled for
+      // the MQTT presets; try each.
+      const char* const roots[] = { GTS_ROOT_R4, ISRG_ROOT_X1 };
+      code = HTTPC_ERROR_CONNECTION_REFUSED;
+      for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        WiFiClientSecure client;
+        client.setCACert(roots[i]);
+        code = provisionHttpGet(client, url, buf, PROVISION_MAX_SIZE, &total);
+        if (code > 0 || code == PROV_FETCH_TOO_BIG) break;   // got an HTTP response, TLS was fine
+      }
     }
   }
 
@@ -525,7 +583,7 @@ static void handleProvisionFetch(FILESYSTEM* fs, const char* args, char* reply) 
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     int ver = provParseHeader(p);
     if (ver < 0) {
-      strcpy(reply, "Err - fetched file missing '#meshcore-provision v1' header; not saved");
+      strcpy(reply, "Err - fetched file missing '#meshcore-provision v1' header; not saved (URL serves a web page, not the raw file?)");
     } else if (ver != PROVISION_VERSION) {
       sprintf(reply, "Err - unsupported provision version %d; not saved", ver);
     } else {
@@ -547,7 +605,10 @@ static void handleProvisionFetch(FILESYSTEM* fs, const char* args, char* reply) 
   } else if (code > 0) {
     sprintf(reply, "Err - HTTP %d", code);
   } else {
-    snprintf(reply, 160, "Err - connection failed (%s)", HTTPClient::errorToString(code).c_str());
+    // HTTPClient reports a failed TLS handshake as "connection refused", so
+    // point at the likely fix when cert validation was in play.
+    snprintf(reply, 160, "Err - connection failed (%s)%s", HTTPClient::errorToString(code).c_str(),
+             (is_https && !insecure) ? "; TLS trust issue? retry with 'insecure' appended" : "");
   }
   free(buf);
 }
@@ -681,6 +742,11 @@ bool CommonCLI::handleProvisionCommand(uint32_t sender_timestamp, char* command,
       strcpy(reply, "Err - capture in progress; finish with 'provision end' first");
     } else {
       runProvisionFile(sender_timestamp, reply);
+      // Manual apply doesn't reboot (unlike boot auto-apply); some settings
+      // (radio params, bridge config) only fully take effect from a clean start.
+      if (memcmp(reply, "Provision:", 10) == 0 && strlen(reply) + 24 < 160) {
+        strcat(reply, "; reboot to finish setup");
+      }
     }
   } else if (strcmp(args, "remove") == 0) {
     bool had_file = _fs->exists(PROVISION_FILE);

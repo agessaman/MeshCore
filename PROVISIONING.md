@@ -27,7 +27,7 @@ Rules:
 - The **first non-blank line must be** `#meshcore-provision v1`. A file with a
   newer version number is refused (and kept on flash untouched).
 - Lines starting with `#` and blank lines are skipped.
-- Max line length: **159 characters** (the serial command buffer size). Longer
+- Max line length: **255 characters** (the serial command buffer size). Longer
   lines are counted as errors and skipped.
 - Max file size: **4 KB** — enforced by both `provision fetch` and apply.
 - Every other line is fed verbatim to the CLI. Unknown or invalid commands
@@ -41,7 +41,7 @@ Rules:
 |---|---|
 | `provision` | Status: file present, size, header version, applied-marker present |
 | `provision show` | Serial: prints the whole file to the console. Remote: paged — `provision show <start-line>` for the next page |
-| `provision apply` | Runs the file with **your** privileges (see below). Ignores the applied-marker |
+| `provision apply` | Runs the file with **your** privileges (see below). Ignores the applied-marker. The summary names the first failing line; on the serial console every failing line is printed with its error. Reboot afterwards so everything takes effect |
 | `provision remove` | Deletes `/provision` and the `/provision_done` marker |
 | `provision begin` / `provision end` | Serial-only paste capture (see below) |
 | `provision fetch <url> [insecure]` | Downloads a file over HTTPS/HTTP (observer/MQTT builds only) |
@@ -83,12 +83,20 @@ provision show
 provision apply
 ```
 
-`fetch` validates HTTPS against the CA roots already bundled with the firmware
-(Google Trust Services, ISRG/Let's Encrypt). Plain `http://` URLs and
+Setting `wifi.ssid`/`wifi.pwd` starts (or restarts) the WiFi connection
+immediately — no reboot needed; give it a few seconds before fetching.
+
+`fetch` validates HTTPS against the firmware's embedded CA root bundle (the
+same trust store the OTA updater uses), so any publicly-CA'd host works;
+builds without the bundle fall back to the Google Trust Services and
+ISRG/Let's Encrypt roots. Plain `http://` URLs and
 `provision fetch <url> insecure` (skip certificate validation) are allowed —
 the file is only *stored*, never auto-applied, so you can inspect it with
 `provision show` before trusting it. Fetch refuses to overwrite `/provision`
 with anything that is oversized or missing the header.
+
+Dropbox share links are adjusted automatically (`dl=0` → `dl=1`) so the raw
+file is fetched instead of the HTML preview page.
 
 **Without WiFi (nRF52 / RP2040 / any build)** — paste over the serial console:
 

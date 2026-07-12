@@ -17,7 +17,9 @@ void halt() {
   while (1) ;
 }
 
-static char command[160];
+// 256 bytes so a full 'provision fetch <long share url>' fits on one line.
+static char command[256];
+static bool command_too_long = false;
 
 // For power saving
 unsigned long POWERSAVING_FIRSTSLEEP_SECS = 120; // The first sleep (if enabled) from boot
@@ -110,22 +112,37 @@ void setup() {
 
 void loop() {
   int len = strlen(command);
-  while (Serial.available() && len < sizeof(command)-1) {
+  bool line_complete = false;
+  while (Serial.available()) {
     char c = Serial.read();
-    if (c != '\n') {
+    if (c == '\r' || c == '\n') {
+      if (command_too_long) {   // reached the end of an over-long line: report, don't execute
+        command_too_long = false;
+        Serial.println();
+        Serial.println("  -> Err - command too long");
+        len = 0;
+        command[0] = 0;
+        continue;
+      }
+      // Blank lines (and the LF of a CRLF pair, or doubled CRs some terminals
+      // send when pasting) are ignored rather than treated as empty commands —
+      // this keeps 'provision begin' paste capture from recording blank lines.
+      if (len == 0) continue;
+      line_complete = true;
+      break;
+    }
+    if (command_too_long) continue;   // discard the rest of an over-long line
+    if (len < (int)sizeof(command) - 1) {
       command[len++] = c;
       command[len] = 0;
       Serial.print(c);
+    } else {
+      command_too_long = true;
     }
-    if (c == '\r') break;
-  }
-  if (len == sizeof(command)-1) {  // command buffer full
-    command[sizeof(command)-1] = '\r';
   }
 
-  if (len > 0 && command[len - 1] == '\r') {  // received complete line
+  if (line_complete) {  // received complete line
     Serial.print('\n');
-    command[len - 1] = 0;  // replace newline with C string null terminator
     char reply[160];
     the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
     if (reply[0]) {

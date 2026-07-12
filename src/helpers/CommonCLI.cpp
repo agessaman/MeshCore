@@ -729,6 +729,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "ERR: clock cannot go backwards");
       }
     } else if (memcmp(command, "memory", 6) == 0) {
+#ifdef ESP_PLATFORM
       sprintf(reply, "Free: %d, Min: %d, Max: %d, Queue: %d, IntFree: %d, IntMax: %d, PSRAM: %d/%d",
               ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
               _callbacks->getQueueSize(),
@@ -736,6 +737,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
               (int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
               (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+#else
+      strcpy(reply, "Err - not supported on this platform");
+#endif
     } else if (memcmp(command, "start ota", 9) == 0) {
       // Manual OTA: bring up the ElegantOTA SoftAP for a hand-uploaded binary.
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {

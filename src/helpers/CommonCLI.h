@@ -154,8 +154,14 @@ struct MQTTPrefs {
   uint16_t alert_wifi_minutes;     // WiFi-down threshold (0 = disabled), default 30
   uint16_t alert_mqtt_minutes;     // MQTT-down threshold (0 = disabled), default 240
   uint16_t alert_min_interval_min; // min minutes between same-fault alerts, default 60
-  char alert_hashtag[24];          // readback for `get alert.hashtag`
+  char alert_hashtag[24];          // readback for `get alert.hashtag` (legacy width — see alert_hashtag_ext)
   char alert_region[31];           // optional region override; empty = default_scope
+
+  // Wider hashtag readback, appended (fields above are at frozen offsets).
+  // Sized to match the companion app's 31-char channel-name limit (incl '#').
+  // When set, this is authoritative; alert_hashtag keeps a truncated mirror so
+  // older firmware still shows something sensible after a downgrade.
+  char alert_hashtag_ext[32];
 };
 
 // /mqtt_prefs is written with an 8-byte header so the format is self-describing.
@@ -422,6 +428,9 @@ class CommonCLI {
   // CommonCLI.cpp. Each returns true if it recognized (handled) the command, or
   // false to fall through to the base get/set parsing.
   bool handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply);
+  // After 'set wifi.ssid/pwd': kick the MQTT bridge so the new credentials take
+  // effect immediately (previously WiFi only came up on the next reboot).
+  void applyWifiCredsChange(char* reply);
   bool handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply);
   // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
   // also live in CommonCLI_Observer.cpp; returns true if it handled the command.

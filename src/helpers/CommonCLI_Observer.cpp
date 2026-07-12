@@ -159,6 +159,29 @@ static void formatMQTTPresetListReply(char* reply, size_t reply_size, int start)
 }
 #endif
 
+// The MQTT bridge samples WiFi credentials only when it starts, so a node that
+// booted without them sits idle until the next reboot. Kick the bridge when the
+// credentials change so 'set wifi.ssid' + 'set wifi.pwd' bring WiFi up
+// immediately — the typical first-provisioning flow follows with a
+// 'provision fetch' that needs the connection.
+void CommonCLI::applyWifiCredsChange(char* reply) {
+#ifdef WITH_MQTT_BRIDGE
+  if (_mqtt_prefs.wifi_ssid[0] == 0) {
+    strcpy(reply, "OK");
+  } else if (_callbacks->isMqttBridgeRunning()) {
+    _callbacks->restartBridge();
+    strcpy(reply, "OK - reconnecting WiFi with new credentials");
+  } else if (_prefs->bridge_enabled) {
+    _callbacks->setBridgeState(true);
+    strcpy(reply, _callbacks->isMqttBridgeRunning() ? "OK - starting WiFi" : "OK");
+  } else {
+    strcpy(reply, "OK");
+  }
+#else
+  strcpy(reply, "OK");
+#endif
+}
+
 bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   bool handled = true;
@@ -278,11 +301,11 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "wifi.ssid ", 10) == 0) {
     StrHelper::strncpy(_mqtt_prefs.wifi_ssid, &config[10], sizeof(_mqtt_prefs.wifi_ssid));
     savePrefs();
-    strcpy(reply, "OK");
+    applyWifiCredsChange(reply);
   } else if (memcmp(config, "wifi.pwd ", 9) == 0) {
     StrHelper::strncpy(_mqtt_prefs.wifi_password, &config[9], sizeof(_mqtt_prefs.wifi_password));
     savePrefs();
-    strcpy(reply, "OK");
+    applyWifiCredsChange(reply);
   } else if (memcmp(config, "wifi.powersave ", 15) == 0) {
     const char* value = &config[15];
     uint8_t ps_value;
@@ -510,6 +533,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     if (len == 0) {
       _mqtt_prefs.alert_psk_hex[0] = '\0';
       _mqtt_prefs.alert_hashtag[0] = '\0';
+      _mqtt_prefs.alert_hashtag_ext[0] = '\0';
       savePrefs();
       _callbacks->onAlertConfigChanged();
       strcpy(reply, "OK - alert.psk cleared (alerts disabled until configured)");
@@ -544,6 +568,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           // The new PSK is operator-supplied, so any previously-derived
           // hashtag name is no longer accurate provenance — drop it.
           _mqtt_prefs.alert_hashtag[0] = '\0';
+          _mqtt_prefs.alert_hashtag_ext[0] = '\0';
           savePrefs();
           _callbacks->onAlertConfigChanged();
           strcpy(reply, "OK - alert.psk updated");
@@ -557,6 +582,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     if (in_len == 0) {
       _mqtt_prefs.alert_psk_hex[0] = '\0';
       _mqtt_prefs.alert_hashtag[0] = '\0';
+      _mqtt_prefs.alert_hashtag_ext[0] = '\0';
       savePrefs();
       _callbacks->onAlertConfigChanged();
       strcpy(reply, "OK - alert.hashtag cleared (alerts disabled until configured)");
@@ -565,10 +591,10 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       // the sha256 input (matching the companion-app hashtag-channel
       // derivation in docs/companion_protocol.md). Accept the user typing
       // either "alerts" or "#alerts".
-      char hashtag[sizeof(_mqtt_prefs.alert_hashtag)];
+      char hashtag[sizeof(_mqtt_prefs.alert_hashtag_ext)];
       size_t need = (val[0] == '#') ? in_len : in_len + 1;
       if (need >= sizeof(hashtag)) {
-        strcpy(reply, "Error: hashtag too long");
+        sprintf(reply, "Error: hashtag too long (max %d chars incl '#')", (int)sizeof(hashtag) - 1);
       } else {
         if (val[0] == '#') {
           StrHelper::strncpy(hashtag, val, sizeof(hashtag));
@@ -591,11 +617,13 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         } else {
           char hex[33];
           mesh::Utils::toHex(hex, digest, 16);
+          StrHelper::strncpy(_mqtt_prefs.alert_hashtag_ext, hashtag, sizeof(_mqtt_prefs.alert_hashtag_ext));
+          // Truncated mirror in the legacy-width field for downgrade readback.
           StrHelper::strncpy(_mqtt_prefs.alert_hashtag, hashtag, sizeof(_mqtt_prefs.alert_hashtag));
           StrHelper::strncpy(_mqtt_prefs.alert_psk_hex, hex, sizeof(_mqtt_prefs.alert_psk_hex));
           savePrefs();
           _callbacks->onAlertConfigChanged();
-          sprintf(reply, "OK - alert.hashtag: %s", _mqtt_prefs.alert_hashtag);
+          sprintf(reply, "OK - alert.hashtag: %s", _mqtt_prefs.alert_hashtag_ext);
         }
       }
     }
@@ -854,7 +882,11 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     sprintf(reply, "> %s", valid ? "valid" : "invalid");
 #endif
   } else if (memcmp(config, "alert.hashtag", 13) == 0) {
-    sprintf(reply, "> %s", _mqtt_prefs.alert_hashtag[0] ? _mqtt_prefs.alert_hashtag : "(unset)");
+    // Prefer the appended wide field; fall back to the legacy-width one (set by
+    // older firmware or the /com_prefs migration).
+    const char* ht = _mqtt_prefs.alert_hashtag_ext[0] ? _mqtt_prefs.alert_hashtag_ext
+                                                      : _mqtt_prefs.alert_hashtag;
+    sprintf(reply, "> %s", ht[0] ? ht : "(unset)");
   } else if (sender_timestamp == 0 && memcmp(config, "alert.psk", 9) == 0) {  // from serial command line only
     sprintf(reply, "> %s", _mqtt_prefs.alert_psk_hex[0] ? _mqtt_prefs.alert_psk_hex : "(unset)");
   } else if (memcmp(config, "alert.region", 12) == 0) {
