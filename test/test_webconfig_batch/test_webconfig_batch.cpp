@@ -200,6 +200,23 @@ TEST(WebConfigBatch, ScheduleAtNeverReturnsTheUnscheduledSentinel) {
   EXPECT_EQ(1u, Batch::scheduleAt(just_below_wrap, 1));
 }
 
+// --------------------------------------------------------------------------
+// Constants freeze — these mirror WebConfigServer verbatim (kMaxBatch=MAX_BATCH
+// .h:90, kStopWarnMs=STOP_WARN_MS .h:95, and the 25/30000/3000 ms literals at
+// .cpp:296/331/784). The behavioral tests above route each constant through a
+// helper, so they would still pass if a value silently drifted; this pins the raw
+// values so any edit to the spec side forces a deliberate re-check against the
+// source (the header is hand-synced, not yet wired). If the source changes, update
+// both the constant AND this test together.
+// --------------------------------------------------------------------------
+TEST(WebConfigBatch, ConstantsMatchTheWebConfigServerSource) {
+  EXPECT_EQ(24, Batch::kMaxBatch);              // WebConfigServer.h:90 MAX_BATCH
+  EXPECT_EQ(25u, Batch::kDrainPacingMs);        // .cpp:296 inter-command gap
+  EXPECT_EQ(30000u, Batch::kRebootFallbackMs);  // .cpp:331 drain-finish fallback
+  EXPECT_EQ(3000u, Batch::kRebootConfirmMs);    // .cpp:784 first result-read arm
+  EXPECT_EQ(10000u, Batch::kStopWarnMs);        // WebConfigServer.h:95 STOP_WARN_MS
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

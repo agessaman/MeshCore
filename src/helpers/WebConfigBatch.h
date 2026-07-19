@@ -83,7 +83,7 @@ static inline PostOutcome classifyPost(State state, bool reqid_matches_current,
   return PostOutcome::Accept;
 }
 
-// The state string a Replay body reports mirrors the batch state (.cpp:640):
+// The state string a Replay body reports mirrors the batch state (.cpp:639):
 // "done" when the matched batch already finished, else "pending".
 static inline const char* replayStateName(State state) {
   return state == State::Done ? "done" : "pending";
@@ -119,7 +119,17 @@ static inline bool drainFinished(int batch_next_after_increment, int batch_count
 
 // On finish, a reboot-requested + all-ok batch arms the 30 s fallback deadline;
 // a partially-failed batch (all_ok == false) never reboots (.cpp:324-333).
-// Returns the reboot_at deadline, or 0 for "no reboot scheduled".
+// Returns the reboot_at deadline, or 0 for "no reboot scheduled by THIS finish".
+//
+// KEEP-STALE CAUTION for a future load-bearing port: production only writes
+// _reboot_at here and at the result-read arm (.cpp:784), and clears it solely on
+// a full server stop/reset (.cpp:235). A new POST-accept (.cpp:699-710) resets
+// the batch fields but deliberately does NOT clear _reboot_at, so a prior
+// fully-OK reboot batch's deadline SURVIVES into a later batch and still fires.
+// Because this returns 0 for the no-reboot case, a naive
+// `_reboot_at = finishRebootAt(...)` would CANCEL that surviving deadline and
+// silently change fleet reboot behavior. A port must assign only when the result
+// is non-zero (preserving keep-stale), or change the behavior deliberately+tested.
 static inline uint32_t finishRebootAt(bool batch_reboot, bool batch_all_ok, uint32_t now) {
   return (batch_reboot && batch_all_ok) ? scheduleAt(now, kRebootFallbackMs) : 0u;
 }

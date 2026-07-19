@@ -624,12 +624,27 @@ into the pure policy seams and covered:
 
 The **WebConfig POST/result/reboot/stop state machine** (the largest gap) now
 has a pure, host-tested SPEC — `src/helpers/WebConfigBatch.h` +
-`test/test_webconfig_batch/` on branch `phase6/webconfig-batch-seam` — that
-faithfully characterizes the accept/drain/result/reboot/stop decisions currently
-inline in `WebConfigServer.cpp`. Like Phase 4's `MQTTLifecycle.h`, it is
-**spec-first and NOT yet wired**: rewiring the hardware-tuned server to consume it
-(so it becomes load-bearing and non-drifting) is a deliberately separate,
-hardware-validated follow-up.
+`test/test_webconfig_batch/` (merged to `webconfig`) — that faithfully
+characterizes the accept/drain/result/reboot/stop decisions currently inline in
+`WebConfigServer.cpp`. A line-by-line faithfulness review confirmed it; the
+follow-up nits it raised are now resolved: the one stale line reference was
+corrected, and the batch constants are literal-pinned by a freeze test
+(`ConstantsMatchTheWebConfigServerSource`), so a spec/source constant drift trips
+the native suite rather than going silent.
+
+Like Phase 4's `MQTTLifecycle.h`, it is **spec-first and NOT yet wired**:
+rewiring the hardware-tuned server to consume it (so it becomes load-bearing and
+non-drifting) is a deliberately separate, hardware-validated follow-up.
+**Porting constraint (fleet behavior) — keep-stale reboot deadline:** production
+never clears `_reboot_at` on a new POST-accept (`WebConfigServer.cpp:699-710`) —
+it clears it only on a full server stop/reset (`.cpp:235`) — so a prior
+fully-OK reboot batch's armed deadline *survives into a later batch and still
+fires*. `WebConfigBatch::finishRebootAt()` returns `0` for the no-reboot case, so
+a naive `_reboot_at = finishRebootAt(...)` during wiring would silently **cancel**
+that surviving reboot and change fleet behavior. The port must assign only when
+the result is non-zero (preserving keep-stale semantics), or change the behavior
+deliberately and cover it with a test. The hazard is documented at the
+`finishRebootAt()` definition in the header.
 
 Still open (each a good follow-up PR): wiring `WebConfigServer.cpp` to the
 `WebConfigBatch` spec above, and the **queue-orchestration** behaviors (FIFO
