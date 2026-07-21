@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <SHA256.h>
 #include <string.h>
+#include <stdlib.h>
 #include "ed_25519.h"
 #include "mbedtls/base64.h"
 
@@ -192,7 +193,167 @@ size_t JWTHelper::createPayload(
   if (len == 0 || len >= sizeof(jsonBuffer)) {
     return 0;
   }
-  
+
   return base64UrlEncode((uint8_t*)jsonBuffer, len, output, outputSize);
+}
+
+size_t JWTHelper::base64UrlDecode(const char* input, uint8_t* output, size_t outputSize) {
+  if (!input || !output || outputSize == 0) {
+    return 0;
+  }
+
+  size_t inputLen = strlen(input);
+  if (inputLen == 0) {
+    return 0;
+  }
+
+  // base64url -> base64 (with padding) in a heap buffer; keeps the MQTT task stack small.
+  char* b64 = (char*)malloc(inputLen + 4 + 1);
+  if (!b64) {
+    return 0;
+  }
+  for (size_t i = 0; i < inputLen; i++) {
+    char c = input[i];
+    b64[i] = (c == '-') ? '+' : (c == '_') ? '/' : c;
+  }
+  size_t padding = (4 - (inputLen % 4)) % 4;
+  for (size_t i = 0; i < padding; i++) {
+    b64[inputLen + i] = '=';
+  }
+  b64[inputLen + padding] = '\0';
+
+  size_t outlen = 0;
+  int ret = mbedtls_base64_decode(output, outputSize, &outlen,
+                                  (const unsigned char*)b64, inputLen + padding);
+  free(b64);
+  return (ret != 0) ? 0 : outlen;
+}
+
+bool JWTHelper::verifyToken(
+  const char* token,
+  const uint8_t* expected_public_key,
+  size_t key_len,
+  char* extracted_public_key,
+  size_t extracted_key_size,
+  char* extracted_nonce,
+  size_t nonce_size,
+  unsigned long* issued_at,
+  unsigned long* expires_at
+) {
+  if (!token || !extracted_public_key || extracted_key_size < 65) {
+    return false;
+  }
+
+  // Split header.payload.signature
+  const char* dot1 = strchr(token, '.');
+  if (!dot1) return false;
+  const char* dot2 = strchr(dot1 + 1, '.');
+  if (!dot2) return false;
+
+  size_t headerLen = dot1 - token;
+  size_t payloadLen = dot2 - (dot1 + 1);
+  size_t signatureLen = strlen(dot2 + 1);
+
+  // Decode and parse the payload JSON (heap-allocated to spare the task stack).
+  char* payload_b64 = (char*)malloc(payloadLen + 1);
+  if (!payload_b64) return false;
+  memcpy(payload_b64, dot1 + 1, payloadLen);
+  payload_b64[payloadLen] = '\0';
+
+  char* payload = (char*)malloc(512);
+  if (!payload) { free(payload_b64); return false; }
+  size_t payloadDecodedLen = base64UrlDecode(payload_b64, (uint8_t*)payload, 512);
+  free(payload_b64);
+  if (payloadDecodedLen == 0) { free(payload); return false; }
+  payload[payloadDecodedLen] = '\0';
+
+  DynamicJsonDocument* doc = new DynamicJsonDocument(512);
+  if (!doc) { free(payload); return false; }
+  DeserializationError error = deserializeJson(*doc, payload);
+  free(payload);
+  if (error) { delete doc; return false; }
+
+  // publicKey claim (64 hex chars) is mandatory
+  const char* pubkey_str = (*doc)["publicKey"];
+  if (!pubkey_str || strlen(pubkey_str) != 64) { delete doc; return false; }
+  strncpy(extracted_public_key, pubkey_str, extracted_key_size - 1);
+  extracted_public_key[extracted_key_size - 1] = '\0';
+
+  if (extracted_nonce && nonce_size > 0) {
+    const char* nonce_str = (*doc)["nonce"];
+    if (nonce_str) {
+      strncpy(extracted_nonce, nonce_str, nonce_size - 1);
+      extracted_nonce[nonce_size - 1] = '\0';
+    } else {
+      extracted_nonce[0] = '\0';
+    }
+  }
+
+  unsigned long iat = doc->containsKey("iat") ? (*doc)["iat"].as<unsigned long>() : 0;
+  unsigned long exp = doc->containsKey("exp") ? (*doc)["exp"].as<unsigned long>() : 0;
+  if (issued_at) *issued_at = iat;
+  if (expires_at) *expires_at = exp;
+  delete doc;
+
+  // Reject expired tokens when the clock is set and an exp claim is present.
+  if (exp > 0) {
+    unsigned long current_time = time(nullptr);
+    if (current_time > 0 && current_time >= exp) {
+      return false;
+    }
+  }
+
+  uint8_t pubkey_bytes[PUB_KEY_SIZE];
+  if (!mesh::Utils::fromHex(pubkey_bytes, PUB_KEY_SIZE, extracted_public_key)) {
+    return false;
+  }
+  if (expected_public_key && key_len == PUB_KEY_SIZE) {
+    if (memcmp(pubkey_bytes, expected_public_key, PUB_KEY_SIZE) != 0) {
+      return false;
+    }
+  }
+
+  // Decode the signature: hex (128 chars) or base64url.
+  uint8_t signature[64];
+  bool is_hex = (signatureLen == 128);
+  if (is_hex) {
+    for (size_t i = 0; i < signatureLen; i++) {
+      char c = dot2[1 + i];
+      if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) {
+        is_hex = false;
+        break;
+      }
+    }
+  }
+  if (is_hex) {
+    if (!mesh::Utils::fromHex(signature, 64, dot2 + 1)) return false;
+  } else {
+    char* sig_b64 = (char*)malloc(signatureLen + 1);
+    if (!sig_b64) return false;
+    memcpy(sig_b64, dot2 + 1, signatureLen);
+    sig_b64[signatureLen] = '\0';
+    size_t sigDecodedLen = base64UrlDecode(sig_b64, signature, 64);
+    free(sig_b64);
+    if (sigDecodedLen != 64) return false;
+  }
+
+  // Signing input is the encoded header.payload (everything before the last dot).
+  size_t signingInputLen = headerLen + 1 + payloadLen;
+  if (signingInputLen >= 1024) return false;
+  char* signingInput = (char*)malloc(signingInputLen + 1);
+  if (!signingInput) return false;
+  memcpy(signingInput, token, signingInputLen);
+  signingInput[signingInputLen] = '\0';
+
+#ifdef ESP_PLATFORM
+  yield();  // feed the watchdog around the verify
+#endif
+  int verify_result = ed25519_verify(signature, (const unsigned char*)signingInput, signingInputLen, pubkey_bytes);
+#ifdef ESP_PLATFORM
+  yield();
+#endif
+
+  free(signingInput);
+  return (verify_result == 1);
 }
 
