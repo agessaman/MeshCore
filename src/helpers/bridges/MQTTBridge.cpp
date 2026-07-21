@@ -10,6 +10,8 @@
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include <time.h>
+#include <ArduinoJson.h>
+#include <stdlib.h>
 #include <sys/time.h>
 #include <math.h>
 #include <strings.h>
@@ -597,7 +599,15 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       // Seed with the worst-case (max runtime slots) budget; end() recomputes the
       // slot-scaled timeout before each stop via setStopTimeoutMs().
       , _lifecycle_ops(this), _lifecycle(_lifecycle_ops, mqttStopTimeoutForSlots(RUNTIME_MQTT_SLOTS))
+      , _remote_control(this, this, this, this)
 {
+  // Remote command channel starts idle; topics are built in begin() once the
+  // IATA and device id are known.
+  _command_topic[0] = '\0';
+  _response_topic[0] = '\0';
+  _pending_command.length = 0;
+  _pending_command.origin_slot = -1;
+
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
   strncpy(_iata, "XXX", sizeof(_iata) - 1);
@@ -820,6 +830,11 @@ void MQTTBridge::begin() {
 
   // Check for configuration mismatch: bridge.source=tx but mqtt.tx=off
   checkConfigurationMismatch();
+
+  // Derive the remote command/response topics from the (now finalized) IATA and
+  // device id. Rebuilt on every begin(), so an IATA change (which restarts the
+  // bridge) refreshes them.
+  buildRemoteTopics();
 
   MQTT_DEBUG_PRINTLN("Config: Origin=%s, IATA=%s, Device=%s", _origin, _iata, _device_id);
 
@@ -1372,6 +1387,13 @@ void MQTTBridge::mqttTaskLoop() {
     // Maintain slot connections (token renewal, reconnect with backoff)
     maintainSlotConnections();
 
+    // Bring remote-command subscriptions in line with the enable flags (global
+    // master + per-slot), then run any command queued by a slot callback. The
+    // kill switch (mqtt.remote off) takes effect here: every slot unsubscribes
+    // and a pending command is dropped without executing.
+    reconcileRemoteSubscriptions();
+    processPendingRemoteCommand();
+
     // Process packet queue
     processPacketQueue();
 
@@ -1558,7 +1580,18 @@ void MQTTBridge::initSlotClients() {
       }
       _slots[index].connected = false;
       _slots[index].connected_at_ms = 0;  // stability clock only runs while connected
+      // The MQTT session dropped: any command-topic subscription is gone. Clear
+      // the flag so reconcileRemoteSubscriptions() re-subscribes after reconnect.
+      _slots[index].remote_subscribed = false;
       updateCachedConnectionStatus();
+    });
+    // Inbound remote commands. Runs on this client's esp-mqtt event task; it only
+    // claims and copies the payload, then hands off to the bridge task (Core 0)
+    // via processPendingRemoteCommand() so JWT verification never runs here.
+    slot.client->onMessage([this, index](char* topic, char* payload, int retain, int qos, bool dup) {
+      // The library null-terminates payload; JWT tokens carry no NULs, so strlen
+      // is the true length.
+      enqueueRemoteCommand(index, topic, payload);
     });
     slot.client->onError([this, index](esp_mqtt_error_codes error) {
       _slots[index].last_tls_err = error.esp_tls_last_esp_err;
@@ -4040,6 +4073,236 @@ void MQTTBridge::setStatsSources(mesh::Dispatcher* dispatcher, mesh::Radio* radi
   _radio = radio;
   _board = board;
   _ms = ms;
+}
+
+// ===========================================================================
+// Remote command execution (JWT-authenticated over MQTT).
+// Policy lives in RemoteControl (host-tested); the methods below bind it to the
+// slots, MQTTPrefs, the ACL/CLI callbacks and the device identity.
+// ===========================================================================
+
+static_assert(RC_PUB_KEY_SIZE == PUB_KEY_SIZE,
+              "RemoteControl key size must match mesh PUB_KEY_SIZE");
+
+void MQTTBridge::buildRemoteTopics() {
+  // The topic namespace embeds the IATA region code, so remote control requires
+  // a real one. With none set the topics stay empty and reconcile never
+  // subscribes (remote control is effectively unavailable until IATA is set).
+  if (!isIATAValid()) {
+    _command_topic[0] = '\0';
+    _response_topic[0] = '\0';
+    return;
+  }
+  snprintf(_command_topic, sizeof(_command_topic), "meshcore/%s/%s/serial/commands", _iata, _device_id);
+  snprintf(_response_topic, sizeof(_response_topic), "meshcore/%s/%s/serial/responses", _iata, _device_id);
+}
+
+void MQTTBridge::reconcileRemoteSubscriptions() {
+  const bool master = _obs && _obs->mqtt_remote_enabled;
+  const bool topic_ok = _command_topic[0] != '\0';
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    MQTTSlot& slot = _slots[i];
+    const bool desired = master && topic_ok && slot.connected && slot.client &&
+                         _obs->mqtt_slot_remote_enabled[i];
+    if (desired && !slot.remote_subscribed) {
+      slot.client->subscribe(_command_topic, 1);
+      slot.remote_subscribed = true;
+      MQTT_DEBUG_PRINTLN("MQTT%d subscribed to remote commands", i + 1);
+    } else if (!desired && slot.remote_subscribed) {
+      if (slot.connected && slot.client) slot.client->unsubscribe(_command_topic);
+      slot.remote_subscribed = false;
+      MQTT_DEBUG_PRINTLN("MQTT%d unsubscribed from remote commands", i + 1);
+    }
+  }
+}
+
+void MQTTBridge::enqueueRemoteCommand(int slot_index, const char* topic, const char* payload) {
+  // Runs on an esp-mqtt event task. Keep it to cheap checks + a copy; the JWT
+  // work happens on the bridge task in processPendingRemoteCommand().
+  if (!_obs || !_obs->mqtt_remote_enabled) return;
+  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
+  if (!_obs->mqtt_slot_remote_enabled[slot_index]) return;
+  if (!topic || _command_topic[0] == '\0' || strcmp(topic, _command_topic) != 0) return;
+  if (!payload) return;
+  const size_t len = strlen(payload);
+  if (len == 0 || len >= sizeof(_pending_command.payload)) return;
+
+  // The same command can arrive on more than one connected slot. Claim the
+  // single in-flight buffer; the first claim wins and duplicates are dropped
+  // until the bridge task finishes (RemoteControl's nonce tracker also rejects
+  // any that slip through as replays).
+  bool expected = false;
+  if (!_cmd_busy.compare_exchange_strong(expected, true)) return;
+  memcpy(_pending_command.payload, payload, len);
+  _pending_command.payload[len] = '\0';
+  _pending_command.length = (unsigned int)len;
+  _pending_command.origin_slot = slot_index;
+  _cmd_ready.store(true, std::memory_order_release);
+}
+
+void MQTTBridge::processPendingRemoteCommand() {
+  if (!_cmd_ready.load(std::memory_order_acquire)) return;
+
+  const int slot = _pending_command.origin_slot;
+  // Kill switch: if remote control (or this slot) was turned off after the
+  // command was queued, drop it without executing.
+  const bool still_enabled = _obs && _obs->mqtt_remote_enabled &&
+                             slot >= 0 && slot < RUNTIME_MQTT_SLOTS &&
+                             _obs->mqtt_slot_remote_enabled[slot];
+  if (still_enabled && _command_executor) {
+    const size_t kOutSize = 2048;  // header + payload(base64) + 128-char hex sig
+    char* out = (char*)malloc(kOutSize);
+    if (out) {
+      const RemoteControl::Outcome oc =
+          _remote_control.process(_pending_command.payload, _device_id, out, kOutSize);
+      if (oc == RemoteControl::Outcome::ResponseReady && _response_topic[0] != '\0') {
+        publishToSlot(slot, _response_topic, out, false, 1);
+      }
+      free(out);
+    }
+  }
+  // Free the buffer for the next command.
+  _cmd_ready.store(false, std::memory_order_release);
+  _cmd_busy.store(false, std::memory_order_release);
+}
+
+// --- RemoteControl seams ---------------------------------------------------
+
+bool MQTTBridge::parseRequest(const char* token, RemoteCommandRequest& out) {
+  if (!token) return false;
+  const char* dot1 = strchr(token, '.');
+  if (!dot1) return false;
+  const char* dot2 = strchr(dot1 + 1, '.');
+  if (!dot2) return false;
+  const size_t payload_b64_len = dot2 - (dot1 + 1);
+
+  char* payload_b64 = (char*)malloc(payload_b64_len + 1);
+  if (!payload_b64) return false;
+  memcpy(payload_b64, dot1 + 1, payload_b64_len);
+  payload_b64[payload_b64_len] = '\0';
+
+  char* json = (char*)malloc(512);
+  if (!json) { free(payload_b64); return false; }
+  const size_t json_len = JWTHelper::base64UrlDecode(payload_b64, (uint8_t*)json, 512);
+  free(payload_b64);
+  if (json_len == 0) { free(json); return false; }
+  json[json_len] = '\0';
+
+  DynamicJsonDocument doc(512);
+  const DeserializationError err = deserializeJson(doc, json);
+  free(json);
+  if (err) return false;
+
+  StrHelper::strncpy(out.command, doc["command"] | "", sizeof(out.command));
+  StrHelper::strncpy(out.target, doc["target"] | "", sizeof(out.target));
+  StrHelper::strncpy(out.nonce, doc["nonce"] | "", sizeof(out.nonce));
+  StrHelper::strncpy(out.public_key, doc["publicKey"] | "", sizeof(out.public_key));
+  return true;
+}
+
+bool MQTTBridge::verifySignature(const char* token, char* out_pubkey_hex, size_t out_size) {
+  return JWTHelper::verifyToken(token, nullptr, 0, out_pubkey_hex, out_size,
+                                nullptr, 0, nullptr, nullptr);
+}
+
+bool MQTTBridge::signResponse(const RemoteCommandResponse& resp, char* out_jwt, size_t out_size) {
+  if (!_identity || !out_jwt || out_size == 0) return false;
+
+  // Header: {"alg":"Ed25519","typ":"JWT"}
+  char header_b64[96];
+  DynamicJsonDocument header_doc(64);
+  header_doc["alg"] = "Ed25519";
+  header_doc["typ"] = "JWT";
+  char header_json[64];
+  const size_t header_json_len = serializeJson(header_doc, header_json, sizeof(header_json));
+  if (header_json_len == 0) return false;
+  const size_t header_len = JWTHelper::base64UrlEncode((uint8_t*)header_json, header_json_len,
+                                                       header_b64, sizeof(header_b64));
+  if (header_len == 0) return false;
+  header_b64[header_len] = '\0';
+
+  // Payload. Field order/names match what the letsmesh decoder expects.
+  DynamicJsonDocument payload_doc(1024);
+  payload_doc["publicKey"] = resp.device_id ? resp.device_id : "";
+  if (resp.command && resp.command[0] != '\0') payload_doc["command"] = resp.command;
+  payload_doc["request_id"] = resp.request_id ? resp.request_id : "";
+  payload_doc["success"] = resp.success;
+  payload_doc["response"] = resp.response ? resp.response : "";
+  payload_doc["iat"] = resp.iat;
+  payload_doc["exp"] = resp.exp;
+
+  char* payload_json = (char*)malloc(1024);
+  if (!payload_json) return false;
+  const size_t payload_json_len = serializeJson(payload_doc, payload_json, 1024);
+  if (payload_json_len == 0 || payload_json_len >= 1024) { free(payload_json); return false; }
+
+  char* payload_b64 = (char*)malloc(1400);
+  if (!payload_b64) { free(payload_json); return false; }
+  const size_t payload_len = JWTHelper::base64UrlEncode((uint8_t*)payload_json, payload_json_len,
+                                                        payload_b64, 1400);
+  free(payload_json);
+  if (payload_len == 0) { free(payload_b64); return false; }
+  payload_b64[payload_len] = '\0';
+
+  // Signing input = base64url(header) + "." + base64url(payload).
+  const size_t signing_len = header_len + 1 + payload_len;
+  char* signing_input = (char*)malloc(signing_len + 1);
+  if (!signing_input) { free(payload_b64); return false; }
+  memcpy(signing_input, header_b64, header_len);
+  signing_input[header_len] = '.';
+  memcpy(signing_input + header_len + 1, payload_b64, payload_len);
+  signing_input[signing_len] = '\0';
+
+  uint8_t signature[64];
+  _identity->sign(signature, (const uint8_t*)signing_input, (int)signing_len);
+  free(signing_input);
+
+  // Hex-encode the signature (matches the incoming command format).
+  char sig_hex[129];
+  for (int i = 0; i < 64; i++) sprintf(sig_hex + (i * 2), "%02X", signature[i]);
+  sig_hex[128] = '\0';
+
+  const int written = snprintf(out_jwt, out_size, "%s.%s.%s", header_b64, payload_b64, sig_hex);
+  free(payload_b64);
+  return written > 0 && (size_t)written < out_size;
+}
+
+bool MQTTBridge::useACL() {
+  return _obs && _obs->mqtt_use_acl;
+}
+
+bool MQTTBridge::authorize(const uint8_t* pubkey, size_t len) {
+  if (!pubkey || len != PUB_KEY_SIZE || !_obs) return false;
+  if (_obs->mqtt_use_acl) {
+    return _acl_callbacks && _acl_callbacks->isPublicKeyAdmin(pubkey, len);
+  }
+  // ACL disabled: match against the explicit admin key.
+  if (_obs->mqtt_admin_public_key[0] != '\0') {
+    uint8_t admin[PUB_KEY_SIZE];
+    if (mesh::Utils::fromHex(admin, PUB_KEY_SIZE, _obs->mqtt_admin_public_key)) {
+      return memcmp(pubkey, admin, PUB_KEY_SIZE) == 0;
+    }
+  }
+  return false;
+}
+
+void MQTTBridge::execute(const char* command, char* reply, size_t reply_size) {
+  if (reply_size == 0) return;
+  reply[0] = '\0';
+  if (!_command_executor) {
+    StrHelper::strncpy(reply, "Command executor not available", reply_size);
+    return;
+  }
+  // REMOTE_COMMAND_SENDER_TS is non-zero, so serial-only CLI gates reject the
+  // command (a remote admin gets mesh-admin access, never console-only access).
+  _command_executor->handleCommand(REMOTE_COMMAND_SENDER_TS, command, reply);
+}
+
+unsigned long MQTTBridge::millisNow() { return millis(); }
+
+unsigned long MQTTBridge::unixNow() {
+  const time_t now = time(nullptr);
+  return (now > 0) ? (unsigned long)now : 0;
 }
 
 #endif
