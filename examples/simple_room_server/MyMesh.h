@@ -27,6 +27,7 @@
 
 #ifdef WITH_MQTT_BRIDGE
 #include "helpers/bridges/MQTTBridge.h"
+#include "helpers/bridges/MQTTRemoteCallbacks.h"
 #define WITH_BRIDGE
 #include "helpers/esp32/WebConfigServer.h"   // defines WITH_WEBCONFIG on ESP32
 #endif
@@ -174,6 +175,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* bridge;
+  ACLAdminAuthCallbacks _acl_callbacks;
+  CLICommandExecutor _command_executor;
 #endif
 #ifdef WITH_MQTT_BRIDGE
   AlertReporter _alerter;
@@ -308,6 +311,7 @@ public:
     if (!bridge) {
 #ifdef WITH_MQTT_BRIDGE
       bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
+      wireBridgeRemoteControl();
 #endif
       if (!bridge) return;
     }
@@ -337,6 +341,19 @@ public:
 #endif
     }
   }
+
+#ifdef WITH_MQTT_BRIDGE
+  // Point the bridge's remote-command hooks at this variant's ACL and CLI. The
+  // bridge keeps these pointers across begin()/end(), so calling it once after
+  // construction is enough.
+  void wireBridgeRemoteControl() {
+    if (!bridge) return;
+    _acl_callbacks = ACLAdminAuthCallbacks(&acl);
+    _command_executor = CLICommandExecutor(&_cli);
+    bridge->setACLCallbacks(&_acl_callbacks);
+    bridge->setCommandExecutor(&_command_executor);
+  }
+#endif
 
   void restartBridge() override {
     if (!bridge || !bridge->isRunning()) return;
