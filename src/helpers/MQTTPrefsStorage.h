@@ -117,6 +117,15 @@ struct MQTTPrefs {
   // interchangeable (see the offsetof static_asserts below).
   uint8_t mqtt_neighbors_enabled;
   uint32_t mqtt_neighbors_interval;
+
+  // Remote serial command execution (JWT-authenticated). Appended at the tail
+  // so a shorter pre-remote /mqtt_prefs still loads with these at their
+  // defaults. mqtt_remote_enabled is the global master (kill switch); a slot
+  // serves remote commands only when the master AND its per-slot flag are set.
+  uint8_t mqtt_remote_enabled;                              // global master, default 0 (off)
+  uint8_t mqtt_use_acl;                                     // authorize via ACL admin list, default 1
+  uint8_t mqtt_slot_remote_enabled[MQTT_PREFS_SLOT_COUNT];  // per-slot enable, default 1
+  char mqtt_admin_public_key[65];                           // explicit admin key when ACL is off
 };
 
 // Neighbor discovery is scheduled with the wrap-safe millis() helpers, whose
@@ -129,14 +138,16 @@ static const uint32_t MQTT_NEIGHBORS_MIN_INTERVAL_MS = MQTT_NEIGHBORS_MIN_INTERV
 static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_MS = MQTT_NEIGHBORS_MAX_INTERVAL_HOURS * 3600000UL;
 static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS = MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS * 3600000UL;
 
-// Version-1 has three payload layouts this firmware can decode. Never infer a
+// Version-1 has four payload layouts this firmware can decode. Never infer a
 // compatible payload from an arbitrary shorter size: raw prefs have no checksum.
 //   - PRE_OBSERVER  (2736): stops before the observer tail (snmp_*/alert_*).
 //   - PRE_NEIGHBORS (2860): full observer tail, no neighbors fields yet.
-//   - FULL          (2864): current baseline, with the neighbors tail.
+//   - PRE_REMOTE    (2864): neighbors tail present, no remote-control fields yet.
+//   - FULL          (2940): current baseline, with the remote-control tail.
 static const size_t MQTT_PREFS_V1_PRE_OBSERVER_PAYLOAD_SIZE = 2736;
 static const size_t MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE = 2860;
-static const size_t MQTT_PREFS_V1_FULL_PAYLOAD_SIZE = 2864;
+static const size_t MQTT_PREFS_V1_PRE_REMOTE_PAYLOAD_SIZE = 2864;
+static const size_t MQTT_PREFS_V1_FULL_PAYLOAD_SIZE = 2940;
 
 // /mqtt_prefs starts with a self-describing 8-byte header. Headerless files
 // are deployed legacy layouts and continue to be distinguished by size.
@@ -266,6 +277,12 @@ static_assert(offsetof(MQTTPrefs, mqtt_neighbors_enabled) == 2857,
               "neighbors enable flag must sit at the flex-compatible offset");
 static_assert(offsetof(MQTTPrefs, mqtt_neighbors_interval) == MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE,
               "neighbors interval offset must equal the pre-neighbors payload size");
+// The remote-control tail is appended after the neighbors fields; the first
+// remote field begins exactly at the pre-remote payload size (2864) so a file
+// written before it existed stops right here and the remote fields keep their
+// defaults (master off, ACL on, per-slot on).
+static_assert(offsetof(MQTTPrefs, mqtt_remote_enabled) == MQTT_PREFS_V1_PRE_REMOTE_PAYLOAD_SIZE,
+              "remote-control tail must begin at the pre-remote payload size");
 static_assert(sizeof(OldMQTTPrefs) == 472, "frozen pre-slot /mqtt_prefs layout changed");
 static_assert(sizeof(PreWifiPowerOldMQTTPrefs) == 472, "frozen pre-WiFi-power /mqtt_prefs layout changed");
 static_assert(offsetof(OldMQTTPrefs, wifi_power_save) == 144,
