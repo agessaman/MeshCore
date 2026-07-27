@@ -105,6 +105,17 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   // (not 0) so an in-lineage upgrade from a pre-neighbors payload is sane.
   prefs->mqtt_neighbors_enabled = 0;
   prefs->mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
+
+  // Remote control: master off (must be opted in), ACL authorization on, and
+  // every slot enabled so flipping the master on serves all brokers by default.
+  // A device upgrading from a pre-remote payload keeps these defaults, so remote
+  // control stays off until the operator enables it.
+  prefs->mqtt_remote_enabled = 0;
+  prefs->mqtt_use_acl = 1;
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; i++) {
+    prefs->mqtt_slot_remote_enabled[i] = 1;
+  }
+  prefs->mqtt_admin_public_key[0] = '\0';
 }
 
 #endif // WITH_MQTT_BRIDGE

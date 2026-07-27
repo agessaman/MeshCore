@@ -4,16 +4,16 @@
 #include "Identity.h"
 
 /**
- * JWT Helper for creating authentication tokens
- * 
- * This class provides functionality to create JWT-style authentication tokens
- * signed with Ed25519 private keys for MQTT authentication.
+ * JWT Helper for creating and verifying authentication tokens
+ *
+ * This class provides functionality to create and verify JWT-style
+ * authentication tokens signed with Ed25519 private keys.
  */
 class JWTHelper {
 public:
   /**
    * Create an authentication token for MQTT authentication
-   * 
+   *
    * @param identity LocalIdentity instance for signing
    * @param audience Audience string (e.g., "mqtt-us-v1.letsmesh.net")
    * @param issuedAt Unix timestamp (0 for current time)
@@ -37,10 +37,35 @@ public:
     const char* email = nullptr
   );
 
-private:
+  /**
+   * Verify a JWT token's Ed25519 signature and extract its claims.
+   *
+   * @param token JWT token string (header.payload.signature)
+   * @param expected_public_key Expected signing key, or nullptr to accept any (caller authorizes)
+   * @param key_len Length of expected_public_key (PUB_KEY_SIZE) when provided
+   * @param extracted_public_key Output buffer for the signing key (hex) from the payload
+   * @param extracted_key_size Size of extracted_public_key (must be >= 65)
+   * @param extracted_nonce Output buffer for the nonce claim (may be nullptr)
+   * @param nonce_size Size of extracted_nonce
+   * @param issued_at Output for the iat claim (may be nullptr)
+   * @param expires_at Output for the exp claim (may be nullptr)
+   * @return true if the signature verifies and the token is not expired
+   */
+  static bool verifyToken(
+    const char* token,
+    const uint8_t* expected_public_key,
+    size_t key_len,
+    char* extracted_public_key,
+    size_t extracted_key_size,
+    char* extracted_nonce,
+    size_t nonce_size,
+    unsigned long* issued_at,
+    unsigned long* expires_at
+  );
+
   /**
    * Base64 URL encode data
-   * 
+   *
    * @param input Input data
    * @param inputLen Length of input data
    * @param output Output buffer
@@ -48,7 +73,18 @@ private:
    * @return Length of encoded data, or 0 on error
    */
   static size_t base64UrlEncode(const uint8_t* input, size_t inputLen, char* output, size_t outputSize);
-  
+
+  /**
+   * Base64 URL decode data
+   *
+   * @param input Input base64url string
+   * @param output Output buffer
+   * @param outputSize Size of output buffer
+   * @return Length of decoded data, or 0 on error
+   */
+  static size_t base64UrlDecode(const char* input, uint8_t* output, size_t outputSize);
+
+private:
   /**
    * Create JWT header
    * 

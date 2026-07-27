@@ -306,6 +306,78 @@ TEST(MQTTPrefsCodec, PreNeighborsV1PayloadLoadsObserverFieldsAndDefaultsNeighbor
   EXPECT_EQ(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS, loaded.mqtt_neighbors_interval);
 }
 
+TEST(MQTTPrefsCodec, PreRemoteV1PayloadLoadsNeighborsAndDefaultsRemoteTail) {
+  // A /mqtt_prefs written by observer/webconfig firmware before the
+  // remote-control tail existed: everything through the neighbors tail present,
+  // 2864-byte v1 payload. It must load as Current with the remote fields left at
+  // the caller's defaults (master off, ACL on, per-slot on, empty admin key).
+  MQTTPrefs source = defaults();
+  strncpy(source.mqtt_origin, "pre-remote-node", sizeof(source.mqtt_origin) - 1);
+  source.mqtt_neighbors_enabled = 1;
+  source.mqtt_neighbors_interval = MQTT_NEIGHBORS_MAX_INTERVAL_MS;
+  // Sentinels that must NOT survive a 2864-byte read.
+  source.mqtt_remote_enabled = 1;
+  source.mqtt_use_acl = 0;
+  source.mqtt_slot_remote_enabled[0] = 0;
+  strncpy(source.mqtt_admin_public_key, "DEADBEEF", sizeof(source.mqtt_admin_public_key) - 1);
+
+  std::vector<uint8_t> bytes(sizeof(MQTTPrefsHeader) + Codec::kV1PreRemotePayloadSize, 0);
+  writeHeader(&bytes, MQTT_PREFS_VERSION,
+              static_cast<uint16_t>(Codec::kV1PreRemotePayloadSize));
+  memcpy(bytes.data() + sizeof(MQTTPrefsHeader), &source, Codec::kV1PreRemotePayloadSize);
+
+  const Codec::DecodePlan plan = classify(bytes);
+  ASSERT_EQ(Codec::Source::Current, plan.source);
+  ASSERT_EQ(Codec::kV1PreRemotePayloadSize, plan.payload_len);
+  ASSERT_FALSE(plan.preserve_file);
+  ASSERT_TRUE(plan.observer_fields_present);
+
+  // Simulate applyMQTTDefaults(): the remote tail defaults the loader relies on.
+  MQTTPrefs loaded = defaults();
+  loaded.mqtt_remote_enabled = 0;
+  loaded.mqtt_use_acl = 1;
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) loaded.mqtt_slot_remote_enabled[i] = 1;
+  loaded.mqtt_admin_public_key[0] = '\0';
+  memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
+
+  // Neighbors fields sit before 2864, so they load from the file.
+  EXPECT_STREQ("pre-remote-node", loaded.mqtt_origin);
+  EXPECT_EQ(1u, loaded.mqtt_neighbors_enabled);
+  EXPECT_EQ(MQTT_NEIGHBORS_MAX_INTERVAL_MS, loaded.mqtt_neighbors_interval);
+  // Remote fields sit beyond the read, so they keep their defaults.
+  EXPECT_EQ(0u, loaded.mqtt_remote_enabled);
+  EXPECT_EQ(1u, loaded.mqtt_use_acl);
+  EXPECT_EQ(1u, loaded.mqtt_slot_remote_enabled[0]);
+  EXPECT_STREQ("", loaded.mqtt_admin_public_key);
+}
+
+TEST(MQTTPrefsCodec, FullPayloadRoundTripsRemoteControlFields) {
+  MQTTPrefs source = defaults();
+  source.mqtt_remote_enabled = 1;
+  source.mqtt_use_acl = 0;
+  source.mqtt_slot_remote_enabled[0] = 0;
+  source.mqtt_slot_remote_enabled[3] = 1;
+  strncpy(source.mqtt_admin_public_key,
+          "1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF",
+          sizeof(source.mqtt_admin_public_key) - 1);
+
+  std::vector<uint8_t> bytes(Codec::kEncodedSize);
+  ASSERT_EQ(Codec::kEncodedSize, Codec::encode(source, bytes.data(), bytes.size()));
+
+  const Codec::DecodePlan plan = classify(bytes);
+  ASSERT_EQ(Codec::Source::Current, plan.source);
+  ASSERT_EQ(Codec::kV1BaselinePayloadSize, plan.payload_len);
+  MQTTPrefs loaded = defaults();
+  memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
+
+  EXPECT_EQ(1u, loaded.mqtt_remote_enabled);
+  EXPECT_EQ(0u, loaded.mqtt_use_acl);
+  EXPECT_EQ(0u, loaded.mqtt_slot_remote_enabled[0]);
+  EXPECT_EQ(1u, loaded.mqtt_slot_remote_enabled[3]);
+  EXPECT_STREQ("1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF",
+               loaded.mqtt_admin_public_key);
+}
+
 TEST(MQTTPrefsCodec, CorruptOrShortVersionedInputsArePreserved) {
   Codec::DecodePlan plan = Codec::classify(nullptr, 0, 0);
   EXPECT_EQ(Codec::Source::Corrupt, plan.source);

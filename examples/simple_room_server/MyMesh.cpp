@@ -943,6 +943,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   if (_prefs.bridge_enabled) {
     // Defer construction to avoid static init crashes on ESP32 classic
     bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
+    wireBridgeRemoteControl();
     if (bridge) {
       // Set device public key for MQTT topics
       char device_id[65];

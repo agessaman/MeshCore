@@ -10,6 +10,7 @@
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
+#include "helpers/RemoteControl.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -65,7 +66,30 @@ class MeshSNMPAgent;  // Forward declaration
  * - Configure slots via: set mqtt1.preset <name>, set mqtt2.preset <name>, etc.
  * - Available presets: analyzer-us, analyzer-eu, meshmapper, custom, none
  */
-class MQTTBridge : public BridgeBase {
+
+// Callbacks a MeshCore variant supplies so JWT-authenticated remote commands can
+// be authorized against its ACL admin list and executed through its CLI. Kept
+// minimal; the mqtt.useacl flag and admin key live in MQTTPrefs, not here.
+class MQTTBridgeACLCallbacks {
+public:
+  virtual ~MQTTBridgeACLCallbacks() {}
+  virtual bool isPublicKeyAdmin(const uint8_t* pubkey, size_t key_len) = 0;
+};
+
+class MQTTBridgeCommandExecutor {
+public:
+  virtual ~MQTTBridgeCommandExecutor() {}
+  virtual void handleCommand(uint32_t sender_timestamp, const char* command, char* reply) = 0;
+};
+
+// The bridge implements the RemoteControl seams privately: it adapts JWTHelper +
+// LocalIdentity (crypto), MQTTPrefs + the ACL callback (authorization), the CLI
+// callback (execution) and millis()/time() (clock) for the policy engine.
+class MQTTBridge : public BridgeBase,
+                   private RemoteControlCrypto,
+                   private RemoteControlAuthorizer,
+                   private RemoteControlExecutor,
+                   private RemoteControlClock {
 public:
   // Max NTP servers in a try-list: 1 custom primary + the built-in fallbacks.
   static const int kMaxNtpServers = 6;
@@ -118,6 +142,12 @@ private:
     // disconnect-after-connect. first_disconnect_time is intentionally separate
     // so the existing 'mqttN.diag' "first_disc" semantics don't change.
     unsigned long current_outage_started_ms;
+
+    // Remote command channel: true once this slot has an active subscription to
+    // the command topic. Reset on disconnect; reconciled by the bridge task
+    // against the global + per-slot enable flags. (The desired state is read
+    // live from MQTTPrefs, so only this actual-state bit needs to persist here.)
+    bool remote_subscribed;
   };
 
   MQTTSlot _slots[RUNTIME_MQTT_SLOTS];
@@ -461,6 +491,48 @@ private:
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
   MQTTPrefs* _obs = nullptr;
 
+  // --- Remote command execution (JWT-authenticated over MQTT) ----------------
+  // Remote commands sent by the CLI executor use a non-zero sentinel timestamp so
+  // the serial-only CLI gates (prv.key, freq, erase, …) treat them as NOT local
+  // serial and refuse — a remote admin gets mesh-admin-equivalent access, never
+  // console-only access. Small enough that clock-sync's `ts > now` never trips.
+  static const uint32_t REMOTE_COMMAND_SENDER_TS = 1;
+
+  MQTTBridgeACLCallbacks* _acl_callbacks = nullptr;
+  MQTTBridgeCommandExecutor* _command_executor = nullptr;
+  char _command_topic[128];   // meshcore/{IATA}/{DEVICE}/serial/commands
+  char _response_topic[128];  // meshcore/{IATA}/{DEVICE}/serial/responses
+
+  // One in-flight command. The esp-mqtt callback (any slot's event task) claims
+  // _cmd_busy, copies the payload, then publishes _cmd_ready; the bridge task
+  // (Core 0) consumes it. Lock-free: _cmd_busy gates the single-slot buffer and
+  // _cmd_ready hands it off with release/acquire ordering.
+  struct PendingCommand {
+    char payload[768];
+    unsigned int length;
+    int origin_slot;
+  };
+  PendingCommand _pending_command;
+  std::atomic<bool> _cmd_busy{false};
+  std::atomic<bool> _cmd_ready{false};
+
+  RemoteControl _remote_control;
+
+  void buildRemoteTopics();               // (re)derive command/response topics from IATA + device id
+  void reconcileRemoteSubscriptions();    // subscribe/unsubscribe slots to match the enable flags
+  void enqueueRemoteCommand(int slot_index, const char* topic, const char* payload);
+  void processPendingRemoteCommand();     // run the policy engine + publish the response (bridge task)
+
+  // RemoteControl seams (see RemoteControl.h). Firmware-only implementations.
+  bool parseRequest(const char* token, RemoteCommandRequest& out) override;
+  bool verifySignature(const char* token, char* out_pubkey_hex, size_t out_size) override;
+  bool signResponse(const RemoteCommandResponse& resp, char* out_jwt, size_t out_size) override;
+  bool useACL() override;
+  bool authorize(const uint8_t* pubkey, size_t len) override;
+  void execute(const char* command, char* reply, size_t reply_size) override;
+  unsigned long millisNow() override;
+  unsigned long unixNow() override;
+
 public:
   MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
 
@@ -603,6 +675,13 @@ public:
 
   void setStatsSources(mesh::Dispatcher* dispatcher, mesh::Radio* radio,
                        mesh::MainBoard* board, mesh::MillisecondClock* ms);
+
+  /** Supply the ACL admin-list lookup used to authorize remote commands. Pass
+   *  null on variants without an ACL (remote commands then fall back to the
+   *  explicit mqtt.admin key). */
+  void setACLCallbacks(MQTTBridgeACLCallbacks* callbacks) { _acl_callbacks = callbacks; }
+  /** Supply the CLI executor used to run authorized remote commands. */
+  void setCommandExecutor(MQTTBridgeCommandExecutor* executor) { _command_executor = executor; }
 
 #ifdef WITH_SNMP
   void setSNMPAgent(MeshSNMPAgent* agent) { _snmp_agent = agent; }

@@ -529,6 +529,13 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       savePrefs();
       _callbacks->restartBridgeSlot(slot);
       sprintf(reply, "OK - slot %d JWT audience cleared (using username/password auth)", slot + 1);
+    } else if (memcmp(subcmd, "remote ", 7) == 0) {
+      // Per-slot remote-command enable. Effective only while the global master
+      // (mqtt.remote) is on; the bridge reconciles subscriptions live.
+      _mqtt_prefs.mqtt_slot_remote_enabled[slot] = memcmp(&subcmd[7], "on", 2) == 0;
+      savePrefs();
+      sprintf(reply, "OK - slot %d remote %s", slot + 1,
+              _mqtt_prefs.mqtt_slot_remote_enabled[slot] ? "on" : "off");
     } else {
       sprintf(reply, "unknown config: %s", config);
     }
@@ -572,6 +579,30 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     StrHelper::strncpy(_mqtt_prefs.mqtt_email, &config[11], sizeof(_mqtt_prefs.mqtt_email));
     savePrefs();
     strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.remote ", 12) == 0) {
+    // Global master / kill switch for remote command execution. The bridge task
+    // reconciles subscriptions live, so no restart is needed; turning this off
+    // unsubscribes every slot and drops any in-flight command on the next pass.
+    _mqtt_prefs.mqtt_remote_enabled = memcmp(&config[12], "on", 2) == 0;
+    savePrefs();
+    sprintf(reply, "OK - remote control %s", _mqtt_prefs.mqtt_remote_enabled ? "on" : "off");
+  } else if (memcmp(config, "mqtt.useacl ", 12) == 0) {
+    _mqtt_prefs.mqtt_use_acl = memcmp(&config[12], "on", 2) == 0;
+    savePrefs();
+    sprintf(reply, "OK - remote auth via %s", _mqtt_prefs.mqtt_use_acl ? "ACL admin list" : "admin key");
+  } else if (memcmp(config, "mqtt.admin ", 11) == 0) {
+    const char* admin_key = &config[11];
+    if (admin_key[0] == '\0' || strcmp(admin_key, "0") == 0) {
+      _mqtt_prefs.mqtt_admin_public_key[0] = '\0';
+      savePrefs();
+      strcpy(reply, "OK - admin key cleared");
+    } else if (mqttOwnerKeyValid(admin_key)) {
+      StrHelper::strncpy(_mqtt_prefs.mqtt_admin_public_key, admin_key, sizeof(_mqtt_prefs.mqtt_admin_public_key));
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: public key must be 64 hex characters (32 bytes)");
+    }
 #endif
   } else if (memcmp(config, "alert ", 6) == 0) {
     // set alert on|off
@@ -828,6 +859,20 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #endif
   } else if (memcmp(config, "mqtt.ntp", 8) == 0 && (config[8] == '\0' || config[8] == ' ')) {
     sprintf(reply, "> %s", MQTTBridge::effectiveNtpPrimary(&_mqtt_prefs));
+  } else if (memcmp(config, "mqtt.remote", 11) == 0) {
+    sprintf(reply, "> %s", _mqtt_prefs.mqtt_remote_enabled ? "on" : "off");
+  } else if (memcmp(config, "mqtt.useacl", 11) == 0) {
+    sprintf(reply, "> %s", _mqtt_prefs.mqtt_use_acl ? "on" : "off");
+  } else if (memcmp(config, "mqtt.admin", 10) == 0) {
+    // Admin key is a public key, but which key controls the device is only
+    // revealed over serial (sender_timestamp == 0), mirroring wifi.pwd/token.
+    if (_mqtt_prefs.mqtt_admin_public_key[0] == '\0') {
+      strcpy(reply, "> (not set)");
+    } else if (sender_timestamp == 0) {
+      sprintf(reply, "> %s", _mqtt_prefs.mqtt_admin_public_key);
+    } else {
+      strcpy(reply, "> (set, serial only)");
+    }
   } else if (config[0] == 'm' && config[1] == 'q' && config[2] == 't' && config[3] == 't' &&
              config[4] >= '1' && config[4] <= ('0' + MAX_MQTT_SLOTS) && config[5] == '.') {
     // Slot-based commands: get mqtt1.preset, get mqtt1.server, etc.
@@ -869,6 +914,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       } else {
         strcpy(reply, "> (not set - custom slots use username/password auth)");
       }
+    } else if (memcmp(subcmd, "remote", 6) == 0) {
+      sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_remote_enabled[slot] ? "on" : "off");
     } else if (memcmp(subcmd, "diag", 4) == 0) {
       MQTTBridge::formatSlotDiagReply(reply, 160, slot);
     } else {

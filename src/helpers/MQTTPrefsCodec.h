@@ -37,6 +37,7 @@ struct DecodePlan {
 
 static const size_t kV1PreObserverPayloadSize = MQTT_PREFS_V1_PRE_OBSERVER_PAYLOAD_SIZE;
 static const size_t kV1PreNeighborsPayloadSize = MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE;
+static const size_t kV1PreRemotePayloadSize = MQTT_PREFS_V1_PRE_REMOTE_PAYLOAD_SIZE;
 static const size_t kV1BaselinePayloadSize = MQTT_PREFS_V1_FULL_PAYLOAD_SIZE;
 static const size_t kEncodedSize = sizeof(MQTTPrefsHeader) + kV1BaselinePayloadSize;
 
@@ -99,6 +100,12 @@ inline DecodePlan classify(const uint8_t* prefix, size_t prefix_read, size_t fil
       }
       if (header.payload_len == kV1BaselinePayloadSize) {
         return {Source::Current, false, false, true, kV1BaselinePayloadSize};
+      }
+      if (header.payload_len == kV1PreRemotePayloadSize) {
+        // Written by observer/webconfig firmware before the remote-control tail
+        // existed. Everything through the neighbors tail is present; only the
+        // remote fields are missing, so they load with their defaults.
+        return {Source::Current, false, false, true, kV1PreRemotePayloadSize};
       }
       if (header.payload_len == kV1PreNeighborsPayloadSize) {
         // Written by observer/webconfig firmware before the neighbors tail
