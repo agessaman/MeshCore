@@ -433,7 +433,12 @@ void PsychicMqttClient::connect()
         }
     }
 
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_start(_client));
+    esp_err_t start_result = esp_mqtt_client_start(_client);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(start_result);
+    if (start_result == ESP_OK)
+    {
+        _started = true;
+    }
     ESP_LOGI(TAG, "MQTT client started.");
 }
 
@@ -489,7 +494,38 @@ void PsychicMqttClient::disconnect()
     }
 
     esp_mqtt_client_stop(_client);
+    _started = false;
     ESP_LOGI(TAG, "MQTT client stopped.");
+}
+
+void PsychicMqttClient::softDisconnect(unsigned long timeout_ms)
+{
+    if (_client == nullptr)
+    {
+        ESP_LOGW(TAG, "MQTT client not started.");
+        return;
+    }
+
+    if (!_connected)
+    {
+        // Nothing to close; leaving the task alone is the whole point.
+        return;
+    }
+
+    ESP_LOGI(TAG, "Disconnecting MQTT transport (client task retained).");
+    _stopMqttClient = false;
+    esp_mqtt_client_disconnect(_client);
+
+    unsigned long waited = 0;
+    while (!_stopMqttClient && waited < timeout_ms)
+    {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+        waited += 10;
+    }
+    if (!_stopMqttClient)
+    {
+        ESP_LOGW(TAG, "softDisconnect: no DISCONNECTED event in %lums", timeout_ms);
+    }
 }
 
 void PsychicMqttClient::forceStop()
@@ -506,6 +542,7 @@ void PsychicMqttClient::forceStop()
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_stop(_client));
     _connected = false;
+    _started = false;
     ESP_LOGI(TAG, "MQTT client forcefully stopped.");
 }
 

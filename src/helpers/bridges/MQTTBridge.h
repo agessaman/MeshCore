@@ -36,6 +36,19 @@ class MeshSNMPAgent;  // Forward declaration
   #define MQTT_DEBUG_PRINTLN(...) {}
 #endif
 
+// Largest-free-block trace around the reconnect lifecycle. On non-PSRAM boards the
+// mbedTLS record buffers are two 16 KiB internal-DRAM blocks, so what matters is the
+// largest contiguous block, not the free total — a soak can show flat free heap while
+// max_alloc walks down. Costs two heap_caps calls per reconnect, so it stays on.
+#if defined(MQTT_DEBUG) && defined(ARDUINO) && defined(ESP32)
+  #define MQTT_TRACE_HEAP(point, idx) \
+    MQTT_DEBUG_PRINTLN("HEAPTRACE slot=%d %s free=%u max=%u", (int)(idx) + 1, point, \
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), \
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL))
+#else
+  #define MQTT_TRACE_HEAP(point, idx) do {} while(0)
+#endif
+
 #ifdef WITH_MQTT_BRIDGE
 
 // Periodic neighbors publication keys off the mesh neighbor cache (sized by
