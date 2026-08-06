@@ -87,6 +87,48 @@ TEST(MQTTConnectionPolicy, ThirdFailureAtMaximumTripsWithoutAnotherHandshake) {
   EXPECT_FALSE(result.should_reconnect);
 }
 
+TEST(MQTTConnectionPolicy, TransportFailuresNeverTripTheBreaker) {
+  // A transport or WS-upgrade failure is transient. Latching on it left a waev slot
+  // dead for 6-7 hours while the broker was accepting connections the whole time.
+  Policy::BackoffAdvance third = Policy::advanceBackoff(5, 2, false);
+  EXPECT_EQ(5, third.reconnect_backoff);
+  EXPECT_EQ(3, third.max_backoff_failures);
+  EXPECT_FALSE(third.circuit_breaker_tripped);
+  EXPECT_TRUE(third.should_reconnect);
+
+  // Still retrying, and still counting, far past the latch threshold.
+  Policy::BackoffAdvance much_later = Policy::advanceBackoff(5, 200, false);
+  EXPECT_EQ(201, much_later.max_backoff_failures);
+  EXPECT_FALSE(much_later.circuit_breaker_tripped);
+  EXPECT_TRUE(much_later.should_reconnect);
+}
+
+TEST(MQTTConnectionPolicy, RefusalStillTripsTheBreaker) {
+  // A CONNECT refusal (bad credentials, not authorized) means the slot is unusable
+  // as configured, so giving up and waiting for the 30-minute probe is correct.
+  Policy::BackoffAdvance result = Policy::advanceBackoff(5, 2, true);
+  EXPECT_TRUE(result.circuit_breaker_tripped);
+  EXPECT_FALSE(result.should_reconnect);
+}
+
+TEST(MQTTConnectionPolicy, BreakerGateDoesNotAffectClimbingTheLadder) {
+  // Below the top rung the gate is irrelevant: both classes back off identically.
+  for (uint8_t level = 0; level < 5; ++level) {
+    Policy::BackoffAdvance transient_fail = Policy::advanceBackoff(level, 0, false);
+    Policy::BackoffAdvance refused = Policy::advanceBackoff(level, 0, true);
+    EXPECT_EQ(level + 1, transient_fail.reconnect_backoff);
+    EXPECT_EQ(transient_fail.reconnect_backoff, refused.reconnect_backoff);
+    EXPECT_FALSE(transient_fail.circuit_breaker_tripped);
+    EXPECT_FALSE(refused.circuit_breaker_tripped);
+  }
+}
+
+TEST(MQTTConnectionPolicy, DefaultsToTrippingSoExistingCallersAreUnchanged) {
+  Policy::BackoffAdvance defaulted = Policy::advanceBackoff(5, 2);
+  EXPECT_TRUE(defaulted.circuit_breaker_tripped);
+  EXPECT_FALSE(defaulted.should_reconnect);
+}
+
 TEST(MQTTConnectionPolicy, CircuitBreakerProbeHasExactThirtyMinuteBoundary) {
   EXPECT_FALSE(Policy::circuitBreakerProbeDue(1799999U, 0U));
   EXPECT_TRUE(Policy::circuitBreakerProbeDue(1800000U, 0U));

@@ -66,8 +66,20 @@ struct BackoffAdvance {
 // the 300-second rung changes level 4 to the saturated marker 5. Three later
 // failures at that rung trip the breaker; the third does not launch another
 // connection attempt.
+//
+// may_trip_breaker gates that last step. Latching is only right when the broker
+// has told us the slot is unusable as configured — an MQTT CONNECT refusal
+// (bad credentials, client id rejected, not authorized). A transport or
+// WebSocket-upgrade failure means "try again later", and latching on it turns a
+// broker's momentary hiccup into an outage that lasts until someone reboots the
+// device or reconfigures the slot. Measured on hardware: a waev slot that
+// tripped recovered instantly on reboot after 41 minutes down, and two earlier
+// occurrences sat dead for 6-7 hours while the broker was accepting
+// connections the whole time. Staying on the 300-second rung retries at a rate
+// the broker will not notice and needs no intervention.
 static inline BackoffAdvance advanceBackoff(uint8_t reconnect_backoff,
-                                            uint8_t max_backoff_failures) {
+                                            uint8_t max_backoff_failures,
+                                            bool may_trip_breaker = true) {
   BackoffAdvance result = {
     reconnect_backoff, max_backoff_failures, false, true
   };
@@ -76,10 +88,12 @@ static inline BackoffAdvance advanceBackoff(uint8_t reconnect_backoff,
     return result;
   }
 
+  // Keep counting even when the breaker cannot latch: 'mqttN.diag' reports this
+  // and a large value is the signal that an endpoint is chronically unhealthy.
   if (result.max_backoff_failures < UINT8_MAX) {
     result.max_backoff_failures++;
   }
-  if (result.max_backoff_failures >= kMaxFailuresAtMaxBackoff) {
+  if (may_trip_breaker && result.max_backoff_failures >= kMaxFailuresAtMaxBackoff) {
     result.circuit_breaker_tripped = true;
     result.should_reconnect = false;
   }

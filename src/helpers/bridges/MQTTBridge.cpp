@@ -700,6 +700,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].reconnect_backoff = 0;
     _slots[i].max_backoff_failures = 0;
     _slots[i].circuit_breaker_tripped = false;
+    _slots[i].last_failure_refused = false;
     _slots[i].last_reconnect_attempt = 0;
     _slots[i].last_log_time = 0;
     _slots[i].port = 1883;
@@ -1621,6 +1622,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
     // disconnect should be governed by the (still-elevated) ladder.
     _slots[index].connected_at_ms = millis();
     _slots[index].circuit_breaker_tripped = false;
+    _slots[index].last_failure_refused = false;
     _slots[index].last_tls_err = 0;
     _slots[index].last_tls_stack_err = 0;
     _slots[index].last_sock_errno = 0;
@@ -1653,6 +1655,9 @@ bool MQTTBridge::ensureSlotClient(int index) {
     _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
     _slots[index].last_sock_errno = error.esp_transport_sock_errno;
     _slots[index].last_error_time = millis();
+    // Classify before logging: only a CONNECT refusal may latch the breaker.
+    _slots[index].last_failure_refused =
+        (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED);
     if (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
       // Broker rejected the MQTT CONNECT itself — not a transport failure.
       // return code: 1=protocol, 2=client-id rejected, 3=server unavailable,
@@ -1807,6 +1812,7 @@ bool MQTTBridge::setupSlot(int index) {
     slot.reconnect_backoff = 0;
     slot.max_backoff_failures = 0;
     slot.circuit_breaker_tripped = false;
+  slot.last_failure_refused = false;
     slot.last_reconnect_attempt = 0;
   }
 
@@ -1994,6 +2000,7 @@ void MQTTBridge::teardownSlot(int index) {
   slot.reconnect_backoff = 0;
   slot.max_backoff_failures = 0;
   slot.circuit_breaker_tripped = false;
+  slot.last_failure_refused = false;
   slot.last_reconnect_attempt = 0;
   slot.last_log_time = 0;
   slot.last_deferred_log_ms = 0;
@@ -2224,7 +2231,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
             slot.reconnect_backoff, static_cast<uint8_t>(index))) {
       slot.last_reconnect_attempt = now_millis;
       MQTTConnectionPolicy::BackoffAdvance advance = MQTTConnectionPolicy::advanceBackoff(
-          slot.reconnect_backoff, slot.max_backoff_failures);
+          slot.reconnect_backoff, slot.max_backoff_failures, slot.last_failure_refused);
       slot.reconnect_backoff = advance.reconnect_backoff;
       slot.max_backoff_failures = advance.max_backoff_failures;
       slot.circuit_breaker_tripped = advance.circuit_breaker_tripped;

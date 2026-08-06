@@ -124,6 +124,10 @@ private:
     uint8_t reconnect_backoff;      // 0..4 index into backoff table
     uint8_t max_backoff_failures;   // consecutive failures at max backoff level
     bool circuit_breaker_tripped;   // true = stop reconnecting until reconfigured
+    // Set when the broker refused the MQTT CONNECT itself, cleared on a transport
+    // failure or a successful connect. Only a refusal may latch the breaker — a
+    // transport/WS-upgrade failure is transient and must keep retrying.
+    bool last_failure_refused;
     unsigned long connected_at_ms;  // millis() of last successful connect (0 = not connected);
                                     // gates the stability-based backoff reset in maintenance
     unsigned long last_reconnect_attempt;
