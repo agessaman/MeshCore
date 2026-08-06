@@ -85,6 +85,17 @@ void setup() {
   Serial.print("Repeater ID: ");
   mesh::Utils::printHex(Serial, the_mesh.self_id.pub_key, PUB_KEY_SIZE); Serial.println();
 
+#if defined(WITH_MQTT_BRIDGE)
+  Serial.println();
+  Serial.println("================================================");
+  Serial.println("  NEW FIRMWARE AVAILABLE");
+  Serial.println("  This Observer build is outdated.");
+  Serial.println("  Flash the improved firmware here:");
+  Serial.println("  https://observer.gessaman.com/");
+  Serial.println("================================================");
+  Serial.println();
+#endif
+
   command[0] = 0;
 
   sensors.begin();
