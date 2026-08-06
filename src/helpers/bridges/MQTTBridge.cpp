@@ -1775,9 +1775,11 @@ bool MQTTBridge::setupSlot(int index) {
   }
 
   // Reconfigure path: if we're re-applying (e.g. after a preset change), stop
-  // the existing connection cleanly first. The client object (and its mbedTLS
-  // context) is reused; setCredentials / setServer below overwrite the config
-  // fields in place before connect() restarts the ESP-IDF client.
+  // the existing connection cleanly first. The client object is reused, but its
+  // mbedTLS context is NOT — closing the transport destroys the TLS session,
+  // record buffers, and peer certificate, and the next connect() reallocates
+  // them. setCredentials / setServer below overwrite the config fields in place
+  // before connect() restarts the ESP-IDF client.
   if (slot.initial_connect_done) {
     if (slot.client->connected()) {
       slot.client->disconnect();
@@ -2140,11 +2142,24 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           // Disconnect + reconnect with fresh credentials, reusing existing client
           // to avoid internal heap leak/fragmentation from destroy/create cycles
           MQTT_DEBUG_PRINTLN("MQTT%d token renewal: reconnecting with fresh credentials", index + 1);
-          if (slot.client->connected()) {
-            slot.client->disconnect();  // stops the client internally
+          MQTT_TRACE_HEAP("renewal:before-bounce", index);
+          if (slot.client->isStarted()) {
+            // Keep the esp-mqtt task alive across the handshake. disconnect()
+            // would stop it, returning its 6 KiB stack into the hole the two
+            // 16 KiB mbedTLS record buffers just vacated — which is what walks
+            // the largest free block down 16 KiB at a time on non-PSRAM boards.
+            slot.client->softDisconnect();
+            MQTT_TRACE_HEAP("renewal:after-disconnect", index);
+            slot.client->setCredentials(_jwt_username, slot.auth_token);
+            MQTT_TRACE_HEAP("renewal:after-credentials", index);
+            slot.client->reconnect();
+          } else {
+            // Client was stopped (teardown/reconfigure). reconnect() is a no-op
+            // on a stopped client, so this path must start it.
+            slot.client->setCredentials(_jwt_username, slot.auth_token);
+            slot.client->connect();
           }
-          slot.client->setCredentials(_jwt_username, slot.auth_token);
-          slot.client->connect();  // restart stopped client; reconnect() fails silently on a stopped client
+          MQTT_TRACE_HEAP("renewal:after-reconnect", index);
           reconnect_attempted = true;
           _last_slot_reconnect_ms = now_millis;
           MQTT_DEBUG_PRINTLN("MQTT%d int_heap=%d at token renewal reconnect", index + 1,

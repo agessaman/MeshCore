@@ -369,6 +369,29 @@ public:
     void disconnect();
 
     /**
+     * @brief Closes the transport but leaves the client task running.
+     *
+     * disconnect() ends with esp_mqtt_client_stop(), which ends the client task
+     * and returns its 6 KiB stack to the heap right as a TLS handshake vacates
+     * two 16 KiB mbedTLS record buffers — the stack then lands in that hole and
+     * the largest free block ratchets down. This variant omits the stop, so the
+     * task and its stack stay put. Pair it with reconnect().
+     *
+     * @param timeout_ms how long to wait for the DISCONNECTED event before
+     *                   giving up. Bounded on purpose: disconnect()'s wait is
+     *                   unbounded and a lost event would wedge the caller.
+     */
+    void softDisconnect(unsigned long timeout_ms = 5000);
+
+    /**
+     * @brief True once esp_mqtt_client_start() has succeeded and no stop has run.
+     *
+     * reconnect() silently does nothing on a stopped client, so callers that
+     * want to avoid stop/start must check this and fall back to connect().
+     */
+    bool isStarted() const { return _started; }
+
+    /**
      * @brief Forcefully stops the MQTT client and disconnects from the server.
      * This does not trigger the onDisconnect callbacks.
      */
@@ -478,6 +501,7 @@ private:
     bool _connected = false;
     bool _stopMqttClient = false;
     bool _config_dirty = true;
+    bool _started = false;
 
     // Runtime cap on the esp-mqtt outbox for QoS 0 async publishes (bytes).
     // 0 = disabled. Enforced in publish(); not an esp-mqtt config field.
