@@ -415,14 +415,32 @@ bool MQTTBridge::getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out) 
   return true;
 }
 
+// Active-slot cap for boards without PSRAM. Two is right for the stock framework,
+// where each WSS/TLS session costs ~40-45 KB of internal DRAM and — more limiting —
+// every handshake needs a contiguous 16 KiB inbound record buffer. Measured on a
+// Heltec V3, the stock 2-slot configuration's largest free block wanders down to
+// 16,372 B — twelve bytes under that requirement — and back up again as reconnects
+// reshuffle the heap; it keeps working because a slot's own teardown frees the space
+// its next setup reuses.
+//
+// A framework built with a 4 KiB outbound record buffer drops the per-session cost
+// to ~32 KB and leaves far more contiguity, which may make three viable. Override
+// this to trial that; do not raise the default until a soak shows the floor staying
+// well clear of 16 KiB. See docs/mbedtls-tls-footprint.md.
+#ifndef MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM
+#define MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM 2
+#endif
+
 int MQTTBridge::getMaxActiveSlots() {
-  // Each WSS/TLS connection needs ~40KB for mbedTLS buffers. Without PSRAM even
-  // 3 concurrent connections would exhaust internal heap, so cap at 2; with
-  // PSRAM cap at 5 (6 configurable but 5 active max).
+  // Never exceed the slot array, however the override is set.
+  const int no_psram_cap = (MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM < RUNTIME_MQTT_SLOTS)
+                               ? MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM
+                               : RUNTIME_MQTT_SLOTS;
 #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  return psramFound() ? 5 : 2;
+  // With PSRAM cap at 5 (6 configurable but 5 active max).
+  return psramFound() ? 5 : no_psram_cap;
 #else
-  return 2;
+  return no_psram_cap;
 #endif
 }
 
