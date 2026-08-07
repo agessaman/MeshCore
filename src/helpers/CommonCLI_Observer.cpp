@@ -812,6 +812,38 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     formatMQTTPresetListReply(reply, 160, start);
   } else if (memcmp(config, "mqtt.stats", 10) == 0) {
     MQTTBridge::formatMqttStatsReply(reply, 160);
+#if defined(MQTT_DEBUG_ALLOC_TEST) && defined(ESP_PLATFORM)
+  } else if (memcmp(config, "mqtt.testalloc", 14) == 0) {
+    // Can a TLS handshake still get its inbound record buffer right now?
+    //
+    // That 16384 B contiguous request is the largest single allocation the bridge
+    // makes, and the only one that fragmentation can realistically deny. It normally
+    // succeeds even when the largest free block is smaller, because a reconnecting
+    // slot frees its own buffers first — this probe asks the harder question of
+    // whether the block is available *without* that, which is the case when a second
+    // slot reconnects while the first is still down.
+    //
+    // Deliberately not testing the neighbours JSON pool: ArduinoJson allocates it in
+    // ARDUINOJSON_POOL_CAPACITY-slot blocks, which is 128 slots = 1024 bytes on these
+    // 32-bit targets, so the 12288 B budget is twelve small allocations and never a
+    // contiguous demand.
+    const size_t before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    void* tls_in = heap_caps_malloc(16384, MALLOC_CAP_INTERNAL);
+    // Measured while the block is still held. If this equals `before`, the request
+    // was satisfied from somewhere other than the largest free block, which is worth
+    // knowing: it means largest-free-block alone does not predict whether a handshake
+    // will get its buffer.
+    const size_t held = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    void* pool_block = heap_caps_malloc(1024, MALLOC_CAP_INTERNAL);
+    if (tls_in) heap_caps_free(tls_in);
+    if (pool_block) heap_caps_free(pool_block);
+    const size_t restored = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    sprintf(reply, "> max=%u tls16384=%s pool1024=%s held=%u restored=%u",
+            (unsigned)before,
+            tls_in ? "OK" : "FAIL",
+            pool_block ? "OK" : "FAIL",
+            (unsigned)held, (unsigned)restored);
+#endif
   } else if (memcmp(config, "mqtt.status", 11) == 0) {
     MQTTBridge::formatMqttStatusReply(reply, 160, &_mqtt_prefs);
   } else if (memcmp(config, "mqtt.packets", 12) == 0) {
