@@ -104,6 +104,7 @@ struct NeighbourInfo {
   uint32_t advert_timestamp;
   uint32_t heard_timestamp;
   int8_t snr; // multiplied by 4, user should divide to get float value
+  int16_t rssi; // dBm from last heard packet
 };
 
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks
@@ -156,6 +157,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     mesh::Identity id;
     uint32_t heard_timestamp;
     int8_t snr;
+    int16_t rssi;
     uint32_t tag;
     char scopes[96];
     uint8_t status;
@@ -177,7 +179,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   char self_default_scope_buf[31];
   char neighbor_discover_origin[32];
 
-  void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
+  void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr, int16_t rssi);
   void sendNodeDiscoverReq();
   mesh::Packet* sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
   bool cancelNeighborDiscoverRequest();
@@ -188,8 +190,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool startNeighborDiscover(char* reply);
   void loopNeighborDiscover();
   void finishNeighborDiscover();
-  bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
-  void touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp);
+  bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len,
+                                      float snr, int16_t rssi);
+  void touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp,
+                           float snr, int16_t rssi);
   void getLocalScopes(char* buf, size_t len);
   static const int NEIGHBOR_DISCOVER_PEER_BASE = 1000;
   static const unsigned long NEIGHBOR_DISCOVER_QUEUE_TIMEOUT_MS = 29000;

@@ -235,8 +235,8 @@ TEST(MQTTPayloadBuilder, MaximumRepresentativePacketAndRawPayloadsRemainValid) {
 
 TEST(MQTTPayloadBuilder, NeighborsMessageRoundTripsSelfAndEntries) {
   MQTTPayloadBuilder::NeighborsMessageEntry neighbors[] = {
-      {"0011223344556677", 9.75f, 42, "DEN,APRS", "active"},
-      {"8899AABBCCDDEEFF", -3.5f, 3600, "", "stale"},
+      {"0011223344556677", 9.75f, -87, 42, "DEN,APRS", "active"},
+      {"8899AABBCCDDEEFF", -3.5f, -110, 3600, "", "stale"},
   };
 
   JsonDocument scratch;
@@ -262,18 +262,20 @@ TEST(MQTTPayloadBuilder, NeighborsMessageRoundTripsSelfAndEntries) {
   ASSERT_EQ(2U, arr.size());
   EXPECT_STREQ("0011223344556677", arr[0]["pubkey"].as<const char*>());
   EXPECT_FLOAT_EQ(9.75f, arr[0]["snr"].as<float>());
+  EXPECT_EQ(-87, arr[0]["rssi"].as<int>());
   EXPECT_EQ(42U, arr[0]["heard_secs_ago"].as<uint32_t>());
   EXPECT_STREQ("DEN,APRS", arr[0]["scopes"].as<const char*>());
   EXPECT_STREQ("active", arr[0]["status"].as<const char*>());
   EXPECT_STREQ("8899AABBCCDDEEFF", arr[1]["pubkey"].as<const char*>());
+  EXPECT_EQ(-110, arr[1]["rssi"].as<int>());
   EXPECT_STREQ("", arr[1]["scopes"].as<const char*>());
   EXPECT_STREQ("stale", arr[1]["status"].as<const char*>());
 }
 
 TEST(MQTTPayloadBuilder, NeighborsMessageMeasurementsMatchCompletePayload) {
   MQTTPayloadBuilder::NeighborsMessageEntry neighbors[] = {
-      {"0011223344556677", 9.75f, UINT32_MAX, "DEN,APRS", "responded"},
-      {"8899AABBCCDDEEFF", -3.5f, UINT32_MAX, "", "timeout"},
+      {"0011223344556677", 9.75f, -87, UINT32_MAX, "DEN,APRS", "responded"},
+      {"8899AABBCCDDEEFF", -3.5f, -110, UINT32_MAX, "", "timeout"},
   };
 
   size_t measured =
@@ -302,7 +304,7 @@ TEST(MQTTPayloadBuilder, NeighborsMessageMeasuredPrefixStopsBeforeOverflow) {
   for (int i = 0; i < 20; i++) {
     snprintf(keys[i], sizeof(keys[i]), "%016X", i);
     neighbors[i] = {
-        keys[i], static_cast<float>(i), UINT32_MAX,
+        keys[i], static_cast<float>(i), -90 - i, UINT32_MAX,
         long_scopes, "responded"};
   }
 
@@ -345,8 +347,8 @@ TEST(MQTTPayloadBuilder, NeighborsMessageMeasuredPrefixStopsBeforeOverflow) {
 
 TEST(MQTTPayloadBuilder, NeighborsMessageFallbackMarksTruncated) {
   MQTTPayloadBuilder::NeighborsMessageEntry neighbors[] = {
-      {"0011223344556677", 9.75f, 1, "DEN", "responded"},
-      {"8899AABBCCDDEEFF", -3.5f, 2, "APRS", "responded"},
+      {"0011223344556677", 9.75f, -87, 1, "DEN", "responded"},
+      {"8899AABBCCDDEEFF", -3.5f, -110, 2, "APRS", "responded"},
   };
   size_t first_only_size =
       MQTTPayloadBuilder::measureNeighborsMessageBase(
@@ -369,7 +371,7 @@ TEST(MQTTPayloadBuilder, NeighborsMessageFallbackMarksTruncated) {
 
 TEST(MQTTPayloadBuilder, NeighborsMessageFailsCleanlyOnAllocationFailure) {
   MQTTPayloadBuilder::NeighborsMessageEntry neighbor = {
-      "0011223344556677", 9.75f, 1, "DEN", "responded"};
+      "0011223344556677", 9.75f, -87, 1, "DEN", "responded"};
   RejectAllJsonAllocations allocator;
   JsonDocument scratch(&allocator);
   char buffer[512];
@@ -406,6 +408,7 @@ TEST(MQTTPayloadBuilder, NeighborsMessageDropsTailWhenBufferFills) {
     snprintf(keys[i], sizeof(keys[i]), "%016X", i);
     neighbors[i].pubkey_hex = keys[i];
     neighbors[i].snr = static_cast<float>(i);
+    neighbors[i].rssi = -90 - i;
     neighbors[i].heard_secs_ago = static_cast<uint32_t>(i) * 10U;
     neighbors[i].heard_unknown = false;
     neighbors[i].scopes = "DEN";
@@ -435,8 +438,8 @@ TEST(MQTTPayloadBuilder, NeighborsMessageRendersUnknownHeardAgeAsNull) {
   // A neighbour stamped before the clock was set has no usable age. The key
   // stays present and null so a consumer cannot read it as "heard just now".
   MQTTPayloadBuilder::NeighborsMessageEntry neighbors[2];
-  neighbors[0] = {"0011223344556677", 9.75f, 42, "DEN", "responded"};
-  neighbors[1] = {"8899AABBCCDDEEFF", -3.5f, 0, "DEN", "responded"};
+  neighbors[0] = {"0011223344556677", 9.75f, -87, 42, "DEN", "responded"};
+  neighbors[1] = {"8899AABBCCDDEEFF", -3.5f, -110, 0, "DEN", "responded"};
   neighbors[1].heard_unknown = true;
 
   JsonDocument scratch;
@@ -463,7 +466,7 @@ TEST(MQTTPayloadBuilder, NeighborsMessageUnknownHeardAgeFitsMeasuredWidth) {
   // Paced discovery measures each entry with a known UINT32_MAX age; a null age
   // must never serialize wider than what that reserved.
   MQTTPayloadBuilder::NeighborsMessageEntry measured = {
-      "0011223344556677", 9.75f, UINT32_MAX, "DEN", "responded"};
+      "0011223344556677", 9.75f, -87, UINT32_MAX, "DEN", "responded"};
   MQTTPayloadBuilder::NeighborsMessageEntry unknown = measured;
   unknown.heard_unknown = true;
   unknown.heard_secs_ago = 0;

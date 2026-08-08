@@ -72,6 +72,7 @@ public:
   struct NeighborsMessageEntry {
     const char* pubkey_hex;
     float snr;
+    int rssi;  // dBm from the last heard packet
     uint32_t heard_secs_ago;
     const char* scopes;
     const char* status;

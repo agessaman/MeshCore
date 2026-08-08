@@ -710,7 +710,7 @@ Full packet data with RF characteristics and metadata.
 Minimal raw packet data for map integration.
 
 ### Neighbors Topic: `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/neighbors`
-Cached zero-hop repeater neighbors with SNR, last-heard age, and flood-allowed scopes. Published on `discover.scopes` or periodically when `mqtt.neighbors` is enabled (observer builds with neighbors compiled in; non-PSRAM builds cap the table at 20 entries and set `truncated`). Goes to every configured slot's `neighbors` topic at QoS 0, retained only where the preset allows it.
+Cached zero-hop repeater neighbors with SNR, RSSI, last-heard age, and flood-allowed scopes. Published on `discover.scopes` or periodically when `mqtt.neighbors` is enabled (observer builds with neighbors compiled in; non-PSRAM builds cap the table at 20 entries and set `truncated`). Goes to every configured slot's `neighbors` topic at QoS 0, retained only where the preset allows it.
 
 Periodic publishing first runs a 60-second zero-hop neighbor refresh equivalent to `discover.neighbors`, then queries the refreshed table for scopes and publishes when the scope-query phase completes.
 
@@ -810,6 +810,7 @@ While `mqtt.neighbors` is on, `get mqtt.status` appends `nbr: <next>/<last>` —
     {
       "pubkey": "0011223344556677...",
       "snr": 9.75,
+      "rssi": -87,
       "heard_secs_ago": 42,
       "scopes": "DEN,APRS",
       "status": "responded"
@@ -817,6 +818,7 @@ While `mqtt.neighbors` is on, `get mqtt.status` appends `nbr: <next>/<last>` —
     {
       "pubkey": "8899AABBCCDDEEFF...",
       "snr": 12.5,
+      "rssi": -95,
       "heard_secs_ago": null,
       "scopes": "DEN",
       "status": "responded"

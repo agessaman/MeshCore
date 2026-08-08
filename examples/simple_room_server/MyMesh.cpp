@@ -518,7 +518,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
   if (neighbor_discover_active && i >= NEIGHBOR_DISCOVER_PEER_BASE) {
     int oi = i - NEIGHBOR_DISCOVER_PEER_BASE;
     if (type == PAYLOAD_TYPE_RESPONSE && oi >= 0 && oi < neighbor_discover_count) {
-      handleNeighborDiscoverResponse(oi, data, len);
+      handleNeighborDiscoverResponse(oi, data, len, packet->getSNR(), packet->getRSSI());
     }
     return;
   }
@@ -534,7 +534,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
   if (neighbor_discover_active && type == PAYLOAD_TYPE_RESPONSE) {
     for (int oi = 0; oi < neighbor_discover_count; oi++) {
       if (client->id.matches(neighbor_discover[oi].id)
-          && handleNeighborDiscoverResponse(oi, data, len)) {
+          && handleNeighborDiscoverResponse(oi, data, len, packet->getSNR(), packet->getRSSI())) {
         return;
       }
     }
@@ -734,7 +734,7 @@ void MyMesh::onAckRecv(mesh::Packet *packet, uint32_t ack_crc) {
 #define CTL_TYPE_NODE_DISCOVER_REQ   0x80
 #define CTL_TYPE_NODE_DISCOVER_RESP  0x90
 
-void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
+void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr, int16_t rssi) {
   // find existing neighbour, else use least recently updated
   uint32_t oldest_timestamp = 0xFFFFFFFF;
   NeighbourInfo *neighbour = &neighbours[0];
@@ -757,6 +757,7 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
   neighbour->advert_timestamp = timestamp;
   neighbour->heard_timestamp = getRTCClock()->getCurrentTime();
   neighbour->snr = (int8_t)(snr * 4);
+  neighbour->rssi = rssi;
 }
 
 static bool isShare(const mesh::Packet *packet) {
@@ -774,7 +775,7 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
   if (packet->getPathHashCount() == 0 && !isShare(packet)) {
     AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
-      putNeighbour(id, timestamp, packet->getSNR());
+      putNeighbour(id, timestamp, packet->getSNR(), packet->getRSSI());
     }
   }
 }
@@ -808,7 +809,7 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
     if (id.matches(self_id)) {
       return;
     }
-    putNeighbour(id, getRTCClock()->getCurrentTime(), packet->getSNR());
+    putNeighbour(id, getRTCClock()->getCurrentTime(), packet->getSNR(), packet->getRSSI());
   }
 }
 
@@ -1818,6 +1819,7 @@ bool MyMesh::completeNeighborDiscoverEntry() {
   MQTTMessageBuilder::NeighborsMessageEntry measured = {
     pubkey_hex,
     entry.snr / 4.0f,
+    entry.rssi,
     UINT32_MAX,
     entry.scopes,
     entry.status == ND_RESPONDED ? "responded"
@@ -1841,7 +1843,8 @@ bool MyMesh::completeNeighborDiscoverEntry() {
 
 // Match a RESPONSE against the pending overlay entry by tag; copy its scope
 // string (payload after the 8-byte {tag}{clock} header) into the entry.
-bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len) {
+bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len,
+                                            float snr, int16_t rssi) {
   if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count) return false;
   NeighborDiscoverEntry& entry = neighbor_discover[overlay_idx];
   if (entry.status != ND_PENDING || len < 8) return false;
@@ -1858,18 +1861,23 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data
   entry.scopes[scope_len] = 0;
   entry.status = ND_RESPONDED;
   // A zero-hop reply is proof we heard this neighbour now, so re-stamp both the
-  // snapshot and the live table; a stamp taken before time sync heals here.
+  // snapshot and the live table with this packet's RX metrics; a stamp taken
+  // before time sync heals here.
   entry.heard_timestamp = getRTCClock()->getCurrentTime();
-  touchNeighbourHeard(entry.id, entry.heard_timestamp);
+  entry.snr = (int8_t)(snr * 4);
+  entry.rssi = rssi;
+  touchNeighbourHeard(entry.id, entry.heard_timestamp, snr, rssi);
   return true;
 }
 
-// Refresh a live neighbour's heard time only: a scope reply carries no advert
-// timestamp or SNR to update.
-void MyMesh::touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp) {
+// Refresh a live neighbour's heard time and RX metrics from a scope reply.
+void MyMesh::touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp,
+                                 float snr, int16_t rssi) {
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
     if (id.matches(neighbours[i].id)) {
       neighbours[i].heard_timestamp = heard_timestamp;
+      neighbours[i].snr = (int8_t)(snr * 4);
+      neighbours[i].rssi = rssi;
       return;
     }
   }
@@ -1991,6 +1999,7 @@ void MyMesh::finishNeighborDiscover() {
       mesh::Utils::toHex(hex, entry.id.pub_key, PUB_KEY_SIZE);
       entries[i].pubkey_hex = hex;
       entries[i].snr = entry.snr / 4.0f;
+      entries[i].rssi = entry.rssi;
       bool heard_known = neighborHeardAgeUsable(entry.heard_timestamp, now_secs);
       entries[i].heard_unknown = !heard_known;
       entries[i].heard_secs_ago = heard_known ? (now_secs - entry.heard_timestamp) : 0;
@@ -2134,6 +2143,7 @@ bool MyMesh::startNeighborDiscover(char* reply) {
       entry.id = neighbours[i].id;
       entry.heard_timestamp = neighbours[i].heard_timestamp;
       entry.snr = neighbours[i].snr;
+      entry.rssi = neighbours[i].rssi;
       entry.scopes[0] = 0;
       entry.tag = 0;
       entry.status = ND_UNSENT;
