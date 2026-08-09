@@ -96,6 +96,7 @@ int MQTTMessageBuilder::buildPacketMessage(
 }
 
 int MQTTMessageBuilder::buildRawMessage(
+  JsonDocument& doc,
   const char* origin,
   const char* origin_id,
   const char* timestamp,
@@ -104,7 +105,7 @@ int MQTTMessageBuilder::buildRawMessage(
   size_t buffer_size
 ) {
   return MQTTPayloadBuilder::buildRawMessage(
-      origin, origin_id, timestamp, raw, buffer, buffer_size);
+      doc, origin, origin_id, timestamp, raw, buffer, buffer_size);
 }
 
 int MQTTMessageBuilder::buildNeighborsMessage(
@@ -182,10 +183,9 @@ int MQTTMessageBuilder::buildPacketJSON(
   }
   
   // Convert packet to hex
-  // MAX_TRANS_UNIT is 255 bytes, hex = 510 chars, but allow for larger with headers
-  char raw_hex[1024];
+  char raw_hex[WIRE_HEX_SCRATCH_SIZE];
   packetToHex(packet, raw_hex, sizeof(raw_hex));
-  
+
   // Get packet characteristics
   int packet_type = packet->getPayloadType();
   const char* route_str = getRouteTypeString(packet->isRouteDirect() ? 1 : 0);
@@ -258,9 +258,9 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
     strcpy(date_str, "01/01/2024");
   }
   
-  // Convert raw radio data to hex (this includes radio headers)
-  // MAX_TRANS_UNIT is 255 bytes, hex = 510 chars, but allow for larger with headers
-  char raw_hex[1024];
+  // Convert raw radio data to hex (this includes radio headers). bytesToHex() emits
+  // an empty string rather than truncating if raw_len exceeds the protocol maximum.
+  char raw_hex[WIRE_HEX_SCRATCH_SIZE];
   bytesToHex(raw_data, raw_len, raw_hex, sizeof(raw_hex));
   
   // Get packet characteristics from the parsed packet
@@ -298,6 +298,7 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
 }
 
 int MQTTMessageBuilder::buildRawJSON(
+  JsonDocument& doc,
   mesh::Packet* packet,
   const char* origin,
   const char* origin_id,
@@ -314,11 +315,10 @@ int MQTTMessageBuilder::buildRawJSON(
   formatIsoTimestampForMqtt(now_tv.tv_sec, now_tv.tv_usec, timezone, timestamp, sizeof(timestamp));
 
   // Convert packet to hex
-  // MAX_TRANS_UNIT is 255, so max hex size is 510 chars + null = 511 bytes
-  char raw_hex[1024];
+  char raw_hex[WIRE_HEX_SCRATCH_SIZE];
   packetToHex(packet, raw_hex, sizeof(raw_hex));
-  
-  return buildRawMessage(origin, origin_id, timestamp, raw_hex, buffer, buffer_size);
+
+  return buildRawMessage(doc, origin, origin_id, timestamp, raw_hex, buffer, buffer_size);
 }
 
 const char* MQTTMessageBuilder::getRouteTypeString(int route_type) {
@@ -356,9 +356,10 @@ void MQTTMessageBuilder::packetToHex(mesh::Packet* packet, char* hex, size_t hex
   hex[0] = '\0';
   // Serialize full on-air/wire format using Packet::writeTo()
   // This includes header, transport codes (if present), path_len, path, and payload
-  uint8_t raw_buf[512];
+  uint8_t raw_buf[WIRE_SCRATCH_SIZE];
+  if (!canSerializePacket(packet, sizeof(raw_buf))) return;
   uint8_t raw_len = packet->writeTo(raw_buf);
-  if (raw_len == 0 || raw_len > sizeof(raw_buf)) return;
+  if (raw_len == 0) return;
   
   // Check if hex buffer is large enough (2 hex chars per byte + null terminator)
   if (hex_size < (size_t)raw_len * 2 + 1) return;

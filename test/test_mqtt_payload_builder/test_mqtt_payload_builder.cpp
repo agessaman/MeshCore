@@ -171,8 +171,9 @@ TEST(MQTTPayloadBuilder, RxPacketOmitsUnknownNanScore) {
 
 TEST(MQTTPayloadBuilder, RawMessageHasExactContractAndEscapesData) {
   char buffer[512];
+  JsonDocument doc;
   int len = MQTTPayloadBuilder::buildRawMessage(
-      "node \"A\"", "id\\1", kTimestamp, "AA\nBB", buffer, sizeof(buffer));
+      doc, "node \"A\"", "id\\1", kTimestamp, "AA\nBB", buffer, sizeof(buffer));
 
   ASSERT_GT(len, 0);
   EXPECT_EQ(static_cast<size_t>(len), strlen(buffer));
@@ -224,8 +225,9 @@ TEST(MQTTPayloadBuilder, MaximumRepresentativePacketAndRawPayloadsRemainValid) {
   EXPECT_STREQ("3c3d3e3f", parsed_path[15].as<const char*>());
 
   char raw_buffer[1024];
+  JsonDocument raw_doc;
   int raw_len = MQTTPayloadBuilder::buildRawMessage(
-      "node", "0123456789ABCDEF", kTimestamp, raw.c_str(),
+      raw_doc, "node", "0123456789ABCDEF", kTimestamp, raw.c_str(),
       raw_buffer, sizeof(raw_buffer));
   ASSERT_GT(raw_len, 0);
   JsonDocument parsed_raw;

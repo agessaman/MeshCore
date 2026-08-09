@@ -12,6 +12,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <math.h>
+#include <new>
 #include <strings.h>
 
 #ifdef WITH_SNMP
@@ -175,6 +176,37 @@ static void psram_free(void* ptr) {
 #else
   free(ptr);
 #endif
+}
+
+static void* psram_realloc(void* ptr, size_t new_size) {
+  if (new_size == 0) {
+    psram_free(ptr);
+    return nullptr;
+  }
+#if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
+  void* p = heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM);
+  if (p != nullptr) return p;
+  // A block that fell back to internal DRAM on allocation (PSRAM exhausted) cannot
+  // be grown in PSRAM; retry there rather than reporting failure.
+  return heap_caps_realloc(ptr, new_size, MALLOC_CAP_INTERNAL);
+#else
+  return realloc(ptr, new_size);
+#endif
+}
+
+// Shared JSON document pools follow the same PSRAM-first policy as the bridge's
+// text buffers. ArduinoJson calls reallocate() when shrinking its pool list and
+// asserts the result is non-null for a shrink, which both branches above satisfy.
+void* MQTTBridge::JsonScratchAllocator::allocate(size_t size) {
+  return psram_malloc(size);
+}
+
+void MQTTBridge::JsonScratchAllocator::deallocate(void* ptr) {
+  psram_free(ptr);
+}
+
+void* MQTTBridge::JsonScratchAllocator::reallocate(void* ptr, size_t new_size) {
+  return psram_realloc(ptr, new_size);
 }
 
 // Time (millis()) when WiFi was last seen connected; 0 when disconnected. Used for get wifi.status uptime.
@@ -474,7 +506,13 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
     return;
   } else if (!slot.enabled) {
     state = "inactive";
+  } else if (!b->isSlotReady(slot_index)) {
+    // Same classification as `get mqtt.status` and getSlotStatusSnapshot(): the slot
+    // is configured but missing a token/IATA/credential, so it was never set up and
+    // has no client yet. Previously reported "disc", which read as a network fault.
+    state = "wait";
   } else if (!slot.client) {
+    // Ready to connect but the client object could not be allocated.
     state = "no client";
   } else if (slot.connected) {
     state = "ok";
@@ -609,7 +647,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #endif
       _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
 #if defined(BOARD_HAS_PSRAM)
-      _publish_json_buffer(nullptr), _status_json_buffer(nullptr),
+      _json_scratch_buffer(nullptr),
 #endif
       _identity(identity),
       _cached_has_connected_slots(false),
@@ -625,7 +663,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _last_slot_reconnect_ms(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
-        _mqtt_task_stack(nullptr), _packet_queue_storage(nullptr)
+        _packet_queue_storage(nullptr)
 #else
       , _queue_head(0), _queue_tail(0)
 #endif
@@ -654,7 +692,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].enabled = false;
     _slots[i].client = nullptr;
     _slots[i].preset = nullptr;
-    // auth_token[0] == '\0' after memset above — no valid token
+    // auth_token == nullptr after memset above — allocated on first token creation
     _slots[i].connected = false;
     _slots[i].initial_connect_done = false;
     _slots[i].token_expires_at = 0;
@@ -712,8 +750,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   #if !defined(BOARD_HAS_PSRAM)
   memset(_last_raw_data, 0, sizeof(_last_raw_data));
   #endif
-  // JSON document scratch space is now a StaticJsonDocument inline class member —
-  // no heap allocation needed; reused via doc.clear() on every publish.
+  // The shared JSON document needs no setup here: its pools are allocated lazily on
+  // the first publish through _json_allocator and released by releaseRuntimeBuffers().
 }
 
 void MQTTBridge::allocateRuntimeBuffers() {
@@ -723,14 +761,11 @@ void MQTTBridge::allocateRuntimeBuffers() {
   // next begin() will retry only the missing buffer.
   _last_raw_data = static_cast<uint8_t*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
       _last_raw_data, LAST_RAW_DATA_SIZE, psram_malloc));
-  _publish_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
-      _publish_json_buffer, PUBLISH_JSON_BUFFER_SIZE, psram_malloc));
-  _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
-      _status_json_buffer, STATUS_JSON_BUFFER_SIZE, psram_malloc));
-  MQTT_DEBUG_PRINTLN("Runtime buffers: raw=%s publish=%s status=%s",
+  _json_scratch_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _json_scratch_buffer, PUBLISH_JSON_BUFFER_SIZE, psram_malloc));
+  MQTT_DEBUG_PRINTLN("Runtime buffers: raw=%s json=%s",
       _last_raw_data ? "PSRAM" : "unavailable",
-      _publish_json_buffer ? "PSRAM" : "stack fallback",
-      _status_json_buffer ? "PSRAM" : "stack fallback");
+      _json_scratch_buffer ? "PSRAM" : "stack fallback");
   #endif
 
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -750,11 +785,14 @@ void MQTTBridge::releaseRuntimeBuffers() {
   #if defined(BOARD_HAS_PSRAM)
   _last_raw_data = static_cast<uint8_t*>(MQTTRuntimeBufferLifecycle::release(
       _last_raw_data, psram_free));
-  _publish_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
-      _publish_json_buffer, psram_free));
-  _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
-      _status_json_buffer, psram_free));
+  _json_scratch_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+      _json_scratch_buffer, psram_free));
   #endif
+
+  // Drop the shared document's pools with the buffers. clear() destroys every pool
+  // and resets the list to its inline array; the next publish reallocates. Holding
+  // 4 KB of pool across a stopped bridge is pure overhead.
+  _json_scratch_doc.clear();
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Paired with the unconditional allocation in allocateRuntimeBuffers().
@@ -961,9 +999,8 @@ void MQTTBridge::begin() {
   #define MQTT_TASK_PRIORITY 1
   #endif
 
-  // Task stack: use dynamic allocation (internal RAM). PSRAM stack was disabled because it
-  // causes resets on some boards (e.g. Heltec V4) when the task runs from PSRAM stack.
-  _mqtt_task_stack = nullptr;
+  // Task stack: dynamic allocation (internal RAM). A PSRAM-backed stack was tried and
+  // reverted — it resets some boards (e.g. Heltec V4) when the task runs from PSRAM.
   _mqtt_task_handle = nullptr;
   // Clear the cooperative-stop handshake before the new task starts reading it.
   // deliverStop() leaves _stop_requested latched true after a stop cycle, so a
@@ -982,8 +1019,6 @@ void MQTTBridge::begin() {
   if (create_result != pdPASS) _mqtt_task_handle = nullptr;
   if (_mqtt_task_handle == nullptr) {
     MQTT_DEBUG_PRINTLN("Failed to create MQTT task!");
-    psram_free(_mqtt_task_stack);
-    _mqtt_task_stack = nullptr;
     vQueueDelete(_packet_queue_handle);
     _packet_queue_handle = nullptr;
     #if defined(BOARD_HAS_PSRAM)
@@ -1005,10 +1040,11 @@ void MQTTBridge::begin() {
   // NOTE: Slot setup deferred until after NTP sync in loop()
   #endif
 
-  // Allocate persistent MQTT client objects once. They live for the bridge's
-  // lifetime so reconfigure/reconnect paths reuse the same mbedTLS context
-  // instead of churning ~40 KB of internal heap per cycle.
-  initSlotClients();
+  // MQTT client objects are NOT allocated here. setupSlot() creates one on a slot's
+  // first setup, so unconfigured and capped-off slots never cost their ~1.3 KB of
+  // internal DRAM. Once created a client lives for the bridge's lifetime, so the
+  // reconfigure/reconnect paths still reuse the same mbedTLS context instead of
+  // churning ~40 KB of internal heap per cycle.
 
   // Sync the lifecycle Coordinator to Running now that all resources exist and
   // the task is created. Driven only on the success path: the failure rollbacks
@@ -1083,7 +1119,7 @@ void MQTTBridge::end() {
 #endif
 
   // Timezone is inline class storage (_timezone_storage) — nothing to delete.
-  // JSON documents are StaticJsonDocument inline members — no heap to free.
+  // The shared JSON document's pools were freed by releaseRuntimeBuffers() above.
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
   MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (%s)",
@@ -1136,10 +1172,6 @@ void MQTTBridge::LifecycleOps::releaseResources() {
   // Just drop our handle reference; FreeRTOS reclaims the self-deleted task's
   // dynamically-allocated stack/TCB in the idle task.
   b->_mqtt_task_handle = nullptr;
-
-  // Free the PSRAM task stack (nullptr for dynamic tasks — no-op).
-  psram_free(b->_mqtt_task_stack);
-  b->_mqtt_task_stack = nullptr;
 
   // Drain and delete the FreeRTOS packet queue (value-copied packets, no
   // external pointers to clean up). Safe on Core 1: not a TLS resource.
@@ -1367,11 +1399,10 @@ void MQTTBridge::mqttTaskLoop() {
       #endif
 
       MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots (max %d active)...", _max_active_slots);
-      int active_count = 0;
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         if (_slots[i].enabled) {
-          if (active_count >= _max_active_slots) {
-            MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached (no PSRAM)", i + 1, _max_active_slots);
+          if (!canActivateSlot(i)) {
+            MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", i + 1, _max_active_slots);
             _slots[i].enabled = false;  // Disable so other loops skip it
             continue;
           }
@@ -1380,8 +1411,10 @@ void MQTTBridge::mqttTaskLoop() {
             MQTT_DEBUG_PRINTLN("MQTT%d not ready - run '%s' to connect", i + 1, reason);
             continue;
           }
-          setupSlot(i);
-          active_count++;
+          // A slot that fails to activate consumes no position and stays enabled, so
+          // maintainSlotConnections() retries it and a later healthy broker is not
+          // starved by it on a capped board.
+          if (!setupSlot(i)) continue;
           // Stagger connections: 5s between slots to avoid simultaneous TLS handshakes
           // which compete for ~40KB internal heap each
           if (i < RUNTIME_MQTT_SLOTS - 1) {
@@ -1546,119 +1579,199 @@ void MQTTBridge::mqttTaskLoop() {
 // Slot management
 // ---------------------------------------------------------------------------
 
-// Allocate one PsychicMqttClient per slot and register its persistent callbacks.
-// Called exactly once per bridge lifetime from begin(); the objects live until
-// destroySlotClients(). Reconfiguring a slot (preset change, JWT renewal,
-// reconnect) reuses the same client — no delete/new cycles, so the mbedTLS
-// context and its ~40 KB of internal-heap buffers are allocated once instead
-// of every reconfigure.
-void MQTTBridge::initSlotClients() {
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    MQTTSlot& slot = _slots[i];
-    if (slot.client != nullptr) continue;
+// Allocate this slot's PsychicMqttClient and register its persistent callbacks.
+// Called from setupSlot(), i.e. only for a slot that is enabled, within the active
+// cap, and ready to connect — a client is ~1.3 KB of internal DRAM and does nothing
+// at all until setupSlot() runs (the reconnect ladder is gated on
+// initial_connect_done), so slots that are unconfigured or capped off never get one.
+//
+// Once created the object lives until destroySlotClients(): reconfiguring a slot
+// (preset change, JWT renewal, reconnect) reuses it, so the mbedTLS context and its
+// ~40 KB of internal-heap buffers are allocated once instead of every reconfigure.
+// That context is created by connect(), not by this constructor, so deferring the
+// allocation to first use costs nothing beyond the object itself.
+bool MQTTBridge::ensureSlotClient(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
+  MQTTSlot& slot = _slots[index];
+  if (slot.client != nullptr) return true;
 
-    slot.client = new PsychicMqttClient();
-    slot.client->setAutoReconnect(false);  // we handle reconnect with our own backoff
-
-    const int index = i;  // capture a fresh copy so lambdas refer to the right slot
-    slot.client->onConnect([this, index](bool sessionPresent) {
-      MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
-      _slots[index].connected = true;
-      // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
-      // A CONNACK alone doesn't prove the link is healthy — a broker that
-      // accepts and then drops within seconds would reset the ladder every
-      // cycle and retry at the 10 s rung forever, and each retry is a full
-      // TLS session alloc/free (~40 KB of internal-heap churn, a known
-      // fragmentation driver). The ladder is instead cleared by
-      // maintainSlotConnection() once the connection has stayed up for
-      // BACKOFF_STABLE_RESET_MS, so flapping endpoints keep their earned
-      // backoff level. The breaker itself does clear now: while connected
-      // the diag/status must not claim the slot gave up, and the next
-      // disconnect should be governed by the (still-elevated) ladder.
-      _slots[index].connected_at_ms = millis();
-      _slots[index].circuit_breaker_tripped = false;
-      _slots[index].last_tls_err = 0;
-      _slots[index].last_tls_stack_err = 0;
-      _slots[index].last_sock_errno = 0;
-      _slots[index].last_error_time = 0;
-      _slots[index].current_outage_started_ms = 0;  // clear current-outage timer for AlertReporter
-      updateCachedConnectionStatus();  // bool store — safe from this (esp-mqtt) task
-      // This callback runs on the client's esp-mqtt event task, not the bridge
-      // task. Do NOT build/publish status here: publishStatusToSlot() writes the
-      // shared _status_json_doc/_status_json_buffer/_origin that the periodic
-      // publishStatus() uses on the bridge task, and two slots' callbacks could
-      // race each other over them. Marshal the publish onto the bridge task via a
-      // per-slot flag (see mqttTaskLoop consumer / A2).
-      _status_publish_pending[index] = true;
-    });
-    slot.client->onDisconnect([this, index](bool sessionPresent) {
-      MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
-      _slots[index].disconnect_count++;
-      if (_slots[index].first_disconnect_time == 0) {
-        _slots[index].first_disconnect_time = millis();
-      }
-      if (_slots[index].current_outage_started_ms == 0) {
-        _slots[index].current_outage_started_ms = millis();
-      }
-      _slots[index].connected = false;
-      _slots[index].connected_at_ms = 0;  // stability clock only runs while connected
-      updateCachedConnectionStatus();
-    });
-    slot.client->onError([this, index](esp_mqtt_error_codes error) {
-      _slots[index].last_tls_err = error.esp_tls_last_esp_err;
-      _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
-      _slots[index].last_sock_errno = error.esp_transport_sock_errno;
-      _slots[index].last_error_time = millis();
-      if (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
-        // Broker rejected the MQTT CONNECT itself — not a transport failure.
-        // return code: 1=protocol, 2=client-id rejected, 3=server unavailable,
-        // 4=bad username/password, 5=not authorized. Codes 3/4/5 point at a
-        // server-side lockout or auth problem rather than the network.
-        MQTT_DEBUG_PRINTLN("MQTT%d connection refused by broker (return code=%d)",
-          index + 1, (int)error.connect_return_code);
-      } else if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
-        MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
-          index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
-          error.esp_transport_sock_errno, error.error_type);
-      } else {
-        MQTT_DEBUG_PRINTLN("MQTT%d error: type=%d", index + 1, error.error_type);
-      }
-    });
+  // nothrow: this framework builds with C++ exceptions enabled, so a plain new would
+  // throw on exhaustion and panic the node. A slot that cannot get a client should
+  // degrade to the "no client" diag state instead.
+  slot.client = new (std::nothrow) PsychicMqttClient();
+  if (slot.client == nullptr) {
+    MQTT_DEBUG_PRINTLN("MQTT%d: out of memory allocating client", index + 1);
+    return false;
   }
+  slot.client->setAutoReconnect(false);  // we handle reconnect with our own backoff
+
+  slot.client->onConnect([this, index](bool sessionPresent) {
+    MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
+    _slots[index].connected = true;
+    // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
+    // A CONNACK alone doesn't prove the link is healthy — a broker that
+    // accepts and then drops within seconds would reset the ladder every
+    // cycle and retry at the 10 s rung forever, and each retry is a full
+    // TLS session alloc/free (~40 KB of internal-heap churn, a known
+    // fragmentation driver). The ladder is instead cleared by
+    // maintainSlotConnection() once the connection has stayed up for
+    // BACKOFF_STABLE_RESET_MS, so flapping endpoints keep their earned
+    // backoff level. The breaker itself does clear now: while connected
+    // the diag/status must not claim the slot gave up, and the next
+    // disconnect should be governed by the (still-elevated) ladder.
+    _slots[index].connected_at_ms = millis();
+    _slots[index].circuit_breaker_tripped = false;
+    _slots[index].last_tls_err = 0;
+    _slots[index].last_tls_stack_err = 0;
+    _slots[index].last_sock_errno = 0;
+    _slots[index].last_error_time = 0;
+    _slots[index].current_outage_started_ms = 0;  // clear current-outage timer for AlertReporter
+    updateCachedConnectionStatus();  // bool store — safe from this (esp-mqtt) task
+    // This callback runs on the client's esp-mqtt event task, not the bridge
+    // task. Do NOT build/publish status here: publishStatusToSlot() writes the
+    // shared _json_scratch_doc/_json_scratch_buffer/_origin that the periodic
+    // publishStatus() uses on the bridge task, and two slots' callbacks could
+    // race each other over them. Marshal the publish onto the bridge task via a
+    // per-slot flag (see mqttTaskLoop consumer / A2).
+    _status_publish_pending[index] = true;
+  });
+  slot.client->onDisconnect([this, index](bool sessionPresent) {
+    MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
+    _slots[index].disconnect_count++;
+    if (_slots[index].first_disconnect_time == 0) {
+      _slots[index].first_disconnect_time = millis();
+    }
+    if (_slots[index].current_outage_started_ms == 0) {
+      _slots[index].current_outage_started_ms = millis();
+    }
+    _slots[index].connected = false;
+    _slots[index].connected_at_ms = 0;  // stability clock only runs while connected
+    updateCachedConnectionStatus();
+  });
+  slot.client->onError([this, index](esp_mqtt_error_codes error) {
+    _slots[index].last_tls_err = error.esp_tls_last_esp_err;
+    _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
+    _slots[index].last_sock_errno = error.esp_transport_sock_errno;
+    _slots[index].last_error_time = millis();
+    if (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+      // Broker rejected the MQTT CONNECT itself — not a transport failure.
+      // return code: 1=protocol, 2=client-id rejected, 3=server unavailable,
+      // 4=bad username/password, 5=not authorized. Codes 3/4/5 point at a
+      // server-side lockout or auth problem rather than the network.
+      MQTT_DEBUG_PRINTLN("MQTT%d connection refused by broker (return code=%d)",
+        index + 1, (int)error.connect_return_code);
+    } else if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
+      MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
+        index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
+        error.esp_transport_sock_errno, error.error_type);
+    } else {
+      MQTT_DEBUG_PRINTLN("MQTT%d error: type=%d", index + 1, error.error_type);
+    }
+  });
+  return true;
+}
+
+// Allocate this slot's JWT token buffer. Called only from createSlotAuthToken(), the
+// sole writer, so a slot on a non-JWT preset (or no preset at all) never allocates.
+//
+// PSRAM where the board has it (psram_malloc falls back to internal DRAM otherwise),
+// which is what moves the token off internal heap for slots that DO use JWT. Safe
+// because the only readers are CPU copies on the bridge task: JWTHelper memcpy's the
+// token in here, and esp-mqtt copies it out of _mqtt_cfg into its own internal-DRAM
+// storage when connect() applies the config. No DMA, no ISR, and no cache-disabled
+// window -- unlike the PSRAM task stack that reset Heltec V4 boards.
+bool MQTTBridge::ensureSlotAuthToken(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
+  MQTTSlot& slot = _slots[index];
+  const bool fresh = (slot.auth_token == nullptr);
+  slot.auth_token = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      slot.auth_token, AUTH_TOKEN_SIZE, psram_malloc));
+  if (slot.auth_token == nullptr) {
+    MQTT_DEBUG_PRINTLN("MQTT%d: out of memory allocating auth token", index + 1);
+    return false;
+  }
+  // Initialise only a newly allocated buffer. Clearing on every call would discard a
+  // valid token at the start of each renewal, so a renewal that then failed inside
+  // JWTHelper would leave the slot with an empty password where it previously kept
+  // working credentials (JWTHelper writes the token only on success).
+  if (fresh) slot.auth_token[0] = '\0';
+  return true;
+}
+
+// Safe only once this slot's client is gone: setCredentials() gave the client this
+// pointer, and esp-mqtt re-reads it from _mqtt_cfg on any later connect() that
+// re-applies a dirtied config. See the MQTTSlot::auth_token comment.
+void MQTTBridge::releaseSlotAuthToken(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
+  MQTTSlot& slot = _slots[index];
+  slot.auth_token = static_cast<char*>(
+      MQTTRuntimeBufferLifecycle::release(slot.auth_token, psram_free));
+  slot.token_expires_at = 0;
+  slot.last_token_renewal = 0;
 }
 
 void MQTTBridge::destroySlotClients() {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     MQTTSlot& slot = _slots[i];
-    if (slot.client == nullptr) continue;
-
-    if (slot.client->connected()) {
-      slot.client->disconnect();
+    if (slot.client != nullptr) {
+      if (slot.client->connected()) {
+        slot.client->disconnect();
+      }
+      #ifdef ESP_PLATFORM
+      vTaskDelay(pdMS_TO_TICKS(50));
+      #else
+      delay(50);
+      #endif
+      delete slot.client;
+      slot.client = nullptr;
     }
-    #ifdef ESP_PLATFORM
-    vTaskDelay(pdMS_TO_TICKS(50));
-    #else
-    delay(50);
-    #endif
-    delete slot.client;
-    slot.client = nullptr;
+    // Unconditional: only now is the token unreachable from the client's stored
+    // config, and a token without a client would otherwise leak.
+    releaseSlotAuthToken(i);
   }
 }
 
-void MQTTBridge::setupSlot(int index) {
-  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
+int MQTTBridge::activatedSlotCount() const {
+  int n = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled && _slots[i].initial_connect_done) n++;
+  }
+  return n;
+}
+
+bool MQTTBridge::canActivateSlot(int index) const {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
+  // Already holding a position (a reconfigure of a live slot) — no new position needed.
+  if (_slots[index].enabled && _slots[index].initial_connect_done) return true;
+  return activatedSlotCount() < _max_active_slots;
+}
+
+// Returns true only when the slot reached connect(). A false result leaves the slot
+// enabled but not activated, so it holds no active-slot position and
+// maintainSlotConnections() will retry it — the allocation failures below are transient
+// memory conditions, not permanent misconfiguration.
+bool MQTTBridge::setupSlot(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
 
   if (!slot.enabled) {
     teardownSlot(index);
-    return;
+    return false;
   }
 
-  // Persistent client is expected to have been allocated by initSlotClients().
-  // If it hasn't, we can't proceed — bail loudly rather than silently leaking.
-  if (slot.client == nullptr) {
-    MQTT_DEBUG_PRINTLN("MQTT%d: setupSlot before initSlotClients() - skipping", index + 1);
-    return;
+  // Every failure below is a real attempt, so stamp it: the retry interval in
+  // maintainSlotConnections() measures from last_reconnect_attempt, which starts at 0
+  // and is re-zeroed by teardownSlot(). Left unstamped, the gate degenerates to
+  // "uptime >= SLOT_SETUP_RETRY_INTERVAL" and a failure past that point is retried on
+  // the very next maintenance pass — the same task iteration, for a live reconfigure.
+  // The reconnect ladder never reads this field for an unactivated slot (it is gated
+  // on initial_connect_done), so stamping here cannot perturb reconnect timing.
+
+  // First setup for this slot allocates its persistent client; later ones reuse it.
+  if (!ensureSlotClient(index)) {
+    MQTT_DEBUG_PRINTLN("MQTT%d: client allocation failed - will retry", index + 1);
+    slot.last_reconnect_attempt = millis();
+    return false;
   }
 
   // Reconfigure path: if we're re-applying (e.g. after a preset change), stop
@@ -1685,7 +1798,7 @@ void MQTTBridge::setupSlot(int index) {
     cfg->username = nullptr;
     cfg->password = nullptr;
     #endif
-    slot.auth_token[0] = '\0';
+    if (slot.auth_token) slot.auth_token[0] = '\0';
     slot.connected = false;
     slot.token_expires_at = 0;
     slot.last_token_renewal = 0;
@@ -1715,12 +1828,16 @@ void MQTTBridge::setupSlot(int index) {
       slot.client->setCACert(slot.preset->ca_cert);
     }
 
-    // Try to create token and connect (will succeed only if NTP synced)
+    // A JWT slot with no usable token would connect unauthenticated and be rejected.
+    // Stay unactivated instead, so the retry path tries again — the failure is either
+    // a transient token-buffer allocation or a JWTHelper error, not a config problem.
     if (slot.preset->auth_type == MQTT_AUTH_JWT) {
-      createSlotAuthToken(index);
-      if (slot.auth_token[0] != '\0') {
-        slot.client->setCredentials(_jwt_username, slot.auth_token);
+      if (!createSlotAuthToken(index) || !slot.auth_token || slot.auth_token[0] == '\0') {
+        MQTT_DEBUG_PRINTLN("MQTT%d: no usable JWT token - will retry", index + 1);
+        slot.last_reconnect_attempt = millis();
+        return false;
       }
+      slot.client->setCredentials(_jwt_username, slot.auth_token);
     } else if (slot.preset->auth_type == MQTT_AUTH_USERPASS) {
       const char* user = nullptr;
       const char* pass = slot.preset->userpass_password
@@ -1829,11 +1946,13 @@ void MQTTBridge::setupSlot(int index) {
 
     // Custom slot authentication: JWT if audience is set, else username/password
     if (slot.audience[0] != '\0') {
-      // JWT auth for custom slot — create initial token (buffer is always inline)
-      createSlotAuthToken(index);
-      if (slot.auth_token[0] != '\0') {
-        slot.client->setCredentials(_jwt_username, slot.auth_token);
+      // JWT auth for custom slot — same rule as the preset JWT path above.
+      if (!createSlotAuthToken(index) || !slot.auth_token || slot.auth_token[0] == '\0') {
+        MQTT_DEBUG_PRINTLN("MQTT%d: no usable JWT token - will retry", index + 1);
+        slot.last_reconnect_attempt = millis();
+        return false;
       }
+      slot.client->setCredentials(_jwt_username, slot.auth_token);
       MQTT_DEBUG_PRINTLN("MQTT%d custom broker using JWT auth (audience: %s)", index + 1, slot.audience);
     } else if (strlen(slot.username) > 0) {
       slot.client->setCredentials(slot.username, slot.password);
@@ -1842,6 +1961,7 @@ void MQTTBridge::setupSlot(int index) {
 
   slot.client->connect();
   slot.initial_connect_done = true;
+  return true;
 }
 
 // Disconnect the slot's MQTT client and clear per-connection state, but leave
@@ -1861,7 +1981,9 @@ void MQTTBridge::teardownSlot(int index) {
     #endif
   }
 
-  slot.auth_token[0] = '\0';
+  // Invalidate the token but keep the buffer: the client survives teardown and still
+  // holds this pointer in its config (see MQTTSlot::auth_token).
+  if (slot.auth_token) slot.auth_token[0] = '\0';
   slot.connected = false;
   slot.initial_connect_done = false;
   slot.broker_uri[0] = '\0';
@@ -1907,8 +2029,12 @@ void MQTTBridge::maintainSlotConnections() {
   // when multiple slots fail simultaneously
   bool teardown_attempted_this_cycle = false;
 
+  // At most one deferred setup retry per cycle: a successful one ends in connect(), so
+  // this shares the "no simultaneous TLS handshakes" rule the reconnect guard enforces.
+  bool setup_retry_this_cycle = false;
+
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (!_slots[i].enabled || !_slots[i].client) continue;
+    if (!_slots[i].enabled) continue;
 
     // JWT slots need time sync before we can manage tokens
     bool slot_jwt = (_slots[i].preset && _slots[i].preset->auth_type == MQTT_AUTH_JWT) ||
@@ -1916,6 +2042,37 @@ void MQTTBridge::maintainSlotConnections() {
     if (slot_jwt && !can_do_jwt) {
       continue;
     }
+
+    // Enabled but never activated: setupSlot() failed on a client or token allocation,
+    // or on token creation. The ladder below is gated on initial_connect_done and would
+    // never revisit it, and maintenance used to skip clientless slots entirely, so
+    // without this the slot stayed dead until a reconfigure or reboot. Only retried
+    // after the initial pass has run, so the NTP-deferred setup order is preserved.
+    if (!_slots[i].initial_connect_done) {
+      if (_slots_setup_done && !setup_retry_this_cycle && !reconnect_attempted_this_cycle &&
+          isSlotReady(i) && canActivateSlot(i) &&
+          MQTTConnectionPolicy::elapsedMs(static_cast<uint32_t>(now_millis),
+                                         static_cast<uint32_t>(_slots[i].last_reconnect_attempt))
+              >= SLOT_SETUP_RETRY_INTERVAL) {
+        _slots[i].last_reconnect_attempt = now_millis;
+        setup_retry_this_cycle = true;
+        MQTT_DEBUG_PRINTLN("MQTT%d retrying deferred setup (int_heap=%d)", i + 1,
+                           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        if (setupSlot(i)) {
+          // A successful setup ends in connect(), so it spends this cycle's single
+          // handshake allowance as well as arming the 15 s cross-slot guard. Without
+          // the local flag, a disconnected slot later in this same pass would start a
+          // second concurrent TLS handshake — the contention the guard exists to
+          // prevent, and most damaging here because a failed allocation is why we are
+          // retrying at all. A failed setup launches nothing and so spends only
+          // setup_retry_this_cycle.
+          _last_slot_reconnect_ms = now_millis;
+          reconnect_attempted_this_cycle = true;
+        }
+      }
+      continue;
+    }
+    if (!_slots[i].client) continue;
 
     maintainSlotConnection(i, now_millis, current_time, time_synced, reconnect_attempted_this_cycle, teardown_attempted_this_cycle);
   }
@@ -1930,7 +2087,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   // ladder. Flapping endpoints therefore stay at their earned backoff rung
   // (worst case the 300 s rung / 30-minute breaker probes) instead of
   // hammering full TLS handshakes at the 10 s rung — see the onConnect
-  // handler in initSlotClients() for why this doesn't happen on CONNACK.
+  // handler in ensureSlotClient() for why this doesn't happen on CONNACK.
   if (slot.connected &&
       (slot.reconnect_backoff != 0 || slot.max_backoff_failures != 0) &&
       MQTTConnectionPolicy::stableConnection(static_cast<uint32_t>(now_millis),
@@ -2029,8 +2186,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       if (slot_uses_jwt) {
         // Regenerate or refresh token, then reconnect the persistent client.
-        // The client object and its mbedTLS context are always live post
-        // initSlotClients(), so no full setup is ever needed here.
+        // Reaching the ladder at all means setupSlot() ran, so the client object
+        // and its mbedTLS context are live and no full setup is needed here.
         if (createSlotAuthToken(index)) {
           slot.client->setCredentials(_jwt_username, slot.auth_token);
           MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (fresh token)", index + 1);
@@ -2130,6 +2287,10 @@ bool MQTTBridge::createSlotAuthToken(int index) {
   }
   if (!audience || audience[0] == '\0') return false;
 
+  // This slot is confirmed JWT, so it needs the token buffer. Allocated on first use
+  // and kept thereafter; every caller already treats false as "no usable token".
+  if (!ensureSlotAuthToken(index)) return false;
+
   // Ensure JWT username is set
   if (_jwt_username[0] == '\0') {
     char public_key_hex[65];
@@ -2169,7 +2330,7 @@ bool MQTTBridge::createSlotAuthToken(int index) {
   return false;
 }
 
-bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload, bool retained, uint8_t qos) {
+bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload, size_t payload_len, bool retained, uint8_t qos) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
   if (!slot.client || !slot.connected) {
@@ -2197,7 +2358,7 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
   // tracking). Negative values (-1 write/failure) are the only actual failures; the queue
   // retry/drop path below handles them.
   bool async = (qos > 0);
-  int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), async);
+  int result = slot.client->publish(topic, qos, retained, payload, (int)payload_len, async);
   if (result < 0) {
     // QoS0 packet/raw publishes are best-effort and may be retried from the
     // bridge queue; avoid logging transient first-attempt failures here.
@@ -2214,11 +2375,11 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
   return true;
 }
 
-bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool retained, uint8_t qos) {
+bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, size_t payload_len, bool retained, uint8_t qos) {
   bool published = false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
-      if (publishToSlot(i, topic, payload, retained, qos)) {
+      if (publishToSlot(i, topic, payload, payload_len, retained, qos)) {
         published = true;
       }
     }
@@ -2280,15 +2441,16 @@ void MQTTBridge::publishStatusToSlot(int index) {
   }
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
-  // _status_json_doc/_status_json_buffer/_origin are shared with publishStatus();
-  // both callers run only on the bridge task (this function is reached solely via
-  // the _status_publish_pending consumer in mqttTaskLoop, never from the onConnect
-  // callback thread — see A2), so the accesses are serialized and need no mutex.
+  // _json_scratch_doc/_json_scratch_buffer/_origin are shared with publishStatus() and
+  // with the packet/raw paths; every one of them runs only on the bridge task (this
+  // function is reached solely via the _status_publish_pending consumer in
+  // mqttTaskLoop, never from the onConnect callback thread — see A2), so the accesses
+  // are serialized and need no mutex.
   #if defined(BOARD_HAS_PSRAM)
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
-  char* json_buffer = (_status_json_buffer != nullptr) ? _status_json_buffer : fallback_status_buffer;
+  char* json_buffer = (_json_scratch_buffer != nullptr) ? _json_scratch_buffer : fallback_status_buffer;
   #else
-  char* json_buffer = _status_json_buffer;
+  char* json_buffer = _json_scratch_buffer;
   #endif
 
   char origin_id[65];
@@ -2339,7 +2501,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
-    _status_json_doc,
+    _json_scratch_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
@@ -2354,7 +2516,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
     // on-connect status must not force retain=true. Custom slots default to
     // non-retained here too, keeping both status paths consistent.
     bool use_retain = slot.preset ? slot.preset->allow_retain : false;
-    int result = slot.client->publish(status_topic, 1, use_retain, json_buffer, strlen(json_buffer));
+    int result = slot.client->publish(status_topic, 1, use_retain, json_buffer, len);
     if (result <= 0) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
     }
@@ -2429,6 +2591,13 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
     slot.audience[sizeof(slot.audience) - 1] = '\0';
     slot.enabled = (slot.host[0] != '\0');
     if (_initialized && slot.enabled && customEndpointComplete(slot.host, slot.port)) {
+      // Same cap startup applies. teardownSlot() above already released this slot's own
+      // position, so reconfiguring a live slot still passes.
+      if (!canActivateSlot(slot_index)) {
+        MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", slot_index + 1, _max_active_slots);
+        slot.enabled = false;
+        return;
+      }
       setupSlot(slot_index);
     }
     return;
@@ -2448,6 +2617,13 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
       char reason[80];
       if (!isSlotReady(slot_index, reason, sizeof(reason))) {
         MQTT_DEBUG_PRINTLN("MQTT%d (%s) not ready - run '%s' to connect", slot_index + 1, preset_name, reason);
+        return;
+      }
+      // Same cap startup applies. Without this a live reconfigure could raise a
+      // non-PSRAM board to three concurrent TLS sessions against a cap of two.
+      if (!canActivateSlot(slot_index)) {
+        MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", slot_index + 1, _max_active_slots);
+        slot.enabled = false;
         return;
       }
       setupSlot(slot_index);
@@ -2636,10 +2812,9 @@ void MQTTBridge::loop() {
   // Deferred slot setup after NTP sync (non-ESP32 path)
   if (_ntp_synced && !_slots_setup_done) {
     _slots_setup_done = true;
-    int active_count = 0;
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       if (_slots[i].enabled) {
-        if (active_count >= _max_active_slots) {
+        if (!canActivateSlot(i)) {
           _slots[i].enabled = false;
           continue;
         }
@@ -2647,7 +2822,6 @@ void MQTTBridge::loop() {
           continue;
         }
         setupSlot(i);
-        active_count++;
       }
     }
   }
@@ -3093,7 +3267,10 @@ uint8_t MQTTBridge::eligiblePacketSlots(uint8_t packet_type, MQTTMessageType typ
   uint8_t eligible_slots = 0;
   char topic[128];
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
-    const bool slot_enabled = _slots[i].enabled && _slots[i].client != nullptr;
+    // Configuration is the gate, not client allocation: a slot whose client has not
+    // been created yet (setupSlot() runs only after NTP sync) is still a target, so
+    // the packet stays queued for the bounded retry per the note above.
+    const bool slot_enabled = _slots[i].enabled;
     // Load once so a live CLI/WebConfig update cannot split this packet's
     // decision across two different masks.
     const uint16_t filter_mask = _obs->mqtt_slot_packet_filter[i];
@@ -3122,7 +3299,10 @@ bool MQTTBridge::shouldQueuePacketType(uint8_t packet_type, bool& filtered) {
   bool any_enabled = false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
     masks[i] = _obs->mqtt_slot_packet_filter[i];
-    enabled[i] = _slots[i].enabled && _slots[i].client != nullptr;
+    // Configured, not allocated — see eligiblePacketSlots(). Gating on the client
+    // here would silently drop every packet received before the post-NTP-sync slot
+    // setup, which is exactly the window the queue exists to cover.
+    enabled[i] = _slots[i].enabled;
     any_enabled = any_enabled || enabled[i];
   }
   if (!any_enabled) return false;
@@ -3144,12 +3324,12 @@ bool MQTTBridge::publishStatus() {
   refreshOriginFromPrefs();
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
-  // _status_json_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
+  // _json_scratch_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
   #if defined(BOARD_HAS_PSRAM)
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
-  char* json_buffer = (_status_json_buffer != nullptr) ? _status_json_buffer : fallback_status_buffer;
+  char* json_buffer = (_json_scratch_buffer != nullptr) ? _json_scratch_buffer : fallback_status_buffer;
   #else
-  char* json_buffer = _status_json_buffer;
+  char* json_buffer = _json_scratch_buffer;
   #endif
   char origin_id[65];
   char timestamp[40];
@@ -3199,7 +3379,7 @@ bool MQTTBridge::publishStatus() {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
-    _status_json_doc,
+    _json_scratch_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
     client_version, "online", timestamp, json_buffer, STATUS_JSON_BUFFER_SIZE,
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
@@ -3217,7 +3397,7 @@ bool MQTTBridge::publishStatus() {
         if (buildTopicForSlot(i, MSG_STATUS, topic, sizeof(topic))) {
           any_slot_wants_status = true;
           bool use_retain = _slots[i].preset ? _slots[i].preset->allow_retain : false;
-          if (publishToSlot(i, topic, json_buffer, use_retain, 1)) {
+          if (publishToSlot(i, topic, json_buffer, (size_t)len, use_retain, 1)) {
             published = true;
           }
         }
@@ -3291,15 +3471,15 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];
   char* active_buffer;
   size_t active_buffer_size;
-  if (_publish_json_buffer != nullptr) {
-    active_buffer = _publish_json_buffer;
+  if (_json_scratch_buffer != nullptr) {
+    active_buffer = _json_scratch_buffer;
     active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   } else {
     active_buffer = json_buffer_stack;
     active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   }
 #else
-  char* active_buffer = _publish_json_buffer;
+  char* active_buffer = _json_scratch_buffer;
   const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
 #endif
   char origin_id[65];
@@ -3317,33 +3497,37 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   if (raw_data && raw_len > 0) {
     float score = (_radio && !is_tx) ? _radio->packetScore(snr, raw_len) : NAN;
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
-      _packet_json_doc,
+      _json_scratch_doc,
       raw_data, raw_len, packet, is_tx, _origin, origin_id,
       snr, rssi, score, _timezone, active_buffer, active_buffer_size
     );
   } else if (!is_tx && _last_raw_data && _last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
     float score = _radio ? _radio->packetScore(_last_snr, _last_raw_len) : NAN;
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
-      _packet_json_doc,
+      _json_scratch_doc,
       _last_raw_data, _last_raw_len, packet, is_tx, _origin, origin_id,
       _last_snr, _last_rssi, score, _timezone, active_buffer, active_buffer_size
     );
   } else {
     // Reconstruct wire-format bytes from packet (same as MQTTMessageBuilder::packetToHex).
-    // This path is used on non-PSRAM boards where raw_data is not stored in the queue,
-    // and ensures the "raw" hex field and SNR/RSSI are accurate in the JSON output.
-    uint8_t reconstructed[512];
-    uint8_t rlen = packet->writeTo(reconstructed);
+    // Reached when the queued item carried no captured raw frame, so the "raw" hex field
+    // is re-serialized rather than dropped. Guarded on the packet's own length fields
+    // as well as the destination, for the reasons in canSerializePacket().
+    uint8_t reconstructed[MQTTMessageBuilder::WIRE_SCRATCH_SIZE];
+    uint8_t rlen = 0;
+    if (MQTTMessageBuilder::canSerializePacket(packet, sizeof(reconstructed))) {
+      rlen = packet->writeTo(reconstructed);
+    }
     if (rlen > 0) {
       float score = (_radio && !is_tx) ? _radio->packetScore(snr, rlen) : NAN;
       len = MQTTMessageBuilder::buildPacketJSONFromRaw(
-        _packet_json_doc,
+        _json_scratch_doc,
         reconstructed, rlen, packet, is_tx, _origin, origin_id,
         snr, rssi, score, _timezone, active_buffer, active_buffer_size
       );
     } else {
       len = MQTTMessageBuilder::buildPacketJSON(
-        _packet_json_doc,
+        _json_scratch_doc,
         packet, is_tx, _origin, origin_id, _timezone, active_buffer, active_buffer_size
       );
     }
@@ -3359,7 +3543,7 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
       if ((eligible_slots & static_cast<uint8_t>(1u << i)) != 0 &&
           _slots[i].enabled && _slots[i].client && _slots[i].connected) {
         if (buildTopicForSlot(i, MSG_PACKETS, topic, sizeof(topic))) {
-          if (publishToSlot(i, topic, active_buffer, false)) {
+          if (publishToSlot(i, topic, active_buffer, (size_t)len, false)) {
             published = true;
           }
         }
@@ -3391,15 +3575,15 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
   char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];
   char* active_buffer;
   size_t active_buffer_size;
-  if (_publish_json_buffer != nullptr) {
-    active_buffer = _publish_json_buffer;
+  if (_json_scratch_buffer != nullptr) {
+    active_buffer = _json_scratch_buffer;
     active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   } else {
     active_buffer = json_buffer_stack;
     active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   }
 #else
-  char* active_buffer = _publish_json_buffer;
+  char* active_buffer = _json_scratch_buffer;
   const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
 #endif
   char origin_id[65];
@@ -3408,6 +3592,7 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
   origin_id[sizeof(origin_id) - 1] = '\0';
 
   int len = MQTTMessageBuilder::buildRawJSON(
+    _json_scratch_doc,
     packet, _origin, origin_id, _timezone, active_buffer, active_buffer_size
   );
 
@@ -3418,7 +3603,7 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
       if ((eligible_slots & static_cast<uint8_t>(1u << i)) != 0 &&
           _slots[i].enabled && _slots[i].client && _slots[i].connected) {
         if (buildTopicForSlot(i, MSG_RAW, topic, sizeof(topic))) {
-          if (publishToSlot(i, topic, active_buffer, false)) {
+          if (publishToSlot(i, topic, active_buffer, (size_t)len, false)) {
             published = true;
           }
         }
@@ -3468,7 +3653,7 @@ bool MQTTBridge::publishNeighbors() {
         // Neighbor snapshots are periodically refreshed. Publish synchronously
         // at QoS 0 to avoid the QoS 1 outbox, retaining where the broker allows.
         bool use_retain = _slots[i].preset ? _slots[i].preset->allow_retain : false;
-        if (publishToSlot(i, topic, _neighbors_json_buffer, use_retain, 0)) {
+        if (publishToSlot(i, topic, _neighbors_json_buffer, _neighbors_publish_len, use_retain, 0)) {
           published = true;
         }
       }
@@ -3740,7 +3925,13 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     // and re-setup all JWT-authenticated slots so they get fresh tokens.
     if (_slots_setup_done && was_ntp_synced) {
       unsigned long current_time = (unsigned long)time(nullptr);
-      for (int i = 0; i < _max_active_slots; i++) {
+      // Every slot, not _max_active_slots: that is a count of positions, never an
+      // index bound. Which indices hold those positions is not contiguous — a slot can
+      // fail isSlotReady() or its setup and be passed over, leaving a higher index
+      // activated — so bounding by the cap silently skipped an activated slot and left
+      // it holding a JWT issued against the pre-correction clock. The guard below
+      // already excludes disabled, non-JWT, and clientless slots.
+      for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         bool slot_jwt = (_slots[i].preset && _slots[i].preset->auth_type == MQTT_AUTH_JWT) ||
                         (!_slots[i].preset && _slots[i].audience[0] != '\0');
         if (_slots[i].enabled && slot_jwt && _slots[i].client) {
