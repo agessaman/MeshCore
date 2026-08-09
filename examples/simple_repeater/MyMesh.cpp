@@ -1029,7 +1029,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.agc_reset_interval = 7;    // 28 seconds (secs/4) — prevents AGC drift on long-running observers
 #endif
   // Observer defaults (radio_watchdog, alert.*, snmp.*) moved to applyMQTTDefaults()
-  // in MQTTDefaults.h — they live in /mqtt_prefs now, not NodePrefs.
+  // in MQTTDefaults.h — they live in /mqtt.json now, not NodePrefs.
 
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled
@@ -1045,7 +1045,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
-  // MQTT/WiFi/timezone/radio_watchdog defaults live in /mqtt_prefs now (see applyMQTTDefaults).
+  // MQTT/WiFi/timezone/radio_watchdog defaults live in /mqtt.json now (see applyMQTTDefaults).
 
   _prefs.adc_multiplier = 0.0f; // 0.0f means use default board multiplier
 

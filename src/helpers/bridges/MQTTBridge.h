@@ -468,7 +468,7 @@ private:
   LifecycleOps _lifecycle_ops;
   MQTTLifecycle::Coordinator _lifecycle;
 
-  // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt_prefs.
+  // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
   MQTTPrefs* _obs = nullptr;
 

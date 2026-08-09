@@ -33,7 +33,8 @@ does not reflect the GoogleTest count — run the built binary directly
 | `test_mqtt_packet_filter` | `src/helpers/MQTTPacketFilter.h` | per-slot 0-15 allowlist parsing/formatting, numeric and named spellings; exact bounds; membership; candidate/eligible split and retry-completion policy; pre-queue union gate; default-mask detection |
 | `test_mqtt_runtime_buffer_lifecycle` | `src/helpers/MQTTRuntimeBufferLifecycle.h` | idempotent allocation/release; partial-allocation degradation; retry of only missing buffers |
 | `test_mqtt_prefs_codec` | `src/helpers/MQTTPrefsStorage.h`, `src/helpers/MQTTPrefsCodec.h` | binary pre-slot/3-slot/6-slot migration fixtures; v1 header integrity; downgrade preservation; shortest-payload write policy (default filters stay downgrade-readable) |
-| `test_mqtt_prefs_atomic_store` | `src/helpers/MQTTPrefsAtomicStore.h` | transactional MQTT writes and legacy `/node_prefs` handoff; exact short-write detection; begin/finish/rename failure cleanup; original-file preservation |
+| `test_mqtt_prefs_serializer` | `src/helpers/MQTTPrefsSerializer.h`, `src/helpers/ConfigSerializer.*` | semantic nested `/mqtt.json` round trips; numeric slot keys; required/future version handling; strict length/overflow/duplicate rejection; safe semantic repair; scratch-before-live loading |
+| `test_mqtt_prefs_atomic_store` | `src/helpers/MQTTPrefsAtomicStore.h`, `src/helpers/MQTTPrefsRecovery.h` | production JSON begin/write/checksum-finish/schema-verify/commit orchestration; first-migration and rename-boundary recovery; legacy `/node_prefs` handoff; failure cleanup and original-file preservation |
 | `test_mqtt_payload_builder` | `src/helpers/MQTTPayloadBuilder.cpp` | status/packet/raw JSON contracts; optional fields; escaping; RX metrics and path; score handling; exact buffer bounds; maximum representative payloads |
 | `test_utils` | `src/Utils.cpp` | `Utils::toHex` (upstream) |
 

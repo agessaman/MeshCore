@@ -20,6 +20,7 @@ enum class FailurePoint {
   PayloadWrite,
   ImageWrite,
   Finish,
+  Verify,
   Commit,
 };
 
@@ -44,7 +45,8 @@ public:
     ++write_calls;
     if (!_open) return 0;
     const bool should_fail = (write_calls == 1 && _failure == FailurePoint::HeaderWrite) ||
-        (write_calls == 2 && _failure == FailurePoint::PayloadWrite);
+        (write_calls == 2 && _failure == FailurePoint::PayloadWrite) ||
+        _failure == FailurePoint::ImageWrite;
     const size_t written = should_fail && size > 0 ? size - 1 : size;
     _staging.insert(_staging.end(), bytes, bytes + written);
     return written;
@@ -68,6 +70,18 @@ public:
     return true;
   }
 
+  bool verify() {
+    ++verify_calls;
+    return _failure != FailurePoint::Verify;
+  }
+
+  void discardFinishedTemp() {
+    ++discard_calls;
+    _files.erase("/mqtt_prefs.tmp");
+    _finished = false;
+    _owns_temp = false;
+  }
+
   void abort() {
     ++abort_calls;
     _open = false;
@@ -88,6 +102,8 @@ public:
   int finish_calls = 0;
   int commit_calls = 0;
   int abort_calls = 0;
+  int verify_calls = 0;
+  int discard_calls = 0;
 
 private:
   FailurePoint _failure;
@@ -111,6 +127,16 @@ AtomicStore::Result runWithObserverTail(InMemoryStore* store) {
   // legacy /com_prefs file. They must be committed before that source is compacted.
   const uint8_t payload[] = {'m', 'i', 'g', 'r', 'a', 't', 'e', 0x91, 0x7e, 0xa5};
   return AtomicStore::write(*store, header, sizeof(header), payload, sizeof(payload));
+}
+
+AtomicStore::VerifiedImageResult runVerifiedJson(InMemoryStore* store) {
+  const uint8_t json[] = "{version:1,wifi:{ssid:\"mesh\"}}";
+  return AtomicStore::writeVerifiedImage(
+      *store,
+      [store, &json]() {
+        return store->write(json, sizeof(json) - 1) == sizeof(json) - 1;
+      },
+      [store]() { return store->verify(); });
 }
 
 class LegacyComPrefs {
@@ -286,9 +312,14 @@ public:
       }
       return;
     }
+    if (action == Recovery::Action::DiscardTemp) {
+      _files.erase("/mqtt_prefs.tmp");
+      return;
+    }
     if (action == Recovery::Action::PromoteBackup) {
       rename("/mqtt_prefs.bak", "/mqtt_prefs");
-      if (backup == Recovery::FileState::Usable && temp != Recovery::FileState::Missing) {
+      if (backup == Recovery::FileState::Usable && !Recovery::uncertain(temp) &&
+          temp != Recovery::FileState::Missing) {
         _files.erase("/mqtt_prefs.tmp");
       }
       return;
@@ -298,12 +329,13 @@ public:
     // incomplete transaction artifact. It only preserves artifacts when the
     // primary itself is opaque.
     if (had_primary && primary == Recovery::FileState::Usable) {
-      _files.erase("/mqtt_prefs.tmp");
-      _files.erase("/mqtt_prefs.bak");
+      if (!Recovery::uncertain(temp)) _files.erase("/mqtt_prefs.tmp");
+      if (!Recovery::uncertain(backup)) _files.erase("/mqtt_prefs.bak");
     }
   }
 
   bool has(const char* path) const { return _files.count(path) != 0; }
+  void removePrimary() { _files.erase("/mqtt_prefs"); }
   bool canStartSave() const { return !has("/mqtt_prefs.tmp") && !has("/mqtt_prefs.bak"); }
   const std::vector<uint8_t>& primary() const { return _files.at("/mqtt_prefs"); }
   static std::vector<uint8_t> oldImage() { return {'o', 'l', 'd'}; }
@@ -335,6 +367,50 @@ TEST(MQTTPrefsAtomicStore, CommitPublishesExactHeaderThenPayload) {
   EXPECT_EQ(1, store.finish_calls);
   EXPECT_EQ(1, store.commit_calls);
   EXPECT_EQ(0, store.abort_calls);
+}
+
+TEST(MQTTPrefsAtomicStore, ProductionJsonPolicyCoversEveryVerificationBoundary) {
+  const std::vector<uint8_t> old_source = {
+      'o', 'l', 'd', '-', 'p', 'r', 'e', 'f', 's'};
+  const struct {
+    FailurePoint point;
+    AtomicStore::VerifiedImageResult expected;
+    int writes;
+    int finishes;
+    int verifies;
+    int commits;
+    int aborts;
+    int discards;
+    bool keeps_temp;
+  } cases[] = {
+      {FailurePoint::None, AtomicStore::VerifiedImageResult::Committed,
+       1, 1, 1, 1, 0, 0, false},
+      {FailurePoint::Begin, AtomicStore::VerifiedImageResult::BeginFailed,
+       0, 0, 0, 0, 1, 0, false},
+      {FailurePoint::ImageWrite, AtomicStore::VerifiedImageResult::WriteFailed,
+       1, 0, 0, 0, 1, 0, false},
+      {FailurePoint::Finish, AtomicStore::VerifiedImageResult::FinishFailed,
+       1, 1, 0, 0, 1, 0, false},
+      {FailurePoint::Verify, AtomicStore::VerifiedImageResult::VerifyFailed,
+       1, 1, 1, 0, 0, 1, false},
+      {FailurePoint::Commit, AtomicStore::VerifiedImageResult::CommitFailed,
+       1, 1, 1, 1, 1, 0, true},
+  };
+
+  for (const auto& test_case : cases) {
+    InMemoryStore store(test_case.point);
+    EXPECT_EQ(test_case.expected, runVerifiedJson(&store));
+    EXPECT_EQ(test_case.writes, store.write_calls);
+    EXPECT_EQ(test_case.finishes, store.finish_calls);
+    EXPECT_EQ(test_case.verifies, store.verify_calls);
+    EXPECT_EQ(test_case.commits, store.commit_calls);
+    EXPECT_EQ(test_case.aborts, store.abort_calls);
+    EXPECT_EQ(test_case.discards, store.discard_calls);
+    EXPECT_EQ(test_case.keeps_temp, store.tempExists());
+    if (test_case.point != FailurePoint::None) {
+      EXPECT_EQ(old_source, store.source());
+    }
+  }
 }
 
 TEST(MQTTPrefsAtomicStore, AnyFailureAbortsAndPreservesExistingSource) {
@@ -546,6 +622,23 @@ TEST(MQTTPrefsAtomicStore, PowerCutDuringTempWriteKeepsPrimaryAndAllowsNextSave)
   EXPECT_TRUE(store.canStartSave());
 }
 
+TEST(MQTTPrefsAtomicStore, TornFirstMigrationTempIsDiscardedSoLegacyCanRetry) {
+  SpiffsMqttTransaction store;
+  store.removePrimary();
+  store.cutDuringTempWrite();
+
+  EXPECT_EQ(Recovery::Action::DiscardTemp,
+            Recovery::select(Recovery::FileState::Missing,
+                             Recovery::FileState::Preserve,
+                             Recovery::FileState::Missing));
+  store.recover(Recovery::FileState::Missing,
+                Recovery::FileState::Preserve,
+                Recovery::FileState::Missing);
+  EXPECT_FALSE(store.has("/mqtt_prefs"));
+  EXPECT_FALSE(store.has("/mqtt_prefs.tmp"));
+  EXPECT_TRUE(store.canStartSave());
+}
+
 TEST(MQTTPrefsAtomicStore, RecoveredUsablePrimaryClearsOpaqueTransactionArtifacts) {
   {
     SpiffsMqttTransaction store;
@@ -605,8 +698,14 @@ TEST(MQTTPrefsAtomicStore, RecoveryNeverOverwritesOpaqueNewerLayout) {
   EXPECT_EQ(Recovery::Action::KeepPrimary,
             Recovery::select(Recovery::FileState::Preserve, Recovery::FileState::Usable,
                              Recovery::FileState::Usable));
-  // If there is no primary, a usable backup wins over an opaque temp. Once
-  // promoted, production treats the backup as authoritative and clears temp.
+  // A syntactically valid future temp may already have passed verification and
+  // reached the rename phase. It wins over the stale supported backup and is
+  // promoted into the authoritative name, where older firmware will hold it.
+  EXPECT_EQ(Recovery::Action::PromoteTemp,
+            Recovery::select(Recovery::FileState::Missing, Recovery::FileState::FutureUsable,
+                             Recovery::FileState::Usable));
+  // A corrupt or incomplete temp is different: the supported backup remains
+  // the last known committed image.
   EXPECT_EQ(Recovery::Action::PromoteBackup,
             Recovery::select(Recovery::FileState::Missing, Recovery::FileState::Preserve,
                              Recovery::FileState::Usable));
@@ -615,6 +714,34 @@ TEST(MQTTPrefsAtomicStore, RecoveryNeverOverwritesOpaqueNewerLayout) {
   EXPECT_EQ(Recovery::Action::PromoteBackup,
             Recovery::select(Recovery::FileState::Missing, Recovery::FileState::Missing,
                              Recovery::FileState::Preserve));
+}
+
+TEST(MQTTPrefsAtomicStore, AmbiguousFutureOrOomTempIsNeverDeleted) {
+  for (const Recovery::FileState uncertain : {
+           Recovery::FileState::FutureClaimed,
+           Recovery::FileState::Indeterminate}) {
+    SpiffsMqttTransaction store;
+    store.cutAt(SpiffsMqttTransaction::Boundary::AfterBackupRename);
+    store.recover(Recovery::FileState::Missing, uncertain,
+                  Recovery::FileState::Usable);
+
+    // The supported backup can run this boot, but the candidate that this
+    // firmware could not classify remains available to newer firmware or a
+    // later boot with more heap. Its presence also blocks a new transaction.
+    EXPECT_EQ(SpiffsMqttTransaction::oldImage(), store.primary());
+    EXPECT_TRUE(store.has("/mqtt_prefs.tmp"));
+    EXPECT_FALSE(store.canStartSave());
+  }
+}
+
+TEST(MQTTPrefsAtomicStore, UsablePrimaryDoesNotCleanIndeterminateArtifact) {
+  SpiffsMqttTransaction store;
+  store.cutDuringTempWrite();
+  store.recover(Recovery::FileState::Usable,
+                Recovery::FileState::Indeterminate);
+  EXPECT_EQ(SpiffsMqttTransaction::oldImage(), store.primary());
+  EXPECT_TRUE(store.has("/mqtt_prefs.tmp"));
+  EXPECT_FALSE(store.canStartSave());
 }
 
 int main(int argc, char** argv) {

@@ -284,6 +284,11 @@ public:
   void savePrefs() override {
     _cli.savePrefs(_fs);
   }
+#ifdef WITH_MQTT_BRIDGE
+  bool saveObserverPrefs() override {
+    return _cli.saveObserverPrefs(_fs);
+  }
+#endif
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size);
 

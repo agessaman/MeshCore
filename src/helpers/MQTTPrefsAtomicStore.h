@@ -3,11 +3,50 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Transactional writer for /mqtt_prefs. The Store interface is intentionally
-// narrow so host tests can exercise every failure boundary without an Arduino
-// filesystem: begin(), write(), finish(), commit(), and abort(). The caller
-// supplies header and payload separately, avoiding a second full-size buffer.
+// Transactional writer policy for preferences. The Store interface is
+// intentionally narrow so host tests can exercise every failure boundary
+// without an Arduino filesystem.
 namespace MQTTPrefsAtomicStore {
+
+// Production /mqtt.json flow. finish() verifies the exact bytes written,
+// verify_image reparses the finished temp through the schema, and only then is
+// commit() allowed to publish it. A schema-verification failure discards the
+// finished temp; a commit failure preserves it for boot recovery.
+enum class VerifiedImageResult : uint8_t {
+  Committed,
+  BeginFailed,
+  WriteFailed,
+  FinishFailed,
+  VerifyFailed,
+  CommitFailed,
+};
+
+template <typename Store, typename ImageWriter, typename ImageVerifier>
+inline VerifiedImageResult writeVerifiedImage(Store& store,
+                                               ImageWriter write_image,
+                                               ImageVerifier verify_image) {
+  if (!store.begin()) {
+    store.abort();
+    return VerifiedImageResult::BeginFailed;
+  }
+  if (!write_image()) {
+    store.abort();
+    return VerifiedImageResult::WriteFailed;
+  }
+  if (!store.finish()) {
+    store.abort();
+    return VerifiedImageResult::FinishFailed;
+  }
+  if (!verify_image()) {
+    store.discardFinishedTemp();
+    return VerifiedImageResult::VerifyFailed;
+  }
+  if (!store.commit()) {
+    store.abort();
+    return VerifiedImageResult::CommitFailed;
+  }
+  return VerifiedImageResult::Committed;
+}
 
 enum class Result : uint8_t {
   Committed,
@@ -59,7 +98,7 @@ inline ImageResult writeImage(Store& store, ImageWriter write_image) {
 }
 
 // Coordinates a two-file legacy upgrade. /com_prefs must not be compacted
-// until the observer tail it carries has been published into /mqtt_prefs.
+// until the observer tail it carries has been published into /mqtt.json.
 // Keeping this state in a tiny pure helper lets host tests cover power-cut
 // boundaries without an Arduino filesystem.
 class LegacyUpgradeGate {
