@@ -891,7 +891,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.radio_fem_txgain = 0;
 
   // Observer defaults (alert.*, etc.) moved to applyMQTTDefaults() — they live
-  // in /mqtt_prefs now, not NodePrefs.
+  // in /mqtt.json now, not NodePrefs.
 
   // bridge defaults (same as repeater)
   _prefs.bridge_enabled = 1;    // enabled
@@ -900,7 +900,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bridge_baud = 115200;  // baud rate
   _prefs.bridge_channel = 1;    // channel 1
 
-  // MQTT/WiFi/timezone defaults live in /mqtt_prefs now (see applyMQTTDefaults).
+  // MQTT/WiFi/timezone defaults live in /mqtt.json now (see applyMQTTDefaults).
 
   next_post_idx = 0;
   next_client_idx = 0;

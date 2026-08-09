@@ -62,10 +62,9 @@ struct PreWifiPowerOldMQTTPrefs {
   char mqtt_email[64];
 };
 
-// MQTT preferences stored separately from NodePrefs to avoid upstream layout
-// conflicts. The full layout is the frozen v1 payload baseline. The prefix
-// before observer settings is also an explicitly supported v1 payload: it was
-// used before the observer fields were appended.
+// Runtime MQTT preferences, stored separately from NodePrefs to avoid upstream
+// layout conflicts. JSON persistence is field-based; this type is deliberately
+// free to evolve independently of the frozen binary migration layouts below.
 struct MQTTPrefs {
   char mqtt_origin[32];
   char mqtt_iata[8];
@@ -110,17 +109,57 @@ struct MQTTPrefs {
   char alert_region[31];
 
   // Neighbors publishing (PSRAM boards only). Appended at the end of the
-  // observer tail so a shorter (pre-neighbors) /mqtt_prefs payload from earlier
-  // firmware still loads with these defaulting off/24h; keeps the format at
-  // VERSION 1. Field order and sizes are kept byte-identical to the flex
-  // neighbors build so a /mqtt_prefs written by either firmware is
-  // interchangeable (see the offsetof static_asserts below).
+  // observer tail in the former binary format. Binary compatibility is now
+  // represented only by LegacyV1MQTTPrefs below.
   uint8_t mqtt_neighbors_enabled;
   uint32_t mqtt_neighbors_interval;
 
   // Per-slot payload-type allow masks. Bit N controls MeshCore packet type N
-  // for both packets and raw MQTT topics. Appended so older v1 payloads load
-  // with the default all-types masks intact.
+  // for both packets and raw MQTT topics.
+  uint16_t mqtt_slot_packet_filter[MQTT_PREFS_SLOT_COUNT];
+};
+
+// Frozen payload written by the version-1 binary format. Keep this distinct
+// from the runtime MQTTPrefs type: JSON persistence must not make the runtime
+// object's padding or member order an on-flash ABI again. Legacy decoding reads
+// into this type and field-copies into a defaulted runtime object.
+struct LegacyV1MQTTPrefs {
+  char mqtt_origin[32];
+  char mqtt_iata[8];
+  uint8_t mqtt_status_enabled;
+  uint8_t mqtt_packets_enabled;
+  uint8_t mqtt_raw_enabled;
+  uint8_t mqtt_tx_enabled;
+  uint32_t mqtt_status_interval;
+  char wifi_ssid[32];
+  char wifi_password[64];
+  uint8_t wifi_power_save;
+  char timezone_string[32];
+  int8_t timezone_offset;
+  char mqtt_slot_preset[MQTT_PREFS_SLOT_COUNT][24];
+  char mqtt_slot_host[MQTT_PREFS_SLOT_COUNT][64];
+  uint16_t mqtt_slot_port[MQTT_PREFS_SLOT_COUNT];
+  char mqtt_slot_username[MQTT_PREFS_SLOT_COUNT][32];
+  char mqtt_slot_password[MQTT_PREFS_SLOT_COUNT][64];
+  char mqtt_owner_public_key[65];
+  char mqtt_email[64];
+  char mqtt_slot_token[MQTT_PREFS_SLOT_COUNT][48];
+  char mqtt_slot_topic[MQTT_PREFS_SLOT_COUNT][96];
+  char mqtt_slot_audience[MQTT_PREFS_SLOT_COUNT][64];
+  uint8_t mqtt_rx_enabled;
+  char mqtt_ntp_server[64];
+  uint8_t snmp_enabled;
+  char snmp_community[24];
+  uint8_t radio_watchdog_minutes;
+  uint8_t alert_enabled;
+  char alert_psk_hex[33];
+  uint16_t alert_wifi_minutes;
+  uint16_t alert_mqtt_minutes;
+  uint16_t alert_min_interval_min;
+  char alert_hashtag[24];
+  char alert_region[31];
+  uint8_t mqtt_neighbors_enabled;
+  uint32_t mqtt_neighbors_interval;
   uint16_t mqtt_slot_packet_filter[MQTT_PREFS_SLOT_COUNT];
 };
 
@@ -272,20 +311,20 @@ static const size_t LEGACY6_AUDIENCE_RX_SIZE = 2840;
 
 // Frozen on-flash layouts; every firmware and native fixture build checks them.
 static_assert(sizeof(MQTTPrefsHeader) == 8, "versioned /mqtt_prefs header must stay 8 bytes");
-static_assert(offsetof(MQTTPrefs, snmp_enabled) == MQTT_PREFS_V1_PRE_OBSERVER_PAYLOAD_SIZE,
+static_assert(offsetof(LegacyV1MQTTPrefs, snmp_enabled) == MQTT_PREFS_V1_PRE_OBSERVER_PAYLOAD_SIZE,
               "v1 pre-observer /mqtt_prefs boundary changed");
-static_assert(sizeof(MQTTPrefs) == MQTT_PREFS_V1_FULL_PAYLOAD_SIZE,
+static_assert(sizeof(LegacyV1MQTTPrefs) == MQTT_PREFS_V1_FULL_PAYLOAD_SIZE,
               "v1 /mqtt_prefs payload layout changed");
 // Lock the neighbors tail to the flex neighbors build's layout so a /mqtt_prefs
 // written by either firmware is byte-for-byte interchangeable. The enable flag
 // lands in the old struct's zeroed trailing padding (offset 2857), and the
 // interval begins exactly at the pre-neighbors payload size (2860) so a
 // pre-neighbors read stops right before it and the interval keeps its default.
-static_assert(offsetof(MQTTPrefs, mqtt_neighbors_enabled) == 2857,
+static_assert(offsetof(LegacyV1MQTTPrefs, mqtt_neighbors_enabled) == 2857,
               "neighbors enable flag must sit at the flex-compatible offset");
-static_assert(offsetof(MQTTPrefs, mqtt_neighbors_interval) == MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE,
+static_assert(offsetof(LegacyV1MQTTPrefs, mqtt_neighbors_interval) == MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE,
               "neighbors interval offset must equal the pre-neighbors payload size");
-static_assert(offsetof(MQTTPrefs, mqtt_slot_packet_filter) == MQTT_PREFS_V1_PRE_FILTER_PAYLOAD_SIZE,
+static_assert(offsetof(LegacyV1MQTTPrefs, mqtt_slot_packet_filter) == MQTT_PREFS_V1_PRE_FILTER_PAYLOAD_SIZE,
               "packet filters must begin at the pre-filter payload boundary");
 static_assert(sizeof(OldMQTTPrefs) == 472, "frozen pre-slot /mqtt_prefs layout changed");
 static_assert(sizeof(PreWifiPowerOldMQTTPrefs) == 472, "frozen pre-WiFi-power /mqtt_prefs layout changed");

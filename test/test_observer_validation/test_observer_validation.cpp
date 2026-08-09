@@ -129,6 +129,18 @@ TEST(ValueFits, RejectsNullOrZeroBuffer) {
   EXPECT_FALSE(mqttValueFits("abc", 0));
 }
 
+TEST(AssignedPresetSlot, FindsDuplicatesOutsideTheTargetSlot) {
+  const char presets[4][24] = {
+    "analyzer-us", "none", "analyzer-eu", "analyzer-us"
+  };
+
+  EXPECT_EQ(3, mqttAssignedPresetSlot(presets, "analyzer-us", 0));
+  EXPECT_EQ(0, mqttAssignedPresetSlot(presets, "analyzer-us", 3));
+  EXPECT_EQ(-1, mqttAssignedPresetSlot(presets, "analyzer-eu", 2));
+  EXPECT_EQ(-1, mqttAssignedPresetSlot(presets, "missing", 0));
+  EXPECT_EQ(-1, mqttAssignedPresetSlot(presets, nullptr, 0));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

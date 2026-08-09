@@ -58,3 +58,20 @@ static inline bool mqttNtpHostnameValid(const char* host) {
 static inline bool mqttValueFits(const char* s, size_t bufsize) {
   return s != NULL && bufsize > 0 && strlen(s) < bufsize;
 }
+
+// Find a preset already assigned to another slot. The caller decides which
+// names are singleton presets ("none" and "custom" intentionally are not).
+template <size_t SlotCount, size_t PresetSize>
+static inline int mqttAssignedPresetSlot(
+    const char (&presets)[SlotCount][PresetSize],
+    const char* preset_name,
+    int ignored_slot) {
+  if (preset_name == NULL) return -1;
+  for (size_t slot = 0; slot < SlotCount; ++slot) {
+    if (static_cast<int>(slot) != ignored_slot &&
+        strcmp(presets[slot], preset_name) == 0) {
+      return static_cast<int>(slot);
+    }
+  }
+  return -1;
+}

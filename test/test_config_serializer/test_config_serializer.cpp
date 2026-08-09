@@ -214,6 +214,23 @@ TEST(NodePrefs, FemGainSettingsRoundTrip) {
     EXPECT_EQ(1, loaded.radio_fem_txgain);
 }
 
+TEST(ConfigSerializer, LoadSerial_KeyDigitsAfterFirstCharacter) {
+    MockInputStream s("{age:1,flags:2,name:\"ok\",slot1:7}");
+    TestStruct data;
+    data.age = data.flags = 0;
+    strcpy(data.name, "before");
+    EXPECT_TRUE(data.loadSerial(s));
+    EXPECT_EQ(1, data.age);
+    EXPECT_EQ(2, data.flags);
+    EXPECT_STREQ("ok", data.name);
+}
+
+TEST(ConfigSerializer, LoadSerial_RejectsLeadingDigitKey) {
+    MockInputStream s("{1slot:7}");
+    TestStruct data;
+    EXPECT_FALSE(data.loadSerial(s));
+}
+
 
 // ── main ───────────────────────────────────────────────────────
 

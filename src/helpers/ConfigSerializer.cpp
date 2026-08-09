@@ -1,5 +1,9 @@
 #include "ConfigSerializer.h"
 
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+
 bool ConfigSerializer::saveSerial(Stream& s) {
   Context context(&s, OP::WRITE);
   _context = &context;  // set the context for structure() call
@@ -22,8 +26,11 @@ bool ConfigSerializer::saveSerial(Stream& s) {
 static bool is_whitespace(char c) {
   return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
-static bool is_key_char(char c) {
+static bool is_key_start_char(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+static bool is_key_char(char c) {
+  return is_key_start_char(c) || (c >= '0' && c <= '9');
 }
 static bool is_value_char(char c) {
   return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '-' || c == '.';
@@ -64,14 +71,26 @@ int ConfigSerializer::Context::readNext() {
     case EXPECT_KEY:
       if (rd_len > 0 && c == ':') { rd_buf[rd_len] = 0; rd_len = 0; rd_mode = EXPECT_VAL_OR_OBJ; return TOK_KEY; }
       if (rd_len == 0 && is_whitespace(c)) return TOK_WHITESPACE;
-      if (rd_len < CONFIG_MAX_KEYLEN-1 && is_key_char(c)) { rd_buf[rd_len++] = c; return TOK_WHITESPACE; }
+      if (rd_len < CONFIG_MAX_KEYLEN-1 &&
+          ((rd_len == 0 && is_key_start_char(c)) || (rd_len > 0 && is_key_char(c)))) {
+        rd_buf[rd_len++] = c;
+        return TOK_WHITESPACE;
+      }
       return TOK_ERROR;
 
     case EXPECT_VAL_OR_OBJ:
       if (rd_len == 0 && is_whitespace(c)) return TOK_WHITESPACE;
-      if (rd_len == 0 && c == '"') { rd_mode = EXPECT_STRING_VAL; return TOK_WHITESPACE; }
+      if (rd_len == 0 && c == '"') {
+        rd_token_quoted = true;
+        rd_mode = EXPECT_STRING_VAL;
+        return TOK_WHITESPACE;
+      }
       if (rd_len == 0 && c == '{') { rd_mode = EXPECT_KEY; return TOK_START_OBJ; }
-      if (is_value_char(c) && rd_len < CONFIG_MAX_TOKEN_LEN-1) { rd_buf[rd_len++] = c; return TOK_WHITESPACE; }
+      if (is_value_char(c) && rd_len < CONFIG_MAX_TOKEN_LEN-1) {
+        if (rd_len == 0) rd_token_quoted = false;
+        rd_buf[rd_len++] = c;
+        return TOK_WHITESPACE;
+      }
       if (rd_len > 0 && (c == ',' || c == '}' || is_whitespace(c))) { pending = c; rd_buf[rd_len] = 0; rd_len = 0; rd_mode = EXPECT_COMMA_OR_CLOSE; return TOK_VALUE;  }
       return TOK_ERROR;
 
@@ -107,9 +126,19 @@ bool ConfigSerializer::loadSerial(Stream& s) {
     if (next_tok == TOK_KEY) {
       context.setKey(sp, context.getToken());
     } else if (next_tok == TOK_VALUE) {
+      context.setValueEvent(sp, false);
       _depth = 1;  // re-run the structure() hierarchy again (looking for specific key, at specific depth)
       structure();
     } else if (next_tok == TOK_START_OBJ) {
+      // The root has no key. For every nested object, rerun the schema at the
+      // parent depth so strict scalar fields can reject an object value and
+      // object fields can confirm that their value has the expected shape.
+      if (sp > 0) {
+        context.setValueEvent(sp, true);
+        _depth = 1;
+        structure();
+        if (!context.success) break;
+      }
       if (sp < CONFIG_MAX_DEPTH - 1) {
         sp++;
       } else {
@@ -153,6 +182,10 @@ void ConfigSerializer::def(const char* key, void* value, size_t len) {
     _context->file()->print("\"");
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       memset(value, 0, len);
       mesh::Utils::fromHex((uint8_t *)value, len, _context->getToken());
     }
@@ -181,6 +214,10 @@ void ConfigSerializer::def(const char* key, char* value, size_t max_len) {
     _context->file()->print("\"");
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       strncpy(value, _context->getToken(), max_len - 1);
       value[max_len - 1] = 0;
     }
@@ -195,6 +232,10 @@ void ConfigSerializer::def(const char* key, int32_t& value) {
     _context->file()->print(value);
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = atol(_context->getToken());
     }
   }
@@ -208,6 +249,10 @@ void ConfigSerializer::def(const char* key, uint32_t& value) {
     _context->file()->print(value);
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = atol(_context->getToken());
     }
   }
@@ -221,6 +266,10 @@ void ConfigSerializer::def(const char* key, int16_t& value) {
     _context->file()->print((int32_t) value, 10);
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = atol(_context->getToken());
     }
   }
@@ -234,6 +283,10 @@ void ConfigSerializer::def(const char* key, uint16_t& value) {
     _context->file()->print((uint32_t) value, 10);
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = atoi(_context->getToken());
     }
   }
@@ -247,6 +300,10 @@ void ConfigSerializer::def(const char* key, uint8_t& value) {
     _context->file()->print((uint32_t) value, 10);
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = atoi(_context->getToken());
     }
   }
@@ -260,6 +317,10 @@ void ConfigSerializer::def(const char* key, int8_t& value) {
     _context->file()->print((int32_t) value, 10);
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = atoi(_context->getToken());
     }
   }
@@ -273,6 +334,10 @@ void ConfigSerializer::def(const char* key, bool& value) {
     _context->file()->print(value ? "true" : "false");
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = strcmp(_context->getToken(), "true") == 0 || atoi(_context->getToken()) != 0;  // 'true' or a non-zero number
     }
   }  
@@ -290,6 +355,10 @@ void ConfigSerializer::def(const char* key, double& value) {
     }
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = atof(_context->getToken());
     }
   }
@@ -307,6 +376,10 @@ void ConfigSerializer::def(const char* key, float& value) {
     }
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() || _context->valueDepth() != _depth) {
+        _context->success = false;
+        return;
+      }
       value = (float) atof(_context->getToken());
     }
   }
@@ -323,9 +396,64 @@ void ConfigSerializer::def(const char* key, ConfigSerializer& sub_obj) {
     if (_context->file()->print("}") != 1) _context->success = false;  // failure detect
   } else {
     if (_context->keyMatch(_depth, key)) {
+      if (_context->objectStart() && _context->valueDepth() == _depth) {
+        return;  // the object itself; descendant values recurse below
+      }
+      if (_context->valueDepth() <= _depth) {
+        _context->success = false;  // known object supplied as a scalar
+        return;
+      }
       sub_obj._context = _context;  // inherit the Context
       sub_obj._depth = _depth + 1;
       sub_obj.structure();   // recurse into sub object
     }
   }
+}
+
+bool ConfigSerializer::defStrict(const char* key, char* value, size_t max_len, bool& seen) {
+  if (_context->op() == OP::WRITE) {
+    def(key, value, max_len);
+    return true;
+  }
+  if (!_context->keyMatch(_depth, key)) return false;
+  if (seen || max_len == 0 || _context->objectStart() ||
+      _context->valueDepth() != _depth || !_context->tokenQuoted()) {
+    _context->success = false;
+    return false;
+  }
+  seen = true;
+  const char* token = _context->getToken();
+  const size_t len = strlen(token);
+  if (len >= max_len) {
+    _context->success = false;
+    return false;
+  }
+  memcpy(value, token, len + 1);
+  return true;
+}
+
+bool ConfigSerializer::defStrict(const char* key, int32_t& value, bool& seen) {
+  if (_context->op() == OP::WRITE) {
+    def(key, value);
+    return true;
+  }
+  if (!_context->keyMatch(_depth, key)) return false;
+  if (seen || _context->objectStart() || _context->valueDepth() != _depth ||
+      _context->tokenQuoted()) {
+    _context->success = false;
+    return false;
+  }
+  seen = true;
+
+  const char* token = _context->getToken();
+  char* end = nullptr;
+  errno = 0;
+  const long long parsed = strtoll(token, &end, 10);
+  if (token[0] == '\0' || end == token || *end != '\0' || errno == ERANGE ||
+      parsed < INT32_MIN || parsed > INT32_MAX) {
+    _context->success = false;
+    return false;
+  }
+  value = static_cast<int32_t>(parsed);
+  return true;
 }
