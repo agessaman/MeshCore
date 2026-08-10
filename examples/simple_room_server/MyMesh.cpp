@@ -1142,6 +1142,11 @@ bool MyMesh::setRxBoostedGain(bool enable) {
   return radio_driver.setRxBoostedGainMode(enable);
 }
 
+bool MyMesh::getRxBoostedGain(bool& enabled) {
+  enabled = radio_driver.getRxBoostedGainMode();
+  return true;
+}
+
 void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   IdentityStore store(*_fs, "");

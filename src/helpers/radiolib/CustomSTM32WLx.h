@@ -68,4 +68,10 @@ class CustomSTM32WLx : public STM32WLx {
       MESH_DEBUG_PRINTLN("Set _maxPayloadMillis=%u", _maxPayloadMillis);
     }
 
+    bool getRxBoostedGainMode() {
+      uint8_t rxGain = 0;
+      readRegister(RADIOLIB_SX126X_REG_RX_GAIN, &rxGain, 1);
+      return (rxGain == RADIOLIB_SX126X_RX_GAIN_BOOSTED);
+    }
+
 };

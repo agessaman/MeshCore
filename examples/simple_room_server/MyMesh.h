@@ -318,6 +318,7 @@ public:
   void dumpLogFile() override;
   void setTxPower(int8_t power_dbm) override;
   bool setRxBoostedGain(bool enable) override;
+  bool getRxBoostedGain(bool& enabled) override;
 
   void formatNeighborsReply(char *reply) override;
   void removeNeighbor(const uint8_t* pubkey, int key_len) override;

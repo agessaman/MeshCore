@@ -15,7 +15,7 @@ inline void lr11x0ResetAGC(LR11x0* radio, float freqMHz, bool rx_boost_gain) {
   // Re-calibrate for the actual operating frequency (band=4MHz matches RadioLib default).
   radio->calibrateImageRejection(freqMHz - 4.0f, freqMHz + 4.0f);
 
-#ifdef RX_BOOSTED_GAIN
+  // Unconditional: the caller passes the live state, so gating on the variant's
+  // compile-time default would drop a user-set gain on boards that define no default.
   radio->setRxBoostedGainMode(rx_boost_gain);
-#endif
 }

@@ -324,6 +324,13 @@ public:
     return false; // CommonCLI reports unsupported if not overridden by wrapper
   };
 
+  // Reads boosted gain back off the radio. Returns false when the build can't read it,
+  // in which case 'get radio.rxgain' reports the pref alone.
+  virtual bool getRxBoostedGain(bool& enabled) {
+    (void)enabled;
+    return false;
+  };
+
   #if defined(USE_LR2021)
   virtual bool configSideDetectors(const uint8_t sideDetSFs[], uint8_t num, float bw) {
     return false; // Override in wrapper

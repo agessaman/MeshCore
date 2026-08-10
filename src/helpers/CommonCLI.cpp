@@ -1513,28 +1513,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: unsupported");
     }
-  } else if (memcmp(config, "radio.fem.rxgain ", 17) == 0) {
-    if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
-    } else if (memcmp(&config[17], "on", 2) == 0) {
-      if (_board->setLoRaFemLnaEnabled(true)) {
-        _prefs->radio_fem_rxgain = 1;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM RX gain on");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
-      }
-    } else if (memcmp(&config[17], "off", 3) == 0) {
-      if (_board->setLoRaFemLnaEnabled(false)) {
-        _prefs->radio_fem_rxgain = 0;
-        savePrefs();
-        strcpy(reply, "OK - LoRa FEM RX gain off");
-      } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
-      }
-    } else {
-      strcpy(reply, "Error: state must be on or off");
-    }
   } else if (memcmp(config, "radio.fem.txgain ", 17) == 0) {
     if (!_board->canControlLoRaFemPaGain()) {
       strcpy(reply, "Error: unsupported");
@@ -1849,12 +1827,13 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "lon", 3) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lon));
   } else if (memcmp(config, "radio.rxgain", 12) == 0) {
-    sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
-  } else if (memcmp(config, "radio.fem.rxgain", 16) == 0) {
-    if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
+    // Report the live register alongside the pref: a divergence means something reset the radio.
+    bool chip_gain;
+    if (_callbacks->getRxBoostedGain(chip_gain)) {
+      sprintf(reply, "> %s (chip: %s)", _prefs->rx_boosted_gain ? "on" : "off",
+              chip_gain ? "on" : "off");
     } else {
-      sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
+      sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
     }
   } else if (memcmp(config, "radio.fem.txgain", 16) == 0) {
     if (!_board->canControlLoRaFemPaGain()) {

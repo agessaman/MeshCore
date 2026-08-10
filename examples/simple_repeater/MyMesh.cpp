@@ -1,5 +1,6 @@
 #include "MyMesh.h"
 #include <algorithm>
+#include <math.h>    // for lroundf()
 #include <stdlib.h>  // for qsort()
 #include <helpers/RxReservePacketManager.h>
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -512,8 +513,13 @@ const char *MyMesh::getLogDateTime() {
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #if MESH_PACKET_LOGGING
   if (Serial.availableForWrite() > 0) {
+    // SNR in quarter-dB integer units: the radio's native resolution, and no float
+    // formatting, which is unreliable on some platform cores.
+    char hdr[56];
+    snprintf(hdr, sizeof(hdr), " RAW: snr_q=%d rssi=%d len=%d hex=",
+             (int)lroundf(snr * 4.0f), (int)lroundf(rssi), len);
     Serial.print(getLogDateTime());
-    Serial.print(" RAW: ");
+    Serial.print(hdr);
     mesh::Utils::printHex(Serial, raw, len);
     Serial.println();
   }
@@ -1315,6 +1321,11 @@ void MyMesh::setTxPower(int8_t power_dbm) {
 
 bool MyMesh::setRxBoostedGain(bool enable) {
   return radio_driver.setRxBoostedGainMode(enable);
+}
+
+bool MyMesh::getRxBoostedGain(bool& enabled) {
+  enabled = radio_driver.getRxBoostedGainMode();
+  return true;
 }
 
 #if defined(USE_LR2021)
