@@ -768,17 +768,10 @@ void MQTTBridge::allocateRuntimeBuffers() {
       _json_scratch_buffer ? "PSRAM" : "stack fallback");
   #endif
 
-#if defined(WITH_MQTT_NEIGHBORS)
-  // Persistent neighbors JSON buffer, heap-allocated on every board: too large to
-  // keep inline in the bridge object the way the non-PSRAM status/packet buffers
-  // are. psram_malloc() falls back to internal DRAM, so this works without PSRAM.
-  // Unlike status/packet there is no stack fallback — a nullptr simply disables
-  // publishing (requestPublishNeighbors/publishNeighbors both no-op on nullptr).
-  _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
-      _neighbors_json_buffer, NEIGHBORS_JSON_BUFFER_SIZE, psram_malloc));
-  MQTT_DEBUG_PRINTLN("Neighbors buffer: %s",
-      _neighbors_json_buffer ? "ready" : "unavailable");
-#endif
+  // The neighbors JSON buffer is NOT allocated here — requestPublishNeighbors()
+  // allocates it on first use, so a node with mqtt.neighbors off never pays its
+  // 4 KB. mqtt.neighbors is read live with no bridge restart, so gating on the
+  // pref here would leave a runtime enable with no buffer.
 }
 
 void MQTTBridge::releaseRuntimeBuffers() {
@@ -795,7 +788,7 @@ void MQTTBridge::releaseRuntimeBuffers() {
   _json_scratch_doc.clear();
 
 #if defined(WITH_MQTT_NEIGHBORS)
-  // Paired with the unconditional allocation in allocateRuntimeBuffers().
+  // Paired with the lazy allocation in requestPublishNeighbors(); no-op if never used.
   _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
       _neighbors_json_buffer, psram_free));
   _neighbors_publish_len = 0;
@@ -3640,10 +3633,19 @@ void MQTTBridge::setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_
 }
 
 void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
-  if (!_neighbors_json_buffer || !json || len == 0) return;
+  if (!json || len == 0) return;
   // Drop a new snapshot while one is still being published (Core 0 clears the
   // flag when done). Acquire pairs with the task loop's release store.
   if (_neighbors_publish_pending.load(std::memory_order_acquire)) return;
+  // Allocated on first use so a node with neighbors off never pays the 4 KB.
+  // Cross-core safe: the release store below publishes this pointer, and the task
+  // loop only reads it after the matching acquire load.
+  _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _neighbors_json_buffer, NEIGHBORS_JSON_BUFFER_SIZE, psram_malloc));
+  if (!_neighbors_json_buffer) {
+    MQTT_DEBUG_PRINTLN("Neighbors buffer unavailable, dropping snapshot");
+    return;
+  }
   if (len >= NEIGHBORS_JSON_BUFFER_SIZE) {
     len = NEIGHBORS_JSON_BUFFER_SIZE - 1;
   }
