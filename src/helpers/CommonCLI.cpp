@@ -1799,7 +1799,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (!_board->canControlLoRaFemLna()) {
       strcpy(reply, "Error: unsupported");
     } else {
-      sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
+      // Same "> <pref> (chip: <live>)" shape as radio.rxgain, so one parser covers both.
+      sprintf(reply, "> %s (chip: %s)", _prefs->radio_fem_rxgain ? "on" : "off",
+              _board->isLoRaFemLnaEnabled() ? "on" : "off");
     }
   } else if (memcmp(config, "agc.reset.interval", 18) == 0) {
     sprintf(reply, "> %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
@@ -1833,7 +1835,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
       sprintf(reply, "> %s (chip: %s)", _prefs->rx_boosted_gain ? "on" : "off",
               chip_gain ? "on" : "off");
     } else {
-      sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
+      // Explicit rather than a shorter reply: "can't read it" and "reads back off" have to
+      // stay distinguishable to anything checking the radio didn't silently reset.
+      sprintf(reply, "> %s (chip: n/a)", _prefs->rx_boosted_gain ? "on" : "off");
     }
   } else if (memcmp(config, "radio.fem.txgain", 16) == 0) {
     if (!_board->canControlLoRaFemPaGain()) {

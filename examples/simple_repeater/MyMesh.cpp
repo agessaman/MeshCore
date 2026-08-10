@@ -3,6 +3,9 @@
 #include <math.h>    // for lroundf()
 #include <stdlib.h>  // for qsort()
 #include <helpers/RxReservePacketManager.h>
+#if MESH_PACKET_LOGGING
+#include <helpers/SerialPacketLog.h>
+#endif
 #if defined(WITH_MQTT_NEIGHBORS)
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
 #endif
@@ -512,16 +515,14 @@ const char *MyMesh::getLogDateTime() {
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #if MESH_PACKET_LOGGING
-  if (Serial.availableForWrite() > 0) {
+  {
     // SNR in quarter-dB integer units: the radio's native resolution, and no float
     // formatting, which is unreliable on some platform cores.
-    char hdr[56];
-    snprintf(hdr, sizeof(hdr), " RAW: snr_q=%d rssi=%d len=%d hex=",
-             (int)lroundf(snr * 4.0f), (int)lroundf(rssi), len);
-    Serial.print(getLogDateTime());
-    Serial.print(hdr);
-    mesh::Utils::printHex(Serial, raw, len);
-    Serial.println();
+    SerialLogLine<> line;
+    line.printf("%s RAW: snr_q=%d rssi=%d len=%d hex=", getLogDateTime(),
+                (int)lroundf(snr * 4.0f), (int)lroundf(rssi), len);
+    line.hex(raw, len);
+    line.flush(Serial);
   }
 #endif
 

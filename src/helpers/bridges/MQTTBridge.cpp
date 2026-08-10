@@ -5,6 +5,7 @@
 #include "../MQTTReplyFormat.h"
 #include "../MQTTRuntimeBufferLifecycle.h"
 #include "../MQTTTopicRouter.h"
+#include "../TaskWatchdog.h"
 #include "../TxtDataHelpers.h"
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -1108,6 +1109,10 @@ void MQTTBridge::end() {
     }
     _lifecycle.tick();              // may fire StopTimedOut -> Stopped (dirty): releaseResources()
     if (!_lifecycle.isStopInProgress()) break;
+    // A cooperative teardown runs the loop task out to the slot-scaled budget (up to ~53 s
+    // on a 6-slot PSRAM board), which is far longer than any watchdog worth having. Waiting
+    // here is not a wedge, so keep feeding it.
+    taskWatchdogFeed();
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 #else

@@ -325,7 +325,7 @@ public:
   };
 
   // Reads boosted gain back off the radio. Returns false when the build can't read it,
-  // in which case 'get radio.rxgain' reports the pref alone.
+  // in which case 'get radio.rxgain' reports the pref with "(chip: n/a)".
   virtual bool getRxBoostedGain(bool& enabled) {
     (void)enabled;
     return false;

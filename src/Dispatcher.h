@@ -6,6 +6,13 @@
 #include <Utils.h>
 #include <string.h>
 
+// The human-readable "RX,/TX," lines, split out from MESH_PACKET_LOGGING so a build can keep
+// the machine-readable RAW: dump without paying for both. Set to 0 alongside
+// MESH_PACKET_LOGGING=1 for capture builds; roughly halves serial volume.
+#ifndef MESH_PACKET_LOGGING_TEXT
+  #define MESH_PACKET_LOGGING_TEXT  MESH_PACKET_LOGGING
+#endif
+
 namespace mesh {
 
 /**

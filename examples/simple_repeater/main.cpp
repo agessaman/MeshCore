@@ -1,5 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
+#include <helpers/SerialPacketLog.h>
+#include <helpers/TaskWatchdog.h>
 
 #include "MyMesh.h"
 
@@ -37,6 +39,7 @@ static unsigned long userBtnDownAt = 0;
 
 void setup() {
   Serial.begin(115200);
+  serialLogBegin();
   delay(1000);
 
   board.begin();
@@ -125,9 +128,14 @@ void setup() {
 #endif
 
   board.onBootComplete();
+
+  // Subscribed last so a slow boot can't trip it.
+  taskWatchdogBegin();
 }
 
 void loop() {
+  taskWatchdogFeed();
+
   // Handle Serial CLI
   int len = strlen(command);
   while (Serial.available() && len < sizeof(command)-1) {
@@ -135,7 +143,7 @@ void loop() {
     if (c != '\n') {
       command[len++] = c;
       command[len] = 0;
-      Serial.print(c);
+      serialLogEmit(Serial, &c, 1);   // echo, but never block on a host that stopped reading
     }
     if (c == '\r') break;
   }
@@ -144,7 +152,7 @@ void loop() {
   }
 
   if (len > 0 && command[len - 1] == '\r') {  // received complete line
-    Serial.print('\n');
+    serialLogEmit(Serial, "\n", 1);
     command[len - 1] = 0;  // replace newline with C string null terminator
     char reply[160];
     reply[0] = 0;
@@ -156,7 +164,9 @@ void loop() {
     the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
 #endif
     if (reply[0]) {
-      Serial.print("  -> "); Serial.println(reply);
+      SerialLogLine<192> line;
+      line.printf("  -> %s", reply);
+      line.flush(Serial);
     }
 
     command[0] = 0;  // reset command buffer
@@ -206,6 +216,7 @@ void loop() {
 #else
     if (the_mesh.millisHasNowPassed(POWERSAVING_FIRSTSLEEP_SECS * 1000)) { // To check if it is time to sleep
       board.sleep(30); // Sleep. Wake up after a while or when receiving a LoRa packet
+      taskWatchdogFeed();   // sleeping is not a wedge
     }
 #endif
   }
