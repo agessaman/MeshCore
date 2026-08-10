@@ -1057,6 +1057,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #endif
 #endif
   _prefs.radio_fem_rxgain = 1;      // LoRa FEM RX gain on by default (FEM boards)
+  _prefs.radio_fem_txgain = 0;      // LoRa FEM TX gain off by default (FEM boards)
   _prefs.cad_enabled = 0;           // hardware CAD before TX (off by default; 'set cad on')
 
   pending_discover_tag = 0;
@@ -1198,6 +1199,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
   board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);   // LoRa FEM LNA (FEM boards only)
+  board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
 
   updateAdvertTimer();
   updateFloodAdvertTimer();

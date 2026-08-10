@@ -66,6 +66,7 @@ public:
   char owner_info[120];
   uint8_t rx_boosted_gain = 0; // power settings
   uint8_t radio_fem_rxgain = 0; // LoRa FEM RX-gain (LNA); hardware driving is wired per-board
+  uint8_t radio_fem_txgain = 0; // LoRa FEM TX gain setting
   uint8_t path_hash_mode = 0;   // which path mode to use when sending
   uint8_t loop_detect = 0;
   uint8_t cad_enabled = 0;      // hardware Channel Activity Detection before TX (boolean)
@@ -88,6 +89,7 @@ private:
       def("int_thr", _parent->interference_threshold);
       def("rxgain", _parent->rx_boosted_gain);
       def("fem_rxgain", _parent->radio_fem_rxgain);
+      def("fem_txgain", _parent->radio_fem_txgain);
       def("tx", _parent->tx_power_dbm);
       def("af", _parent->airtime_factor);
       def("rxdelay", _parent->rx_delay_base);

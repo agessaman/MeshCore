@@ -56,11 +56,11 @@ static const size_t LEGACY_MQTT_GAP_6SLOT = 306 + 6 * 186;  // 1422
 static const size_t LEGACY_MQTT_GAP_3SLOT = 306 + 3 * 186;  // 864
 static const size_t LEGACY_OBS_TAIL_MAX = 124;  // rx_boosted(1) + flood(2) + snmp(25) + watchdog(1) + alert block(95)
 
-// Bytes the last binary layout wrote after owner_info (offsets 290-294):
+// Bytes the last binary layout wrote after owner_info (offsets 290-295):
 // rx_boosted_gain, flood_max_unscoped, flood_max_advert, radio_fem_rxgain,
-// cad_enabled. loadPrefsInt() treats any larger remainder as a legacy MQTT-gap
+// cad_enabled, radio_fem_txgain. loadPrefsInt() treats any larger remainder as a legacy MQTT-gap
 // file. Prefs are now written as JSON, so this describes read-side history only.
-static const size_t COM_PREFS_TAIL_BYTES = 5;
+static const size_t COM_PREFS_TAIL_BYTES = 6;
 
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
@@ -207,6 +207,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
     // Defaults for the trailing fields that older/shorter files may not contain.
     // (upstream defaults: FEM RX gain on, CAD off) — overwritten below if present.
     _prefs->radio_fem_rxgain = 1;
+    _prefs->radio_fem_txgain = 0;
     _prefs->cad_enabled = 0;
     // A remainder larger than the new-format tail means an old fork file with the
     // legacy MQTT gap; detect and recover it below.
@@ -322,6 +323,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
       if (file.available() >= (int)sizeof(_prefs->cad_enabled)) {        // 294
         file.read((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));
       }
+      if (file.available() >= (int)sizeof(_prefs->radio_fem_txgain)) {   // 295
+        file.read((uint8_t *)&_prefs->radio_fem_txgain, sizeof(_prefs->radio_fem_txgain));
+      }
     }
 
     // sanitise bad pref values
@@ -338,9 +342,6 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
     _prefs->adc_multiplier = constrain(_prefs->adc_multiplier, 0.0f, 10.0f);
     _prefs->path_hash_mode = constrain(_prefs->path_hash_mode, 0, 2);   // NOTE: mode 3 reserved for future
     _prefs->loop_detect = constrain(_prefs->loop_detect, 0, 3);          // LOOP_DETECT_OFF..LOOP_DETECT_STRICT
-    _prefs->radio_fem_rxgain = constrain(_prefs->radio_fem_rxgain, 0, 1); // boolean
-    _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1);          // boolean
-
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->bridge_delay = constrain(_prefs->bridge_delay, 0, 10000);
@@ -355,6 +356,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
 
     _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
     _prefs->radio_fem_rxgain = constrain(_prefs->radio_fem_rxgain, 0, 1); // boolean
+    _prefs->radio_fem_txgain = constrain(_prefs->radio_fem_txgain, 0, 1); // boolean
     _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1); // boolean
 
     file.close();
@@ -1533,6 +1535,28 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: state must be on or off");
     }
+  } else if (memcmp(config, "radio.fem.txgain ", 17) == 0) {
+    if (!_board->canControlLoRaFemPaGain()) {
+      strcpy(reply, "Error: unsupported");
+    } else if (memcmp(&config[17], "on", 2) == 0) {
+      if (_board->setLoRaFemPaGainEnabled(true)) {
+        _prefs->radio_fem_txgain = 1;
+        savePrefs();
+        strcpy(reply, "OK - LoRa FEM TX gain on");
+      } else {
+        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
+      }
+    } else if (memcmp(&config[17], "off", 3) == 0) {
+      if (_board->setLoRaFemPaGainEnabled(false)) {
+        _prefs->radio_fem_txgain = 0;
+        savePrefs();
+        strcpy(reply, "OK - LoRa FEM TX gain off");
+      } else {
+        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
+      }
+    } else {
+      strcpy(reply, "Error: state must be on or off");
+    }
   } else if (memcmp(config, "radio ", 6) == 0) {
     strcpy(tmp, &config[6]);
     const char *parts[4];
@@ -1831,6 +1855,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: unsupported");
     } else {
       sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
+    }
+  } else if (memcmp(config, "radio.fem.txgain", 16) == 0) {
+    if (!_board->canControlLoRaFemPaGain()) {
+      strcpy(reply, "Error: unsupported");
+    } else {
+      sprintf(reply, "> %s", _board->isLoRaFemPaGainEnabled() ? "on" : "off");
     }
   } else if (memcmp(config, "radio", 5) == 0) {
     char freq[16], bw[16];
