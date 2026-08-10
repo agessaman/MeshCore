@@ -102,11 +102,27 @@ print("reduced-TLS: linking mbedTLS from %s (verified)" % staged)
 
 
 def _verify_map(source, target, env):
-    """Confirm every mbedTLS archive in the link came from our directory."""
-    map_path = os.path.join(env.subst("$BUILD_DIR"), "firmware.map")
+    """Confirm every mbedTLS archive in the link came from our directory.
+
+    Fails closed. Anything that stops this from *proving* the link — no map, an
+    unparsable map, a short archive list — is a failure, not a warning. A warning
+    here would leave exactly the hole the check exists to close: an opt-in build
+    that succeeds while silently linking the framework's 16 KiB buffers.
+    """
+    # Derive the map name from PROGNAME rather than hardcoding firmware.map, so a
+    # renamed program cannot leave us inspecting a stale or absent file.
+    map_path = os.path.join(env.subst("$BUILD_DIR"),
+                            env.subst("${PROGNAME}") + ".map")
     if not os.path.isfile(map_path):
-        print("reduced-TLS: WARNING no firmware.map, cannot confirm the link",
+        legacy = os.path.join(env.subst("$BUILD_DIR"), "firmware.map")
+        map_path = legacy if os.path.isfile(legacy) else map_path
+    if not os.path.isfile(map_path):
+        print("\n*** reduced-TLS: no linker map at %s ***" % map_path,
               file=sys.stderr)
+        print("Cannot prove the reduced-TLS archives were linked. Ensure the env "
+              "emits a map (-Wl,-Map), or unset MESHCORE_REDUCED_TLS.",
+              file=sys.stderr)
+        env.Exit(1)
         return
     # The map records whatever the linker was given, which for a -L hit is a path
     # relative to the linker's cwd (the project dir). Resolve before comparing, or
@@ -133,12 +149,21 @@ def _verify_map(source, target, env):
         for path in sorted(stray):
             print("  " + path, file=sys.stderr)
         env.Exit(1)
-    if not seen:
-        print("reduced-TLS: WARNING firmware.map names no mbedTLS archive",
-              file=sys.stderr)
         return
-    print("reduced-TLS: confirmed %d archives linked from %s"
-          % (len(seen), staged))
+    # Every required archive must appear. Seeing only some of them means the rest
+    # resolved somewhere this parse did not recognise, which is not proof of anything.
+    missing = [name for name in REQUIRED if name not in seen]
+    if missing:
+        print("\n*** reduced-TLS: %s names only %d of %d archives ***"
+              % (os.path.basename(map_path), len(seen), len(REQUIRED)),
+              file=sys.stderr)
+        print("  missing: " + ", ".join(missing), file=sys.stderr)
+        print("Either the map format changed or mbedTLS was resolved elsewhere; "
+              "the reduced buffers cannot be assumed.", file=sys.stderr)
+        env.Exit(1)
+        return
+    print("reduced-TLS: confirmed all %d archives linked from %s"
+          % (len(REQUIRED), staged))
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", _verify_map)

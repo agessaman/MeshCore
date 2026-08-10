@@ -1992,6 +1992,23 @@ void MQTTBridge::teardownSlot(int index) {
   slot.last_deferred_log_ms = 0;
 }
 
+// A stopped client needs connect(): reconnect() is a documented no-op on one, so reaching
+// it here would strand the slot. The WiFi-transition teardown stops a client while leaving
+// initial_connect_done set, so the ladder does see this state.
+void MQTTBridge::reconnectSlotClient(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
+  MQTTSlot& slot = _slots[index];
+  if (slot.client == nullptr) return;
+
+  if (!slot.client->isStarted()) {
+    MQTT_DEBUG_PRINTLN("MQTT%d start (client was stopped)", index + 1);
+    slot.client->connect();
+    return;
+  }
+  slot.client->reconnect();
+}
+
+
 void MQTTBridge::maintainSlotConnections() {
   if (!_identity) return;
 
@@ -3637,6 +3654,11 @@ void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
   // Drop a new snapshot while one is still being published (Core 0 clears the
   // flag when done). Acquire pairs with the task loop's release store.
   if (_neighbors_publish_pending.load(std::memory_order_acquire)) return;
+  // Allocating here means a stopped bridge must not: a discovery started before the
+  // stop can finish after it, and releaseRuntimeBuffers() has already run, so the
+  // allocation would be retained with no task left to consume it. isRunning() is the
+  // same flag end() guards on.
+  if (!isRunning()) return;
   // Allocated on first use so a node with neighbors off never pays the 4 KB.
   // Cross-core safe: the release store below publishes this pointer, and the task
   // loop only reads it after the matching acquire load.
@@ -3959,7 +3981,9 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
             if (createSlotAuthToken(i)) {
               _slots[i].client->setCredentials(_jwt_username, _slots[i].auth_token);
             }
-            _slots[i].client->reconnect();
+            // Reuse the transport — the fault is stale credentials, not the transport —
+            // but via the helper, so a stopped client is started rather than no-opped.
+            reconnectSlotClient(i);
           }
         }
       }
