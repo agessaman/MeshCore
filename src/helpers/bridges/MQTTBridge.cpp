@@ -2148,7 +2148,16 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
                                             (time_synced && old_token_expires_at >= 1000000000 &&
                                              current_time >= (old_token_expires_at - renewal_buffer));
 
-        if (old_token_expired_or_imminent || !slot.client->connected()) {
+        // Only bounce for exp if this broker actually enforces it. A broker that
+        // leaves live sessions alone past expiry needs the fresh token at the next
+        // reconnect, not now, and the bounce's re-handshake is where contiguity goes.
+        const bool exp_forces_bounce =
+            old_token_expired_or_imminent && mqttPresetEnforcesTokenExp(slot.preset);
+        if (!exp_forces_bounce && old_token_expired_or_imminent && slot.client->connected()) {
+          MQTT_DEBUG_PRINTLN("MQTT%d token renewed, no bounce (broker does not enforce exp)",
+              index + 1);
+        }
+        if (exp_forces_bounce || !slot.client->connected()) {
           // Disconnect + reconnect with fresh credentials, reusing existing client
           // to avoid internal heap leak/fragmentation from destroy/create cycles
           MQTT_DEBUG_PRINTLN("MQTT%d token renewal: reconnecting with fresh credentials", index + 1);
