@@ -1,6 +1,7 @@
 #include "MQTTMessageBuilder.h"
 #include <ArduinoJson.h>
 #include <time.h>
+#include <sys/time.h>
 #include <Timezone.h>
 #include "MeshCore.h"
 
@@ -176,18 +177,25 @@ int MQTTMessageBuilder::buildPacketJSON(
   if (!packet) return 0;
   
   // Get current device time (should be UTC since system timezone is set to UTC)
-  time_t now = time(nullptr);
+  struct timeval now_tv;
+  gettimeofday(&now_tv, nullptr);
+  time_t now = now_tv.tv_sec;
   
-  // Convert to local time using timezone library (for timestamp field only)
-  time_t local_time = timezone ? timezone->toLocal(now) : now;
-  struct tm* local_timeinfo = localtime(&local_time);
+  // Packet timestamp is emitted as zone-aware UTC (RFC3339 "Zulu") via gmtime — not naive
+  // local time. (timezone is intentionally not applied here; see the timestamp comment below.)
+  struct tm* utc_ts_info = gmtime(&now);
   
-  // Format timestamp in ISO 8601 format (LOCAL TIME)
+  // Zone-aware UTC (RFC3339 Zulu) with a REAL sub-second from gettimeofday(). The prior ".000000"
+  // was a hardcoded literal carrying no information; gettimeofday() yields genuine microseconds
+  // (SNTP-maintained on ESP32), useful for self-hosted logging/correlation. Aggregators that only
+  // need second resolution (e.g. CoreScope) simply truncate the fraction. Emitting UTC with an
+  // explicit Z (not naive local time) also stops such aggregators from clamping the value.
   char timestamp[32];
-  if (local_timeinfo) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", local_timeinfo);
+  if (utc_ts_info) {
+    size_t ts_len = strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", utc_ts_info);
+    snprintf(timestamp + ts_len, sizeof(timestamp) - ts_len, ".%06ldZ", (long)now_tv.tv_usec);
   } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+    strcpy(timestamp, "2024-01-01T12:00:00.000000Z");
   }
   
   // Get UTC time (since system timezone is UTC, time() returns UTC)
@@ -258,18 +266,25 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
   if (!packet || !raw_data || raw_len <= 0) return 0;
   
   // Get current device time (should be UTC since system timezone is set to UTC)
-  time_t now = time(nullptr);
+  struct timeval now_tv;
+  gettimeofday(&now_tv, nullptr);
+  time_t now = now_tv.tv_sec;
   
-  // Convert to local time using timezone library (for timestamp field only)
-  time_t local_time = timezone ? timezone->toLocal(now) : now;
-  struct tm* local_timeinfo = localtime(&local_time);
+  // Packet timestamp is emitted as zone-aware UTC (RFC3339 "Zulu") via gmtime — not naive
+  // local time. (timezone is intentionally not applied here; see the timestamp comment below.)
+  struct tm* utc_ts_info = gmtime(&now);
   
-  // Format timestamp in ISO 8601 format (LOCAL TIME)
+  // Zone-aware UTC (RFC3339 Zulu) with a REAL sub-second from gettimeofday(). The prior ".000000"
+  // was a hardcoded literal carrying no information; gettimeofday() yields genuine microseconds
+  // (SNTP-maintained on ESP32), useful for self-hosted logging/correlation. Aggregators that only
+  // need second resolution (e.g. CoreScope) simply truncate the fraction. Emitting UTC with an
+  // explicit Z (not naive local time) also stops such aggregators from clamping the value.
   char timestamp[32];
-  if (local_timeinfo) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", local_timeinfo);
+  if (utc_ts_info) {
+    size_t ts_len = strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", utc_ts_info);
+    snprintf(timestamp + ts_len, sizeof(timestamp) - ts_len, ".%06ldZ", (long)now_tv.tv_usec);
   } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+    strcpy(timestamp, "2024-01-01T12:00:00.000000Z");
   }
   
   // Get UTC time (since system timezone is UTC, time() returns UTC)
@@ -335,18 +350,20 @@ int MQTTMessageBuilder::buildRawJSON(
   if (!packet) return 0;
   
   // Get current device time
-  time_t now = time(nullptr);
+  struct timeval now_tv;
+  gettimeofday(&now_tv, nullptr);
+  time_t now = now_tv.tv_sec;
   
-  // Convert to local time using timezone library
-  time_t local_time = timezone ? timezone->toLocal(now) : now;
-  struct tm* timeinfo = localtime(&local_time);
+  // Emit zone-aware UTC (RFC3339 Zulu) — consistent with the packet builders above.
+  struct tm* timeinfo = gmtime(&now);
   
-  // Format timestamp in ISO 8601 format
+  // Format timestamp as zone-aware UTC (RFC3339 Zulu) with real sub-second from gettimeofday()
   char timestamp[32];
   if (timeinfo) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", timeinfo);
+    size_t ts_len = strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", timeinfo);
+    snprintf(timestamp + ts_len, sizeof(timestamp) - ts_len, ".%06ldZ", (long)now_tv.tv_usec);
   } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+    strcpy(timestamp, "2024-01-01T12:00:00.000000Z");
   }
   
   // Convert packet to hex

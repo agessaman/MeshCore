@@ -1480,12 +1480,18 @@ bool MQTTBridge::publishStatus() {
   char timestamp[32];
   char radio_info[64];
   
-  // Get current timestamp in ISO 8601 format
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", &timeinfo);
+  // Zone-aware UTC timestamp (RFC3339 "Zulu") with a real sub-second from gettimeofday(), matching
+  // the packet builder (MQTTMessageBuilder). The prior ".000000" literal carried no sub-second and
+  // (with a local TZ set) could read as naive local; gmtime() + an explicit Z keeps it unambiguous UTC.
+  struct timeval now_tv;
+  gettimeofday(&now_tv, nullptr);
+  time_t now_sec = now_tv.tv_sec;
+  struct tm* utc_info = gmtime(&now_sec);
+  if (utc_info) {
+    size_t ts_len = strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", utc_info);
+    snprintf(timestamp + ts_len, sizeof(timestamp) - ts_len, ".%06ldZ", (long)now_tv.tv_usec);
   } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+    strcpy(timestamp, "2024-01-01T12:00:00.000000Z");
   }
   
   // Build radio info string (freq,bw,sf,cr)
@@ -2497,12 +2503,18 @@ void MQTTBridge::publishStatusToAnalyzerClient(PsychicMqttClient* client, const 
   char timestamp[32];
   char radio_info[64];
   
-  // Get current timestamp in ISO 8601 format
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000000", &timeinfo);
+  // Zone-aware UTC timestamp (RFC3339 "Zulu") with a real sub-second from gettimeofday(), matching
+  // the packet builder (MQTTMessageBuilder). The prior ".000000" literal carried no sub-second and
+  // (with a local TZ set) could read as naive local; gmtime() + an explicit Z keeps it unambiguous UTC.
+  struct timeval now_tv;
+  gettimeofday(&now_tv, nullptr);
+  time_t now_sec = now_tv.tv_sec;
+  struct tm* utc_info = gmtime(&now_sec);
+  if (utc_info) {
+    size_t ts_len = strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", utc_info);
+    snprintf(timestamp + ts_len, sizeof(timestamp) - ts_len, ".%06ldZ", (long)now_tv.tv_usec);
   } else {
-    strcpy(timestamp, "2024-01-01T12:00:00.000000");
+    strcpy(timestamp, "2024-01-01T12:00:00.000000Z");
   }
   
   // Build radio info string (freq,bw,sf,cr)
