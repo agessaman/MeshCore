@@ -228,6 +228,10 @@ private:
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
   volatile bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS];
 
+  // A broker refusal can invalidate an otherwise clock-valid JWT. The esp-mqtt
+  // callback sets this and the bridge loop consumes it; byte access is atomic.
+  volatile bool _slot_force_jwt_mint[RUNTIME_MQTT_SLOTS];
+
   // Pending on-connect status publish: set from the onConnect callback (which
   // runs on the esp-mqtt event task, NOT this bridge task), consumed by the MQTT
   // task (Core 0). publishStatusToSlot() touches the shared status doc/buffer/

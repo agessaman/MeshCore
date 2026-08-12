@@ -137,6 +137,22 @@ TEST(MQTTConnectionPolicy, SyncedClockRenewsInvalidExpiredOrImminentTokens) {
   EXPECT_TRUE(Policy::tokenNeedsRenewal(true, expires + 1U, expires, 300U));
 }
 
+TEST(MQTTConnectionPolicy, JwtReconnectReusesOnlyProvenValidCredentials) {
+  const uint32_t now = 1735689600U;
+  const uint32_t usable_expiry = now + Policy::kJwtReconnectSafetyMarginSecs + 1U;
+
+  EXPECT_TRUE(Policy::canReuseJwtForReconnect(true, true, false, now, usable_expiry));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(
+      true, true, false, now, Policy::kMinimumValidEpoch - 1U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(
+      true, true, false, now, now + Policy::kJwtReconnectSafetyMarginSecs));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now - 1U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, false, false, now, usable_expiry));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(false, true, false, now, usable_expiry));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, true, now, usable_expiry));
+}
+
 TEST(MQTTConnectionPolicy, RenewalThrottleHasExactBoundaryAndHandlesRollover) {
   EXPECT_FALSE(Policy::renewalAttemptAllowed(59999U, 0U));
   EXPECT_TRUE(Policy::renewalAttemptAllowed(60000U, 0U));

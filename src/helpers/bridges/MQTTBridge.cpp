@@ -704,6 +704,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].last_log_time = 0;
     _slots[i].port = 1883;
     _slot_reconfigure_pending[i] = false;
+    _slot_force_jwt_mint[i] = false;
     _status_publish_pending[i] = false;
   }
 
@@ -1601,6 +1602,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
   slot.client->onConnect([this, index](bool sessionPresent) {
     MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
     _slots[index].connected = true;
+    _slot_force_jwt_mint[index] = false;
     // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
     // A CONNACK alone doesn't prove the link is healthy — a broker that
     // accepts and then drops within seconds would reset the ladder every
@@ -1647,6 +1649,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
     _slots[index].last_sock_errno = error.esp_transport_sock_errno;
     _slots[index].last_error_time = millis();
     if (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+      _slot_force_jwt_mint[index] = true;
       // Broker rejected the MQTT CONNECT itself — not a transport failure.
       // return code: 1=protocol, 2=client-id rejected, 3=server unavailable,
       // 4=bad username/password, 5=not authorized. Codes 3/4/5 point at a
@@ -1801,6 +1804,8 @@ bool MQTTBridge::setupSlot(int index) {
     slot.max_backoff_failures = 0;
     slot.circuit_breaker_tripped = false;
     slot.last_reconnect_attempt = 0;
+    // The refusal that set this belonged to the credentials being cleared here.
+    _slot_force_jwt_mint[index] = false;
   }
 
   bool uses_jwt = (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) || slot.audience[0] != '\0';
@@ -1990,6 +1995,8 @@ void MQTTBridge::teardownSlot(int index) {
   slot.last_reconnect_attempt = 0;
   slot.last_log_time = 0;
   slot.last_deferred_log_ms = 0;
+  // The refusal that set this belonged to the credentials being cleared here.
+  _slot_force_jwt_mint[index] = false;
 }
 
 // A stopped client needs connect(): reconnect() is a documented no-op on one, so reaching
@@ -2203,6 +2210,59 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   // persistent clients (Phase 1), the mbedTLS context is allocated once at
   // startup and the preflight is no longer necessary.
 
+  const auto prepareJwtReconnect = [&](bool force_mint, int backoff_level) {
+    const bool has_token = slot.auth_token && slot.auth_token[0] != '\0';
+    const unsigned long expires_at = slot.token_expires_at;
+    const bool remaining_known = time_synced &&
+        expires_at >= MQTTConnectionPolicy::kMinimumValidEpoch;
+    const unsigned long remaining_secs = current_time < expires_at
+        ? expires_at - current_time
+        : 0;
+    const bool force_mint_after_refusal = _slot_force_jwt_mint[index];
+    force_mint = force_mint || force_mint_after_refusal;
+    const bool reuse_token = MQTTConnectionPolicy::canReuseJwtForReconnect(
+        time_synced, has_token, force_mint, static_cast<uint32_t>(current_time),
+        static_cast<uint32_t>(expires_at));
+    const char* mint_reason = "none";
+    if (!reuse_token) {
+      if (backoff_level < 0) {
+        mint_reason = "circuit-breaker-probe";
+      } else if (force_mint_after_refusal) {
+        mint_reason = "connection-refused";
+      } else if (!time_synced) {
+        mint_reason = "clock-unsynced";
+      } else if (!has_token) {
+        mint_reason = "empty-token";
+      } else if (expires_at < MQTTConnectionPolicy::kMinimumValidEpoch) {
+        mint_reason = "invalid-expiry";
+      } else if (current_time >= expires_at) {
+        mint_reason = "expired";
+      } else {
+        mint_reason = "safety-margin";
+      }
+    }
+    const char* mint_result = reuse_token ? "REUSED" : "FAILED";
+    if (!reuse_token && createSlotAuthToken(index)) {
+      slot.client->setCredentials(_jwt_username, slot.auth_token);
+      mint_result = "OK";
+    }
+    char remaining_text[24];
+    if (remaining_known) {
+      snprintf(remaining_text, sizeof(remaining_text), "%lus", remaining_secs);
+    } else {
+      strncpy(remaining_text, "unknown", sizeof(remaining_text));
+    }
+    if (backoff_level >= 0) {
+      MQTT_DEBUG_PRINTLN("MQTT%d JWT reconnect backoff=%d token=%s mint_reason=%s result=%s remaining=%s",
+          index + 1, backoff_level, reuse_token ? "REUSE" : "MINT", mint_reason,
+          mint_result, remaining_text);
+    } else {
+      MQTT_DEBUG_PRINTLN("MQTT%d JWT circuit-breaker probe token=%s mint_reason=%s result=%s remaining=%s",
+          index + 1, reuse_token ? "REUSE" : "MINT", mint_reason, mint_result,
+          remaining_text);
+    }
+  };
+
   // Periodic probe for circuit-breaker-tripped slots (recovery from transient outages)
   // Attempts a single reconnect every 30 minutes to see if the server has come back
   if (slot.circuit_breaker_tripped && !reconnect_attempted) {
@@ -2219,13 +2279,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           _radio ? _radio->getRadioState() : -1,
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       if (slot_uses_jwt) {
-        // Regenerate or refresh token, then reconnect the persistent client.
-        // Reaching the ladder at all means setupSlot() ran, so the client object
-        // and its mbedTLS context are live and no full setup is needed here.
-        if (createSlotAuthToken(index)) {
-          slot.client->setCredentials(_jwt_username, slot.auth_token);
-          MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (fresh token)", index + 1);
-        }
+        prepareJwtReconnect(true, -1);
         slot.client->reconnect();
       } else {
         slot.client->reconnect();
@@ -2259,16 +2313,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
       if (slot_uses_jwt) {
-        // Always lightweight reconnect on the persistent client. A stale/expired
-        // token is handled by regenerating it in place and updating credentials
-        // — no teardown is needed because the client and its mbedTLS context
-        // persist for the bridge lifetime.
-        if (createSlotAuthToken(index)) {
-          slot.client->setCredentials(_jwt_username, slot.auth_token);
-          MQTT_DEBUG_PRINTLN("MQTT%d reconnect (fresh token, backoff %d)", index + 1, slot.reconnect_backoff);
-        } else {
-          MQTT_DEBUG_PRINTLN("MQTT%d reconnect (token refresh failed, backoff %d)", index + 1, slot.reconnect_backoff);
-        }
+        prepareJwtReconnect(false, slot.reconnect_backoff);
         slot.client->reconnect();
       } else {
         // Non-JWT slots — lightweight reconnect on existing client.

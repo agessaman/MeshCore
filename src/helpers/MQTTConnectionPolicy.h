@@ -17,6 +17,7 @@ static const uint8_t kMaxFailuresAtMaxBackoff = 3;
 static const uint32_t kDefaultJwtLifetimeSecs = 86400UL;
 static const uint32_t kMaxJwtStaggerSecs = 300UL;
 static const uint32_t kMinimumValidEpoch = 1000000000UL;
+static const uint32_t kJwtReconnectSafetyMarginSecs = 60UL;
 static const uint32_t kJwtClockThreshold = 1735689600UL; // 2025-01-01 UTC
 // A wall clock at or past this instant was set from a real source (NTP or an
 // admin); anything earlier is the firmware's unset-clock default (1715770351,
@@ -155,6 +156,20 @@ static inline bool tokenNeedsRenewal(bool time_synced, uint32_t current_time,
     return true;
   }
   return current_time >= token_expires_at - renewal_buffer_secs;
+}
+
+// A reconnect may keep its credentials only when their validity is known to
+// outlast the next handshake; uncertainty refreshes them before reconnecting.
+static inline bool canReuseJwtForReconnect(bool time_synced, bool has_token,
+                                           bool force_mint,
+                                           uint32_t current_time,
+                                           uint32_t token_expires_at) {
+  return time_synced &&
+         has_token &&
+         !force_mint &&
+         token_expires_at >= kMinimumValidEpoch &&
+         current_time < token_expires_at &&
+         (token_expires_at - current_time) > kJwtReconnectSafetyMarginSecs;
 }
 
 static inline bool renewalAttemptAllowed(uint32_t now, uint32_t last_attempt) {
