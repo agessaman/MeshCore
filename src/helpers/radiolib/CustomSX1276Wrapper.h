@@ -3,9 +3,22 @@
 #include "CustomSX1276.h"
 #include "RadioLibWrappers.h"
 
+#ifndef USE_SX1276
+#define USE_SX1276
+#endif
+
 class CustomSX1276Wrapper : public RadioLibWrapper {
 public:
   CustomSX1276Wrapper(CustomSX1276& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
+
+  void setParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
+    ((CustomSX1276 *)_radio)->setFrequency(freq);
+    ((CustomSX1276 *)_radio)->setSpreadingFactor(sf);
+    ((CustomSX1276 *)_radio)->setBandwidth(bw);
+    ((CustomSX1276 *)_radio)->setCodingRate(cr);
+    updatePreamble(sf);
+  }
+
   bool isReceivingPacket() override { 
     return ((CustomSX1276 *)_radio)->isReceiving();
   }
@@ -19,4 +32,5 @@ public:
     int sf = ((CustomSX1276 *)_radio)->spreadingFactor;
     return packetScoreInt(snr, sf, packet_len);
   }
+  uint8_t getSpreadingFactor() const override { return ((CustomSX1276 *)_radio)->spreadingFactor; }
 };

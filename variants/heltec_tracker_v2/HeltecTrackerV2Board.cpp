@@ -6,18 +6,14 @@ void HeltecTrackerV2Board::begin() {
     pinMode(PIN_ADC_CTRL, OUTPUT);
     digitalWrite(PIN_ADC_CTRL, LOW); // Initially inactive
 
-    pinMode(P_LORA_PA_POWER, OUTPUT);
-    digitalWrite(P_LORA_PA_POWER,HIGH);
-
-    rtc_gpio_hold_dis((gpio_num_t)P_LORA_PA_EN);
-    pinMode(P_LORA_PA_EN, OUTPUT);
-    digitalWrite(P_LORA_PA_EN,HIGH);
-    pinMode(P_LORA_PA_TX_EN, OUTPUT);
-    digitalWrite(P_LORA_PA_TX_EN,LOW);
-
-    periph_power.begin();
+    loRaFEMControl.init();
 
     esp_reset_reason_t reason = esp_reset_reason();
+    if (reason != ESP_RST_DEEPSLEEP) {
+      delay(1);  // GC1109 startup time after cold power-on
+    }
+
+    periph_power.begin();
     if (reason == ESP_RST_DEEPSLEEP) {
       long wakeup_source = esp_sleep_get_ext1_wakeup_status();
       if (wakeup_source & (1 << P_LORA_DIO_1)) {  // received a LoRa packet (while in deep sleep)
@@ -31,41 +27,20 @@ void HeltecTrackerV2Board::begin() {
 
   void HeltecTrackerV2Board::onBeforeTransmit(void) {
     digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
-    digitalWrite(P_LORA_PA_TX_EN,HIGH);
+    loRaFEMControl.setTxModeEnable();
   }
 
   void HeltecTrackerV2Board::onAfterTransmit(void) {
     digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED off
-    digitalWrite(P_LORA_PA_TX_EN,LOW);
+    loRaFEMControl.setRxModeEnable();
   }
 
-  void HeltecTrackerV2Board::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  void HeltecTrackerV2Board::powerOff() {
+    // Turn off PA
+    digitalWrite(P_LORA_PA_POWER, LOW);
+    rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_POWER);
 
-    // Make sure the DIO1 and NSS GPIOs are hold on required levels during deep sleep
-    rtc_gpio_set_direction((gpio_num_t)P_LORA_DIO_1, RTC_GPIO_MODE_INPUT_ONLY);
-    rtc_gpio_pulldown_en((gpio_num_t)P_LORA_DIO_1);
-
-    rtc_gpio_hold_en((gpio_num_t)P_LORA_NSS);
-
-    rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_EN); //It also needs to be enabled in receive mode
-
-    if (pin_wake_btn < 0) {
-      esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);  // wake up on: recv LoRa packet
-    } else {
-      esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1) | (1L << pin_wake_btn), ESP_EXT1_WAKEUP_ANY_HIGH);  // wake up on: recv LoRa packet OR wake btn
-    }
-
-    if (secs > 0) {
-      esp_sleep_enable_timer_wakeup(secs * 1000000);
-    }
-
-    // Finally set ESP32 into sleep
-    esp_deep_sleep_start();   // CPU halts here and never returns!
-  }
-
-  void HeltecTrackerV2Board::powerOff()  {
-    enterDeepSleep(0);
+    ESP32Board::powerOff();
   }
 
   uint16_t HeltecTrackerV2Board::getBattMilliVolts()  {
@@ -85,4 +60,22 @@ void HeltecTrackerV2Board::begin() {
 
   const char* HeltecTrackerV2Board::getManufacturerName() const {
     return "Heltec Tracker V2";
+  }
+
+  bool HeltecTrackerV2Board::setLoRaFemLnaEnabled(bool enable) {
+    if (!loRaFEMControl.isLnaCanControl()) {
+      return false;
+    }
+
+    loRaFEMControl.setLNAEnable(enable);
+    loRaFEMControl.setRxModeEnable();
+    return true;
+  }
+
+  bool HeltecTrackerV2Board::canControlLoRaFemLna() const {
+    return loRaFEMControl.isLnaCanControl();
+  }
+
+  bool HeltecTrackerV2Board::isLoRaFemLnaEnabled() const {
+    return loRaFEMControl.isLNAEnabled();
   }

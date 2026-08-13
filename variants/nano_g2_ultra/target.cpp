@@ -12,7 +12,7 @@ WRAPPER_CLASS radio_driver(radio, board);
 
 VolatileRTCClock fallback_clock;
 AutoDiscoverRTCClock rtc_clock(fallback_clock);
-MicroNMEALocationProvider nmea = MicroNMEALocationProvider(Serial1);
+MicroNMEALocationProvider nmea = MicroNMEALocationProvider(Serial1, &rtc_clock);
 NanoG2UltraSensorManager sensors = NanoG2UltraSensorManager(nmea);
 
 #ifdef DISPLAY_CLASS
@@ -23,21 +23,6 @@ MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
 bool radio_init() {
   rtc_clock.begin(Wire);
   return radio.std_init(&SPI);
-}
-
-uint32_t radio_get_rng_seed() {
-  return radio.random(0x7FFFFFFF);
-}
-
-void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr) {
-  radio.setFrequency(freq);
-  radio.setSpreadingFactor(sf);
-  radio.setBandwidth(bw);
-  radio.setCodingRate(cr);
-}
-
-void radio_set_tx_power(int8_t dbm) {
-  radio.setOutputPower(dbm);
 }
 
 void NanoG2UltraSensorManager::start_gps() {

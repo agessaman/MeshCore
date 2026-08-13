@@ -1,5 +1,6 @@
-# Meshcore payloads
-Inside of each [meshcore packet](./packet_structure.md) is a payload, identified by the payload type in the packet header. The types of payloads are:
+# Payload Format
+
+Inside each [MeshCore Packet](./packet_format.md) is a payload, identified by the payload type in the packet header. The types of payloads are:
 
 * Node advertisement.
 * Acknowledgment.
@@ -22,7 +23,7 @@ NOTE: all 16 and 32-bit integer fields are Little Endian.
 
 * Node hash: the first byte of the node's public key
 
-# Node advertisement
+## Node advertisement
 This kind of payload notifies receivers that a node exists, and gives information about the node
 
 | Field         | Size (bytes)    | Description                                              |
@@ -56,16 +57,16 @@ Appdata Flags
 | `0x40` | has feature 2  | Reserved for future use.              |
 | `0x80` | has name       | appdata contains a node name          |
 
-# Acknowledgement
+## Acknowledgement
 
-An acknowledgement that a message was received. Note that for returned path messages, an acknowledgement can be sent in the "extra" payload (see [Returned Path](#returned-path)) instead of as a separate ackowledgement packet. CLI commands do not cause acknowledgement responses, neither discrete nor extra.
+An acknowledgement that a message was received. Note that for returned path messages, an acknowledgement can be sent in the "extra" payload (see [Returned Path](#returned-path)) instead of as a separate acknowledgement packet. CLI commands do not cause acknowledgement responses, neither discrete nor extra.
 
 | Field    | Size (bytes) | Description                                                |
 |----------|--------------|------------------------------------------------------------|
 | checksum | 4            | CRC checksum of message timestamp, text, and sender pubkey |
 
 
-# Returned path, request, response, and plain text message
+## Returned path, request, response, and plain text message
 
 Returned path, request, response, and plain text messages are all formatted in the same way. See the subsection for more details about the ciphertext's associated plaintext representation.
 
@@ -76,38 +77,32 @@ Returned path, request, response, and plain text messages are all formatted in t
 | cipher MAC       | 2               | MAC for encrypted data in next field                 |
 | ciphertext       | rest of payload | encrypted message, see subsections below for details |
 
-## Returned path
+### Returned path
 
 Returned path messages provide a description of the route a packet took from the original author. Receivers will send returned path messages to the author of the original message.
 
-| Field       | Size (bytes) | Description                                                                                  |
-|-------------|--------------|----------------------------------------------------------------------------------------------|
-| path length | 1            | length of next field                                                                         |
-| path        | see above    | a list of node hashes (one byte each) |
-| extra type  | 1            | extra, bundled payload type, eg., acknowledgement or response. Same values as in [packet structure](./packet_structure.md) |
-| extra       | rest of data | extra, bundled payload content, follows same format as main content defined by this document |
+| Field       | Size (bytes) | Description                                                                                                          |
+|-------------|--------------|----------------------------------------------------------------------------------------------------------------------|
+| path length | 1            | length of next field                                                                                                 |
+| path        | see above    | a list of node hashes (one byte each)                                                                                |
+| extra type  | 1            | extra, bundled payload type, eg., acknowledgement or response. Same values as in [Packet Format](./packet_format.md) |
+| extra       | rest of data | extra, bundled payload content, follows same format as main content defined by this document                         |
 
-## Request
+### Request
 
-| Field        | Size (bytes)    | Description                |
-|--------------|-----------------|----------------------------|
-| timestamp    | 4               | send time (unix timestamp) |
-| request type | 1               | see below                  |
-| request data | rest of payload | depends on request type    |
+| Field        | Size (bytes)    | Description                              |
+|--------------|-----------------|------------------------------------------|
+| timestamp    | 4               | sender time (unix timestamp)             |
+| request data | rest of payload | application-defined request payload body |
 
-Request type
+For the common chat/server helpers in `BaseChatMesh`, the current request type values are:
 
-| Value  | Name                 | Description                           |
-|--------|----------------------|---------------------------------------|
-| `0x01` | get stats            | get stats of repeater or room server  |
-| `0x02` | keepalive            | (deprecated) |
-| `0x03` | get telemetry data   | TODO |
-| `0x04` | get min,max,avg data | sensor nodes - get min, max, average for given time span |
-| `0x05` | get access list      | get node's approved access list            |
-| `0x06` | get neighbors        | get repeater node's neighbors              |
-| `0x07` | get owner info       | get repeater firmware-ver/name/owner info  |
+| Value  | Name      | Description                                        |
+|--------|-----------|----------------------------------------------------|
+| `0x01` | get stats | get stats of repeater or room server               |
+| `0x02` | keepalive | keep-alive request used for maintained connections |
 
-### Get stats
+#### Get stats
 
 Gets information about the node, possibly including the following:
 
@@ -130,55 +125,56 @@ Gets information about the node, possibly including the following:
 * Number posted (?)
 * Number of post pushes (?)
 
-### Get telemetry data
+#### Get telemetry data
 
-Request data about sensors on the node, including battery level.
+Not defined in `BaseChatMesh`. Sensor- and application-specific request payloads may be implemented by higher-level firmware.
 
-### Get Telemetry
+#### Get Telemetry
 
-TODO
+Not defined in `BaseChatMesh`.
 
-### Get Min/Max/Ave  (Sensor nodes)
+#### Get Min/Max/Ave  (Sensor nodes)
 
-TODO
+Not defined in `BaseChatMesh`.
 
-### Get Access List
+#### Get Access List
 
-TODO
+Not defined in `BaseChatMesh`.
 
-### Get Neighors
+#### Get Neighbors
 
-TODO
+Not defined in `BaseChatMesh`.
 
-### Get Owner Info
+#### Get Owner Info
 
-TODO
+Not defined in `BaseChatMesh`.
 
 
-## Response
+### Response
 
-| Field   | Size (bytes)    | Description |
-|---------|-----------------|-------------|
-| tag     | 4               | TODO        |
-| content | rest of payload | TODO        |
+| Field   | Size (bytes)    | Description                       |
+|---------|-----------------|-----------------------------------|
+| content | rest of payload | application-defined response body |
 
-## Plain text message
+Response contents are opaque application data. There is no single generic response envelope beyond the encrypted payload wrapper shown above.
 
-| Field              | Size (bytes)    | Description                                                  |
-|--------------------|-----------------|--------------------------------------------------------------|
-| timestamp          | 4               | send time (unix timestamp)                                   |
+### Plain text message
+
+| Field              | Size (bytes)    | Description                                                                       |
+|--------------------|-----------------|-----------------------------------------------------------------------------------|
+| timestamp          | 4               | send time (unix timestamp)                                                        |
 | txt_type + attempt | 1               | upper six bits are txt_type (see below), lower two bits are attempt number (0..3) |
-| message            | rest of payload | the message content, see next table                          |
+| message            | rest of payload | the message content, see next table                                               |
 
 txt_type
 
-| Value  | Description               | Message content                                            |
-|--------|---------------------------|------------------------------------------------------------|
-| `0x00` | plain text message        | the plain text of the message                              |
-| `0x01` | CLI command               | the command text of the message                            |
+| Value  | Description               | Message content                                                          |
+|--------|---------------------------|--------------------------------------------------------------------------|
+| `0x00` | plain text message        | the plain text of the message                                            |
+| `0x01` | CLI command               | the command text of the message                                          |
 | `0x02` | signed plain text message | first four bytes is sender pubkey prefix, followed by plain text message |
 
-# Anonymous request
+## Anonymous request
 
 | Field            | Size (bytes)    | Description                               |
 |------------------|-----------------|-------------------------------------------|
@@ -187,7 +183,7 @@ txt_type
 | cipher MAC       | 2               | MAC for encrypted data in next field      |
 | ciphertext       | rest of payload | encrypted message, see below for details  |
 
-## Room server login
+### Room server login
 
 | Field          | Size (bytes)    | Description                                                                   |
 |----------------|-----------------|-------------------------------------------------------------------------------|
@@ -195,60 +191,79 @@ txt_type
 | sync timestamp | 4               | sender's "sync messages SINCE x" timestamp                                    |
 | password       | rest of message | password for room                                                             |
 
-## Repeater/Sensor login
+### Repeater/Sensor login
 
 | Field          | Size (bytes)    | Description                                                                   |
 |----------------|-----------------|-------------------------------------------------------------------------------|
 | timestamp      | 4               | sender time (unix timestamp)                                                  |
 | password       | rest of message | password for repeater/sensor                                                  |
 
-## Repeater - Regions request
+### Repeater - Regions request
 
-| Field          | Size (bytes)    | Description                                                                   |
-|----------------|-----------------|-------------------------------------------------------------------------------|
-| timestamp      | 4               | sender time (unix timestamp)                                                  |
-| req type       | 1               | 0x01 (request sub type)                                                       |
-| reply path len | 1               | path len for reply                                                       |
-| reply path     | (variable)      | reply path                                                       |
+| Field          | Size (bytes) | Description                  |
+|----------------|--------------|------------------------------|
+| timestamp      | 4            | sender time (unix timestamp) |
+| req type       | 1            | 0x01 (request sub type)      |
+| reply path len | 1            | path len for reply           |
+| reply path     | (variable)   | reply path                   |
 
-## Repeater - Owner info request
+### Repeater - Owner info request
 
-| Field          | Size (bytes)    | Description                                                                   |
-|----------------|-----------------|-------------------------------------------------------------------------------|
-| timestamp      | 4               | sender time (unix timestamp)                                                  |
-| req type       | 1               | 0x02 (request sub type)                                                       |
-| reply path len | 1               | path len for reply                                                       |
-| reply path     | (variable)      | reply path                                                       |
+| Field          | Size (bytes) | Description                  |
+|----------------|--------------|------------------------------|
+| timestamp      | 4            | sender time (unix timestamp) |
+| req type       | 1            | 0x02 (request sub type)      |
+| reply path len | 1            | path len for reply           |
+| reply path     | (variable)   | reply path                   |
 
-## Repeater - Clock and status request
+### Repeater - Clock and status request
 
-| Field          | Size (bytes)    | Description                                                                   |
-|----------------|-----------------|-------------------------------------------------------------------------------|
-| timestamp      | 4               | sender time (unix timestamp)                                                  |
-| req type       | 1               | 0x03 (request sub type)                                                       |
-| reply path len | 1               | path len for reply                                                       |
-| reply path     | (variable)      | reply path                                                       |
+| Field          | Size (bytes) | Description                  |
+|----------------|--------------|------------------------------|
+| timestamp      | 4            | sender time (unix timestamp) |
+| req type       | 1            | 0x03 (request sub type)      |
+| reply path len | 1            | path len for reply           |
+| reply path     | (variable)   | reply path                   |
 
 
-# Group text message / datagram
+## Group text message
 
-| Field        | Size (bytes)    | Description                                |
-|--------------|-----------------|--------------------------------------------|
-| channel hash | 1               | first byte of SHA256 of channel's shared key  |
-| cipher MAC   | 2               | MAC for encrypted data in next field       |
-| ciphertext   | rest of payload | encrypted message, see below for details   |
+| Field        | Size (bytes)    | Description                                  |
+|--------------|-----------------|----------------------------------------------|
+| channel hash | 1               | first byte of SHA256 of channel's shared key |
+| cipher MAC   | 2               | MAC for encrypted data in next field         |
+| ciphertext   | rest of payload | encrypted message, see below for details     |
 
 The plaintext contained in the ciphertext matches the format described in [plain text message](#plain-text-message). Specifically, it consists of a four byte timestamp, a flags byte, and the message. The flags byte will generally be `0x00` because it is a "plain text message". The message will be of the form `<sender name>: <message body>` (eg., `user123: I'm on my way`).
 
+The sender name is unverified message text. Group messages contain no sender
+signature, so any channel-key holder can choose any sender name.
 
-# Control data
+## Group datagram
+
+| Field        | Size (bytes)    | Description                                  |
+|--------------|-----------------|----------------------------------------------|
+| channel hash | 1               | first byte of SHA256 of channel's shared key |
+| cipher MAC   | 2               | MAC for encrypted data in next field         |
+| ciphertext   | rest of payload | encrypted data, see below for details        |
+
+The data contained in the ciphertext uses the format below:
+
+| Field     | Size (bytes)    | Description                                              |
+|-----------|-----------------|----------------------------------------------------------|
+| data type | 2               | Identifier for type of data. (See number_allocations.md) |
+| data len  | 1               | byte length of data                                      |
+| data      | rest of payload | (depends on data type)                                   |
+
+
+## Control data
 
 | Field        | Size (bytes)    | Description                                |
 |--------------|-----------------|--------------------------------------------|
 | flags        | 1               | upper 4 bits is sub_type                   |
 | data         | rest of payload | typically unencrypted data                 |
 
-## DISCOVER_REQ (sub_type)
+### DISCOVER_REQ (sub_type)
 
 | Field        | Size (bytes)    | Description                                  |
 |--------------|-----------------|----------------------------------------------|
@@ -257,7 +272,7 @@ The plaintext contained in the ciphertext matches the format described in [plain
 | tag          | 4               | randomly generate by sender                  |
 | since        | 4               | (optional) epoch timestamp (0 by default)    |
 
-## DISCOVER_RESP (sub_type)
+### DISCOVER_RESP (sub_type)
 
 | Field        | Size (bytes)    | Description                                |
 |--------------|-----------------|--------------------------------------------|
@@ -267,6 +282,6 @@ The plaintext contained in the ciphertext matches the format described in [plain
 | pubkey       | 8 or 32         | node's ID (or prefix)                      |
 
 
-# Custom packet
+## Custom packet
 
 Custom packets have no defined format.
