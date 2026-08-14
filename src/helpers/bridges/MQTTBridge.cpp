@@ -2280,10 +2280,10 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       if (slot_uses_jwt) {
         prepareJwtReconnect(true, -1);
-        slot.client->reconnect();
-      } else {
-        slot.client->reconnect();
       }
+      // Via the helper: reconnect() is a no-op on a client the WiFi-drop path
+      // stopped, which would probe forever without ever starting it.
+      reconnectSlotClient(index);
       // If the connect callback fires and sets slot.connected = true,
       // it will clear circuit_breaker_tripped via the onConnect handler
     }
@@ -2314,12 +2314,13 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       _last_slot_reconnect_ms = now_millis;
       if (slot_uses_jwt) {
         prepareJwtReconnect(false, slot.reconnect_backoff);
-        slot.client->reconnect();
       } else {
         // Non-JWT slots — lightweight reconnect on existing client.
         MQTT_DEBUG_PRINTLN("MQTT%d reconnect (non-JWT, backoff %d)", index + 1, slot.reconnect_backoff);
-        slot.client->reconnect();
       }
+      // Via the helper: reconnect() is a no-op on a client the WiFi-drop path
+      // stopped, which would back off forever without ever starting it.
+      reconnectSlotClient(index);
     }
   }
 }
