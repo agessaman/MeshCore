@@ -438,8 +438,13 @@ void PsychicMqttClient::connect()
     if (start_result == ESP_OK)
     {
         _started = true;
+        ESP_LOGI(TAG, "MQTT client started.");
     }
-    ESP_LOGI(TAG, "MQTT client started.");
+    else
+    {
+        // Reporting success here hides the one state reconnect() cannot recover from.
+        ESP_LOGE(TAG, "MQTT client failed to start: %s", esp_err_to_name(start_result));
+    }
 }
 
 void PsychicMqttClient::reconnect()
