@@ -27,9 +27,15 @@ public:
   }
 
   void powerOff() override {
+#if defined(STM32F1xx)
+    // STM32F1 has no SHUTDOWN mode / PWREx; fall back to STANDBY.
+    __disable_irq();
+    HAL_PWR_EnterSTANDBYMode();
+#else
     HAL_PWREx_DisableInternalWakeUpLine();
     __disable_irq();
     HAL_PWREx_EnterSHUTDOWNMode();
+#endif
   }
 
 #if defined(P_LORA_TX_LED)
