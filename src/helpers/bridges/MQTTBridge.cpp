@@ -4012,7 +4012,24 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
   }
   #endif
 
-  if (ntp_ok && ntp_server_used) {
+  // No server answered, but the clock itself may still be usable. Requiring a real
+  // SNTP completion above removed something the plausible-clock test was doing by
+  // accident: an RTC-backed device on a network that blocks NTP (UDP/123) while
+  // allowing the broker (443) stayed synced and kept minting JWTs. _ntp_synced gates
+  // slot setup outright, so losing that strands those deployments with no slots at
+  // all. Keep the behaviour, but as its own decision rather than as a claim about a
+  // server that never replied. Not on the validation path — `set mqtt.ntp` asks
+  // whether that server works, and the clock cannot answer for it.
+  if (!ntp_ok && !primary_only) {
+    unsigned long existing = (unsigned long)time(nullptr);
+    if (existing >= kMinValidEpoch) {
+      epochTime = existing;
+      ntp_ok = true;
+      MQTT_DEBUG_PRINTLN("No NTP server answered; continuing on the existing clock: %lu", existing);
+    }
+  }
+
+  if (ntp_ok) {
     // Take ownership of the system clock here, before anything reads it. configTime()
     // only restarts SNTP and returns, and _rtc reaches settimeofday() on exactly one
     // path: AutoDiscoverRTCClock writes a detected DS3231/RV3028/PCF8563/RX8130CE chip
@@ -4025,7 +4042,11 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     accepted.tv_usec = 0;
     settimeofday(&accepted, nullptr);
 
-    configTime(0, 0, ntp_server_used);
+    // Only when a server actually answered: there is nothing to point SNTP at
+    // otherwise, and the existing configuration is the best guess available.
+    if (ntp_server_used) {
+      configTime(0, 0, ntp_server_used);
+    }
 
     if (_rtc) {
       _rtc->setCurrentTime(epochTime);
@@ -4036,7 +4057,8 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     _last_ntp_sync = millis();
     sync_in_progress = false;
 
-    MQTT_DEBUG_PRINTLN("Time synced: %lu (via %s)", epochTime, ntp_server_used);
+    MQTT_DEBUG_PRINTLN("Time synced: %lu (via %s)", epochTime,
+        ntp_server_used ? ntp_server_used : "existing clock");
 
     // If slots are already set up and the time jumped significantly (e.g., SNTP
     // initially returned stale RTC time, then a later sync corrected it), re-issue
