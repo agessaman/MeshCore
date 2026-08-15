@@ -40,6 +40,8 @@ jobs:
           - PicoW_repeater
           # STM32
           - wio-e5-mini_repeater
+          - ebyte_e22p_f103_kiss_modem_uart
+          - ebyte_e22p_f103_kiss_modem_usb
           # ESP32-C6
           - LilyGo_Tlora_C6_repeater_
           # LR1110 (nRF52)
