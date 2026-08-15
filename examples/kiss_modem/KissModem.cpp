@@ -303,12 +303,15 @@ void KissModem::processFrame() {
 
 void KissModem::handleHardwareCommand(uint8_t sub_cmd, const uint8_t* data, uint16_t len) {
   switch (sub_cmd) {
+#if !defined(KISS_NO_CRYPTO)
     case HW_CMD_GET_IDENTITY:
       handleGetIdentity();
       break;
+#endif
     case HW_CMD_GET_RANDOM:
       handleGetRandom(data, len);
       break;
+#if !defined(KISS_NO_CRYPTO)
     case HW_CMD_VERIFY_SIGNATURE:
       handleVerifySignature(data, len);
       break;
@@ -327,6 +330,7 @@ void KissModem::handleHardwareCommand(uint8_t sub_cmd, const uint8_t* data, uint
     case HW_CMD_HASH:
       handleHash(data, len);
       break;
+#endif
     case HW_CMD_SET_RADIO:
       handleSetRadio(data, len);
       break;
@@ -462,9 +466,11 @@ void KissModem::onPacketReceived(int8_t snr, int8_t rssi, const uint8_t* packet,
   }
 }
 
+#if !defined(KISS_NO_CRYPTO)
 void KissModem::handleGetIdentity() {
   writeHardwareFrame(HW_RESP(HW_CMD_GET_IDENTITY), _identity.pub_key, PUB_KEY_SIZE);
 }
+#endif
 
 void KissModem::handleGetRandom(const uint8_t* data, uint16_t len) {
   if (len < 1) {
@@ -483,6 +489,7 @@ void KissModem::handleGetRandom(const uint8_t* data, uint16_t len) {
   writeHardwareFrame(HW_RESP(HW_CMD_GET_RANDOM), buf, requested);
 }
 
+#if !defined(KISS_NO_CRYPTO)
 void KissModem::handleVerifySignature(const uint8_t* data, uint16_t len) {
   if (len < PUB_KEY_SIZE + SIGNATURE_SIZE + 1) {
     writeHardwareError(HW_ERR_INVALID_LENGTH);
@@ -570,6 +577,7 @@ void KissModem::handleHash(const uint8_t* data, uint16_t len) {
   mesh::Utils::sha256(hash, 32, data, len);
   writeHardwareFrame(HW_RESP(HW_CMD_HASH), hash, 32);
 }
+#endif
 
 void KissModem::handleSetRadio(const uint8_t* data, uint16_t len) {
   if (len < 10) {

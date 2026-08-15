@@ -166,14 +166,18 @@ class KissModem {
   void handleHardwareCommand(uint8_t sub_cmd, const uint8_t* data, uint16_t len);
   void processTx();
 
+#if !defined(KISS_NO_CRYPTO)
   void handleGetIdentity();
+#endif
   void handleGetRandom(const uint8_t* data, uint16_t len);
+#if !defined(KISS_NO_CRYPTO)
   void handleVerifySignature(const uint8_t* data, uint16_t len);
   void handleSignData(const uint8_t* data, uint16_t len);
   void handleEncryptData(const uint8_t* data, uint16_t len);
   void handleDecryptData(const uint8_t* data, uint16_t len);
   void handleKeyExchange(const uint8_t* data, uint16_t len);
   void handleHash(const uint8_t* data, uint16_t len);
+#endif
   void handleSetRadio(const uint8_t* data, uint16_t len);
   void handleSetTxPower(const uint8_t* data, uint16_t len);
   void handleGetRadio();
