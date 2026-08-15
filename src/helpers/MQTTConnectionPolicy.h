@@ -211,4 +211,27 @@ static inline SlotActivation classifySlotActivation(int slot, const bool* enable
                               : SlotActivation::OverActiveCap;
 }
 
+// What to do with a slot whose token a clock correction just proved stale. Four
+// outcomes, because esp-mqtt accepts a reconnect request only from
+// MQTT_STATE_WAIT_RECONNECT: asking a live client to reconnect is refused and
+// leaves it running on the stale token, so a live session has to have its
+// transport closed first — and that costs a handshake, which is only worth
+// spending where the broker actually enforces exp.
+enum class StaleTokenAction : uint8_t {
+  Defer,      // no fresh credentials — leave the slot to the backoff ladder
+  Reconnect,  // client is down: start it, or wake one that is waiting
+  Bounce,     // live session the broker will reject: close the transport, then reconnect
+  KeepAlive,  // live session the broker tolerates: stage credentials, keep the handshake
+};
+
+// A failed mint yields Defer even when the slot is down: reconnecting then would
+// re-present the credentials the correction just invalidated. Minting fails for
+// recoverable reasons (allocation pressure), and the ladder retries.
+static inline StaleTokenAction classifyStaleToken(bool minted, bool connected,
+                                                  bool broker_enforces_exp) {
+  if (!minted) return StaleTokenAction::Defer;
+  if (!connected) return StaleTokenAction::Reconnect;
+  return broker_enforces_exp ? StaleTokenAction::Bounce : StaleTokenAction::KeepAlive;
+}
+
 } // namespace MQTTConnectionPolicy

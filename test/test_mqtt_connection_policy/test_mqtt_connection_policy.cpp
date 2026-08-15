@@ -258,6 +258,38 @@ TEST(SlotActivation, DisabledAndOutOfRangeSlots) {
   EXPECT_EQ(SlotActivation::Disabled, Policy::classifySlotActivation(0, nullptr, 3, 2));
 }
 
+using Policy::StaleTokenAction;
+
+TEST(StaleToken, ConnectedSlotOnAnExpEnforcingBrokerBounces) {
+  // The broker will reject the stale token, and esp-mqtt refuses reconnect() from
+  // CONNECTED, so the transport has to close first.
+  EXPECT_EQ(StaleTokenAction::Bounce,
+            Policy::classifyStaleToken(/*minted=*/true, /*connected=*/true,
+                                       /*broker_enforces_exp=*/true));
+}
+
+TEST(StaleToken, ConnectedSlotOnATolerantBrokerKeepsItsSession) {
+  // waev leaves live sessions alone past exp. Bouncing would spend a 16 KiB
+  // contiguous handshake to replace a session the broker was not going to drop.
+  EXPECT_EQ(StaleTokenAction::KeepAlive,
+            Policy::classifyStaleToken(true, true, /*broker_enforces_exp=*/false));
+}
+
+TEST(StaleToken, DisconnectedSlotReconnectsRegardlessOfBrokerPolicy) {
+  EXPECT_EQ(StaleTokenAction::Reconnect, Policy::classifyStaleToken(true, false, true));
+  EXPECT_EQ(StaleTokenAction::Reconnect, Policy::classifyStaleToken(true, false, false));
+}
+
+TEST(StaleToken, FailedMintNeverReconnects) {
+  // Reconnecting here would re-present the credentials the correction invalidated.
+  // Every combination defers — including the disconnected one, which is the case
+  // that previously reconnected on the stale token.
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, false, true));
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, false, false));
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, true));
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, false));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

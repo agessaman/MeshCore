@@ -4057,24 +4057,26 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
           // in place and reconnect the persistent client. No teardown needed.
           if (_slots[i].token_expires_at > 0 && current_time > _slots[i].token_expires_at) {
             MQTT_DEBUG_PRINTLN("MQTT%d token stale after time correction, re-creating", i + 1);
-            const bool minted = createSlotAuthToken(i);
-            if (minted) {
-              // Staged only; the config is applied by connect()/reconnect() below.
-              _slots[i].client->setCredentials(_jwt_username, _slots[i].auth_token);
+            const MQTTConnectionPolicy::StaleTokenAction action =
+                MQTTConnectionPolicy::classifyStaleToken(
+                    createSlotAuthToken(i), _slots[i].client->connected(),
+                    mqttPresetEnforcesTokenExp(_slots[i].preset));
+            if (action == MQTTConnectionPolicy::StaleTokenAction::Defer) {
+              MQTT_DEBUG_PRINTLN("MQTT%d token refresh failed after time correction, "
+                  "deferring to the reconnect ladder", i + 1);
+              continue;
             }
-            if (!_slots[i].client->connected()) {
+            // Staged only; the config is applied by connect()/reconnect() below.
+            _slots[i].client->setCredentials(_jwt_username, _slots[i].auth_token);
+            if (action == MQTTConnectionPolicy::StaleTokenAction::Reconnect) {
               // Reuse the transport — the fault is stale credentials, not the transport —
               // but via the helper, so a stopped client is started rather than no-opped.
               reconnectSlotClient(i);
-            } else if (minted && mqttPresetEnforcesTokenExp(_slots[i].preset)) {
-              // esp-mqtt honours reconnect() only from WAIT_RECONNECT, so on a live
-              // session it is refused and the slot keeps running on the stale token.
-              // Close the transport first — and only here, where the broker enforces
-              // exp: elsewhere that handshake buys nothing.
+            } else if (action == MQTTConnectionPolicy::StaleTokenAction::Bounce) {
               MQTT_DEBUG_PRINTLN("MQTT%d bouncing for the corrected-clock token", i + 1);
               _slots[i].client->softDisconnect();
               _slots[i].client->reconnect();
-            } else if (minted) {
+            } else {
               MQTT_DEBUG_PRINTLN("MQTT%d token re-created, no bounce (broker does not enforce exp)",
                   i + 1);
             }
