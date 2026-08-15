@@ -3954,14 +3954,24 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
   const int kMaxNtpRetriesPerServer = 2;
   for (int s = 0; s < server_count && !ntp_ok; s++) {
     const char* server = servers[s];
-    _ntp_client.setPoolServerName(server);
 
     #ifdef ESP_PLATFORM
+    // Authoritative, not advisory. NTPClient::sendNTPPacket() ignores what
+    // beginPacket() returns, and WiFiUDP leaves remote_ip/remote_port at the previous
+    // destination when a name fails to resolve — so asking an unresolvable host sends
+    // the request to whichever server resolved last, and that server's genuine reply
+    // gets credited to this name. Observed on d4: `set mqtt.ntp bogus.invalid` reported
+    // success with a correct epoch, answered by the pool address left over from boot.
+    // Skipping is what keeps the credit honest; the name that answered is the name
+    // recorded.
     IPAddress resolved_ip;
     if (!WiFi.hostByName(server, resolved_ip)) {
-      MQTT_DEBUG_PRINTLN("WARNING: DNS resolution failed for %s - NTP sync may fail", server);
+      MQTT_DEBUG_PRINTLN("NTP: %s does not resolve — skipping, not attempting a send", server);
+      continue;
     }
     #endif
+
+    _ntp_client.setPoolServerName(server);
 
     for (int attempt = 1; attempt <= kMaxNtpRetriesPerServer && !ntp_ok; attempt++) {
       if (attempt > 1) {
