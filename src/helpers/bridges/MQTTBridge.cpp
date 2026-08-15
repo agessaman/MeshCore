@@ -4013,6 +4013,18 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
   #endif
 
   if (ntp_ok && ntp_server_used) {
+    // Take ownership of the system clock here, before anything reads it. configTime()
+    // only restarts SNTP and returns, and _rtc reaches settimeofday() on exactly one
+    // path: AutoDiscoverRTCClock writes a detected DS3231/RV3028/PCF8563/RX8130CE chip
+    // *instead of* its fallback, so on any board carrying one, libc keeps the pre-sync
+    // time. Everything downstream reads time(nullptr) — the stale-token test below, and
+    // the iat of every JWT minted from here on — so once _ntp_synced is true that call
+    // has to already return the epoch we accepted.
+    struct timeval accepted;
+    accepted.tv_sec = (time_t)epochTime;
+    accepted.tv_usec = 0;
+    settimeofday(&accepted, nullptr);
+
     configTime(0, 0, ntp_server_used);
 
     if (_rtc) {
