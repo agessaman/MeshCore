@@ -3986,15 +3986,21 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     for (int s = 0; s < server_count && !ntp_ok; s++) {
       const char* server = servers[s];
       MQTT_DEBUG_PRINTLN("SNTP fallback trying %s...", server);
-      configTime(0, 0, server);
       // A plausible clock is not evidence this server answered. The device usually
       // already holds valid time here — from an earlier sync, or the RTC — so polling
       // time(nullptr) declared the very first server successful without a packet ever
       // arriving, stopped the fallback walk there, and refreshed _last_ntp_sync. Worse
       // on the `set mqtt.ntp` validation path, where a typo is supposed to fail fast.
       // Wait for SNTP itself to report completion. The status is one-shot — reading
-      // COMPLETED clears it — so drop any result an earlier sync left behind.
+      // COMPLETED clears it — so drop any result an earlier sync left behind, and do
+      // that *before* starting this one: configTime() returns after sntp_init(), so a
+      // fast reply can complete inside it, and clearing afterwards would erase the
+      // very result being waited for.
+      if (sntp_enabled()) {
+        sntp_stop();
+      }
       sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
+      configTime(0, 0, server);
       for (int i = 0; i < 20; i++) {
         delay(500);
         if (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) continue;
