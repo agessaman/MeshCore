@@ -4015,8 +4015,8 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     MQTT_DEBUG_PRINTLN("Time synced: %lu (via %s)", epochTime, ntp_server_used);
 
     // If slots are already set up and the time jumped significantly (e.g., SNTP
-    // initially returned stale RTC time, then a later sync corrected it), tear down
-    // and re-setup all JWT-authenticated slots so they get fresh tokens.
+    // initially returned stale RTC time, then a later sync corrected it), re-issue
+    // credentials for every JWT slot the correction left holding an expired token.
     if (_slots_setup_done && was_ntp_synced) {
       unsigned long current_time = (unsigned long)time(nullptr);
       // Every slot, not _max_active_slots: that is a count of positions, never an
@@ -4033,12 +4033,27 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
           // in place and reconnect the persistent client. No teardown needed.
           if (_slots[i].token_expires_at > 0 && current_time > _slots[i].token_expires_at) {
             MQTT_DEBUG_PRINTLN("MQTT%d token stale after time correction, re-creating", i + 1);
-            if (createSlotAuthToken(i)) {
+            const bool minted = createSlotAuthToken(i);
+            if (minted) {
+              // Staged only; the config is applied by connect()/reconnect() below.
               _slots[i].client->setCredentials(_jwt_username, _slots[i].auth_token);
             }
-            // Reuse the transport — the fault is stale credentials, not the transport —
-            // but via the helper, so a stopped client is started rather than no-opped.
-            reconnectSlotClient(i);
+            if (!_slots[i].client->connected()) {
+              // Reuse the transport — the fault is stale credentials, not the transport —
+              // but via the helper, so a stopped client is started rather than no-opped.
+              reconnectSlotClient(i);
+            } else if (minted && mqttPresetEnforcesTokenExp(_slots[i].preset)) {
+              // esp-mqtt honours reconnect() only from WAIT_RECONNECT, so on a live
+              // session it is refused and the slot keeps running on the stale token.
+              // Close the transport first — and only here, where the broker enforces
+              // exp: elsewhere that handshake buys nothing.
+              MQTT_DEBUG_PRINTLN("MQTT%d bouncing for the corrected-clock token", i + 1);
+              _slots[i].client->softDisconnect();
+              _slots[i].client->reconnect();
+            } else if (minted) {
+              MQTT_DEBUG_PRINTLN("MQTT%d token re-created, no bounce (broker does not enforce exp)",
+                  i + 1);
+            }
           }
         }
       }
