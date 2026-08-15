@@ -11,7 +11,14 @@ namespace MQTTPrefsAtomicStore {
 // Production /mqtt.json flow. finish() verifies the exact bytes written,
 // verify_image reparses the finished temp through the schema, and only then is
 // commit() allowed to publish it. A schema-verification failure discards the
-// finished temp; a commit failure preserves it for boot recovery.
+// finished temp; a commit failure is undone by rollbackFailedCommit().
+//
+// CommitFailed and CommitIndeterminate are distinct outcomes, not shades of the
+// same one. Publishing moves the old primary aside before the verified temp
+// takes its name, so a half-done commit leaves an image that boot recovery
+// would promote. CommitFailed means that was undone and the change is really
+// gone; CommitIndeterminate means it could not be, and the next boot may still
+// come up with the new value. Callers must not report the two the same way.
 enum class VerifiedImageResult : uint8_t {
   Committed,
   BeginFailed,
@@ -19,6 +26,7 @@ enum class VerifiedImageResult : uint8_t {
   FinishFailed,
   VerifyFailed,
   CommitFailed,
+  CommitIndeterminate,
 };
 
 template <typename Store, typename ImageWriter, typename ImageVerifier>
@@ -42,8 +50,13 @@ inline VerifiedImageResult writeVerifiedImage(Store& store,
     return VerifiedImageResult::VerifyFailed;
   }
   if (!store.commit()) {
+    // Undo the partial publish before answering. Only the store knows whether
+    // the pre-transaction state was actually restored, so take its word for
+    // which failure this was.
+    const bool rolled_back = store.rollbackFailedCommit();
     store.abort();
-    return VerifiedImageResult::CommitFailed;
+    return rolled_back ? VerifiedImageResult::CommitFailed
+                       : VerifiedImageResult::CommitIndeterminate;
   }
   return VerifiedImageResult::Committed;
 }

@@ -208,7 +208,13 @@ bool CommonCLI::persistObserverPrefs(char* reply) {
   if (_observer_prefs_rollback != nullptr) {
     memcpy(&_mqtt_prefs, _observer_prefs_rollback, sizeof(_mqtt_prefs));
   }
-  strcpy(reply, "Error: setting not persisted; change rolled back");
+  // The running node is back on the old value either way, but only claim the
+  // change is gone when the write really was undone on flash.
+  if (_observer_save_indeterminate) {
+    strcpy(reply, "Error: setting not persisted; flash state unresolved, recheck after reboot");
+  } else {
+    strcpy(reply, "Error: setting not persisted; change rolled back");
+  }
   return false;
 #else
   (void)reply;

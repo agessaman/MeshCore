@@ -191,6 +191,29 @@ TEST(MQTTPrefsSerializer, FutureVersionProbeIgnoresV1FieldTypeChanges) {
   }
 }
 
+TEST(MQTTPrefsSerializer, VersionIsWrittenAsTheFirstRootProperty) {
+  MQTTPrefs prefs = defaults();
+  MQTTPrefsSerializer writer(&prefs);
+  OutputStream output;
+  ASSERT_TRUE(writer.saveSerial(output));
+  EXPECT_EQ(0u, output.text().find("{version:1,")) << output.text();
+}
+
+TEST(MQTTPrefsSerializer, FutureGrammarAheadOfVersionCannotBeRecognizedAsFuture) {
+  // Why the version-first invariant is part of the format rather than a style
+  // preference. These two files differ only in key order, and only the
+  // compliant one keeps its preservation guarantee on this firmware.
+  InputStream compliant("{version:2,x:[1]}");
+  MQTTPrefsVersionProbe compliant_probe;
+  EXPECT_FALSE(compliant_probe.loadSerial(compliant));
+  EXPECT_TRUE(compliant_probe.hasFutureVersion());
+
+  InputStream violating("{x:[1],version:2}");
+  MQTTPrefsVersionProbe violating_probe;
+  EXPECT_FALSE(violating_probe.loadSerial(violating));
+  EXPECT_FALSE(violating_probe.hasFutureVersion());
+}
+
 TEST(MQTTPrefsSerializer, RejectsDuplicateKnownKey) {
   MQTTPrefs prefs = defaults();
   InputStream input("{version:1,mqtt:{origin:\"one\",origin:\"two\"}}");

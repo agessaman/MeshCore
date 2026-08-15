@@ -9,6 +9,15 @@
 
 static const int32_t MQTT_PREFS_JSON_FORMAT_VERSION = 1;
 
+// Format invariant, binding on every future schema version: `version` is the
+// FIRST property of the root object. The probe below reads it with this
+// firmware's grammar and stops at the first construct that grammar cannot
+// tokenize, so a newer file that introduces unknown syntax ahead of its version
+// field is indistinguishable from a corrupt one here. That costs it the
+// opaque-future preservation guarantee: as a temp left by an interrupted commit
+// it would be classified as discardable rather than retained. Keep the version
+// first when adding fields or bumping the version; a host test pins it.
+//
 // Reads only the mandatory root version while ignoring every other schema
 // field. Recovery uses this before the v1 decoder so a syntactically valid
 // future file remains opaque even when that schema changes a v1 field's type.
@@ -369,7 +378,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
 
 protected:
   void structure() override {
-    defStrict("version", _version, _seen_version);
+    defStrict("version", _version, _seen_version);  // must stay first; see above
     def("wifi", _wifi);
     def("time", _time);
     def("mqtt", _mqtt);

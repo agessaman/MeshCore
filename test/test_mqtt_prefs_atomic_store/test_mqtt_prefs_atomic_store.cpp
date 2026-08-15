@@ -70,18 +70,6 @@ public:
     return true;
   }
 
-  bool verify() {
-    ++verify_calls;
-    return _failure != FailurePoint::Verify;
-  }
-
-  void discardFinishedTemp() {
-    ++discard_calls;
-    _files.erase("/mqtt_prefs.tmp");
-    _finished = false;
-    _owns_temp = false;
-  }
-
   void abort() {
     ++abort_calls;
     _open = false;
@@ -102,8 +90,6 @@ public:
   int finish_calls = 0;
   int commit_calls = 0;
   int abort_calls = 0;
-  int verify_calls = 0;
-  int discard_calls = 0;
 
 private:
   FailurePoint _failure;
@@ -129,12 +115,167 @@ AtomicStore::Result runWithObserverTail(InMemoryStore* store) {
   return AtomicStore::write(*store, header, sizeof(header), payload, sizeof(payload));
 }
 
-AtomicStore::VerifiedImageResult runVerifiedJson(InMemoryStore* store) {
-  const uint8_t json[] = "{version:1,wifi:{ssid:\"mesh\"}}";
+// Models MQTTPrefsJsonFileStore under the SPIFFS rule it was written for:
+// rename() refuses an existing destination, so publishing must move the old
+// primary to .bak before the verified temp can take its name. Both halves of
+// that publish, and the rollback that undoes a half-done one, are injectable.
+class InMemoryJsonStore {
+public:
+  struct Options {
+    FailurePoint failure = FailurePoint::None;
+    bool rollback_rename_fails = false;
+    bool rollback_remove_fails = false;
+    bool has_primary = true;
+  };
+
+  explicit InMemoryJsonStore(FailurePoint failure) : _opts{failure, false, false, true} {
+    _files["/mqtt.json"] = oldImage();
+  }
+  explicit InMemoryJsonStore(Options opts) : _opts(opts) {
+    if (_opts.has_primary) _files["/mqtt.json"] = oldImage();
+  }
+
+  bool begin() {
+    ++begin_calls;
+    // Production refuses to open a new transaction while recovery still owns
+    // an artifact, so a rollback that left one behind blocks the retry.
+    if (has("/mqtt.json.tmp") || has("/mqtt.json.bak")) return false;
+    _staging.clear();
+    _open = _opts.failure != FailurePoint::Begin;
+    return _open;
+  }
+
+  size_t write(const uint8_t* bytes, size_t size) {
+    ++write_calls;
+    if (!_open) return 0;
+    const size_t written =
+        _opts.failure == FailurePoint::ImageWrite && size > 0 ? size - 1 : size;
+    _staging.insert(_staging.end(), bytes, bytes + written);
+    return written;
+  }
+
+  bool finish() {
+    ++finish_calls;
+    _open = false;
+    if (_opts.failure == FailurePoint::Finish) return false;
+    _files["/mqtt.json.tmp"] = _staging;
+    _finished = true;
+    return true;
+  }
+
+  bool verify() {
+    ++verify_calls;
+    return _opts.failure != FailurePoint::Verify;
+  }
+
+  bool commit() {
+    ++commit_calls;
+    if (!_finished) return false;
+    if (has("/mqtt.json.bak")) return false;
+    if (has("/mqtt.json") && !rename("/mqtt.json", "/mqtt.json.bak")) return false;
+    // Fail the publish rename, the boundary that leaves the old primary parked
+    // in .bak with the verified new image still sitting in the temp.
+    if (_opts.failure == FailurePoint::Commit) return false;
+    if (!rename("/mqtt.json.tmp", "/mqtt.json")) return false;
+    _files.erase("/mqtt.json.bak");
+    _finished = false;
+    return true;
+  }
+
+  bool rollbackFailedCommit() {
+    ++rollback_calls;
+    if (!has("/mqtt.json") && has("/mqtt.json.bak")) {
+      if (_opts.rollback_rename_fails || !rename("/mqtt.json.bak", "/mqtt.json")) {
+        return false;
+      }
+    }
+    if (has("/mqtt.json.tmp")) {
+      if (_opts.rollback_remove_fails) return has("/mqtt.json");
+      _files.erase("/mqtt.json.tmp");
+    }
+    return true;
+  }
+
+  void discardFinishedTemp() {
+    ++discard_calls;
+    _files.erase("/mqtt.json.tmp");
+    _finished = false;
+  }
+
+  void abort() {
+    ++abort_calls;
+    _open = false;
+    _staging.clear();
+    if (!_finished) _files.erase("/mqtt.json.tmp");
+    _finished = false;
+  }
+
+  // Apply the boot-recovery policy to whatever the transaction left behind and
+  // report the image the node would come up on. Every file present in these
+  // scenarios is a complete image, so each maps to Usable.
+  std::vector<uint8_t> imageAfterReboot() {
+    const auto state = [this](const char* path) {
+      return has(path) ? Recovery::FileState::Usable : Recovery::FileState::Missing;
+    };
+    switch (Recovery::select(state("/mqtt.json"), state("/mqtt.json.tmp"),
+                             state("/mqtt.json.bak"))) {
+      case Recovery::Action::PromoteTemp:
+        rename("/mqtt.json.tmp", "/mqtt.json");
+        break;
+      case Recovery::Action::PromoteBackup:
+        rename("/mqtt.json.bak", "/mqtt.json");
+        break;
+      case Recovery::Action::DiscardTemp:
+        _files.erase("/mqtt.json.tmp");
+        break;
+      default:
+        break;
+    }
+    return has("/mqtt.json") ? _files.at("/mqtt.json") : std::vector<uint8_t>();
+  }
+
+  bool has(const char* path) const { return _files.count(path) != 0; }
+  bool canStartSave() const { return !has("/mqtt.json.tmp") && !has("/mqtt.json.bak"); }
+  const std::vector<uint8_t>& source() const { return _files.at("/mqtt.json"); }
+  static std::vector<uint8_t> oldImage() {
+    const char* text = "{version:1,wifi:{ssid:\"old\"}}";
+    return std::vector<uint8_t>(text, text + strlen(text));
+  }
+  static std::vector<uint8_t> newImage() {
+    const char* text = "{version:1,wifi:{ssid:\"mesh\"}}";
+    return std::vector<uint8_t>(text, text + strlen(text));
+  }
+
+  int begin_calls = 0;
+  int write_calls = 0;
+  int finish_calls = 0;
+  int commit_calls = 0;
+  int abort_calls = 0;
+  int verify_calls = 0;
+  int discard_calls = 0;
+  int rollback_calls = 0;
+
+private:
+  bool rename(const char* from, const char* to) {
+    if (_files.count(from) == 0 || _files.count(to) != 0) return false;
+    _files[to] = _files[from];
+    _files.erase(from);
+    return true;
+  }
+
+  Options _opts;
+  bool _open = false;
+  bool _finished = false;
+  std::vector<uint8_t> _staging;
+  std::map<std::string, std::vector<uint8_t>> _files;
+};
+
+AtomicStore::VerifiedImageResult runVerifiedJson(InMemoryJsonStore* store) {
+  const std::vector<uint8_t> json = InMemoryJsonStore::newImage();
   return AtomicStore::writeVerifiedImage(
       *store,
       [store, &json]() {
-        return store->write(json, sizeof(json) - 1) == sizeof(json) - 1;
+        return store->write(json.data(), json.size()) == json.size();
       },
       [store]() { return store->verify(); });
 }
@@ -284,13 +425,23 @@ public:
   }
 
   // Inject ordinary operation failures (as distinct from a power cut). A
-  // failed temp rename leaves both the verified temp and old backup intact.
+  // failed temp rename leaves both the verified temp and old backup intact,
+  // which is the state rollbackFailedPublish() then undoes.
   bool publish(bool fail_backup_rename, bool fail_temp_rename, bool fail_cleanup) {
     writeVerifiedTemp();
     if (fail_backup_rename || !rename("/mqtt_prefs", "/mqtt_prefs.bak")) return false;
     if (fail_temp_rename || !rename("/mqtt_prefs.tmp", "/mqtt_prefs")) return false;
     if (!fail_cleanup) _files.erase("/mqtt_prefs.bak");
     return true;  // backup cleanup is intentionally non-fatal after publish
+  }
+
+  bool rollbackFailedPublish() {
+    if (!has("/mqtt_prefs") && has("/mqtt_prefs.bak") &&
+        !rename("/mqtt_prefs.bak", "/mqtt_prefs")) {
+      return false;
+    }
+    _files.erase("/mqtt_prefs.tmp");
+    return true;
   }
 
   void recover(Recovery::FileState primary = Recovery::FileState::Usable,
@@ -370,8 +521,6 @@ TEST(MQTTPrefsAtomicStore, CommitPublishesExactHeaderThenPayload) {
 }
 
 TEST(MQTTPrefsAtomicStore, ProductionJsonPolicyCoversEveryVerificationBoundary) {
-  const std::vector<uint8_t> old_source = {
-      'o', 'l', 'd', '-', 'p', 'r', 'e', 'f', 's'};
   const struct {
     FailurePoint point;
     AtomicStore::VerifiedImageResult expected;
@@ -381,24 +530,24 @@ TEST(MQTTPrefsAtomicStore, ProductionJsonPolicyCoversEveryVerificationBoundary) 
     int commits;
     int aborts;
     int discards;
-    bool keeps_temp;
+    int rollbacks;
   } cases[] = {
       {FailurePoint::None, AtomicStore::VerifiedImageResult::Committed,
-       1, 1, 1, 1, 0, 0, false},
+       1, 1, 1, 1, 0, 0, 0},
       {FailurePoint::Begin, AtomicStore::VerifiedImageResult::BeginFailed,
-       0, 0, 0, 0, 1, 0, false},
+       0, 0, 0, 0, 1, 0, 0},
       {FailurePoint::ImageWrite, AtomicStore::VerifiedImageResult::WriteFailed,
-       1, 0, 0, 0, 1, 0, false},
+       1, 0, 0, 0, 1, 0, 0},
       {FailurePoint::Finish, AtomicStore::VerifiedImageResult::FinishFailed,
-       1, 1, 0, 0, 1, 0, false},
+       1, 1, 0, 0, 1, 0, 0},
       {FailurePoint::Verify, AtomicStore::VerifiedImageResult::VerifyFailed,
-       1, 1, 1, 0, 0, 1, false},
+       1, 1, 1, 0, 0, 1, 0},
       {FailurePoint::Commit, AtomicStore::VerifiedImageResult::CommitFailed,
-       1, 1, 1, 1, 1, 0, true},
+       1, 1, 1, 1, 1, 0, 1},
   };
 
   for (const auto& test_case : cases) {
-    InMemoryStore store(test_case.point);
+    InMemoryJsonStore store(test_case.point);
     EXPECT_EQ(test_case.expected, runVerifiedJson(&store));
     EXPECT_EQ(test_case.writes, store.write_calls);
     EXPECT_EQ(test_case.finishes, store.finish_calls);
@@ -406,11 +555,64 @@ TEST(MQTTPrefsAtomicStore, ProductionJsonPolicyCoversEveryVerificationBoundary) 
     EXPECT_EQ(test_case.commits, store.commit_calls);
     EXPECT_EQ(test_case.aborts, store.abort_calls);
     EXPECT_EQ(test_case.discards, store.discard_calls);
-    EXPECT_EQ(test_case.keeps_temp, store.tempExists());
+    EXPECT_EQ(test_case.rollbacks, store.rollback_calls);
+    // Every failure leaves the previous image published and no artifact behind,
+    // so the next save can start immediately.
     if (test_case.point != FailurePoint::None) {
-      EXPECT_EQ(old_source, store.source());
+      EXPECT_EQ(InMemoryJsonStore::oldImage(), store.source());
+      EXPECT_TRUE(store.canStartSave());
     }
   }
+}
+
+TEST(MQTTPrefsAtomicStore, FailedPublishIsUndoneSoTheRefusedValueCannotReturnAtBoot) {
+  InMemoryJsonStore store(FailurePoint::Commit);
+
+  // The publish moved the old primary to .bak before failing to rename the
+  // verified temp into place. Reporting the change as rolled back is only
+  // truthful because that half-done transaction is undone here.
+  ASSERT_EQ(AtomicStore::VerifiedImageResult::CommitFailed, runVerifiedJson(&store));
+  EXPECT_EQ(InMemoryJsonStore::oldImage(), store.source());
+  EXPECT_FALSE(store.has("/mqtt.json.tmp"));
+  EXPECT_FALSE(store.has("/mqtt.json.bak"));
+  EXPECT_EQ(InMemoryJsonStore::oldImage(), store.imageAfterReboot());
+}
+
+TEST(MQTTPrefsAtomicStore, UnrestorablePublishFailureIsReportedAsIndeterminate) {
+  // Rollback cannot republish the backup: the primary name stays empty and the
+  // verified temp still wins recovery, so the refused value does come back at
+  // the next boot. The caller must say so rather than claim a rollback.
+  InMemoryJsonStore backup_stuck(InMemoryJsonStore::Options{
+      FailurePoint::Commit, /*rollback_rename_fails=*/true, false, true});
+  ASSERT_EQ(AtomicStore::VerifiedImageResult::CommitIndeterminate,
+            runVerifiedJson(&backup_stuck));
+  EXPECT_TRUE(backup_stuck.has("/mqtt.json.tmp"));
+  EXPECT_TRUE(backup_stuck.has("/mqtt.json.bak"));
+  EXPECT_FALSE(backup_stuck.canStartSave());  // retries fail until this resolves
+  EXPECT_EQ(InMemoryJsonStore::newImage(), backup_stuck.imageAfterReboot());
+
+  // Same verdict for the first-ever save, where there is no backup to restore
+  // and the undeletable temp is the only image the next boot can find.
+  InMemoryJsonStore first_save(InMemoryJsonStore::Options{
+      FailurePoint::Commit, false, /*rollback_remove_fails=*/true,
+      /*has_primary=*/false});
+  ASSERT_EQ(AtomicStore::VerifiedImageResult::CommitIndeterminate,
+            runVerifiedJson(&first_save));
+  EXPECT_FALSE(first_save.has("/mqtt.json"));
+  EXPECT_EQ(InMemoryJsonStore::newImage(), first_save.imageAfterReboot());
+}
+
+TEST(MQTTPrefsAtomicStore, FirstSavePublishFailureLeavesNoImageToPromote) {
+  InMemoryJsonStore store(InMemoryJsonStore::Options{
+      FailurePoint::Commit, false, false, /*has_primary=*/false});
+
+  // No prior /mqtt.json exists, so rollback only has to discard the temp. The
+  // next boot re-runs migration from the legacy source instead of adopting the
+  // value the CLI just refused.
+  ASSERT_EQ(AtomicStore::VerifiedImageResult::CommitFailed, runVerifiedJson(&store));
+  EXPECT_FALSE(store.has("/mqtt.json.tmp"));
+  EXPECT_TRUE(store.imageAfterReboot().empty());
+  EXPECT_TRUE(store.canStartSave());
 }
 
 TEST(MQTTPrefsAtomicStore, AnyFailureAbortsAndPreservesExistingSource) {
@@ -677,8 +879,11 @@ TEST(MQTTPrefsAtomicStore, SpiffsRenameAndCleanupFailuresRemainRecoverable) {
     EXPECT_FALSE(store.has("/mqtt_prefs"));
     EXPECT_TRUE(store.has("/mqtt_prefs.tmp"));
     EXPECT_TRUE(store.has("/mqtt_prefs.bak"));
+    // Unlike a power cut at this boundary, a returned failure is answered to
+    // the caller, so the transaction is undone before recovery ever sees it.
+    EXPECT_TRUE(store.rollbackFailedPublish());
     store.recover();
-    EXPECT_EQ(SpiffsMqttTransaction::newImage(), store.primary());
+    EXPECT_EQ(SpiffsMqttTransaction::oldImage(), store.primary());
     EXPECT_FALSE(store.has("/mqtt_prefs.tmp"));
     EXPECT_FALSE(store.has("/mqtt_prefs.bak"));
   }

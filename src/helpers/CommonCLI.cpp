@@ -608,12 +608,14 @@ public:
     _finished = false;
     _open = false;
     _owns_temp = false;
+    _owns_backup = false;
     _bytes_written = 0;
     _expected_crc = MQTT_JSON_FNV1A_OFFSET_BASIS;
-    // Recovery owns stale artifacts. Do not delete them here: a failed commit
-    // may have moved the old primary to .bak and left a verified temp that the
-    // next boot must choose between. Refusing the save is safer than erasing an
-    // image this firmware cannot decode.
+    // Recovery owns stale artifacts. Do not delete them here: a power cut, or a
+    // failed commit that could not be rolled back, may have moved the old
+    // primary to .bak and left a verified temp that the next boot must choose
+    // between. Refusing the save is safer than erasing an image this firmware
+    // cannot decode.
     if (_fs->exists("/mqtt.json.tmp") || _fs->exists("/mqtt.json.bak")) return false;
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
     _file = _fs->open("/mqtt.json.tmp", FILE_O_WRITE);
@@ -679,16 +681,43 @@ public:
     if (!_finished) return false;
     // SPIFFS refuses rename(tmp, existing_dest). Move the existing image to a
     // recoverable backup first, then publish temp into the now-empty primary.
-    // Never remove either image after a failed boundary; boot recovery selects
-    // the completed temp or restores the backup.
+    // A power cut at either boundary is resolved by boot recovery; a failure
+    // that returns here is undone by rollbackFailedCommit().
     if (_fs->exists("/mqtt.json.bak")) return false;
-    if (_fs->exists("/mqtt.json") && !_fs->rename("/mqtt.json", "/mqtt.json.bak")) {
-      return false;
+    if (_fs->exists("/mqtt.json")) {
+      if (!_fs->rename("/mqtt.json", "/mqtt.json.bak")) return false;
+      _owns_backup = true;
     }
     if (!_fs->rename("/mqtt.json.tmp", "/mqtt.json")) return false;
     // Cleanup failure is non-fatal: the new primary is published and recovery
     // will remove a known-good stale backup on a later boot.
     if (_fs->exists("/mqtt.json.bak")) _fs->remove("/mqtt.json.bak");
+    return true;
+  }
+
+  // Undo a commit that failed midway. Without this, a failed publish can leave
+  // the old primary parked in .bak and the verified temp still holding the new
+  // image, which boot recovery then promotes — so a setter that told the
+  // operator the change was rolled back would be wrong after the next reset.
+  //
+  // Republishing the backup is the operation that matters: once the primary
+  // name is occupied, recovery keeps it and treats the temp as stale, so the
+  // temp removal below is only housekeeping. Returns false when the
+  // pre-transaction state could not be restored and the outcome of the next
+  // boot is therefore uncertain.
+  bool rollbackFailedCommit() {
+    // Only ever restore the backup this transaction made. Anything else under
+    // that name predates the transaction and is recovery's to resolve.
+    if (_owns_backup && !_fs->exists("/mqtt.json") &&
+        !_fs->rename("/mqtt.json.bak", "/mqtt.json")) {
+      return false;
+    }
+    _owns_backup = false;
+    if (_owns_temp && _fs->exists("/mqtt.json.tmp") && !_fs->remove("/mqtt.json.tmp")) {
+      // A verified temp still outranks a missing primary during recovery, so
+      // this is only harmless if the primary name is occupied again.
+      return _fs->exists("/mqtt.json");
+    }
     return true;
   }
 
@@ -703,14 +732,15 @@ public:
   void abort() {
     if (_open) _file.close();
     _open = false;
-    // Once finish() has verified the temp, commit may already have moved the
-    // primary to .bak. Keep the temp on a commit failure so recovery can
-    // publish it (or fall back to .bak) after reset.
+    // Only unfinished staging is disposable here. Once finish() has verified
+    // the temp, rollbackFailedCommit() has already decided its fate, and a temp
+    // that survived that is one recovery must resolve after reset.
     if (_owns_temp && !_finished && _fs->exists("/mqtt.json.tmp")) {
       _fs->remove("/mqtt.json.tmp");
     }
     _finished = false;
     _owns_temp = false;
+    _owns_backup = false;
   }
 
 private:
@@ -719,6 +749,9 @@ private:
   bool _open = false;
   bool _finished = false;
   bool _owns_temp = false;
+  // This transaction moved the old primary to /mqtt.json.bak, so a failed
+  // publish may put it back. Never true for a backup it did not create.
+  bool _owns_backup = false;
   size_t _bytes_written = 0;
   uint32_t _expected_crc = MQTT_JSON_FNV1A_OFFSET_BASIS;
 };
@@ -1061,7 +1094,16 @@ bool CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
       }
       break;
     case MQTTPrefsAtomicStore::VerifiedImageResult::CommitFailed:
-      MESH_DEBUG_PRINTLN("MQTT: atomic /mqtt.json save failed during rename; recovery files preserved");
+      MESH_DEBUG_PRINTLN("MQTT: atomic /mqtt.json save failed during rename; transaction rolled back");
+      break;
+    case MQTTPrefsAtomicStore::VerifiedImageResult::CommitIndeterminate:
+      // The failed publish could not be undone, so a recovery file this
+      // firmware may still promote is holding the new image. No further save
+      // can start until it is resolved: begin() refuses while either the temp
+      // or the backup exists, which is exactly the state that gets us here.
+      _observer_save_indeterminate = true;
+      MESH_DEBUG_PRINTLN("MQTT: atomic /mqtt.json save failed during rename and could not be rolled back; "
+                         "recovery files preserved");
       break;
   }
   return false;

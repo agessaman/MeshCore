@@ -170,7 +170,8 @@ favour of independent `mqtt.rx` / `mqtt.tx` controls. Everything MQTT-specific l
 
 Observer preferences use the same `ConfigSerializer` object notation as upstream
 `/prefs.json`: semantic unquoted keys, quoted strings, decimal numbers, and nested
-objects. Schema version 1 requires the root `version:1` field. The main shape is:
+objects. Schema version 1 requires the root `version:1` field, which must be the
+first property of the root object. The main shape is:
 
 ```text
 {version:1,
@@ -210,7 +211,20 @@ though the setting were durable.
 Saves stream to `/mqtt.json.tmp` through a sticky short-write detector while computing
 size and checksum. The firmware closes and rereads the temp, verifies size/checksum,
 parses it into another scratch object, then publishes with
-`/mqtt.json` -> `/mqtt.json.bak` and temp -> primary. Boot recovery selects the usable
+`/mqtt.json` -> `/mqtt.json.bak` and temp -> primary. Failure safety is paid for in
+transient heap: a CLI setter holds one `MQTTPrefs` rollback snapshot (2876 bytes) for the
+whole command, and the save allocates one more for normalization defaults (released
+before file I/O) and then one for verification — about 5.6 KiB peak above baseline.
+Each allocation is checked, so exhaustion refuses the setting rather than crashing.
+
+If publishing fails partway, the transaction is rolled back rather than left for boot
+recovery: the backup is renamed back over the empty primary and the verified temp is
+discarded. This is what makes the setter's "change rolled back" reply true — without it
+the next boot would promote that temp and activate the value the CLI just refused. When
+the rollback itself cannot complete, the save reports an indeterminate outcome instead,
+the artifacts stay for recovery, and the CLI says the flash state is unresolved. Further
+saves are refused until then, because a transaction cannot start while a temp or backup
+exists. Boot recovery selects the usable
 primary/temp/backup without overwriting an opaque future or corrupt primary. A valid
 future-version temp that reached the rename phase wins over the stale backup and is held
 for newer firmware. If a temp claims a future version but uses grammar this firmware
@@ -232,6 +246,14 @@ within the limits above. A future version is treated as opaque rather than parti
 loading its known-looking fields. Literal schema keys are compile-time checked against
 the 15-character visible-key limit so a new version-1 field cannot accidentally violate
 that downgrade contract.
+
+Every future version must also keep `version` as the first root property. Older firmware
+detects a future file by probing that field with its own grammar, and the probe stops at
+the first construct it cannot tokenize (an array, an overlong key, a value type it does
+not expect). Syntax a newer schema introduces *before* the version field therefore makes
+its files look corrupt rather than future, which costs them the preservation guarantee
+above: as the temp of an interrupted commit such a file is discardable instead of
+retained. `test_mqtt_prefs_serializer` pins both the ordering and that consequence.
 
 #### Downgrade and rollback
 

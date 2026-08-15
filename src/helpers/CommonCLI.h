@@ -373,6 +373,11 @@ class CommonCLI {
   // /mqtt.json is newer, corrupt, or temporarily unreadable. The in-memory prefs
   // run on defaults and saveMQTTPrefs() must not overwrite the source file.
   bool _mqtt_prefs_hold = false;
+  // A failed publish could not be undone, so the next boot may still come up
+  // with the value that was refused. persistObserverPrefs() must not call that
+  // a rollback. Latched for the boot: the artifact left behind also makes every
+  // later transaction fail to begin, so the condition cannot clear itself.
+  bool _observer_save_indeterminate = false;
 #endif
   bool _com_prefs_needs_upgrade = false;  // old-format legacy prefs detected; rewrite once after load
 
