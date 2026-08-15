@@ -28,10 +28,13 @@ if [ ! -f "$MANIFEST" ]; then
 fi
 
 # Manifest lines: <arch> <sha256> <filename>. Blank lines and # comments ignored.
+# The "platform" and "stock:<arch>" lines bind the archives to a framework version;
+# they are the build check's business, not ours, and are not architectures.
 expected="$(awk -v a="$ARCH" '$1 == a && $0 !~ /^#/ {print $2"  "$3}' "$MANIFEST")"
 if [ -z "$expected" ]; then
   echo "error: no manifest entries for arch '$ARCH'" >&2
-  echo "known arches: $(awk '$0 !~ /^#/ && NF {print $1}' "$MANIFEST" | sort -u | tr '\n' ' ')" >&2
+  echo "known arches: $(awk '$0 !~ /^#/ && NF && $1 != "platform" && $1 !~ /^stock:/ {print $1}' \
+    "$MANIFEST" | sort -u | tr '\n' ' ')" >&2
   exit 1
 fi
 

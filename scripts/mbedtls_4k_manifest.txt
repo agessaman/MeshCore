@@ -10,3 +10,14 @@ esp32s3 01629f635b33ffa2c1fdfcd8ac52327cd3a92e8d4e7c9a32d92974e0cfdfe398 libmbed
 esp32s3 07e7a09847589fefc35bc8d2f739d556535d535acd7185a9824b2af8edd5b05a libmbedtls_2.a
 esp32s3 e12bcc8d76a368e819987f266e73c265178d6b6675f05d0e29014bb543c402af libmbedtls.a
 esp32s3 c1e10324e19f6d7763737f72d9032cec832bdfce60c7a7d381a5fcfc7dcad573 libmbedx509.a
+
+# Framework binding, read by scripts/mbedtls_4k.py and ignored by the fetch script.
+# "stock:" lines fingerprint the framework's own archives — the ones the entries above
+# displace. They are what makes "rebuild on every platform bump" enforceable instead of
+# advisory: if the framework's copies move, the entries above are stale by construction
+# and the build stops. Regenerate both sets together, never one alone.
+platform espressif32@6.11.0
+stock:esp32s3 abdaf759ee17aa697468427b55a86c6c0082ac4cdeb643a63d8b3ac2df324633 libmbedcrypto.a
+stock:esp32s3 9a580d2ff7c885e1bf59479a14422e3d10a485ae9083acb5db943df714c0ac35 libmbedtls_2.a
+stock:esp32s3 a0f331245feb5cf4fe8d9f99b03d34d64f10e38d8a8d680e35b34ec82aa3cf9e libmbedtls.a
+stock:esp32s3 3d56277224b066118b6c48a973ae18fdf8078448bf54b482ac5557699e52f223 libmbedx509.a
