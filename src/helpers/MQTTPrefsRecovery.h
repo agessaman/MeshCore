@@ -7,9 +7,16 @@
 // the primary name. On a reset, the loader uses this policy before decoding
 // the primary. FutureUsable is syntactically valid but belongs to newer
 // firmware. FutureClaimed and Indeterminate cannot be safely classified by
-// this firmware, so recovery may use a known-good backup but must retain the
+// this firmware, so recovery may run a known-good backup but must retain the
 // uncertain image and hold further writes. Preserve is definitively invalid or
 // unsupported and may be discarded only where the transaction policy permits.
+//
+// The filenames are the transaction state. A temp that exists while the primary
+// name is empty says the commit had already passed the backup rename, and that
+// is the only record of it — so an uncertain temp is answered with
+// UseBackupHeld, which renames nothing. Publishing the backup instead would
+// make the candidate look like an ordinary stale artifact to the next boot,
+// which would delete it exactly when it finally became readable.
 namespace MQTTPrefsRecovery {
 
 enum class FileState : uint8_t {
@@ -27,6 +34,10 @@ enum class Action : uint8_t {
   DiscardTemp,
   PromoteTemp,
   PromoteBackup,
+  // Run the backup where it lies, changing nothing on disk, and hold writes.
+  // Every later boot re-runs this policy against the same three names until one
+  // of them can classify the candidate.
+  UseBackupHeld,
 };
 
 inline Action select(FileState primary, FileState temp, FileState backup) {
@@ -50,10 +61,12 @@ inline Action select(FileState primary, FileState temp, FileState backup) {
   }
 
   // FutureClaimed and Indeterminate may be a completed image this firmware
-  // cannot classify. A known-good backup can run this boot, but without one
-  // preserve the only candidate under the authoritative name and hold writes.
+  // cannot classify. A known-good backup can run this boot, but it must run
+  // from its own name: promoting it would spend the empty primary name that
+  // marks the candidate as mid-commit. Without such a backup, preserve the only
+  // candidate under the authoritative name and hold writes.
   if (temp == FileState::FutureClaimed || temp == FileState::Indeterminate) {
-    return backup == FileState::Usable ? Action::PromoteBackup : Action::PromoteTemp;
+    return backup == FileState::Usable ? Action::UseBackupHeld : Action::PromoteTemp;
   }
 
   // No temp survived. The backup is the only recoverable image, even when it

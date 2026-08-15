@@ -467,6 +467,9 @@ public:
       _files.erase("/mqtt_prefs.tmp");
       return;
     }
+    if (action == Recovery::Action::UseBackupHeld) {
+      return;  // production renames nothing and runs the backup where it lies
+    }
     if (action == Recovery::Action::PromoteBackup) {
       rename("/mqtt_prefs.bak", "/mqtt_prefs");
       if (backup == Recovery::FileState::Usable && !Recovery::uncertain(temp) &&
@@ -930,13 +933,81 @@ TEST(MQTTPrefsAtomicStore, AmbiguousFutureOrOomTempIsNeverDeleted) {
     store.recover(Recovery::FileState::Missing, uncertain,
                   Recovery::FileState::Usable);
 
-    // The supported backup can run this boot, but the candidate that this
-    // firmware could not classify remains available to newer firmware or a
-    // later boot with more heap. Its presence also blocks a new transaction.
-    EXPECT_EQ(SpiffsMqttTransaction::oldImage(), store.primary());
+    // The supported backup runs this boot from its own name. Nothing is
+    // renamed, so the empty primary name still records that the candidate had
+    // reached the publish phase. Its presence also blocks a new transaction.
+    EXPECT_FALSE(store.has("/mqtt_prefs"));
     EXPECT_TRUE(store.has("/mqtt_prefs.tmp"));
+    EXPECT_TRUE(store.has("/mqtt_prefs.bak"));
     EXPECT_FALSE(store.canStartSave());
   }
+}
+
+TEST(MQTTPrefsAtomicStore, PreservedCandidateIsPromotedByTheBootThatCanReadIt) {
+  // The whole point of keeping an uncertain temp is that a later boot can act
+  // on it. Publishing the backup on the first boot would defeat that: the
+  // candidate would then look like a stale artifact next to a usable primary,
+  // and get deleted exactly when it finally became readable.
+  const struct {
+    Recovery::FileState first_boot;
+    Recovery::FileState second_boot;
+    // A promoted current-format image ends the transaction, so its backup goes
+    // too. A future-format one keeps the last readable image and stays held.
+    bool clears_backup;
+  } cases[] = {
+      // Classification scratch could not be allocated, then heap recovered.
+      {Recovery::FileState::Indeterminate, Recovery::FileState::Usable, true},
+      // Downgraded firmware could not parse it, then the node rolled forward.
+      {Recovery::FileState::FutureClaimed, Recovery::FileState::Usable, true},
+      // Still a newer schema on the second boot, but now classifiable.
+      {Recovery::FileState::FutureClaimed, Recovery::FileState::FutureUsable, false},
+  };
+
+  for (const auto& test_case : cases) {
+    SpiffsMqttTransaction store;
+    store.cutAt(SpiffsMqttTransaction::Boundary::AfterBackupRename);
+
+    store.recover(Recovery::FileState::Missing, test_case.first_boot,
+                  Recovery::FileState::Usable);
+    ASSERT_TRUE(store.has("/mqtt_prefs.tmp"));
+    ASSERT_FALSE(store.has("/mqtt_prefs"));
+
+    store.recover(Recovery::FileState::Missing, test_case.second_boot,
+                  Recovery::FileState::Usable);
+    EXPECT_EQ(SpiffsMqttTransaction::newImage(), store.primary());
+    EXPECT_FALSE(store.has("/mqtt_prefs.tmp"));
+    EXPECT_EQ(test_case.clears_backup, !store.has("/mqtt_prefs.bak"));
+    EXPECT_EQ(test_case.clears_backup, store.canStartSave());
+  }
+}
+
+TEST(MQTTPrefsAtomicStore, CandidateThatProvesInvalidYieldsToTheHeldBackup) {
+  SpiffsMqttTransaction store;
+  store.cutAt(SpiffsMqttTransaction::Boundary::AfterBackupRename);
+  store.recover(Recovery::FileState::Missing, Recovery::FileState::Indeterminate,
+                Recovery::FileState::Usable);
+
+  // The second boot can classify it and finds it definitively corrupt, so the
+  // last committed image is published and the candidate is dropped. The node
+  // leaves the held state without ever having discarded an unread candidate.
+  store.recover(Recovery::FileState::Missing, Recovery::FileState::Preserve,
+                Recovery::FileState::Usable);
+  EXPECT_EQ(SpiffsMqttTransaction::oldImage(), store.primary());
+  EXPECT_FALSE(store.has("/mqtt_prefs.tmp"));
+  EXPECT_TRUE(store.canStartSave());
+}
+
+TEST(MQTTPrefsAtomicStore, UncertainTempWithNoUsableBackupStillOwnsThePrimaryName) {
+  // With no image that can run this boot, the candidate is the only thing left
+  // to protect, so it takes the authoritative name and CommonCLI holds it.
+  EXPECT_EQ(Recovery::Action::PromoteTemp,
+            Recovery::select(Recovery::FileState::Missing,
+                             Recovery::FileState::Indeterminate,
+                             Recovery::FileState::Missing));
+  EXPECT_EQ(Recovery::Action::PromoteTemp,
+            Recovery::select(Recovery::FileState::Missing,
+                             Recovery::FileState::FutureClaimed,
+                             Recovery::FileState::Preserve));
 }
 
 TEST(MQTTPrefsAtomicStore, UsablePrimaryDoesNotCleanIndeterminateArtifact) {

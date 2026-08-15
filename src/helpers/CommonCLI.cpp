@@ -409,7 +409,13 @@ enum class JsonPrefsLoadResult : uint8_t {
   UnsupportedVersion,
   FutureClaimed,
   Invalid,
+  NoMemory,
 };
+
+static bool jsonPrefsLoaded(JsonPrefsLoadResult result) {
+  return result == JsonPrefsLoadResult::Loaded ||
+         result == JsonPrefsLoadResult::LoadedWithRepairs;
+}
 
 static JsonPrefsLoadResult loadMqttJsonFile(FILESYSTEM* fs, const char* path,
                                              MQTTPrefs* output) {
@@ -441,6 +447,19 @@ static JsonPrefsLoadResult loadMqttJsonFile(FILESYSTEM* fs, const char* path,
   return repaired ? JsonPrefsLoadResult::LoadedWithRepairs : JsonPrefsLoadResult::Loaded;
 }
 
+// Parse `path` through a heap scratch object and publish it over `dest` only
+// once the whole file is known good, so a late failure cannot leave the live
+// preferences half-loaded.
+static JsonPrefsLoadResult adoptMqttJsonFile(FILESYSTEM* fs, const char* path,
+                                              MQTTPrefs* dest) {
+  MQTTPrefs* scratch = new (std::nothrow) MQTTPrefs;
+  if (scratch == nullptr) return JsonPrefsLoadResult::NoMemory;
+  const JsonPrefsLoadResult result = loadMqttJsonFile(fs, path, scratch);
+  if (jsonPrefsLoaded(result)) memcpy(dest, scratch, sizeof(*dest));
+  delete scratch;
+  return result;
+}
+
 static MQTTPrefsRecovery::FileState mqttJsonFileState(FILESYSTEM* fs, const char* path) {
   if (!fs->exists(path)) return MQTTPrefsRecovery::FileState::Missing;
   MQTTPrefs* scratch = new (std::nothrow) MQTTPrefs;
@@ -462,7 +481,15 @@ static MQTTPrefsRecovery::FileState mqttJsonFileState(FILESYSTEM* fs, const char
       : MQTTPrefsRecovery::FileState::Preserve;
 }
 
-static bool recoverMqttJsonFiles(FILESYSTEM* fs) {
+// hold: observer writes must not replace whatever was left on disk.
+// run_from_backup: nothing was renamed and /mqtt.json does not exist; this boot
+// reads the last committed image straight out of /mqtt.json.bak.
+struct MqttJsonRecovery {
+  bool hold;
+  bool run_from_backup;
+};
+
+static MqttJsonRecovery recoverMqttJsonFiles(FILESYSTEM* fs) {
   const MQTTPrefsRecovery::FileState primary = mqttJsonFileState(fs, "/mqtt.json");
   const MQTTPrefsRecovery::FileState temp = mqttJsonFileState(fs, "/mqtt.json.tmp");
   const MQTTPrefsRecovery::FileState backup = mqttJsonFileState(fs, "/mqtt.json.bak");
@@ -479,17 +506,18 @@ static bool recoverMqttJsonFiles(FILESYSTEM* fs) {
         fs->remove("/mqtt.json.bak");
       }
     }
-    return MQTTPrefsRecovery::uncertain(primary) ||
-           MQTTPrefsRecovery::uncertain(temp) ||
-           MQTTPrefsRecovery::uncertain(backup);
+    return {MQTTPrefsRecovery::uncertain(primary) ||
+                MQTTPrefsRecovery::uncertain(temp) ||
+                MQTTPrefsRecovery::uncertain(backup),
+            false};
   }
   if (action == MQTTPrefsRecovery::Action::DiscardTemp) {
     if (fs->remove("/mqtt.json.tmp")) {
       MESH_DEBUG_PRINTLN("MQTT: discarded incomplete first-migration JSON temp");
-      return false;
+      return {false, false};
     }
     MESH_DEBUG_PRINTLN("MQTT: could not discard incomplete /mqtt.json temp; source held");
-    return true;
+    return {true, false};
   }
   if (action == MQTTPrefsRecovery::Action::PromoteTemp) {
     if (fs->rename("/mqtt.json.tmp", "/mqtt.json")) {
@@ -498,11 +526,21 @@ static bool recoverMqttJsonFiles(FILESYSTEM* fs) {
         fs->remove("/mqtt.json.bak");
       }
       MESH_DEBUG_PRINTLN("MQTT: recovered /mqtt.json from transaction temp");
-      return MQTTPrefsRecovery::uncertain(temp) ||
-             MQTTPrefsRecovery::uncertain(backup);
+      return {MQTTPrefsRecovery::uncertain(temp) ||
+                  MQTTPrefsRecovery::uncertain(backup),
+              false};
     }
     MESH_DEBUG_PRINTLN("MQTT: could not recover /mqtt.json temp; files preserved");
-    return true;
+    return {true, false};
+  }
+  if (action == MQTTPrefsRecovery::Action::UseBackupHeld) {
+    // Deliberately rename nothing. The empty primary name is what records that
+    // the interrupted commit had already moved the old image aside, and a boot
+    // that cannot classify the candidate must not spend that record: a later
+    // boot with more heap, or firmware that understands the candidate, promotes
+    // it through the ordinary rule instead of deleting it as a stale artifact.
+    MESH_DEBUG_PRINTLN("MQTT: unresolved /mqtt.json candidate; running the backup in place and holding writes");
+    return {true, true};
   }
   if (action == MQTTPrefsRecovery::Action::PromoteBackup) {
     if (fs->rename("/mqtt.json.bak", "/mqtt.json")) {
@@ -512,13 +550,14 @@ static bool recoverMqttJsonFiles(FILESYSTEM* fs) {
         fs->remove("/mqtt.json.tmp");
       }
       MESH_DEBUG_PRINTLN("MQTT: recovered /mqtt.json from transaction backup");
-      return MQTTPrefsRecovery::uncertain(temp) ||
-             MQTTPrefsRecovery::uncertain(backup);
+      return {MQTTPrefsRecovery::uncertain(temp) ||
+                  MQTTPrefsRecovery::uncertain(backup),
+              false};
     }
     MESH_DEBUG_PRINTLN("MQTT: could not recover /mqtt.json backup; files preserved");
-    return true;
+    return {true, false};
   }
-  return false;
+  return {false, false};
 }
 
 static MQTTPrefsRecovery::FileState mqttPrefsFileState(FILESYSTEM* fs, const char* path) {
@@ -577,6 +616,12 @@ static bool recoverMqttPrefsFiles(FILESYSTEM* fs) {
       return false;
     }
     MESH_DEBUG_PRINTLN("MQTT: could not recover /mqtt_prefs temp; files preserved");
+    return true;
+  }
+  if (action == MQTTPrefsRecovery::Action::UseBackupHeld) {
+    // Unreachable for the binary format, whose classifier never reports an
+    // uncertain state. Hold rather than fall through to "nothing to do" if a
+    // later classifier change makes it reachable.
     return true;
   }
   if (action == MQTTPrefsRecovery::Action::PromoteBackup) {
@@ -784,7 +829,26 @@ private:
 void CommonCLI::loadMQTTPrefs(
     FILESYSTEM* fs, MQTTPrefsAtomicStore::LegacyUpgradeGate* legacy_upgrade) {
   setMQTTPrefsDefaults(&_mqtt_prefs);
-  _mqtt_prefs_hold = recoverMqttJsonFiles(fs);
+  const MqttJsonRecovery recovery = recoverMqttJsonFiles(fs);
+  _mqtt_prefs_hold = recovery.hold;
+
+  // An interrupted commit left a candidate this boot cannot classify, so
+  // recovery renamed nothing. Read the last committed image out of the backup
+  // rather than publishing it: the transaction filenames must survive this boot
+  // intact for a later one to promote the candidate.
+  if (recovery.run_from_backup) {
+    _legacy_tail.valid = false;
+    const JsonPrefsLoadResult backup_result =
+        adoptMqttJsonFile(fs, "/mqtt.json.bak", &_mqtt_prefs);
+    if (jsonPrefsLoaded(backup_result)) {
+      MESH_DEBUG_PRINTLN("MQTT: running the /mqtt.json backup; candidate preserved and writes held");
+    } else {
+      setMQTTPrefsDefaults(&_mqtt_prefs);
+      MESH_DEBUG_PRINTLN("MQTT: /mqtt.json backup became unreadable; using defaults (files preserved)");
+    }
+    return;
+  }
+
   if (_mqtt_prefs_hold && !fs->exists("/mqtt.json") &&
       (fs->exists("/mqtt.json.tmp") || fs->exists("/mqtt.json.bak"))) {
     _legacy_tail.valid = false;
@@ -796,18 +860,9 @@ void CommonCLI::loadMQTTPrefs(
   // stale binary snapshot when JSON is corrupt, unreadable, or from a future
   // schema: preserve it and run defaults until an operator resolves it.
   if (fs->exists("/mqtt.json")) {
-    MQTTPrefs* scratch = new (std::nothrow) MQTTPrefs;
-    if (scratch == nullptr) {
-      _mqtt_prefs_hold = true;
-      _legacy_tail.valid = false;
-      MESH_DEBUG_PRINTLN("MQTT: no memory to validate /mqtt.json; source preserved");
-      return;
-    }
-    const JsonPrefsLoadResult json_result = loadMqttJsonFile(fs, "/mqtt.json", scratch);
-    if (json_result == JsonPrefsLoadResult::Loaded ||
-        json_result == JsonPrefsLoadResult::LoadedWithRepairs) {
-      memcpy(&_mqtt_prefs, scratch, sizeof(_mqtt_prefs));
-      delete scratch;
+    const JsonPrefsLoadResult json_result =
+        adoptMqttJsonFile(fs, "/mqtt.json", &_mqtt_prefs);
+    if (jsonPrefsLoaded(json_result)) {
       _legacy_tail.valid = false;
       if (json_result == JsonPrefsLoadResult::LoadedWithRepairs) {
         MESH_DEBUG_PRINTLN("MQTT: repaired out-of-range values in /mqtt.json");
@@ -818,10 +873,11 @@ void CommonCLI::loadMQTTPrefs(
       }
       return;
     }
-    delete scratch;
     _mqtt_prefs_hold = true;
     _legacy_tail.valid = false;
-    if (json_result == JsonPrefsLoadResult::UnsupportedVersion) {
+    if (json_result == JsonPrefsLoadResult::NoMemory) {
+      MESH_DEBUG_PRINTLN("MQTT: no memory to validate /mqtt.json; source preserved");
+    } else if (json_result == JsonPrefsLoadResult::UnsupportedVersion) {
       MESH_DEBUG_PRINTLN("MQTT: /mqtt.json uses a future version; using defaults (file preserved)");
     } else if (json_result == JsonPrefsLoadResult::FutureClaimed) {
       MESH_DEBUG_PRINTLN(

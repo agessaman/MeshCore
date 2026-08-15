@@ -228,8 +228,14 @@ exists. Boot recovery selects the usable
 primary/temp/backup without overwriting an opaque future or corrupt primary. A valid
 future-version temp that reached the rename phase wins over the stale backup and is held
 for newer firmware. If a temp claims a future version but uses grammar this firmware
-cannot parse, or cannot be classified because scratch allocation fails, recovery may run
-the last usable backup but retains the uncertain temp and holds all observer writes. A
+cannot parse, or cannot be classified because scratch allocation fails, recovery renames
+nothing at all: it reads the last usable backup straight out of `/mqtt.json.bak`, leaves
+the primary name empty, and holds all observer writes. The empty primary name is the only
+record that the candidate had already passed the backup rename, so publishing the backup
+would make the candidate indistinguishable from a stale artifact — and the next boot, the
+one with enough heap or new enough firmware to finally read it, would delete it. Leaving
+the names alone means that boot promotes the candidate through the ordinary temp rule, or
+falls back to the backup if it turns out to be definitively corrupt. A
 definitively corrupt/incomplete current-version temp may be discarded for that backup.
 If power fails during the very first migration, there is no JSON primary or backup yet;
 recovery discards a definitively invalid temp so the intact `/mqtt_prefs` source can be
