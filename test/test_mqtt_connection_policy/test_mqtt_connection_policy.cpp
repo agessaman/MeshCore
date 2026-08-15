@@ -290,6 +290,48 @@ TEST(StaleToken, FailedMintNeverReconnects) {
   EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, false));
 }
 
+using Policy::ClockSource;
+
+// 2026-01-01, the bridge's plausibility floor, and the 2024 placeholder
+// ESP32RTCClock::begin() stamps into libc on a power-on reset.
+static const uint32_t kFloor = 1767225600;
+static const uint32_t kPowerOnPlaceholder = 1715770351;
+static const uint32_t kPlausibleNow = 1786000000;
+
+TEST(FallbackClock, PrefersTheSystemClockWhenItIsUsable) {
+  // A clock SNTP set recently outranks an RTC that may have drifted.
+  EXPECT_EQ(ClockSource::System,
+            Policy::chooseFallbackClock(false, kPlausibleNow, kPlausibleNow - 900, kFloor));
+}
+
+TEST(FallbackClock, FallsBackToTheRtcOnAColdBoot) {
+  // The case the system-clock-only check missed: libc holds the power-on
+  // placeholder while a detected chip holds real time.
+  EXPECT_EQ(ClockSource::Rtc,
+            Policy::chooseFallbackClock(false, kPowerOnPlaceholder, kPlausibleNow, kFloor));
+}
+
+TEST(FallbackClock, NothingUsableStaysUnsynced) {
+  EXPECT_EQ(ClockSource::None,
+            Policy::chooseFallbackClock(false, kPowerOnPlaceholder, kPowerOnPlaceholder, kFloor));
+  // rtc_time 0 is how a board with no clock to consult is passed in.
+  EXPECT_EQ(ClockSource::None,
+            Policy::chooseFallbackClock(false, kPowerOnPlaceholder, 0, kFloor));
+}
+
+TEST(FallbackClock, ServerValidationNeverAcceptsALocalClock) {
+  // `set mqtt.ntp` asks whether that host answers. No clock can answer for it,
+  // however plausible — this is the path where a typo has to fail.
+  EXPECT_EQ(ClockSource::None,
+            Policy::chooseFallbackClock(true, kPlausibleNow, kPlausibleNow, kFloor));
+}
+
+TEST(FallbackClock, TheFloorItselfIsAccepted) {
+  EXPECT_EQ(ClockSource::System, Policy::chooseFallbackClock(false, kFloor, 0, kFloor));
+  EXPECT_EQ(ClockSource::Rtc, Policy::chooseFallbackClock(false, kFloor - 1, kFloor, kFloor));
+  EXPECT_EQ(ClockSource::None, Policy::chooseFallbackClock(false, kFloor - 1, kFloor - 1, kFloor));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

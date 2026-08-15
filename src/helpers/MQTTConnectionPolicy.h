@@ -234,4 +234,25 @@ static inline StaleTokenAction classifyStaleToken(bool minted, bool connected,
   return broker_enforces_exp ? StaleTokenAction::Bounce : StaleTokenAction::KeepAlive;
 }
 
+// Which clock to fall back on when no NTP server answered.
+enum class ClockSource : uint8_t {
+  None,    // nothing plausible to work from — stay unsynced
+  System,  // libc already holds a usable time
+  Rtc,     // libc does not, but the RTC does
+};
+
+// System first: a clock SNTP set recently outranks an RTC that may have drifted.
+// The RTC matters on a cold boot, where ESP32RTCClock::begin() seeds libc with a 2024
+// placeholder on power-on while a detected chip already holds real time and
+// AutoDiscoverRTCClock::begin() never copies one into the other. Never while
+// validating a server: that asks whether a specific host answers, and no clock can
+// answer it. Pass rtc_time 0 when the board has no clock to consult.
+static inline ClockSource chooseFallbackClock(bool validating_server, uint32_t system_time,
+                                              uint32_t rtc_time, uint32_t min_valid_epoch) {
+  if (validating_server) return ClockSource::None;
+  if (system_time >= min_valid_epoch) return ClockSource::System;
+  if (rtc_time >= min_valid_epoch) return ClockSource::Rtc;
+  return ClockSource::None;
+}
+
 } // namespace MQTTConnectionPolicy

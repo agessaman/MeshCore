@@ -4026,12 +4026,21 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
   // all. Keep the behaviour, but as its own decision rather than as a claim about a
   // server that never replied. Not on the validation path — `set mqtt.ntp` asks
   // whether that server works, and the clock cannot answer for it.
-  if (!ntp_ok && !primary_only) {
-    unsigned long existing = (unsigned long)time(nullptr);
-    if (existing >= kMinValidEpoch) {
-      epochTime = existing;
+  if (!ntp_ok) {
+    const unsigned long system_time = (unsigned long)time(nullptr);
+    // On a cold boot with a detected RTC chip these disagree: ESP32RTCClock::begin()
+    // stamps libc with a 2024 placeholder on power-on, AutoDiscoverRTCClock::begin()
+    // never copies the chip into it, and getCurrentTime() reads the chip. Asking libc
+    // alone would reject a board that knows exactly what time it is.
+    const unsigned long rtc_time = _rtc ? (unsigned long)_rtc->getCurrentTime() : 0;
+    const MQTTConnectionPolicy::ClockSource source = MQTTConnectionPolicy::chooseFallbackClock(
+        primary_only, (uint32_t)system_time, (uint32_t)rtc_time, (uint32_t)kMinValidEpoch);
+    if (source != MQTTConnectionPolicy::ClockSource::None) {
+      const bool from_rtc = (source == MQTTConnectionPolicy::ClockSource::Rtc);
+      epochTime = from_rtc ? rtc_time : system_time;
       ntp_ok = true;
-      MQTT_DEBUG_PRINTLN("No NTP server answered; continuing on the existing clock: %lu", existing);
+      MQTT_DEBUG_PRINTLN("No NTP server answered; continuing on the existing %s: %lu",
+          from_rtc ? "RTC" : "system clock", epochTime);
     }
   }
 
@@ -4048,8 +4057,10 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     accepted.tv_usec = 0;
     settimeofday(&accepted, nullptr);
 
-    // Only when a server actually answered: there is nothing to point SNTP at
-    // otherwise, and the existing configuration is the best guess available.
+    // Only when a server supplied the accepted epoch. The fallback above necessarily
+    // points configTime() at each server before knowing whether it replies; this is
+    // the post-acceptance call, and there is nothing to re-point it at when the epoch
+    // came from a local clock.
     if (ntp_server_used) {
       configTime(0, 0, ntp_server_used);
     }
