@@ -21,6 +21,7 @@
 
 #ifdef ESP_PLATFORM
 #include <esp_wifi.h>
+#include <esp_sntp.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -3986,15 +3987,26 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
       const char* server = servers[s];
       MQTT_DEBUG_PRINTLN("SNTP fallback trying %s...", server);
       configTime(0, 0, server);
+      // A plausible clock is not evidence this server answered. The device usually
+      // already holds valid time here — from an earlier sync, or the RTC — so polling
+      // time(nullptr) declared the very first server successful without a packet ever
+      // arriving, stopped the fallback walk there, and refreshed _last_ntp_sync. Worse
+      // on the `set mqtt.ntp` validation path, where a typo is supposed to fail fast.
+      // Wait for SNTP itself to report completion. The status is one-shot — reading
+      // COMPLETED clears it — so drop any result an earlier sync left behind.
+      sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
       for (int i = 0; i < 20; i++) {
         delay(500);
+        if (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) continue;
         epochTime = (unsigned long)time(nullptr);
         if (epochTime >= kMinValidEpoch) {
           ntp_ok = true;
           ntp_server_used = server;
           MQTT_DEBUG_PRINTLN("SNTP fallback succeeded on %s: %lu", server, epochTime);
-          break;
+        } else {
+          MQTT_DEBUG_PRINTLN("SNTP fallback: %s synced an implausible epoch %lu", server, epochTime);
         }
+        break;
       }
     }
   }
