@@ -17,6 +17,7 @@ static const uint8_t kMaxFailuresAtMaxBackoff = 3;
 static const uint32_t kDefaultJwtLifetimeSecs = 86400UL;
 static const uint32_t kMaxJwtStaggerSecs = 300UL;
 static const uint32_t kMinimumValidEpoch = 1000000000UL;
+static const uint32_t kJwtReconnectSafetyMarginSecs = 60UL;
 static const uint32_t kJwtClockThreshold = 1735689600UL; // 2025-01-01 UTC
 // A wall clock at or past this instant was set from a real source (NTP or an
 // admin); anything earlier is the firmware's unset-clock default (1715770351,
@@ -157,6 +158,20 @@ static inline bool tokenNeedsRenewal(bool time_synced, uint32_t current_time,
   return current_time >= token_expires_at - renewal_buffer_secs;
 }
 
+// A reconnect may keep its credentials only when their validity is known to
+// outlast the next handshake; uncertainty refreshes them before reconnecting.
+static inline bool canReuseJwtForReconnect(bool time_synced, bool has_token,
+                                           bool force_mint,
+                                           uint32_t current_time,
+                                           uint32_t token_expires_at) {
+  return time_synced &&
+         has_token &&
+         !force_mint &&
+         token_expires_at >= kMinimumValidEpoch &&
+         current_time < token_expires_at &&
+         (token_expires_at - current_time) > kJwtReconnectSafetyMarginSecs;
+}
+
 static inline bool renewalAttemptAllowed(uint32_t now, uint32_t last_attempt) {
   return elapsedMs(now, last_attempt) >= kRenewalThrottleMs;
 }
@@ -194,6 +209,50 @@ static inline SlotActivation classifySlotActivation(int slot, const bool* enable
   }
   return (rank <= max_active) ? SlotActivation::Connects
                               : SlotActivation::OverActiveCap;
+}
+
+// What to do with a slot whose token a clock correction just proved stale. Four
+// outcomes, because esp-mqtt accepts a reconnect request only from
+// MQTT_STATE_WAIT_RECONNECT: asking a live client to reconnect is refused and
+// leaves it running on the stale token, so a live session has to have its
+// transport closed first — and that costs a handshake, which is only worth
+// spending where the broker actually enforces exp.
+enum class StaleTokenAction : uint8_t {
+  Defer,      // no fresh credentials — leave the slot to the backoff ladder
+  Reconnect,  // client is down: start it, or wake one that is waiting
+  Bounce,     // live session the broker will reject: close the transport, then reconnect
+  KeepAlive,  // live session the broker tolerates: stage credentials, keep the handshake
+};
+
+// A failed mint yields Defer even when the slot is down: reconnecting then would
+// re-present the credentials the correction just invalidated. Minting fails for
+// recoverable reasons (allocation pressure), and the ladder retries.
+static inline StaleTokenAction classifyStaleToken(bool minted, bool connected,
+                                                  bool broker_enforces_exp) {
+  if (!minted) return StaleTokenAction::Defer;
+  if (!connected) return StaleTokenAction::Reconnect;
+  return broker_enforces_exp ? StaleTokenAction::Bounce : StaleTokenAction::KeepAlive;
+}
+
+// Which clock to fall back on when no NTP server answered.
+enum class ClockSource : uint8_t {
+  None,    // nothing plausible to work from — stay unsynced
+  System,  // libc already holds a usable time
+  Rtc,     // libc does not, but the RTC does
+};
+
+// System first: a clock SNTP set recently outranks an RTC that may have drifted.
+// The RTC matters on a cold boot, where ESP32RTCClock::begin() seeds libc with a 2024
+// placeholder on power-on while a detected chip already holds real time and
+// AutoDiscoverRTCClock::begin() never copies one into the other. Never while
+// validating a server: that asks whether a specific host answers, and no clock can
+// answer it. Pass rtc_time 0 when the board has no clock to consult.
+static inline ClockSource chooseFallbackClock(bool validating_server, uint32_t system_time,
+                                              uint32_t rtc_time, uint32_t min_valid_epoch) {
+  if (validating_server) return ClockSource::None;
+  if (system_time >= min_valid_epoch) return ClockSource::System;
+  if (rtc_time >= min_valid_epoch) return ClockSource::Rtc;
+  return ClockSource::None;
 }
 
 } // namespace MQTTConnectionPolicy

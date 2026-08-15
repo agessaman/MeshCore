@@ -36,6 +36,19 @@ class MeshSNMPAgent;  // Forward declaration
   #define MQTT_DEBUG_PRINTLN(...) {}
 #endif
 
+// Largest-free-block trace around the reconnect lifecycle. On non-PSRAM boards the
+// mbedTLS record buffers are two 16 KiB internal-DRAM blocks, so what matters is the
+// largest contiguous block, not the free total — a soak can show flat free heap while
+// max_alloc walks down. Costs two heap_caps calls per reconnect, so it stays on.
+#if defined(MQTT_DEBUG) && defined(ARDUINO) && defined(ESP32)
+  #define MQTT_TRACE_HEAP(point, idx) \
+    MQTT_DEBUG_PRINTLN("HEAPTRACE slot=%d %s free=%u max=%u", (int)(idx) + 1, point, \
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), \
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL))
+#else
+  #define MQTT_TRACE_HEAP(point, idx) do {} while(0)
+#endif
+
 #ifdef WITH_MQTT_BRIDGE
 
 // Periodic neighbors publication keys off the mesh neighbor cache (sized by
@@ -214,6 +227,10 @@ private:
 
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
   volatile bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS];
+
+  // A broker refusal can invalidate an otherwise clock-valid JWT. The esp-mqtt
+  // callback sets this and the bridge loop consumes it; byte access is atomic.
+  volatile bool _slot_force_jwt_mint[RUNTIME_MQTT_SLOTS];
 
   // Pending on-connect status publish: set from the onConnect callback (which
   // runs on the esp-mqtt event task, NOT this bridge task), consumed by the MQTT
@@ -434,6 +451,9 @@ private:
   int activatedSlotCount() const;
   bool canActivateSlot(int index) const;
   void teardownSlot(int index);        // Disconnect the slot's client (keeps the object alive)
+  // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a
+  // no-op on a stopped client). See the definition.
+  void reconnectSlotClient(int index);
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
