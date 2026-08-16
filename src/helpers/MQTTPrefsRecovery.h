@@ -16,7 +16,9 @@
 // is the only record of it — so an uncertain temp is answered with
 // UseBackupHeld, which renames nothing. Publishing the backup instead would
 // make the candidate look like an ordinary stale artifact to the next boot,
-// which would delete it exactly when it finally became readable.
+// which would delete it exactly when it finally became readable. When neither
+// file can run this boot, RunDefaultsHeld keeps both names untouched for the
+// same reason.
 namespace MQTTPrefsRecovery {
 
 enum class FileState : uint8_t {
@@ -38,7 +40,14 @@ enum class Action : uint8_t {
   // Every later boot re-runs this policy against the same three names until one
   // of them can classify the candidate.
   UseBackupHeld,
+  // Neither the candidate nor the backup can run this boot. Change nothing,
+  // come up on defaults, and hold writes until a boot that can classify them.
+  RunDefaultsHeld,
 };
+
+inline bool uncertain(FileState state) {
+  return state == FileState::FutureClaimed || state == FileState::Indeterminate;
+}
 
 inline Action select(FileState primary, FileState temp, FileState backup) {
   // A primary of any kind owns the name. In particular, do not roll a newer
@@ -63,20 +72,26 @@ inline Action select(FileState primary, FileState temp, FileState backup) {
   // FutureClaimed and Indeterminate may be a completed image this firmware
   // cannot classify. A known-good backup can run this boot, but it must run
   // from its own name: promoting it would spend the empty primary name that
-  // marks the candidate as mid-commit. Without such a backup, preserve the only
-  // candidate under the authoritative name and hold writes.
-  if (temp == FileState::FutureClaimed || temp == FileState::Indeterminate) {
-    return backup == FileState::Usable ? Action::UseBackupHeld : Action::PromoteTemp;
+  // marks the candidate as mid-commit.
+  //
+  // A backup this firmware cannot run is still the previous committed image, so
+  // the same argument applies to it: promoting the candidate would give it the
+  // authoritative name, and the "any primary owns the name" rule above would
+  // then keep it even on a boot that proves it corrupt. Spend the transaction
+  // state recorded in the filenames only once the backup is definitively no
+  // longer a usable fallback.
+  if (uncertain(temp)) {
+    if (backup == FileState::Usable) return Action::UseBackupHeld;
+    if (backup == FileState::FutureUsable || uncertain(backup)) {
+      return Action::RunDefaultsHeld;
+    }
+    return Action::PromoteTemp;
   }
 
   // No temp survived. The backup is the only recoverable image, even when it
   // is a newer layout that this firmware must preserve rather than decode.
   if (backup != FileState::Missing) return Action::PromoteBackup;
   return Action::None;
-}
-
-inline bool uncertain(FileState state) {
-  return state == FileState::FutureClaimed || state == FileState::Indeterminate;
 }
 
 }  // namespace MQTTPrefsRecovery

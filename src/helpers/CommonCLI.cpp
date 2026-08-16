@@ -542,6 +542,13 @@ static MqttJsonRecovery recoverMqttJsonFiles(FILESYSTEM* fs) {
     MESH_DEBUG_PRINTLN("MQTT: unresolved /mqtt.json candidate; running the backup in place and holding writes");
     return {true, true};
   }
+  if (action == MQTTPrefsRecovery::Action::RunDefaultsHeld) {
+    // Same reasoning, with no image this firmware can run: renaming either file
+    // would spend transaction state that a later boot still needs.
+    MESH_DEBUG_PRINTLN("MQTT: unresolved /mqtt.json candidate and no runnable backup; "
+                       "using defaults (files preserved)");
+    return {true, false};
+  }
   if (action == MQTTPrefsRecovery::Action::PromoteBackup) {
     if (fs->rename("/mqtt.json.bak", "/mqtt.json")) {
       if (backup == MQTTPrefsRecovery::FileState::Usable &&
@@ -618,7 +625,8 @@ static bool recoverMqttPrefsFiles(FILESYSTEM* fs) {
     MESH_DEBUG_PRINTLN("MQTT: could not recover /mqtt_prefs temp; files preserved");
     return true;
   }
-  if (action == MQTTPrefsRecovery::Action::UseBackupHeld) {
+  if (action == MQTTPrefsRecovery::Action::UseBackupHeld ||
+      action == MQTTPrefsRecovery::Action::RunDefaultsHeld) {
     // Unreachable for the binary format, whose classifier never reports an
     // uncertain state. Hold rather than fall through to "nothing to do" if a
     // later classifier change makes it reachable.
@@ -766,26 +774,36 @@ public:
     return true;
   }
 
-  void discardFinishedTemp() {
+  // Drop a temp that was written and byte-verified but then rejected. Returns
+  // false when it is still on flash and no primary outranks it: recovery
+  // promotes a lone temp, so the caller cannot claim the change was undone.
+  bool discardFinishedTemp() {
     if (_open) _file.close();
     _open = false;
-    if (_owns_temp && _fs->exists("/mqtt.json.tmp")) _fs->remove("/mqtt.json.tmp");
+    bool removed = true;
+    if (_owns_temp && _fs->exists("/mqtt.json.tmp")) {
+      removed = _fs->remove("/mqtt.json.tmp");
+    }
     _finished = false;
     _owns_temp = false;
+    return removed || _fs->exists("/mqtt.json");
   }
 
-  void abort() {
+  // Same disposition contract as discardFinishedTemp(). Only unfinished staging
+  // is disposable here: once finish() has verified the temp,
+  // rollbackFailedCommit() has already decided its fate, and a temp that
+  // survived that is one recovery must resolve after reset.
+  bool abort() {
     if (_open) _file.close();
     _open = false;
-    // Only unfinished staging is disposable here. Once finish() has verified
-    // the temp, rollbackFailedCommit() has already decided its fate, and a temp
-    // that survived that is one recovery must resolve after reset.
+    bool removed = true;
     if (_owns_temp && !_finished && _fs->exists("/mqtt.json.tmp")) {
-      _fs->remove("/mqtt.json.tmp");
+      removed = _fs->remove("/mqtt.json.tmp");
     }
     _finished = false;
     _owns_temp = false;
     _owns_backup = false;
+    return removed || _fs->exists("/mqtt.json");
   }
 
 private:
@@ -1130,6 +1148,12 @@ bool CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
             return verify_result == JsonPrefsLoadResult::Loaded;
           });
 
+  // A recovery file this firmware may still promote is holding the new image,
+  // so the change cannot be reported as rolled back. No further save can start
+  // until it is resolved: begin() refuses while either the temp or the backup
+  // exists, which is exactly the state that gets us here.
+  if (MQTTPrefsAtomicStore::saveOutcomeUnresolved(result)) _observer_save_indeterminate = true;
+
   switch (result) {
     case MQTTPrefsAtomicStore::VerifiedImageResult::Committed:
       return true;
@@ -1149,15 +1173,14 @@ bool CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
         MESH_DEBUG_PRINTLN("MQTT: generated /mqtt.json temp failed schema validation; source preserved");
       }
       break;
+    case MQTTPrefsAtomicStore::VerifiedImageResult::CleanupIndeterminate:
+      MESH_DEBUG_PRINTLN("MQTT: rejected /mqtt.json temp could not be removed and no primary outranks it; "
+                         "recovery files preserved");
+      break;
     case MQTTPrefsAtomicStore::VerifiedImageResult::CommitFailed:
       MESH_DEBUG_PRINTLN("MQTT: atomic /mqtt.json save failed during rename; transaction rolled back");
       break;
     case MQTTPrefsAtomicStore::VerifiedImageResult::CommitIndeterminate:
-      // The failed publish could not be undone, so a recovery file this
-      // firmware may still promote is holding the new image. No further save
-      // can start until it is resolved: begin() refuses while either the temp
-      // or the backup exists, which is exactly the state that gets us here.
-      _observer_save_indeterminate = true;
       MESH_DEBUG_PRINTLN("MQTT: atomic /mqtt.json save failed during rename and could not be rolled back; "
                          "recovery files preserved");
       break;

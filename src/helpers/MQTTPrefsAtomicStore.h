@@ -13,21 +13,31 @@ namespace MQTTPrefsAtomicStore {
 // commit() allowed to publish it. A schema-verification failure discards the
 // finished temp; a commit failure is undone by rollbackFailedCommit().
 //
-// CommitFailed and CommitIndeterminate are distinct outcomes, not shades of the
-// same one. Publishing moves the old primary aside before the verified temp
-// takes its name, so a half-done commit leaves an image that boot recovery
-// would promote. CommitFailed means that was undone and the change is really
-// gone; CommitIndeterminate means it could not be, and the next boot may still
-// come up with the new value. Callers must not report the two the same way.
+// A failed save that is really gone and one that may still surface at the next
+// boot are distinct outcomes, not shades of the same one. Publishing moves the
+// old primary aside before the verified temp takes its name, so a half-done
+// commit leaves an image that boot recovery would promote; CommitFailed means
+// that was undone, CommitIndeterminate means it could not be. The same applies
+// before the commit: a rejected temp that cleanup could not delete is still an
+// image recovery may promote when no primary outranks it, which is
+// CleanupIndeterminate. Callers must not report these as a rollback.
 enum class VerifiedImageResult : uint8_t {
   Committed,
   BeginFailed,
   WriteFailed,
   FinishFailed,
   VerifyFailed,
+  CleanupIndeterminate,
   CommitFailed,
   CommitIndeterminate,
 };
+
+// The change may still be on flash at the next boot, so the caller must not
+// tell the operator it was rolled back.
+inline bool saveOutcomeUnresolved(VerifiedImageResult result) {
+  return result == VerifiedImageResult::CleanupIndeterminate ||
+         result == VerifiedImageResult::CommitIndeterminate;
+}
 
 template <typename Store, typename ImageWriter, typename ImageVerifier>
 inline VerifiedImageResult writeVerifiedImage(Store& store,
@@ -38,16 +48,24 @@ inline VerifiedImageResult writeVerifiedImage(Store& store,
     return VerifiedImageResult::BeginFailed;
   }
   if (!write_image()) {
+    // A short write leaves a structurally incomplete image that recovery
+    // classifies as invalid, so a temp that survives cleanup here cannot be
+    // promoted and the change really is gone.
     store.abort();
     return VerifiedImageResult::WriteFailed;
   }
   if (!store.finish()) {
-    store.abort();
-    return VerifiedImageResult::FinishFailed;
+    // Unlike a short write, this does not prove the bytes on disk are
+    // unusable: finish() also fails when a complete temp cannot be read back.
+    return store.abort() ? VerifiedImageResult::FinishFailed
+                         : VerifiedImageResult::CleanupIndeterminate;
   }
   if (!verify_image()) {
-    store.discardFinishedTemp();
-    return VerifiedImageResult::VerifyFailed;
+    // The temp is complete and byte-verified, only rejected by the schema. If
+    // it cannot be deleted and no primary outranks it, boot recovery promotes
+    // the very image this call is about to report as not saved.
+    return store.discardFinishedTemp() ? VerifiedImageResult::VerifyFailed
+                                       : VerifiedImageResult::CleanupIndeterminate;
   }
   if (!store.commit()) {
     // Undo the partial publish before answering. Only the store knows whether

@@ -126,6 +126,8 @@ public:
     bool rollback_rename_fails = false;
     bool rollback_remove_fails = false;
     bool has_primary = true;
+    bool discard_remove_fails = false;
+    bool abort_remove_fails = false;
   };
 
   explicit InMemoryJsonStore(FailurePoint failure) : _opts{failure, false, false, true} {
@@ -157,8 +159,11 @@ public:
   bool finish() {
     ++finish_calls;
     _open = false;
-    if (_opts.failure == FailurePoint::Finish) return false;
+    // Production writes straight to /mqtt.json.tmp, so the bytes are on flash
+    // before finish() reads them back. A finish() failure can therefore be a
+    // failed read-back of an otherwise complete image, not a torn one.
     _files["/mqtt.json.tmp"] = _staging;
+    if (_opts.failure == FailurePoint::Finish) return false;
     _finished = true;
     return true;
   }
@@ -196,18 +201,28 @@ public:
     return true;
   }
 
-  void discardFinishedTemp() {
+  // Both cleanups report the same disposition as production: false means a temp
+  // survived with no primary to outrank it, so boot recovery may still promote
+  // the image the caller is about to report as not saved.
+  bool discardFinishedTemp() {
     ++discard_calls;
-    _files.erase("/mqtt.json.tmp");
+    const bool removed = !_opts.discard_remove_fails;
+    if (removed) _files.erase("/mqtt.json.tmp");
     _finished = false;
+    return removed || has("/mqtt.json");
   }
 
-  void abort() {
+  bool abort() {
     ++abort_calls;
     _open = false;
     _staging.clear();
-    if (!_finished) _files.erase("/mqtt.json.tmp");
+    bool removed = true;
+    if (!_finished && has("/mqtt.json.tmp")) {
+      removed = !_opts.abort_remove_fails;
+      if (removed) _files.erase("/mqtt.json.tmp");
+    }
     _finished = false;
+    return removed || has("/mqtt.json");
   }
 
   // Apply the boot-recovery policy to whatever the transaction left behind and
@@ -467,8 +482,9 @@ public:
       _files.erase("/mqtt_prefs.tmp");
       return;
     }
-    if (action == Recovery::Action::UseBackupHeld) {
-      return;  // production renames nothing and runs the backup where it lies
+    if (action == Recovery::Action::UseBackupHeld ||
+        action == Recovery::Action::RunDefaultsHeld) {
+      return;  // production renames nothing, so the transaction state survives
     }
     if (action == Recovery::Action::PromoteBackup) {
       rename("/mqtt_prefs.bak", "/mqtt_prefs");
@@ -603,6 +619,49 @@ TEST(MQTTPrefsAtomicStore, UnrestorablePublishFailureIsReportedAsIndeterminate) 
             runVerifiedJson(&first_save));
   EXPECT_FALSE(first_save.has("/mqtt.json"));
   EXPECT_EQ(InMemoryJsonStore::newImage(), first_save.imageAfterReboot());
+}
+
+TEST(MQTTPrefsAtomicStore, RejectedTempThatCannotBeDeletedIsReportedAsIndeterminate) {
+  // The temp is a complete, byte-verified, perfectly valid image: only the
+  // scratch allocation that reparses it failed. With no primary on a fresh
+  // install, a temp that cleanup cannot delete is exactly what boot recovery
+  // promotes, so this must not be answered as a rollback.
+  InMemoryJsonStore first_save(InMemoryJsonStore::Options{
+      FailurePoint::Verify, false, false, /*has_primary=*/false,
+      /*discard_remove_fails=*/true});
+  ASSERT_EQ(AtomicStore::VerifiedImageResult::CleanupIndeterminate,
+            runVerifiedJson(&first_save));
+  EXPECT_TRUE(AtomicStore::saveOutcomeUnresolved(
+      AtomicStore::VerifiedImageResult::CleanupIndeterminate));
+  EXPECT_TRUE(first_save.has("/mqtt.json.tmp"));
+  EXPECT_FALSE(first_save.canStartSave());  // retries fail until this resolves
+  EXPECT_EQ(InMemoryJsonStore::newImage(), first_save.imageAfterReboot());
+
+  // With a primary published, the same stuck temp cannot win recovery, so the
+  // change really is gone and the ordinary rejection verdict still holds.
+  InMemoryJsonStore with_primary(InMemoryJsonStore::Options{
+      FailurePoint::Verify, false, false, /*has_primary=*/true,
+      /*discard_remove_fails=*/true});
+  ASSERT_EQ(AtomicStore::VerifiedImageResult::VerifyFailed,
+            runVerifiedJson(&with_primary));
+  EXPECT_FALSE(AtomicStore::saveOutcomeUnresolved(
+      AtomicStore::VerifiedImageResult::VerifyFailed));
+  EXPECT_EQ(InMemoryJsonStore::oldImage(), with_primary.imageAfterReboot());
+}
+
+TEST(MQTTPrefsAtomicStore, UnverifiedTempThatCannotBeDeletedIsReportedAsIndeterminate) {
+  // finish() failing does not prove the bytes are torn — a complete image whose
+  // read-back failed still parses at the next boot. If abort() cannot remove it
+  // and no primary outranks it, the outcome is unresolved for the same reason.
+  InMemoryJsonStore store(InMemoryJsonStore::Options{
+      FailurePoint::Finish, false, false, /*has_primary=*/false,
+      /*discard_remove_fails=*/false, /*abort_remove_fails=*/true});
+
+  ASSERT_EQ(AtomicStore::VerifiedImageResult::CleanupIndeterminate,
+            runVerifiedJson(&store));
+  EXPECT_TRUE(store.has("/mqtt.json.tmp"));
+  EXPECT_FALSE(store.canStartSave());
+  EXPECT_EQ(InMemoryJsonStore::newImage(), store.imageAfterReboot());
 }
 
 TEST(MQTTPrefsAtomicStore, FirstSavePublishFailureLeavesNoImageToPromote) {
@@ -1008,6 +1067,49 @@ TEST(MQTTPrefsAtomicStore, UncertainTempWithNoUsableBackupStillOwnsThePrimaryNam
             Recovery::select(Recovery::FileState::Missing,
                              Recovery::FileState::FutureClaimed,
                              Recovery::FileState::Preserve));
+}
+
+TEST(MQTTPrefsAtomicStore, UncertainTempDoesNotSpendAnOpaqueBackup) {
+  // Newer firmware was replacing a future-version primary when power was lost.
+  // This boot can prove the backup is a syntactically valid future image but
+  // cannot run it, and cannot classify the candidate at all.
+  EXPECT_EQ(Recovery::Action::RunDefaultsHeld,
+            Recovery::select(Recovery::FileState::Missing,
+                             Recovery::FileState::FutureClaimed,
+                             Recovery::FileState::FutureUsable));
+  EXPECT_EQ(Recovery::Action::RunDefaultsHeld,
+            Recovery::select(Recovery::FileState::Missing,
+                             Recovery::FileState::Indeterminate,
+                             Recovery::FileState::Indeterminate));
+  // A backup that is definitively invalid has ceased to be a fallback, so the
+  // candidate may take the authoritative name.
+  EXPECT_EQ(Recovery::Action::PromoteTemp,
+            Recovery::select(Recovery::FileState::Missing,
+                             Recovery::FileState::Indeterminate,
+                             Recovery::FileState::Preserve));
+}
+
+TEST(MQTTPrefsAtomicStore, HeldOpaqueBackupSurvivesACandidateThatProvesInvalid) {
+  SpiffsMqttTransaction store;
+  store.cutAt(SpiffsMqttTransaction::Boundary::AfterBackupRename);
+
+  // Nothing is renamed, so the empty primary name still records the interrupted
+  // commit and the previous committed image keeps its backup name.
+  store.recover(Recovery::FileState::Missing, Recovery::FileState::FutureClaimed,
+                Recovery::FileState::FutureUsable);
+  EXPECT_FALSE(store.has("/mqtt_prefs"));
+  EXPECT_TRUE(store.has("/mqtt_prefs.tmp"));
+  EXPECT_TRUE(store.has("/mqtt_prefs.bak"));
+  EXPECT_FALSE(store.canStartSave());
+
+  // A later boot understands both and finds the candidate corrupt. Because the
+  // first boot did not spend the primary name on it, the last committed image
+  // is still there to publish instead of being stranded behind a bad primary.
+  store.recover(Recovery::FileState::Missing, Recovery::FileState::Preserve,
+                Recovery::FileState::Usable);
+  EXPECT_EQ(SpiffsMqttTransaction::oldImage(), store.primary());
+  EXPECT_FALSE(store.has("/mqtt_prefs.tmp"));
+  EXPECT_TRUE(store.canStartSave());
 }
 
 TEST(MQTTPrefsAtomicStore, UsablePrimaryDoesNotCleanIndeterminateArtifact) {
