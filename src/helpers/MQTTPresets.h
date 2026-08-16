@@ -212,4 +212,25 @@ static const MQTTPresetDef* findMQTTPreset(const char* name) {
 static const char MQTT_PRESET_NONE[] = "none";
 static const char MQTT_PRESET_CUSTOM[] = "custom";
 
+// Uploads the adverts this node hears to the meshcore.io map over HTTPS instead
+// of connecting to a broker. Kept out of MQTT_PRESETS[] on purpose: every field
+// in MQTTPresetDef describes an MQTT connection (URL, auth, topic style, JWT
+// lifetime, keepalive) and none of them mean anything for a stateless POST. It
+// is a third virtual preset alongside "custom" and "none", which is also what
+// keeps it clear of the cross-channel preset-name parity check.
+// See helpers/bridges/MeshcoreMapUploader.h.
+static const char MQTT_PRESET_MESHCORE_MAP[] = "meshcore-map";
+
+static inline bool isMapUploaderPreset(const char* name) {
+  return name != nullptr && strcmp(name, MQTT_PRESET_MESHCORE_MAP) == 0;
+}
+
+// True when this slot's preset makes the slot hold an MQTT connection. The map
+// uploader does not, so it never occupies one of the _max_active_slots TLS
+// positions and is skipped by the connection-oriented slot machinery.
+static inline bool mqttPresetIsBrokerSlot(const char* name) {
+  return name != nullptr && name[0] != '\0' &&
+         strcmp(name, MQTT_PRESET_NONE) != 0 && !isMapUploaderPreset(name);
+}
+
 #endif

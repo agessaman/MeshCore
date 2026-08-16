@@ -163,6 +163,45 @@ TEST(MQTTPresets, SlotCountsAreSane) {
   EXPECT_EQ(6, MAX_MQTT_SLOTS);  // persisted layout — must not drift without migration
 }
 
+// ---- meshcore-map virtual preset ------------------------------------------
+
+TEST(MQTTPresets, MapUploaderIsNotInTheBrokerTable) {
+  // It holds no MQTT connection, so it must not appear in the table the slot
+  // machinery (and the cross-channel parity check) iterates.
+  EXPECT_EQ(nullptr, findMQTTPreset(MQTT_PRESET_MESHCORE_MAP));
+  for (int i = 0; i < MQTT_PRESET_COUNT; i++) {
+    EXPECT_STRNE(MQTT_PRESET_MESHCORE_MAP, MQTT_PRESETS[i].name);
+  }
+}
+
+TEST(MQTTPresets, MapUploaderPresetIsRecognizedByName) {
+  EXPECT_TRUE(isMapUploaderPreset(MQTT_PRESET_MESHCORE_MAP));
+  EXPECT_TRUE(isMapUploaderPreset("meshcore-map"));
+  EXPECT_FALSE(isMapUploaderPreset("meshcore-maps"));
+  EXPECT_FALSE(isMapUploaderPreset("Meshcore-Map"));  // names are case-sensitive
+  EXPECT_FALSE(isMapUploaderPreset(MQTT_PRESET_NONE));
+  EXPECT_FALSE(isMapUploaderPreset(MQTT_PRESET_CUSTOM));
+  EXPECT_FALSE(isMapUploaderPreset(""));
+  EXPECT_FALSE(isMapUploaderPreset(nullptr));
+}
+
+TEST(MQTTPresets, MapUploaderDoesNotCountAsABrokerSlot) {
+  // This is what keeps it clear of the _max_active_slots TLS cap.
+  EXPECT_FALSE(mqttPresetIsBrokerSlot(MQTT_PRESET_MESHCORE_MAP));
+  EXPECT_FALSE(mqttPresetIsBrokerSlot(MQTT_PRESET_NONE));
+  EXPECT_FALSE(mqttPresetIsBrokerSlot(""));
+  EXPECT_FALSE(mqttPresetIsBrokerSlot(nullptr));
+  EXPECT_TRUE(mqttPresetIsBrokerSlot(MQTT_PRESET_CUSTOM));
+  EXPECT_TRUE(mqttPresetIsBrokerSlot("analyzer-us"));
+}
+
+TEST(MQTTPresets, VirtualPresetNamesFitTheSlotBuffer) {
+  // Same 24-byte mqtt_slot_preset[] limit the table entries are checked against.
+  for (const char* name : {MQTT_PRESET_NONE, MQTT_PRESET_CUSTOM, MQTT_PRESET_MESHCORE_MAP}) {
+    EXPECT_LT(strlen(name), (size_t)24) << name << " too long for slot-preset buffer";
+  }
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

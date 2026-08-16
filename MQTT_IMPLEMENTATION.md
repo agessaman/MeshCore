@@ -161,12 +161,68 @@ below documents the current build.
 | `atvirastinklas` | `wss://mqtt-mc.atvirastinklas.lt:443` | JWT | — |
 | `gomesh` | `wss://mqtt.gomesh.dev:443` | JWT | — |
 | `idahomesh` | `wss://mqtt.idahomesh.org:443/mqtt` | JWT | — |
+| `meshcore-map` | `https://map.meshcore.io` (not a broker) | Ed25519, device identity | — (see [map uploader](#meshcore-map-uploader)) |
 | `custom` | your own broker | User/pass, or JWT when `mqttN.audience` is set | `set mqttN.server` (see [custom broker setup](#custom-brokers)) |
 | `none` | (slot disabled) | — | — |
 
 Transport is the URL scheme: `wss://` is WebSocket Secure, `mqtts://` is MQTT over TLS,
 and `mqtt://` is plain unencrypted MQTT. The two TLS schemes are what count against the
 non-PSRAM slot limit below.
+
+### meshcore.io map uploader
+
+`meshcore-map` is the one preset that is not an MQTT broker. Instead of connecting to
+anything, it POSTs the adverts this node hears to the meshcore.io map:
+
+```bash
+set mqtt1.preset meshcore-map
+```
+
+It needs **only WiFi** — no IATA, no token, no credentials, and it works with
+`set mqtt.packets off` and every other publication switched off, so a node can be
+map-only. The wire format and the accept/reject rules follow
+[recrof/map.meshcore.io-uploader](https://github.com/recrof/map.meshcore.io-uploader),
+the reference tool the map operator documents, so uploads are indistinguishable from
+that tool's.
+
+What it sends, per accepted advert, to `https://map.meshcore.io/api/v1/uploader/node`:
+
+```json
+{"data":"{\"params\":{\"freq\":910.525,\"cr\":5,\"sf\":10,\"bw\":250},\"links\":[\"meshcore://<raw advert frame in hex>\"]}",
+ "signature":"<Ed25519 over SHA-256 of the data string>",
+ "publicKey":"<this node's public key>"}
+```
+
+The radio parameters come from this node's own prefs (`freq`/`bw`/`sf`/`cr`) and describe
+the mesh the advert was heard on. The signature is made with this node's identity key and
+attests "this node heard this advert" — the advert carries its own signature, which the
+server checks independently.
+
+Which adverts go up:
+
+- **Repeaters, room servers, and sensors only.** `CHAT` adverts (companion clients) are
+  never uploaded, matching the reference tool.
+- **Verified only.** The advert's own Ed25519 signature is checked before upload, so a
+  forged advert cannot be put on the map through this node.
+- **Once per node per hour.** A node is re-uploaded only once its advert timestamp has
+  advanced 3600 s; earlier repeats are dropped, and a timestamp that does not advance at
+  all is dropped as a replay. The last upload per node is remembered for 64 nodes with
+  PSRAM (24 without), least-recently-uploaded evicted first.
+- **At most one upload per 15 s**, whatever the node. Each upload is a fresh TLS session,
+  so a mesh that floods a dozen adverts at once does not become a dozen handshakes.
+
+**Memory.** Each upload opens an HTTPS connection, which needs a contiguous block of
+internal heap for the mbedTLS record buffers — the same heap the WSS/MQTT slots draw from.
+The uploader checks for ~42 KB of largest-free-block before each POST and defers when it
+is short, so it degrades to fewer uploads rather than destabilising the bridge. It uses a
+single pinned root (ISRG Root X1) rather than the CA bundle for the same reason. In
+practice that means: on a **non-PSRAM board, pair `meshcore-map` with at most one TLS
+broker slot** (or none) — with two live WSS sessions there is often not 42 KB contiguous
+free and uploads will mostly be skipped. PSRAM boards are unaffected.
+
+The slot itself holds no connection, so `meshcore-map` does **not** count against the
+non-PSRAM 2-slot TLS limit. `get mqtt.status` reports it as
+`N: meshcore-map (ok=<uploads> err=<failures> nodes=<tracked>)`.
 
 ### Slots and Memory Limits
 

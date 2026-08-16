@@ -94,7 +94,7 @@ static bool parseTlsBundleTarget(const char* input, char* host_out, size_t host_
 #ifdef WITH_MQTT_BRIDGE
 static int getMQTTPresetNameCount() {
   // Include virtual presets accepted by CLI parser.
-  return MQTT_PRESET_COUNT + 2; // built-ins + custom + none
+  return MQTT_PRESET_COUNT + 3; // built-ins + custom + none + meshcore-map
 }
 
 // Reject a value that wouldn't fit its destination MQTTPrefs buffer (which must
@@ -113,6 +113,7 @@ static const char* getMQTTPresetNameByIndex(int index) {
   if (index < MQTT_PRESET_COUNT) return MQTT_PRESETS[index].name;
   if (index == MQTT_PRESET_COUNT) return MQTT_PRESET_CUSTOM;
   if (index == MQTT_PRESET_COUNT + 1) return MQTT_PRESET_NONE;
+  if (index == MQTT_PRESET_COUNT + 2) return MQTT_PRESET_MESHCORE_MAP;
   return nullptr;
 }
 
@@ -395,10 +396,12 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       // Validate preset name
       if (findMQTTPreset(preset_name) != nullptr ||
           strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0 ||
-          strcmp(preset_name, MQTT_PRESET_NONE) == 0) {
-        // Reject duplicate presets (except "none" and "custom")
+          strcmp(preset_name, MQTT_PRESET_NONE) == 0 ||
+          isMapUploaderPreset(preset_name)) {
+        // Reject duplicate presets (except "none" and "custom"). The map
+        // uploader is deduped too: a second slot would upload every advert twice.
         int dup_slot = -1;
-        if (findMQTTPreset(preset_name) != nullptr) {
+        if (findMQTTPreset(preset_name) != nullptr || isMapUploaderPreset(preset_name)) {
           for (int s = 0; s < MAX_MQTT_SLOTS; s++) {
             if (s != slot && strcmp(_mqtt_prefs.mqtt_slot_preset[s], preset_name) == 0) {
               dup_slot = s;
@@ -414,7 +417,12 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           _callbacks->restartBridgeSlot(slot);
           // Check if the slot has everything it needs to connect
           const MQTTPresetDef* p = findMQTTPreset(preset_name);
-          if (p && p->topic_style == MQTT_TOPIC_MESHRANK && _mqtt_prefs.mqtt_slot_token[slot][0] == '\0') {
+          if (isMapUploaderPreset(preset_name)) {
+            // No broker, no IATA, no credentials — it only needs WiFi and the
+            // radio prefs the node already has.
+            sprintf(reply, "OK - slot %d preset: %s (uploads heard adverts to map.meshcore.io)",
+                    slot + 1, preset_name);
+          } else if (p && p->topic_style == MQTT_TOPIC_MESHRANK && _mqtt_prefs.mqtt_slot_token[slot][0] == '\0') {
             sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt%d.token <your_token>' to connect)", slot + 1, preset_name, slot + 1);
           } else if (p && p->topic_style == MQTT_TOPIC_MESHCORE &&
                      (strlen(_mqtt_prefs.mqtt_iata) == 0 || strcmp(_mqtt_prefs.mqtt_iata, "XXX") == 0)) {
@@ -442,11 +450,12 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           // (classifySlotActivation): slots past the runtime array are never
           // tried; slots within it are skipped once more than getMaxActiveSlots()
           // are enabled (each WSS/TLS link costs ~40 KB heap).
-          if (strcmp(preset_name, MQTT_PRESET_NONE) != 0) {
+          // The map uploader holds no MQTT connection, so neither the slot array
+          // nor the TLS cap applies to it and neither warning would be true.
+          if (strcmp(preset_name, MQTT_PRESET_NONE) != 0 && !isMapUploaderPreset(preset_name)) {
             bool slot_enabled[MAX_MQTT_SLOTS];
             for (int s = 0; s < MAX_MQTT_SLOTS; s++) {
-              slot_enabled[s] = _mqtt_prefs.mqtt_slot_preset[s][0] != '\0' &&
-                                strcmp(_mqtt_prefs.mqtt_slot_preset[s], MQTT_PRESET_NONE) != 0;
+              slot_enabled[s] = mqttPresetIsBrokerSlot(_mqtt_prefs.mqtt_slot_preset[s]);
             }
             const int max_active = MQTTBridge::getMaxActiveSlots();
             const MQTTConnectionPolicy::SlotActivation act =

@@ -128,6 +128,10 @@ bool MQTTBridge::isConfigValid(const MQTTPrefs* obs) {
     if (preset_name[0] == '\0' || strcmp(preset_name, MQTT_PRESET_NONE) == 0) continue;
     if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
       if (customEndpointComplete(obs->mqtt_slot_host[i], obs->mqtt_slot_port[i])) return true;
+    } else if (isMapUploaderPreset(preset_name)) {
+      // Needs only WiFi — no broker, IATA, or credentials. A map-only node is a
+      // valid configuration and must still bring the bridge (and its WiFi/NTP) up.
+      return true;
     } else if (findMQTTPreset(preset_name) != nullptr) {
       return true;
     }
@@ -284,7 +288,15 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
     const char* name = nullptr;
     const char* state = nullptr;
 
-    if (!slot.enabled && slot.preset) {
+    if (!slot.enabled && isMapUploaderPreset(b->_obs->mqtt_slot_preset[i])) {
+      // Not a broker slot, so it has no connection state to report — show what
+      // the uploader has actually done instead.
+      char map_status[72];
+      b->_map_uploader.formatStatus(map_status, sizeof(map_status));
+      replyAppendf(buf, bufsize, &pos, ", %d: %s (%s)", i + 1, MQTT_PRESET_MESHCORE_MAP,
+                   map_status);
+      continue;
+    } else if (!slot.enabled && slot.preset) {
       name = slot.preset->name;
       state = "inactive";
     } else if (!slot.enabled) {
@@ -922,6 +934,12 @@ void MQTTBridge::begin() {
         _slots[i].password[sizeof(_slots[i].password) - 1] = '\0';
         strncpy(_slots[i].audience, _obs->mqtt_slot_audience[i], sizeof(_slots[i].audience) - 1);
         _slots[i].audience[sizeof(_slots[i].audience) - 1] = '\0';
+      } else if (isMapUploaderPreset(preset_name)) {
+        // Not a broker slot: the uploader is enabled separately by
+        // refreshMapUploaderEnabled() and the slot itself stays disabled, so no
+        // client is allocated and no TLS position is consumed.
+        _slots[i].enabled = false;
+        _slots[i].preset = nullptr;
       } else {
         const MQTTPresetDef* preset = findMQTTPreset(preset_name);
         if (preset) {
@@ -949,10 +967,15 @@ void MQTTBridge::begin() {
       } else {
         MQTT_DEBUG_PRINTLN("MQTT%d: custom=%s:%d", i + 1, _slots[i].host, _slots[i].port);
       }
+    } else if (isMapUploaderPreset(_obs->mqtt_slot_preset[i])) {
+      MQTT_DEBUG_PRINTLN("MQTT%d: %s (no broker)", i + 1, MQTT_PRESET_MESHCORE_MAP);
     } else {
       MQTT_DEBUG_PRINTLN("MQTT%d: none", i + 1);
     }
   }
+
+  _map_uploader.begin(_identity);
+  refreshMapUploaderEnabled();
 
   #ifdef ESP_PLATFORM
   // Create FreeRTOS queue; use PSRAM storage when available
@@ -1068,6 +1091,11 @@ void MQTTBridge::end() {
 
   // Stop new diagnostic reads through the singleton before teardown begins.
   s_mqtt_bridge_instance = nullptr;
+
+  // Stop feeding/uploading before the MQTT task is asked to wind down, so no
+  // HTTPS POST is in flight while WiFi is torn down (and OTA is not held up by
+  // one). Drops anything staged; the radio path checks isEnabled() first.
+  _map_uploader.end();
 
   // Size the stop timeout to the work about to happen: each enabled slot's
   // mbedTLS/wss client takes ~5-6 s to disconnect + destroy, sequentially (Phase
@@ -1418,6 +1446,10 @@ void MQTTBridge::mqttTaskLoop() {
         }
       }
     }
+
+    // Map uploader: owns its own HTTPS session, so it is driven here rather than
+    // through the packet queue (which drains only when a broker slot is up).
+    _map_uploader.loop(currentRadioParams(), (uint32_t)millis());
 
     // Process pending slot reconfigures (queued from CLI on Core 1)
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
@@ -2647,7 +2679,20 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
 
   teardownSlot(slot_index);
 
+  // Recompute from prefs before the branches below return: this slot may be
+  // taking on the map preset, or giving it up for a broker. Callers always write
+  // prefs before reconfiguring, so prefs are the source of truth here.
+  refreshMapUploaderEnabled();
+
   if (strcmp(preset_name, MQTT_PRESET_NONE) == 0 || preset_name[0] == '\0') {
+    slot.enabled = false;
+    slot.preset = nullptr;
+    return;
+  }
+
+  if (isMapUploaderPreset(preset_name)) {
+    // Holds no MQTT connection: leave the slot disabled so every connection-
+    // oriented loop skips it. refreshMapUploaderEnabled() above turned it on.
     slot.enabled = false;
     slot.preset = nullptr;
     return;
@@ -2710,6 +2755,36 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
       setupSlot(slot_index);
     }
   }
+}
+
+void MQTTBridge::refreshMapUploaderEnabled() {
+  bool wanted = false;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (isMapUploaderPreset(_obs->mqtt_slot_preset[i])) { wanted = true; break; }
+  }
+  _map_uploader.setEnabled(wanted);
+}
+
+MapUploadRequest::RadioParams MQTTBridge::currentRadioParams() const {
+  MapUploadRequest::RadioParams p{};
+  if (_prefs != nullptr) {
+    // Units already match the API: NodePrefs holds freq in MHz and bw in kHz,
+    // which is what the reference tool derives from the companion protocol.
+    p.freq_mhz = _prefs->freq;
+    p.bw_khz   = _prefs->bw;
+    p.sf       = _prefs->sf;
+    p.cr       = _prefs->cr;
+  }
+  return p;
+}
+
+void MQTTBridge::formatMapUploaderStatus(char* buf, size_t buf_size) {
+  if (buf == nullptr || buf_size == 0) return;
+  if (s_mqtt_bridge_instance == nullptr) {
+    snprintf(buf, buf_size, "off");
+    return;
+  }
+  s_mqtt_bridge_instance->_map_uploader.formatStatus(buf, buf_size);
 }
 
 void MQTTBridge::setSlotCustomBroker(int slot_index, const char* host, uint16_t port,
@@ -3890,6 +3965,14 @@ void MQTTBridge::dequeuePacket() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi) {
+  // Feed the map uploader from here rather than onPacketReceived(): this is the
+  // exact raw frame the map wants, and it arrives before the MQTT packet filters
+  // and the mqtt_packets_enabled/mqtt_rx_enabled gates — so a node configured
+  // only for the map still uploads with all MQTT publication switched off.
+  if (len > 0) {
+    _map_uploader.offerAdvert(raw_data, (size_t)len, (uint32_t)millis());
+  }
+
   // Writes into the Core 1-only staging area. No mutex needed: this function and
   // queuePacket() are both called from Core 1 in guaranteed sequence for each packet.
   if (len > 0 && len <= (int)LAST_RAW_DATA_SIZE) {

@@ -11,6 +11,7 @@
 #include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
+#include "helpers/bridges/MeshcoreMapUploader.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -533,6 +534,16 @@ private:
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
   MQTTPrefs* _obs = nullptr;
 
+  // The "meshcore-map" preset. Not an MQTTSlot — it holds no broker connection
+  // and consumes none of the _max_active_slots TLS positions. Fed on Core 1 from
+  // storeRawRadioData() and driven on Core 0 from mqttTaskLoop().
+  MeshcoreMapUploader _map_uploader;
+  // True when any configured slot names the map preset. Recomputed from prefs on
+  // begin() and on every slot reconfigure.
+  void refreshMapUploaderEnabled();
+  // Live radio parameters for the upload payload, read from _prefs each time.
+  MapUploadRequest::RadioParams currentRadioParams() const;
+
 public:
   MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
 
@@ -631,6 +642,9 @@ public:
   int getConnectedBrokers() const;
   int getQueueSize() const;
   bool isReady() const;
+  /** One-line map-uploader summary for `get mqtt.status` ("off" when no slot
+   *  uses the preset). Safe to call before begin(). */
+  static void formatMapUploaderStatus(char* buf, size_t buf_size);
   /** True only after a CLEAN cooperative stop — end() received the MQTT task's
    *  acknowledgment within the timeout. A timed-out/forced stop returns false so
    *  OTA flashing is withheld until a clean start/stop cycle. Mirrors

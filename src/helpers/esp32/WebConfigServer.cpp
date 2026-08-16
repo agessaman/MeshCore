@@ -1302,7 +1302,10 @@ void WebConfigServer::handleScan(AsyncWebServerRequest* req) {
 void WebConfigServer::handlePresets(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   _last_activity = millis();
-  DynamicJsonDocument doc(3072);
+  // Sized for MQTT_PRESET_COUNT + the virtual presets below, with headroom: an
+  // overflowed document serializes truncated, which would silently drop presets
+  // from the portal's dropdown rather than fail visibly.
+  DynamicJsonDocument doc(4096);
   JsonArray arr = doc.createNestedArray("presets");
   for (int i = 0; i < MQTT_PRESET_COUNT; i++) {
     const MQTTPresetDef& p = MQTT_PRESETS[i];
@@ -1320,6 +1323,15 @@ void WebConfigServer::handlePresets(AsyncWebServerRequest* req) {
     } else {
       o["needs"] = "none";
     }
+  }
+  // The map uploader is not in MQTT_PRESETS[] (it holds no broker connection),
+  // but it is a slot preset the portal must offer. "none"/"custom" are added by
+  // the portal itself around this list; this one belongs here because it is a
+  // real, selectable destination that needs nothing collected from the user.
+  {
+    JsonObject o = arr.createNestedObject();
+    o["name"] = MQTT_PRESET_MESHCORE_MAP;
+    o["needs"] = "none";
   }
   AsyncResponseStream* res = req->beginResponseStream("application/json");
   serializeJson(doc, *res);
