@@ -2001,8 +2001,11 @@ void MQTTBridge::teardownSlot(int index) {
 }
 
 // A stopped client needs connect(): reconnect() is a documented no-op on one, so reaching
-// it here would strand the slot. The WiFi-transition teardown stops a client while leaving
-// initial_connect_done set, so the ladder does see this state.
+// it here would strand the slot. The producer is a failed esp_mqtt_client_start(), which
+// leaves _started false while initial_connect_done stays set. Not the WiFi-drop teardown,
+// which only stops slots still marked connected: a publishing slot's socket fails first, so
+// the guard skips it — measured across a 62 s deauth, five slots, zero stops. An idle slot
+// with no traffic to fail on is the one case that could still reach here that way.
 void MQTTBridge::reconnectSlotClient(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
@@ -2221,9 +2224,13 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         : 0;
     const bool force_mint_after_refusal = _slot_force_jwt_mint[index];
     force_mint = force_mint || force_mint_after_refusal;
+    // Same buffer the renewal path uses, so a reconnect never keeps a token that
+    // the next maintenance pass would renew (and bounce) seconds later.
+    const uint32_t renewal_buffer_secs = MQTTConnectionPolicy::renewalBufferSecs(
+        static_cast<uint32_t>(slotTokenLifetime(index)));
     const bool reuse_token = MQTTConnectionPolicy::canReuseJwtForReconnect(
         time_synced, has_token, force_mint, static_cast<uint32_t>(current_time),
-        static_cast<uint32_t>(expires_at));
+        static_cast<uint32_t>(expires_at), renewal_buffer_secs);
     const char* mint_reason = "none";
     if (!reuse_token) {
       if (backoff_level < 0) {
@@ -2238,8 +2245,12 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         mint_reason = "invalid-expiry";
       } else if (current_time >= expires_at) {
         mint_reason = "expired";
+      } else if (remaining_secs <= MQTTConnectionPolicy::kJwtReconnectSafetyMarginSecs) {
+        mint_reason = "safety-margin";  // too little left to outlast the handshake
+      } else if (remaining_secs <= renewal_buffer_secs) {
+        mint_reason = "renewal-due";    // the renewal path wants this token now
       } else {
-        mint_reason = "safety-margin";
+        mint_reason = "renewal-imminent";  // it will, within the handshake margin
       }
     }
     const char* mint_result = reuse_token ? "REUSED" : "FAILED";
@@ -2282,8 +2293,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       if (slot_uses_jwt) {
         prepareJwtReconnect(true, -1);
       }
-      // Via the helper: reconnect() is a no-op on a client the WiFi-drop path
-      // stopped, which would probe forever without ever starting it.
+      // Via the helper: reconnect() is a no-op on a client whose start failed,
+      // which would probe forever without ever starting it.
       reconnectSlotClient(index);
       // If the connect callback fires and sets slot.connected = true,
       // it will clear circuit_breaker_tripped via the onConnect handler
@@ -2319,8 +2330,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         // Non-JWT slots — lightweight reconnect on existing client.
         MQTT_DEBUG_PRINTLN("MQTT%d reconnect (non-JWT, backoff %d)", index + 1, slot.reconnect_backoff);
       }
-      // Via the helper: reconnect() is a no-op on a client the WiFi-drop path
-      // stopped, which would back off forever without ever starting it.
+      // Via the helper: reconnect() is a no-op on a client whose start failed,
+      // which would back off forever without ever starting it.
       reconnectSlotClient(index);
     }
   }

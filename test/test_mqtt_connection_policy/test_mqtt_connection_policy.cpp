@@ -141,16 +141,44 @@ TEST(MQTTConnectionPolicy, JwtReconnectReusesOnlyProvenValidCredentials) {
   const uint32_t now = 1735689600U;
   const uint32_t usable_expiry = now + Policy::kJwtReconnectSafetyMarginSecs + 1U;
 
-  EXPECT_TRUE(Policy::canReuseJwtForReconnect(true, true, false, now, usable_expiry));
+  // Buffer 0 gates on the flat margin alone, which is what these cases cover.
+  EXPECT_TRUE(Policy::canReuseJwtForReconnect(true, true, false, now, usable_expiry, 0U));
   EXPECT_FALSE(Policy::canReuseJwtForReconnect(
-      true, true, false, now, Policy::kMinimumValidEpoch - 1U));
-  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, 0U));
+      true, true, false, now, Policy::kMinimumValidEpoch - 1U, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, 0U, 0U));
   EXPECT_FALSE(Policy::canReuseJwtForReconnect(
-      true, true, false, now, now + Policy::kJwtReconnectSafetyMarginSecs));
-  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now - 1U));
-  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, false, false, now, usable_expiry));
-  EXPECT_FALSE(Policy::canReuseJwtForReconnect(false, true, false, now, usable_expiry));
-  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, true, now, usable_expiry));
+      true, true, false, now, now + Policy::kJwtReconnectSafetyMarginSecs, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now - 1U, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, false, false, now, usable_expiry, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(false, true, false, now, usable_expiry, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, true, now, usable_expiry, 0U));
+}
+
+TEST(MQTTConnectionPolicy, JwtReuseRefusesATokenTheRenewalPathIsAboutToBounce) {
+  const uint32_t now = 1735689600U;
+  const uint32_t buffer = Policy::renewalBufferSecs(3300U);  // waev's 55-minute tokens
+  ASSERT_EQ(buffer, 300U);
+  const uint32_t floor_secs = buffer + Policy::kJwtReconnectSafetyMarginSecs;
+
+  // The observed defect (d3, 2026-08-17T14:31): reused at 302 s remaining under the
+  // flat 60 s margin, then renewed five seconds later, which bounced the slot.
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now + 302U, buffer));
+
+  // Anything the renewal path would act on is refused, and so is the slack above it.
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now + buffer, buffer));
+  EXPECT_FALSE(
+      Policy::canReuseJwtForReconnect(true, true, false, now, now + floor_secs, buffer));
+  const uint32_t tightest_reuse = now + floor_secs + 1U;
+  EXPECT_TRUE(Policy::canReuseJwtForReconnect(true, true, false, now, tightest_reuse, buffer));
+
+  // What the margin above the buffer buys: the tightest token reuse will accept is still
+  // not due for renewal a full margin later, so no renewal can bounce in behind it.
+  EXPECT_FALSE(Policy::tokenNeedsRenewal(
+      true, now + Policy::kJwtReconnectSafetyMarginSecs, tightest_reuse, buffer));
+
+  // A buffer that would wrap the floor has to fail closed, not reuse a doomed token.
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(
+      true, true, false, now, now + 100000U, std::numeric_limits<uint32_t>::max()));
 }
 
 TEST(MQTTConnectionPolicy, RenewalThrottleHasExactBoundaryAndHandlesRollover) {

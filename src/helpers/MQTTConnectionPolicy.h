@@ -160,16 +160,26 @@ static inline bool tokenNeedsRenewal(bool time_synced, uint32_t current_time,
 
 // A reconnect may keep its credentials only when their validity is known to
 // outlast the next handshake; uncertainty refreshes them before reconnecting.
+// Clearing the renewal buffer is not enough: tokenNeedsRenewal() fires the moment
+// remaining reaches it, so reuse must clear it by the handshake margin too, or the
+// reused token is renewed — and bounced, on a broker enforcing exp — seconds later.
+// Pass 0 for renewal_buffer_secs to gate on the flat margin alone.
 static inline bool canReuseJwtForReconnect(bool time_synced, bool has_token,
                                            bool force_mint,
                                            uint32_t current_time,
-                                           uint32_t token_expires_at) {
+                                           uint32_t token_expires_at,
+                                           uint32_t renewal_buffer_secs) {
+  // Saturate rather than wrap: a wrapped floor would silently weaken this gate.
+  const uint32_t floor_secs =
+      renewal_buffer_secs > UINT32_MAX - kJwtReconnectSafetyMarginSecs
+          ? UINT32_MAX
+          : renewal_buffer_secs + kJwtReconnectSafetyMarginSecs;
   return time_synced &&
          has_token &&
          !force_mint &&
          token_expires_at >= kMinimumValidEpoch &&
          current_time < token_expires_at &&
-         (token_expires_at - current_time) > kJwtReconnectSafetyMarginSecs;
+         (token_expires_at - current_time) > floor_secs;
 }
 
 static inline bool renewalAttemptAllowed(uint32_t now, uint32_t last_attempt) {
