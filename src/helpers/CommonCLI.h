@@ -73,7 +73,7 @@ public:
   uint8_t extra_sf[4];
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) are not in NodePrefs.
-  // They live in MQTTPrefs, persisted separately to /mqtt_prefs, so this struct
+  // They live in MQTTPrefs, persisted separately to /mqtt.json, so this struct
   // stays aligned with upstream. See struct MQTTPrefs below.
 
 private:
@@ -228,6 +228,13 @@ struct LegacyObserverTail {
 class CommonCLICallbacks {
 public:
   virtual void savePrefs() = 0;
+#ifdef WITH_MQTT_BRIDGE
+  virtual bool saveObserverPrefs() = 0;
+#else
+  virtual bool saveObserverPrefs() {
+    return false;
+  }
+#endif
   virtual const char* getFirmwareVer() = 0;
   virtual const char* getBuildDate() = 0;
   virtual const char* getRole() = 0;
@@ -359,10 +366,18 @@ class CommonCLI {
   char tmp[PRV_KEY_SIZE*2 + 4];
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
+  // Points at a per-command snapshot only while an observer setter is running.
+  // persistObserverPrefs() uses it to undo RAM mutations when flash commit fails.
+  const MQTTPrefs* _observer_prefs_rollback = nullptr;
   LegacyObserverTail _legacy_tail;
-  // /mqtt_prefs is newer, corrupt, or temporarily unreadable. The in-memory prefs
+  // /mqtt.json is newer, corrupt, or temporarily unreadable. The in-memory prefs
   // run on defaults and saveMQTTPrefs() must not overwrite the source file.
   bool _mqtt_prefs_hold = false;
+  // A failed publish could not be undone, so the next boot may still come up
+  // with the value that was refused. persistObserverPrefs() must not call that
+  // a rollback. Latched for the boot: the artifact left behind also makes every
+  // later transaction fail to begin, so the condition cannot clear itself.
+  bool _observer_save_indeterminate = false;
 #endif
   bool _com_prefs_needs_upgrade = false;  // old-format legacy prefs detected; rewrite once after load
 
@@ -384,6 +399,7 @@ class CommonCLI {
   // false to fall through to the base get/set parsing.
   bool handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply);
   bool handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply);
+  bool persistObserverPrefs(char* reply);
   // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
   // also live in CommonCLI_Observer.cpp; returns true if it handled the command.
   bool handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply);
@@ -393,14 +409,17 @@ public:
       : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks) { }
 
   void loadPrefs(FILESYSTEM* _fs);
-  bool savePrefs(FILESYSTEM* _fs, bool save_mqtt = true);
+  // Node preferences and observer preferences are separate transactions.
+  // Callers must explicitly request an observer save when they changed it.
+  bool savePrefs(FILESYSTEM* _fs, bool save_mqtt = false);
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   mesh::MainBoard* getBoard() { return _board; }
   uint8_t buildAdvertData(uint8_t node_type, uint8_t* app_data);
 #ifdef WITH_MQTT_BRIDGE
-  // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt_prefs.
+  // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
   // Exposed so the app can hand it to MQTTBridge/AlertReporter, which read these
   // fields directly (they no longer live in NodePrefs).
   MQTTPrefs* getObserverPrefs() const { return const_cast<MQTTPrefs*>(&_mqtt_prefs); }
+  bool saveObserverPrefs(FILESYSTEM* fs) { return saveMQTTPrefs(fs); }
 #endif
 };

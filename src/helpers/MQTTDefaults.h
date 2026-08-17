@@ -8,7 +8,7 @@
 #include "MQTTPacketFilter.h"
 #include "MQTTPresets.h"
 
-// Compile-time defaults for fresh /mqtt_prefs (override via platformio build_flags).
+// Compile-time defaults for fresh /mqtt.json (override via platformio build_flags).
 // Example:
 //   -D MQTT_DEFAULT_SLOT1_PRESET='"meshcore-ca-1"'
 //   -D MQTT_DEFAULT_IATA='"YYZ"'

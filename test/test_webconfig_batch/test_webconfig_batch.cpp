@@ -230,6 +230,7 @@ TEST(WebConfigBatch, CliFailureRepliesAreRecognisedInEveryShapeCommonCLIEmits) {
     "Err - bad params",                          // MyMesh setperm
     "ERR: bad pubkey",                           // neighbor.remove
     "Error: IATA code must be exactly 3 letters",// observer setters
+    "Error: setting not persisted; change rolled back", // observer storage failure
     "(ERR: clock cannot go backwards)",          // clock sync, parenthesised
     "Unknown command",                           // top-level fallthrough
     "unknown config: mqtt.nope",                 // set fallthrough

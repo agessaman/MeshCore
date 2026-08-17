@@ -214,6 +214,118 @@ TEST(NodePrefs, FemGainSettingsRoundTrip) {
     EXPECT_EQ(1, loaded.radio_fem_txgain);
 }
 
+TEST(ConfigSerializer, LoadSerial_KeyDigitsAfterFirstCharacter) {
+    MockInputStream s("{age:1,flags:2,name:\"ok\",slot1:7}");
+    TestStruct data;
+    data.age = data.flags = 0;
+    strcpy(data.name, "before");
+    EXPECT_TRUE(data.loadSerial(s));
+    EXPECT_EQ(1, data.age);
+    EXPECT_EQ(2, data.flags);
+    EXPECT_STREQ("ok", data.name);
+}
+
+TEST(ConfigSerializer, LoadSerial_RejectsLeadingDigitKey) {
+    MockInputStream s("{1slot:7}");
+    TestStruct data;
+    EXPECT_FALSE(data.loadSerial(s));
+}
+
+// ── /prefs.json compatibility under the strict shape checks ─────────────────
+//
+// The scalar-vs-object rejection added for /mqtt.json also runs for the plain
+// def() overloads that NodePrefs uses, and loadPrefsInt() applies /prefs.json
+// straight onto the live object without consulting the return value. These
+// pin what that combination does to files already on deployed devices.
+
+// A settings file in the exact shape the firmware writes, transcribed rather
+// than produced by saveSerial() so a change to the writer cannot quietly move
+// the fixture with it.
+static const char* DEPLOYED_PREFS_JSON =
+    "{name:\"Repeater-1\",pass:\"hunter2\",guest:\"\",owner:\"ops@example.com\","
+    "adv_int:4,f_adv_int:12,lat:47.612345,lon:-122.334567,disc_mod:1719791234,"
+    "radio:{freq:910.5250,bw:250.0000,sf:10,cr:5,cad:0,int_thr:0,rxgain:1,"
+    "fem_rxgain:0,fem_txgain:1,tx:22,af:1.0000,rxdelay:1000.0000,"
+    "f_txdelay:0.5000,d_txdelay:0.2000,agc_int:0,hash_mode:0,multi_ack:0},"
+    "bridge:{en:0,delay:500,src:1,baud:115200,ch:1,secret:\"\"},"
+    "gps:{en:0,int:60,adv_loc:0},"
+    "repeat:{disable:0,f_max:64,f_max_uns:32,f_max_adv:16,loop:1},"
+    "room:{rd_only:0},power:{adc_mult:1.0000,pwr_sav_en:0}}";
+
+TEST(NodePrefs, DeployedPrefsJsonStillLoadsCompletely) {
+    MockInputStream s(DEPLOYED_PREFS_JSON);
+    NodePrefs prefs;
+
+    ASSERT_TRUE(prefs.loadSerial(s));
+    EXPECT_STREQ("Repeater-1", prefs.node_name);
+    EXPECT_STREQ("ops@example.com", prefs.owner_info);
+    EXPECT_EQ(4, prefs.advert_interval);
+    EXPECT_DOUBLE_EQ(47.612345, prefs.node_lat);
+    EXPECT_DOUBLE_EQ(-122.334567, prefs.node_lon);
+    EXPECT_EQ(1719791234u, prefs.discovery_mod_timestamp);
+    EXPECT_FLOAT_EQ(910.525f, prefs.freq);
+    EXPECT_EQ(10, prefs.sf);
+    EXPECT_EQ(22, prefs.tx_power_dbm);
+    EXPECT_EQ(1, prefs.radio_fem_txgain);
+    EXPECT_EQ(1, prefs.bridge_pkt_src);
+    EXPECT_EQ(115200u, prefs.bridge_baud);
+    EXPECT_EQ(60u, prefs.gps_interval);
+    EXPECT_EQ(64, prefs.flood_max);
+    EXPECT_EQ(1, prefs.loop_detect);
+}
+
+TEST(NodePrefs, UnknownNestedObjectCannotBeMistakenForARootScalar) {
+    // Depth is what keeps an unknown group's inner keys from matching a root
+    // field of the same name, so an unrecognized section must stay ignorable.
+    MockInputStream s("{name:\"Repeater-1\",mqtt:{name:\"other\",owner:\"nobody\"},adv_int:4}");
+    NodePrefs prefs;
+    strcpy(prefs.owner_info, "ops@example.com");
+
+    EXPECT_TRUE(prefs.loadSerial(s));
+    EXPECT_STREQ("Repeater-1", prefs.node_name);
+    EXPECT_STREQ("ops@example.com", prefs.owner_info);
+    EXPECT_EQ(4, prefs.advert_interval);
+}
+
+TEST(NodePrefs, TornPrefsJsonAppliesOnlyTheFieldsBeforeTheTear) {
+    // A power cut during the old non-transactional /prefs.json write leaves a
+    // file like this. loadPrefsInt() ignores the failed return and keeps the
+    // partial result, which is the pre-existing behavior; the strict checks
+    // must not turn it into something worse than a partial load.
+    MockInputStream s("{name:\"Repeater-1\",adv_int:4,radio:{freq:910.5250,sf:1");
+    NodePrefs prefs;
+    prefs.sf = 9;
+
+    EXPECT_FALSE(prefs.loadSerial(s));
+    EXPECT_STREQ("Repeater-1", prefs.node_name);
+    EXPECT_EQ(4, prefs.advert_interval);
+    EXPECT_FLOAT_EQ(910.525f, prefs.freq);
+    EXPECT_EQ(9, prefs.sf);  // the torn value never completed a token
+}
+
+TEST(NodePrefs, ShapeMismatchIsRejectedAndStopsFurtherApplication) {
+    // Hand-edited or corrupted files are the regression surface for the strict
+    // checks: a known scalar holding an object now fails the load and stops
+    // parsing, so nothing after the mismatch reaches the live object.
+    MockInputStream scalar_as_object("{name:{x:1},adv_int:4}");
+    NodePrefs prefs;
+    prefs.advert_interval = 7;
+    EXPECT_FALSE(prefs.loadSerial(scalar_as_object));
+    EXPECT_EQ(7, prefs.advert_interval);
+
+    // The reverse mismatch is rejected too: a known group given a scalar.
+    MockInputStream object_as_scalar("{name:\"Repeater-1\",radio:1}");
+    NodePrefs scalar_group;
+    EXPECT_FALSE(scalar_group.loadSerial(object_as_scalar));
+
+    // And a known scalar nested one level deeper than the schema places it.
+    MockInputStream over_nested("{radio:{sf:{value:10}}}");
+    NodePrefs nested;
+    nested.sf = 9;
+    EXPECT_FALSE(nested.loadSerial(over_nested));
+    EXPECT_EQ(9, nested.sf);
+}
+
 
 // ── main ───────────────────────────────────────────────────────
 

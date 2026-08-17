@@ -285,7 +285,7 @@ flash regardless of target.
 
 #### Compile-time fresh-install defaults (`src/helpers/MQTTDefaults.h`)
 
-Optional PlatformIO `build_flags` override defaults written when `/mqtt_prefs` is first created. They do **not** change existing saved prefs on upgrade or reflash (unless `/mqtt_prefs` is erased).
+Optional PlatformIO `build_flags` override defaults used when `/mqtt.json` is first created. They do **not** change existing saved prefs on upgrade or reflash (unless `/mqtt.json` is erased).
 
 | Macro | Default | Notes |
 |-------|---------|-------|

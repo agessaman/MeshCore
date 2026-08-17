@@ -8,7 +8,8 @@ Developer-facing notes on how the MQTT observer feature is structured in the cod
 - `src/helpers/bridges/MQTTBridge.h` - MQTT bridge class definition
 - `src/helpers/bridges/MQTTBridge.cpp` - MQTT bridge implementation
 - `src/helpers/MQTTPresets.h` - Preset definitions, CA certificates, and lookup functions
-- `src/helpers/MQTTDefaults.h` - Compile-time defaults for fresh `/mqtt_prefs`
+- `src/helpers/MQTTDefaults.h` - Compile-time defaults for fresh `/mqtt.json`
+- `src/helpers/MQTTPrefsSerializer.h` - Versioned, semantic observer JSON schema
 - `src/helpers/MQTTMessageBuilder.h` - JSON message formatting utilities
 - `src/helpers/MQTTMessageBuilder.cpp` - JSON message formatting implementation
 - `src/helpers/JWTHelper.h` - JWT token generation for Ed25519-based authentication
@@ -30,8 +31,9 @@ The observer feature is kept out of upstream-tracked files through three mechani
   `resolveAlertScope`, `beginDeferredOtaUpdate`). The example apps override them
   behind `#ifdef WITH_MQTT_BRIDGE`.
 - **Separate settings file** — observer settings (MQTT slots, WiFi, timezone, SNMP,
-  radio watchdog, fault alerts) live in the `MQTTPrefs` struct persisted to
-  `/mqtt_prefs`, keeping `NodePrefs` / `/com_prefs` aligned with the upstream layout.
+  radio watchdog, fault alerts) live in the runtime `MQTTPrefs` object and are
+  field-serialized to `/mqtt.json`, keeping `NodePrefs` / `/prefs.json` aligned with
+  upstream. The two files are independent transactions, not one atomic snapshot.
 
 Remaining integration points in upstream files:
 - `examples/simple_repeater/MyMesh.{h,cpp}`, `examples/simple_room_server/MyMesh.{h,cpp}` -
@@ -164,75 +166,132 @@ which packet events non-MQTT bridges capture. The MQTT bridge ignores `bridge.so
 favour of independent `mqtt.rx` / `mqtt.tx` controls. Everything MQTT-specific lives under
 `mqtt.*` (shared settings), `mqttN.*` (per-slot broker config), `wifi.*`, and `timezone.*`.
 
-### `/mqtt_prefs` file format
+### `/mqtt.json` file format
 
-`/mqtt_prefs` is written with an 8-byte `MQTTPrefsHeader` (`magic`, `version`,
-`payload_len`) followed by the raw `MQTTPrefs` payload. The magic is
-`{0xF5, 'M', 'Q', 'P'}` — its leading non-ASCII byte can never collide with the first
-bytes of a legacy (headerless) file, whose payload begins with the `mqtt_origin`
-string. Bump `MQTT_PREFS_VERSION` when the payload layout changes incompatibly; a file
-whose version this firmware doesn't recognize is left untouched and the in-memory prefs
-fall back to defaults (no downgrade, no misread). `saveMQTTPrefs()` also refuses to
-write while such a file is present (`_mqtt_prefs_hold`), so a `set` command after a
-firmware downgrade can't clobber the newer config — observer settings changed in that
-state simply don't persist. The frozen legacy layouts are pinned with `static_assert`s
-in `MQTTPrefsStorage.h`, so every target build re-verifies the fleet's file offsets.
+Observer preferences use the same `ConfigSerializer` object notation as upstream
+`/prefs.json`: semantic unquoted keys, quoted strings, decimal numbers, and nested
+objects. Schema version 1 requires the root `version:1` field, which must be the
+first property of the root object. The main shape is:
 
-Adding a field to the current version stays backward compatible: append it to the end
-of `MQTTPrefs`, give the older exact payload length an explicit decoder boundary, and
-leave the missing tail at its default. The packet-filter addition follows that rule:
-the prior 2864-byte v1 payload loads with all six filters set to `all`, while the
-full payload is 2876 bytes.
+```text
+{version:1,
+ wifi:{ssid:"...",password:"...",power_save:1},
+ time:{timezone:"...",utc_offset:0,ntp_server:"..."},
+ mqtt:{origin:"...",iata:"SEA",packets_enabled:1,raw_enabled:0,
+       tx_enabled:2,rx_enabled:1,
+       status:{enabled:1,interval_ms:300000},
+       neighbors:{enabled:0,interval_ms:86400000},
+       owner:{public_key:"...",email:"..."},
+       slot1:{preset:"analyzer-us",host:"",port:0,username:"",password:"",
+              token:"",topic:"",audience:"",packet_filter:65535},
+       ... slot2 through slot6 ...},
+ snmp:{enabled:0,community:"public"},
+ radio:{watchdog_min:5},
+ alert:{enabled:0,psk_hex:"",wifi_minutes:30,mqtt_minutes:240,
+        rate_limit_min:60,hashtag:"",region:""}}
+```
 
-#### The downgrade contract
+Keys may contain digits after their first character, which permits the readable
+`slot1` ... `slot6` names. Every schema key fits `ConfigSerializer`'s 15-character
+visible-key limit. Known strings and numbers use strict parsing: duplicates, overlong
+strings, malformed decimals, and overflow reject the complete file. A supported file
+with a semantically out-of-range value is repaired to that field's safe default and
+rewritten atomically. Unknown fields are ignored only within the serializer's general
+limits (15-character keys, 127-byte decoded values, and six nested object levels below the root).
 
-**Within a version tag the layout is append-only, and a longer payload is always
-readable.** A file written by a later build starts with this binary's exact baseline,
-so `classify()` reads that prefix and ignores the tail. A downgraded node keeps its
-WiFi credentials, broker slots, and every other setting it understands; the only thing
-it loses is the settings the newer build added.
+Loading always starts with defaults and parses into a separate heap scratch object.
+The live preferences change only after the complete file parses, has an explicit
+supported version, and passes validation. A missing/future version, syntax error,
+overlength value, or allocation/read failure leaves `/mqtt.json` untouched, runs this
+boot on defaults, and holds observer saves so a later CLI/WebConfig write cannot erase
+the opaque source. If an observer setter cannot commit its JSON transaction, it restores
+the pre-command in-memory preferences and does not restart or apply a bridge change as
+though the setting were durable.
 
-That asymmetry is the whole point. Refusing the file costs the operator the network
-itself — `/mqtt_prefs` holds `wifi_ssid`/`wifi_password` as well as the broker config,
-so a node that falls back to defaults has no WiFi, no portal, and no OTA, recoverable
-only over serial. Reading it costs a feature's settings. Losing later settings is the
-acceptable half of that trade; losing the node is not.
+Saves stream to `/mqtt.json.tmp` through a sticky short-write detector while computing
+size and checksum. The firmware closes and rereads the temp, verifies size/checksum,
+parses it into another scratch object, then publishes with
+`/mqtt.json` -> `/mqtt.json.bak` and temp -> primary. Failure safety is paid for in
+transient heap: a CLI setter holds one `MQTTPrefs` rollback snapshot (2876 bytes) for the
+whole command, and the save allocates one more for normalization defaults (released
+before file I/O) and then one for verification — about 5.6 KiB peak above baseline.
+Each allocation is checked, so exhaustion refuses the setting rather than crashing.
 
-The tail survives until something actually writes. `saveMQTTPrefs()` rewrites at this
-binary's own length, so a rollback that changes no observer setting and is later rolled
-forward keeps the newer fields intact — only an explicit `set` while downgraded drops
-them. The boot log says so when it happens.
+If publishing fails partway, the transaction is rolled back rather than left for boot
+recovery: the backup is renamed back over the empty primary and the verified temp is
+discarded. This is what makes the setter's "change rolled back" reply true — without it
+the next boot would promote that temp and activate the value the CLI just refused. When
+the rollback itself cannot complete, the save reports an indeterminate outcome instead,
+the artifacts stay for recovery, and the CLI says the flash state is unresolved. Further
+saves are refused until then, because a transaction cannot start while a temp or backup
+exists. Boot recovery selects the usable
+primary/temp/backup without overwriting an opaque future or corrupt primary. A valid
+future-version temp that reached the rename phase wins over the stale backup and is held
+for newer firmware. If a temp claims a future version but uses grammar this firmware
+cannot parse, or cannot be classified because scratch allocation fails, recovery renames
+nothing at all: it reads the last usable backup straight out of `/mqtt.json.bak`, leaves
+the primary name empty, and holds all observer writes. The empty primary name is the only
+record that the candidate had already passed the backup rename, so publishing the backup
+would make the candidate indistinguishable from a stale artifact — and the next boot, the
+one with enough heap or new enough firmware to finally read it, would delete it. Leaving
+the names alone means that boot promotes the candidate through the ordinary temp rule, or
+falls back to the backup if it turns out to be definitively corrupt. A
+definitively corrupt/incomplete current-version temp may be discarded for that backup.
+If power fails during the very first migration, there is no JSON primary or backup yet;
+recovery discards a definitively invalid temp so the intact `/mqtt_prefs` source can be
+loaded and the migration retried. An uncertain/future temp is still preserved and held.
 
-**A change that is not a pure append MUST bump `MQTT_PREFS_VERSION`.** The version
-check is what makes the rule above safe: a different tag is still refused outright and
-the file preserved, because the bytes may no longer mean what this binary thinks. Never
-reorder, resize, or repurpose an existing field within a version.
+Unknown slot preset names are repaired to `none`, never to a build-specific default
+broker. Duplicate known presets from historical firmware are preserved on load; current
+CLI and WebConfig setters prevent creating new duplicates without silently changing an
+existing deployment during migration.
 
-Note the rule is only as old as the build that implements it. Firmware already deployed
-carries the *previous* decoder, which rejects any longer v1 payload — so rolling back
-from this build to one shipped before it still falls back to defaults.
-`MQTTPrefsCodec::payloadLenFor()` covers that gap from the writing side: it returns the
-shortest length that still round-trips the configuration, so a node keeps writing 2864
-bytes until a packet filter actually holds something, and clearing the last non-default
-filter puts it back. That mitigation can be retired once no supported downgrade target
-predates the contract; the contract itself is the durable half.
+Schema changes that reinterpret existing names or values must increment `version`.
+Additive fields may remain in version 1 only when old readers can safely ignore them
+within the limits above. A future version is treated as opaque rather than partially
+loading its known-looking fields. Literal schema keys are compile-time checked against
+the 15-character visible-key limit so a new version-1 field cannot accidentally violate
+that downgrade contract.
 
-Shorter payloads keep their existing, stricter treatment: a short length must match a
-boundary that really shipped (`MQTT_PREFS_V1_*_PAYLOAD_SIZE`), because raw prefs have
-no checksum and an arbitrary short size cannot be trusted to mean anything.
+Every future version must also keep `version` as the first root property. Older firmware
+detects a future file by probing that field with its own grammar, and the probe stops at
+the first construct it cannot tokenize (an array, an overlong key, a value type it does
+not expect). Syntax a newer schema introduces *before* the version field therefore makes
+its files look corrupt rather than future, which costs them the preservation guarantee
+above: as the temp of an interrupted commit such a file is discardable instead of
+retained. `test_mqtt_prefs_serializer` pins both the ordering and that consequence.
+
+#### Downgrade and rollback
+
+The old `/mqtt_prefs` binary is read only for one-time migration and is deliberately
+not updated or deleted. When it exists and is usable, it is the exact pre-migration
+rollback snapshot. Firmware older than this JSON change will therefore see stale
+observer settings after a downgrade. A fresh JSON-only install has no binary observer
+configuration to recover on downgrade.
+
+The two files are intentionally not reconciled. If an operator changes observer settings
+while running old firmware, those changes update only `/mqtt_prefs`. Rolling forward to
+this firmware makes the existing `/mqtt.json` authoritative again, so rollback-era edits
+are ignored unless the operator exports and reapplies them. Conversely, JSON-only settings
+cannot be recovered by old firmware. This is a rollback snapshot, not bidirectional sync.
+
+`LegacyV1MQTTPrefs` and the older pre-slot/3-slot/6-slot structs are frozen migration
+ABIs with size/offset assertions. The runtime `MQTTPrefs` layout is not an on-flash ABI.
 
 ### Settings upgrade / migration
 
 `loadPrefs()` handles every historical on-device format one-time at boot:
-- **`/mqtt_prefs`** — if the file has the version header it is read directly. Otherwise
+- **`/mqtt_prefs` -> `/mqtt.json`** — if the legacy file has the version header its
+  frozen v1 layout is field-copied. Otherwise
   it is a legacy headerless file and its layout is detected by size: pre-slot
   (`OldMQTTPrefs`), 3-slot (`ThreeSlotMQTTPrefs`), or the 6-slot layout shipped on
   `observer-firmware` back when it was named `mqtt-bridge-implementation-flex`
   (`Legacy6SlotMQTTPrefs`). Each is field-copied into
-  the current compact `MQTTPrefs` and re-saved with the version header — which also
+  the runtime `MQTTPrefs` and saved as schema-versioned JSON — which also
   drops the vestigial `_legacy_*` fields the flex layout carried mid-struct. This is a
   one-time rewrite; every deployed device performs it on its first boot of versioned
-  firmware, after which all reads take the header path.
+  firmware, after which `/mqtt.json` is authoritative. The binary source remains as
+  a rollback snapshot and is never dual-written.
   The pre-slot (`OldMQTTPrefs`) copy maps the old single-broker keys onto slots:
   `mqtt.analyzer.us = on` → slot 1 `analyzer-us`, `mqtt.analyzer.eu = on` → slot 2
   `analyzer-eu`, and a configured `mqtt.server` / `mqtt.port` / `mqtt.username` /
@@ -241,7 +300,7 @@ no checksum and an arbitrary short size cannot be trusted to mean anything.
 - **`/com_prefs`** — a file written by fork firmware that predates the `MQTTPrefs` split
   (a zero-filled MQTT gap plus a trailing observer block) is detected by size; the
   trailing SNMP / radio-watchdog / fault-alert settings and the `rx_boosted_gain` /
-  `flood_max_*` fields are recovered, carried into `/mqtt_prefs`, and both files are
+  `flood_max_*` fields are recovered, carried into `/mqtt.json`, and the active files are
   rewritten in the current formats.
 - Settings the pre-split firmware stored *inside* the `/com_prefs` MQTT gap (the MQTT
   slot/WiFi config itself) are **not** recovered — users upgrading from firmware that
