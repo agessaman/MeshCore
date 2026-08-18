@@ -559,9 +559,11 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
         replyAppendf(buf, bufsize, &pos, ", tls:0x%04X", (unsigned)slot.last_tls_err);
       }
     }
-    // mbedTLS stack error (shown as negative hex per convention)
+    // mbedTLS stack error (shown as negative hex per convention). ESP-IDF stores the
+    // magnitude, not the negative mbedTLS code, so normalise instead of negating.
     if (slot.last_tls_stack_err != 0) {
-      replyAppendf(buf, bufsize, &pos, ", mbedtls:-0x%04X", (unsigned)(-slot.last_tls_stack_err));
+      replyAppendf(buf, bufsize, &pos, ", mbedtls:-0x%04X",
+                   (unsigned)mbedtlsErrorMagnitude(slot.last_tls_stack_err));
     }
     // Socket errno
     if (slot.last_sock_errno != 0) {
