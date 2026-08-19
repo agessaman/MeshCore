@@ -940,6 +940,21 @@ void MQTTBridge::begin() {
           _slots[i].enabled = false;
         }
       }
+    } else {
+      // Prefs say this slot is off. Without this the slot keeps whatever the previous
+      // begin() left in RAM, so a restart resurrects a broker the operator disabled and
+      // reconnects to it with the old credentials. teardownSlot() deliberately preserves
+      // enabled/preset, and the constructor only clears them once, so nothing else does.
+      // Config fields only: the client belongs to destroySlotClients() and the token
+      // buffer to releaseSlotAuthToken(), and clearing either here would strand a pointer
+      // esp-mqtt still holds.
+      _slots[i].enabled = false;
+      _slots[i].preset = nullptr;
+      _slots[i].host[0] = '\0';
+      _slots[i].username[0] = '\0';
+      _slots[i].password[0] = '\0';
+      _slots[i].audience[0] = '\0';
+      _slots[i].port = 0;
     }
   }
 
