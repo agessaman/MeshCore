@@ -442,7 +442,10 @@ private:
   bool ensureSlotClient(int index);    // Allocate this slot's persistent client + callbacks on first use
   bool ensureSlotAuthToken(int index); // Allocate this slot's JWT token buffer on first token creation
   void releaseSlotAuthToken(int index);// Free the token buffer (only with the client — see MQTTSlot)
-  void destroySlotClients();           // Delete all persistent clients (shutdown only)
+  // force=true stops each client without waiting for its DISCONNECTED event. Only the
+  // dirty-stop fallback passes it: disconnect()'s wait is unbounded, so a client already
+  // wedged in mbedTLS would block the caller — MyMesh::loop() — indefinitely.
+  void destroySlotClients(bool force = false);  // Delete all persistent clients (shutdown only)
   bool setupSlot(int index);           // Configure and connect the slot; false = not activated
   // Single definition of "this slot holds one of the _max_active_slots positions":
   // it is enabled and has been through a successful setupSlot(). Startup, the
@@ -450,7 +453,8 @@ private:
   // exceeded by one route while another enforces it.
   int activatedSlotCount() const;
   bool canActivateSlot(int index) const;
-  void teardownSlot(int index);        // Disconnect the slot's client (keeps the object alive)
+  // force as in destroySlotClients(): skip the unbounded wait, dirty-stop path only.
+  void teardownSlot(int index, bool force = false);  // Disconnect the slot's client (keeps the object alive)
   // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a
   // no-op on a stopped client). See the definition.
   void reconnectSlotClient(int index);

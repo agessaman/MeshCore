@@ -1175,8 +1175,10 @@ void MQTTBridge::LifecycleOps::releaseResources() {
     if (b->_mqtt_task_handle != nullptr) {
       vTaskDelete(b->_mqtt_task_handle);
     }
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) b->teardownSlot(i);
-    b->destroySlotClients();
+    // force: the task is already gone and the client is presumed wedged, so waiting on a
+    // DISCONNECTED event that may never arrive would hang this task (the app loop) forever.
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) b->teardownSlot(i, /*force=*/true);
+    b->destroySlotClients(/*force=*/true);
   }
   // Clean path (or a task that acked right at the deadline): the MQTT task
   // already disconnected/deleted its clients on Core 0 and self-terminated, so
@@ -1724,11 +1726,17 @@ void MQTTBridge::releaseSlotAuthToken(int index) {
   slot.last_token_renewal = 0;
 }
 
-void MQTTBridge::destroySlotClients() {
+void MQTTBridge::destroySlotClients(bool force) {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     MQTTSlot& slot = _slots[i];
     if (slot.client != nullptr) {
-      if (slot.client->connected()) {
+      // force is deliberately NOT gated on connected(). The state it exists for — a client
+      // that already took its DISCONNECTED callback and is now stuck inside
+      // esp_mqtt_client_stop() — reports not-connected, so gating skipped the stop exactly
+      // when it mattered and left the object to be deleted from under a live IDF task.
+      if (force) {
+        slot.client->forceStop();
+      } else if (slot.client->connected()) {
         slot.client->disconnect();
       }
       #ifdef ESP_PLATFORM
@@ -1986,12 +1994,18 @@ bool MQTTBridge::setupSlot(int index) {
 // the client object alive so a subsequent setupSlot() can reuse its mbedTLS
 // context. This is called both on reconfigure (preset change) and at shutdown;
 // destruction of the underlying client happens once in destroySlotClients().
-void MQTTBridge::teardownSlot(int index) {
+void MQTTBridge::teardownSlot(int index, bool force) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
 
-  if (slot.client && slot.client->connected()) {
-    slot.client->disconnect();
+  // As in destroySlotClients(): force is not gated on connected(), because the wedged
+  // mid-stop state it exists for already reports not-connected.
+  if (slot.client && (force || slot.client->connected())) {
+    if (force) {
+      slot.client->forceStop();
+    } else {
+      slot.client->disconnect();
+    }
     #ifdef ESP_PLATFORM
     vTaskDelay(pdMS_TO_TICKS(50));
     #else
