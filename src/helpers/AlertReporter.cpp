@@ -4,6 +4,9 @@
 #include <Packet.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef WITH_MQTT_BRIDGE
+#include "AlertFaultPolicy.h"
+#endif
 
 // Header layout for PAYLOAD_TYPE_GRP_TXT before encryption:
 //   [0..3] timestamp (uint32_t LE) — also helps make packet_hash unique
@@ -129,11 +132,9 @@ bool AlertReporter::resolveChannel(mesh::GroupChannel& out) const {
 void AlertReporter::onConfigChanged() {
   // Reset transient state so a config change re-arms the edge detector.
 #ifdef WITH_MQTT_BRIDGE
-  _wifi.state = OK;
-  _wifi.fired_at_ms = 0;
+  AlertFaultPolicy::reset(_wifi);
   for (size_t i = 0; i < sizeof(_mqtt) / sizeof(_mqtt[0]); i++) {
-    _mqtt[i].state = OK;
-    _mqtt[i].fired_at_ms = 0;
+    AlertFaultPolicy::reset(_mqtt[i]);
   }
 #endif
 }
@@ -194,124 +195,75 @@ bool AlertReporter::sendText(const char* text) {
   return sendChannel(text);
 }
 
-void AlertReporter::formatAge(unsigned long age_ms, char* out, size_t out_size) const {
-  unsigned long secs = age_ms / 1000UL;
-  unsigned long h = secs / 3600UL;
-  unsigned long m = (secs % 3600UL) / 60UL;
-  if (h > 0) {
-    snprintf(out, out_size, "%luh%lum", h, m);
-  } else {
-    snprintf(out, out_size, "%lum", m);
-  }
-}
-
 void AlertReporter::onLoop(unsigned long now_ms) {
   if (!_prefs || !_obs || !_obs->alert_enabled) return;
   if (!_mesh) return;
 
-  // Throttle: ~5 s cadence. The thresholds are minutes-scale so this is fine.
-  if ((long)(now_ms - _next_check_ms) < 0) return;
-  _next_check_ms = now_ms + 5000UL;
+  const uint32_t now = (uint32_t)now_ms;
+  if (!AlertFaultPolicy::checkDue(now, (uint32_t)_next_check_ms)) return;
+  _next_check_ms = AlertFaultPolicy::nextCheckMs(now);
 
 #ifdef WITH_MQTT_BRIDGE
-  // Clamp to a 60-minute floor regardless of what's in NodePrefs. The CLI
-  // already enforces this on set, but a stale prefs file or future field
-  // tweak shouldn't be able to drag the floor below 1 hour and let a
-  // flapping link spam the mesh.
-  //
-  // The rate limiter only applies between two real sends: fired_at_ms == 0
-  // means "never fired since boot/config change", and treating it as a send
-  // at millis()==0 would suppress every first alert until uptime reaches
-  // min_interval (observed as a 30-minute alert.mqtt threshold not reporting
-  // until 60 minutes after a reboot).
-  uint16_t cfg_min = _obs->alert_min_interval_min;
-  if (cfg_min < 60) cfg_min = 60;
-  unsigned long min_interval_ms = (unsigned long)cfg_min * 60000UL;
+  const uint32_t min_interval_ms =
+      AlertFaultPolicy::minIntervalMs(_obs->alert_min_interval_min);
 
   // -------- WiFi fault --------
   if (_obs->alert_wifi_minutes > 0) {
-    unsigned long wifi_disc_ms = MQTTBridge::getLastWifiDisconnectTime();
-    unsigned long wifi_conn_ms = MQTTBridge::getWifiConnectedAtMillis();
-    bool wifi_down = (wifi_disc_ms != 0 && wifi_conn_ms == 0);
-    unsigned long down_ms = wifi_down ? (now_ms - wifi_disc_ms) : 0;
-    unsigned long thresh_ms = (unsigned long)_obs->alert_wifi_minutes * 60000UL;
-
-    if (_wifi.state == OK) {
-      if (wifi_down && down_ms >= thresh_ms &&
-          (_wifi.fired_at_ms == 0 || (now_ms - _wifi.fired_at_ms) >= min_interval_ms)) {
-        char age[16];
-        formatAge(down_ms, age, sizeof(age));
-        uint8_t reason = MQTTBridge::getLastWifiDisconnectReason();
+    if (_bridge != nullptr) {
+      const AlertFaultPolicy::OutageSnapshot snap = _bridge->getWifiOutageSnapshot();
+      AlertFaultPolicy::TickResult r = AlertFaultPolicy::tick(
+          _wifi, now, snap,
+          AlertFaultPolicy::thresholdMs(_obs->alert_wifi_minutes),
+          min_interval_ms);
+      if (r.action == AlertFaultPolicy::Action::FireDown) {
         char text[80];
-        if (reason != 0) {
-          snprintf(text, sizeof(text), "WiFi down %s (reason %u)", age, (unsigned)reason);
-        } else {
-          snprintf(text, sizeof(text), "WiFi down %s", age);
-        }
+        AlertFaultPolicy::formatWifiAlert(text, sizeof(text), r, snap);
         if (sendChannel(text)) {
-          _wifi.state = FIRING;
-          _wifi.fired_at_ms = now_ms;
-          _wifi.last_outage_started_ms = wifi_disc_ms;
+          AlertFaultPolicy::commitDown(_wifi, now, snap.started_ms);
         }
-      }
-    } else { // FIRING
-      if (!wifi_down) {
-        unsigned long total = (wifi_conn_ms != 0 && _wifi.last_outage_started_ms != 0)
-            ? (wifi_conn_ms - _wifi.last_outage_started_ms) : 0;
-        char age[16];
-        formatAge(total, age, sizeof(age));
+      } else if (r.action == AlertFaultPolicy::Action::FireRecovered) {
         char text[80];
-        snprintf(text, sizeof(text), "WiFi recovered after %s", age);
+        AlertFaultPolicy::formatWifiAlert(text, sizeof(text), r, snap);
         sendChannel(text);
-        _wifi.state = OK;
+        AlertFaultPolicy::commitRecovered(_wifi);
       }
     }
-  } else if (_wifi.state == FIRING) {
-    _wifi.state = OK; // threshold disabled mid-fault: silently re-arm
+  } else {
+    AlertFaultPolicy::rearmIfDisabled(_wifi);
   }
 
   // -------- MQTT slot faults --------
   if (_obs->alert_mqtt_minutes > 0 && _bridge != nullptr) {
     int n = MQTTBridge::getRuntimeSlotCount();
     if (n > (int)(sizeof(_mqtt) / sizeof(_mqtt[0]))) n = (int)(sizeof(_mqtt) / sizeof(_mqtt[0]));
-    unsigned long thresh_ms = (unsigned long)_obs->alert_mqtt_minutes * 60000UL;
+    const uint32_t thresh_ms = AlertFaultPolicy::thresholdMs(_obs->alert_mqtt_minutes);
 
     for (int i = 0; i < n; i++) {
-      Fault& f = _mqtt[i];
+      AlertFaultPolicy::Fault& f = _mqtt[i];
       if (!_bridge->isSlotEnabledAndAttempted(i)) {
-        if (f.state == FIRING) f.state = OK; // slot disabled mid-fault
+        AlertFaultPolicy::rearmIfDisabled(f);
         continue;
       }
-      unsigned long outage_start = _bridge->getSlotCurrentOutageStartMs(i);
-      bool down = (outage_start != 0);
-      unsigned long down_ms = down ? (now_ms - outage_start) : 0;
-
-      if (f.state == OK) {
-        if (down && down_ms >= thresh_ms &&
-            (f.fired_at_ms == 0 || (now_ms - f.fired_at_ms) >= min_interval_ms)) {
-          char age[16];
-          formatAge(down_ms, age, sizeof(age));
-          char text[100];
-          snprintf(text, sizeof(text), "MQTT slot %d (%s) down %s",
-                   i + 1, _bridge->getSlotPresetName(i), age);
-          if (sendChannel(text)) {
-            f.state = FIRING;
-            f.fired_at_ms = now_ms;
-            f.last_outage_started_ms = outage_start;
-          }
+      const uint32_t outage_start = (uint32_t)_bridge->getSlotCurrentOutageStartMs(i);
+      const AlertFaultPolicy::OutageSnapshot snap =
+          AlertFaultPolicy::fromStartMs(outage_start);
+      AlertFaultPolicy::TickResult r = AlertFaultPolicy::tick(
+          f, now, snap, thresh_ms, min_interval_ms);
+      if (r.action == AlertFaultPolicy::Action::FireDown) {
+        char text[100];
+        AlertFaultPolicy::formatMqttDown(text, sizeof(text), i + 1,
+                                         _bridge->getSlotPresetName(i),
+                                         r.duration_ms);
+        if (sendChannel(text)) {
+          AlertFaultPolicy::commitDown(f, now, outage_start);
         }
-      } else { // FIRING
-        if (!down) {
-          unsigned long total = (f.last_outage_started_ms != 0)
-              ? (now_ms - f.last_outage_started_ms) : 0;
-          char age[16];
-          formatAge(total, age, sizeof(age));
-          char text[100];
-          snprintf(text, sizeof(text), "MQTT slot %d (%s) recovered after %s",
-                   i + 1, _bridge->getSlotPresetName(i), age);
-          sendChannel(text);
-          f.state = OK;
-        }
+      } else if (r.action == AlertFaultPolicy::Action::FireRecovered) {
+        char text[100];
+        AlertFaultPolicy::formatMqttRecovered(text, sizeof(text), i + 1,
+                                              _bridge->getSlotPresetName(i),
+                                              r.duration_ms);
+        sendChannel(text);
+        AlertFaultPolicy::commitRecovered(f);
       }
     }
   }

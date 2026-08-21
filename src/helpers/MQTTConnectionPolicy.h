@@ -120,6 +120,24 @@ static inline uint8_t nextWifiBackoffAttempt(uint8_t attempt) {
   return attempt < 5 ? static_cast<uint8_t>(attempt + 1) : attempt;
 }
 
+// Current WiFi outage start (millis), or 0 while associated. handleWiFiConnection()
+// applies this on each STA status observation. Reconnect attempts that fire
+// while already down must pass connected=false and last_connected=false so the
+// start is preserved — WiFi.disconnect() in the backoff ladder is not a new
+// outage, and must not become the clock AlertReporter quotes as downtime.
+static inline uint32_t wifiCurrentOutageStartMs(uint32_t now, bool connected,
+                                                bool last_connected,
+                                                uint32_t current_start,
+                                                bool initialized) {
+  if (!initialized) {
+    return connected ? 0U : now;
+  }
+  if (connected) {
+    return last_connected ? current_start : 0U;
+  }
+  return last_connected ? now : current_start;
+}
+
 // Each later slot expires up to five percent of the base lifetime earlier,
 // capped at five minutes per slot. Runtime slot indexes are bounded by the
 // persisted MQTT slot count; the final clamp also prevents underflow if this

@@ -230,6 +230,21 @@ TEST(MQTTConnectionPolicy, WifiReconnectRequiresBothDownAndSinceAttemptToClearRu
   EXPECT_TRUE(Policy::wifiReconnectDue(1000U + 15000U, down_since, last_attempt, attempt));
 }
 
+TEST(MQTTConnectionPolicy, WifiOutageStartStickyAcrossReconnectAttempts) {
+  // First observe-down (or connected→down) records `now`. Further down samples
+  // — including STA backoff WiFi.disconnect() — must keep that start so
+  // AlertReporter quotes the outage, not the last attempt / boot event.
+  EXPECT_EQ(0U, Policy::wifiCurrentOutageStartMs(5000, true, false, 0, false));
+  EXPECT_EQ(5000U, Policy::wifiCurrentOutageStartMs(5000, false, false, 0, false));
+
+  const uint32_t start = 9000U;
+  EXPECT_EQ(start, Policy::wifiCurrentOutageStartMs(start, false, true, 0, true));
+  EXPECT_EQ(start, Policy::wifiCurrentOutageStartMs(start + 15000U, false, false, start, true));
+  EXPECT_EQ(start, Policy::wifiCurrentOutageStartMs(start + 2U * 3600U * 1000U,
+                                                    false, false, start, true));
+  EXPECT_EQ(0U, Policy::wifiCurrentOutageStartMs(start + 1000U, true, false, start, true));
+}
+
 TEST(MQTTConnectionPolicy, WifiReconnectDueSurvivesMillisRollover) {
   const uint32_t down_since = std::numeric_limits<uint32_t>::max() - 100U;
   const uint32_t last_attempt = down_since;

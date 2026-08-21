@@ -11,6 +11,7 @@
 #include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
+#include "helpers/AlertFaultPolicy.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -409,10 +410,20 @@ private:
   unsigned long _last_wifi_check;
   wl_status_t _last_wifi_status;
   bool _wifi_status_initialized;
-  unsigned long _wifi_disconnected_time;  // 0 when connected
+  // Packed OutageSnapshot; Core 0 (event + MQTT task) stores, Core 1 loads.
+  std::atomic<uint64_t> _wifi_outage_bits;
   unsigned long _last_wifi_reconnect_attempt;
   uint8_t _wifi_reconnect_backoff_attempt;  // 0..5 → 15s, 30s, 60s, 120s, 300s; reset on connect
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
+
+  AlertFaultPolicy::OutageSnapshot wifiOutage() const {
+    return AlertFaultPolicy::unpackOutageSnapshot(
+        _wifi_outage_bits.load(std::memory_order_acquire));
+  }
+  void setWifiOutage(AlertFaultPolicy::OutageSnapshot snap) {
+    _wifi_outage_bits.store(AlertFaultPolicy::packOutageSnapshot(snap),
+                            std::memory_order_release);
+  }
 
   // Optional pointers for collecting stats internally (set by mesh if available)
   mesh::Dispatcher* _dispatcher;  // For air times and errors
@@ -642,6 +653,15 @@ public:
   bool canFlashAfterStop() const { return _lifecycle.mayBeginFlash(); }
 
   static unsigned long getWifiConnectedAtMillis();
+
+  /**
+   * Current WiFi outage snapshot for AlertReporter: down, started_ms, and the
+   * initiating disconnect reason. Distinct from getLastWifiDisconnectTime() /
+   * getLastWifiDisconnectReason(), which follow the most recent ESP-IDF
+   * DISCONNECTED event and are overwritten by STA-backoff WiFi.disconnect()
+   * (reason 8 / ASSOC_LEAVE).
+   */
+  AlertFaultPolicy::OutageSnapshot getWifiOutageSnapshot() const { return wifiOutage(); }
 
   /**
    * Per-slot outage accessors used by AlertReporter to detect prolonged

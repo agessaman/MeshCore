@@ -6,6 +6,7 @@
 
 #ifdef WITH_MQTT_BRIDGE
 #include "bridges/MQTTBridge.h"
+#include "AlertFaultPolicy.h"
 #endif
 
 /**
@@ -89,14 +90,6 @@ public:
 private:
   bool resolveChannel(mesh::GroupChannel& out) const;
   bool sendChannel(const char* text);
-  void formatAge(unsigned long age_ms, char* out, size_t out_size) const;
-
-  enum FaultState { OK, FIRING };
-  struct Fault {
-    FaultState state;
-    unsigned long fired_at_ms;     // millis() when we last sent a "down" alert
-    unsigned long last_outage_started_ms; // remembered so the recovered msg can quote duration
-  };
 
   NodePrefs* _prefs;
   MQTTPrefs* _obs;
@@ -104,8 +97,8 @@ private:
   CommonCLICallbacks* _callbacks;
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* _bridge;
-  Fault _wifi;
-  Fault _mqtt[RUNTIME_MQTT_SLOTS];
+  AlertFaultPolicy::Fault _wifi;
+  AlertFaultPolicy::Fault _mqtt[RUNTIME_MQTT_SLOTS];
 #endif
   unsigned long _next_check_ms;
 };

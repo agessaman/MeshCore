@@ -662,7 +662,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _snmp_agent(nullptr),
 #endif
       _last_wifi_check(0), _last_wifi_status(WL_DISCONNECTED), _wifi_status_initialized(false),
-      _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
+      _wifi_outage_bits{0}, _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
       _last_slot_reconnect_ms(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
@@ -1257,16 +1257,23 @@ void MQTTBridge::initializeWiFiInTask() {
       switch(event) {
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
           MQTT_DEBUG_PRINTLN("WiFi connected: %s", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+          setWifiOutage(AlertFaultPolicy::applyWifiGotIp(wifiOutage()));
+          _wifi_reconnect_backoff_attempt = 0;
           // Set flag to trigger NTP sync from loop() instead of doing it here
           if (!_ntp_synced && !_ntp_sync_pending) {
             _ntp_sync_pending = true;
           }
           break;
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-          s_wifi_disconnect_reason = info.wifi_sta_disconnected.reason;
-          s_wifi_disconnect_time = millis();
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
+          const uint8_t reason = info.wifi_sta_disconnected.reason;
+          const unsigned long t = millis();
+          s_wifi_disconnect_reason = reason;
+          s_wifi_disconnect_time = t;
+          setWifiOutage(AlertFaultPolicy::applyWifiDisconnectEvent(
+              (uint32_t)t, reason, wifiOutage()));
           MQTT_DEBUG_PRINTLN("WiFi disconnected: reason %d", s_wifi_disconnect_reason);
           break;
+        }
         default:
           break;
       }
@@ -2795,11 +2802,19 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
   if (!_wifi_status_initialized) {
     _last_wifi_status = current_wifi_status;
     _wifi_status_initialized = true;
-    if (current_wifi_status != WL_CONNECTED) {
-      _wifi_disconnected_time = now;
-    }
+    setWifiOutage(AlertFaultPolicy::applyWifiStatus(
+        (uint32_t)now, current_wifi_status == WL_CONNECTED, wifiOutage(), false));
   }
   if (now - _last_wifi_check <= 10000) {
+    // Events own the snapshot between 10 s polls. If STA is associated again
+    // and GOT_IP was missed, still close the outage so a flap contained
+    // between polls does not look like one continuous downtime.
+    if (current_wifi_status == WL_CONNECTED) {
+      AlertFaultPolicy::OutageSnapshot snap = wifiOutage();
+      if (snap.down) {
+        setWifiOutage(AlertFaultPolicy::applyWifiGotIp(snap));
+      }
+    }
     return false;
   }
   _last_wifi_check = now;
@@ -2807,7 +2822,8 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
   if (current_wifi_status == WL_CONNECTED) {
     if (_last_wifi_status != WL_CONNECTED) {
       transitioned_to_connected = true;
-      _wifi_disconnected_time = 0;
+      setWifiOutage(AlertFaultPolicy::applyWifiStatus(
+          (uint32_t)now, true, wifiOutage(), true));
       s_wifi_connected_at = now;
       _wifi_reconnect_backoff_attempt = 0;
       #ifdef ESP_PLATFORM
@@ -2833,8 +2849,11 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
     }
     _last_wifi_status = WL_CONNECTED;
   } else {
-    if (_last_wifi_status == WL_CONNECTED) {
-      _wifi_disconnected_time = now;
+    const bool last_connected = (_last_wifi_status == WL_CONNECTED);
+    AlertFaultPolicy::OutageSnapshot snap = AlertFaultPolicy::applyWifiStatus(
+        (uint32_t)now, false, wifiOutage(), true);
+    setWifiOutage(snap);
+    if (last_connected) {
       s_wifi_connected_at = 0;
       // Disconnect all slot clients when WiFi drops
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
@@ -2842,13 +2861,13 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
           _slots[i].client->disconnect();
         }
       }
-    } else if (_wifi_disconnected_time > 0) {
+    } else if (snap.down) {
       // Backoff ladder + wrap-safe timing live in MQTTConnectionPolicy (Phase 6),
       // exercised by host tests. Behavior is unchanged: both the link-down
       // duration and the since-last-attempt interval must clear the current rung
       // (elapsedMs is the wrap-safe form of the old ULONG_MAX branch).
       if (MQTTConnectionPolicy::wifiReconnectDue(
-              (uint32_t)now, (uint32_t)_wifi_disconnected_time,
+              (uint32_t)now, snap.started_ms,
               (uint32_t)_last_wifi_reconnect_attempt,
               _wifi_reconnect_backoff_attempt)) {
         _last_wifi_reconnect_attempt = now;
