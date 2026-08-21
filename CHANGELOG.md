@@ -8,6 +8,10 @@ existing behavior · **Internal** = refactor / under-the-hood · **Docs** = docu
 **Build** / **CI** = build system & automation. **⬆ Upstream sync** marks a merge of the
 upstream MeshCore `dev` branch, which generally pulls in a new MeshCore software version.
 
+### August 2026
+
+- **New** · `platformio` — MQTT observer repeater and room-server configs for Heltec V4 R8 (OLED and TFT)  <sub>2026-08-20</sub>
+
 ### June 2026
 
 - **New** — AlertReporter integration in MyMesh for Room Server <sub>2026-06-17 · `985fda13`</sub>
