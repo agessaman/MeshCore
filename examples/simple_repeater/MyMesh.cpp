@@ -69,6 +69,11 @@
 // channel so an update is never stalled indefinitely.
 #define OTA_TX_DRAIN_TIMEOUT_MS     5000
 
+// Bench mitigation for a ThinkNode M7 cache-error race between a clean MQTT
+// teardown and the OTA worker allocation. 25 ms still failed intermittently;
+// 100 ms completed five consecutive one-slot OTA cycles without a crash.
+#define OTA_MQTT_STOP_SETTLE_MS      100
+
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
@@ -1731,6 +1736,9 @@ void MyMesh::loop() {
     // duty-limited channel) is lost when the flash spins the loop and reboots.
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
     setBridgeState(false);
+    // TODO: Replace this timed settle with a proven MQTT task/client/callback
+    // quiescence barrier once the teardown race's root cause is identified.
+    delay(OTA_MQTT_STOP_SETTLE_MS);
     char ota_reply[160];
     // OTA teardown barrier (Phase 5): only flash after a CLEAN MQTT shutdown.
     // A timed-out/forced stop leaves mbedTLS/heap ownership uncertain — writing
