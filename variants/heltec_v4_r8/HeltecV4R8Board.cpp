@@ -1,5 +1,9 @@
 #include "HeltecV4R8Board.h"
 
+#if defined(HELTEC_V4_R8_TFT) && defined(DISPLAY_CLASS)
+  #include <target.h>
+#endif
+
 void HeltecV4R8Board::begin() {
   ESP32Board::begin();
 
@@ -8,8 +12,8 @@ void HeltecV4R8Board::begin() {
 
   loRaFEMControl.init();
 
-  // Expansion Kit CHSC6X touch RST/INT are unwired. GPIO 21 is TFT RST
-  // (PIN_TFT_RST), owned by ST7789LCDDisplay. Do not pulse it here.
+  // GPIO 21 is shared by LCD_RST and TP_RST. Let ST7789LCDDisplay own the
+  // reset sequence; no separate touch reset is needed.
 #ifdef PIN_TOUCH_RST
   pinMode(PIN_TOUCH_RST, OUTPUT);
   digitalWrite(PIN_TOUCH_RST, HIGH);
@@ -42,6 +46,10 @@ void HeltecV4R8Board::onAfterTransmit(void) {
 }
 
 void HeltecV4R8Board::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
+#if defined(HELTEC_V4_R8_TFT) && defined(DISPLAY_CLASS)
+  display.turnOff();
+#endif
+
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
 
   rtc_gpio_set_direction((gpio_num_t)P_LORA_DIO_1, RTC_GPIO_MODE_INPUT_ONLY);
