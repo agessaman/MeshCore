@@ -4,6 +4,10 @@
   #define PIN_TFT_MISO -1
 #endif
 
+#ifndef PIN_TFT_LEDA_CTL_ACTIVE
+  #define PIN_TFT_LEDA_CTL_ACTIVE HIGH
+#endif
+
 #ifndef DISPLAY_ROTATION
   #define DISPLAY_ROTATION 3
 #endif
@@ -36,11 +40,14 @@ ColorVal UIColor::corp_blue = 0x001A;
 
 bool ST7789LCDDisplay::begin() {
   if (!_isOn) {
-    if (_peripher_power) _peripher_power->claim();
+    if (_peripher_power) {
+      _peripher_power->claim();
+      delay(100);
+    }
 
     if (PIN_TFT_LEDA_CTL != -1) {
       pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
-      digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
+      digitalWrite(PIN_TFT_LEDA_CTL, !PIN_TFT_LEDA_CTL_ACTIVE);
     }
 
     // Im not sure if this is just a t-deck problem or not, if your display is slow try this.
@@ -55,9 +62,13 @@ bool ST7789LCDDisplay::begin() {
 
     display.fillScreen(ST77XX_BLACK);
     display.setTextColor(ST77XX_WHITE);
-    display.setTextSize(2 * DISPLAY_SCALE_X); 
+    display.setTextSize(2 * DISPLAY_SCALE_X);
     display.cp437(true); // Use full 256 char 'Code Page 437' font
-  
+
+    if (PIN_TFT_LEDA_CTL != -1) {
+      digitalWrite(PIN_TFT_LEDA_CTL, PIN_TFT_LEDA_CTL_ACTIVE);
+    }
+
     _isOn = true;
   }
 
@@ -71,13 +82,10 @@ void ST7789LCDDisplay::turnOn() {
 void ST7789LCDDisplay::turnOff() {
   if (_isOn) {
     if (PIN_TFT_LEDA_CTL != -1) {
-      digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
+      digitalWrite(PIN_TFT_LEDA_CTL, !PIN_TFT_LEDA_CTL_ACTIVE);
     }
     if (PIN_TFT_RST != -1) {
       digitalWrite(PIN_TFT_RST, LOW);
-    }
-    if (PIN_TFT_LEDA_CTL != -1) {
-      digitalWrite(PIN_TFT_LEDA_CTL, LOW);
     }
     _isOn = false;
 

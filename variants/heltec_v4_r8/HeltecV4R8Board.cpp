@@ -8,6 +8,8 @@ void HeltecV4R8Board::begin() {
 
   loRaFEMControl.init();
 
+  // Expansion Kit CHSC6X touch RST/INT are unwired. GPIO 21 is TFT RST
+  // (PIN_TFT_RST), owned by ST7789LCDDisplay. Do not pulse it here.
 #ifdef PIN_TOUCH_RST
   pinMode(PIN_TOUCH_RST, OUTPUT);
   digitalWrite(PIN_TOUCH_RST, HIGH);
