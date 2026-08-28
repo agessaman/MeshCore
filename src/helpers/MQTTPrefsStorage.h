@@ -117,7 +117,15 @@ struct MQTTPrefs {
   // Per-slot payload-type allow masks. Bit N controls MeshCore packet type N
   // for both packets and raw MQTT topics.
   uint16_t mqtt_slot_packet_filter[MQTT_PREFS_SLOT_COUNT];
+
+  // Seconds of inactivity before the display blanks; 0 keeps it lit. Runtime
+  // only - deliberately absent from LegacyV1MQTTPrefs, so the frozen binary
+  // layout and its four payload sizes are unchanged.
+  uint16_t display_timeout_secs;
 };
+
+static const uint16_t DISPLAY_TIMEOUT_DEFAULT_SECS = 60;
+static const uint16_t DISPLAY_TIMEOUT_MAX_SECS = 3600;
 
 // Frozen payload written by the version-1 binary format. Keep this distinct
 // from the runtime MQTTPrefs type: JSON persistence must not make the runtime

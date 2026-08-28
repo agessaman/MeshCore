@@ -16,7 +16,31 @@
 #include <helpers/esp32/WebConfigServer.h>   // defines WITH_WEBCONFIG on ESP32
 #endif
 
-#define AUTO_OFF_MILLIS      20000  // 20 seconds
+#ifndef AUTO_OFF_MILLIS
+#define AUTO_OFF_MILLIS      20000  // 20 seconds; 0 keeps the screen on
+#endif
+
+#ifdef DISPLAY_TOUCH_TOGGLE
+#define TOUCH_POLL_MILLIS    50
+#endif
+
+// Wrap-safe deadline test. `millis() >= deadline` fires early for the whole
+// interval before a rollover, because the deadline has already wrapped to a
+// small value while millis() is still near UINT32_MAX; the signed difference
+// stays correct across it.
+static inline bool millisReached(unsigned long now, unsigned long deadline) {
+  return (int32_t)((uint32_t)now - (uint32_t)deadline) >= 0;
+}
+
+// `display.timeout` when the observer prefs are available, otherwise the
+// compiled-in default. Read on every use so a `set display.timeout` takes
+// effect immediately.
+unsigned long UITask::displayTimeoutMillis() const {
+#ifdef WITH_MQTT_BRIDGE
+  if (_observer_prefs) return (unsigned long)_observer_prefs->display_timeout_secs * 1000UL;
+#endif
+  return AUTO_OFF_MILLIS;
+}
 #define BOOT_SCREEN_MILLIS   4000   // 4 seconds
 
 #define POWEROFF_DELAY 3000
@@ -40,10 +64,17 @@ static const uint8_t meshcore_logo [] PROGMEM = {
 
 void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version) {
   _prevBtnState = HIGH;
-  _auto_off = millis() + AUTO_OFF_MILLIS;
+  _timeout_seen = displayTimeoutMillis();
+  _auto_off = millis() + displayTimeoutMillis();
   _started_at = millis();
   _node_prefs = node_prefs;
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  ObserverDashboard::applyDarkPalette();   // retunes UIColor for this target only
+#endif
   _display->turnOn();
+#ifdef DISPLAY_TOUCH_TOGGLE
+  _touch.begin();
+#endif
 #ifdef DISPLAY_REDRAW_ON_CHANGE
   _frame_valid = false;
 #endif
@@ -67,6 +98,9 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
 
 void UITask::renderCurrScreen() {
   char tmp[80];
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  _rows_valid = false;
+#endif
   if (millis() < _started_at + BOOT_SCREEN_MILLIS) { // boot screen
     // meshcore logo
     _display->setColor(UIColor::corp_blue);
@@ -141,6 +175,10 @@ void UITask::renderCurrScreen() {
       return;
     }
 #endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+    renderDashboard();
+    return;
+#endif
     // node name
     _display->setCursor(0, 0);
     _display->setTextSize(1);
@@ -204,7 +242,7 @@ uint32_t UITask::getFrameSignature() {
   snprintf(tmp, sizeof(tmp), "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
   signature = DisplayFrameSignature::append(signature, tmp);
 
-#ifdef WITH_MQTT_BRIDGE
+#if defined(WITH_MQTT_BRIDGE) && !defined(DISPLAY_ACTIVITY_DASHBOARD)
   if (WiFi.status() == WL_CONNECTED) {
     IPAddress ip = WiFi.localIP();
     snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
@@ -218,10 +256,81 @@ uint32_t UITask::getFrameSignature() {
 }
 #endif
 
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+#define ACTIVITY_REFRESH_MILLIS 5000
+
+bool UITask::buildDashboardContext(ObserverDashboard::Context* ctx) {
+  if (_node_prefs == NULL) return false;
+  ctx->node_name = _node_prefs->node_name;
+  ctx->role_label = "REPEATER";
+  ctx->freq = _node_prefs->freq;
+  ctx->sf = _node_prefs->sf;
+  ctx->bw = _node_prefs->bw;
+#ifdef WITH_MQTT_BRIDGE
+  ctx->link_up = (WiFi.status() == WL_CONNECTED);
+#else
+  ctx->link_up = false;
+#endif
+  return true;
+}
+
+void UITask::renderDashboard() {
+  ObserverDashboard::Context ctx;
+  if (!buildDashboardContext(&ctx)) return;
+
+  RadioActivitySnapshot snap;
+  if (_activity) {
+    _activity->snapshot(millis(), &snap);
+  } else {
+    memset(&snap, 0, sizeof(snap));
+  }
+
+  const ObserverDashboard::Layout& layout = ObserverDashboard::activeLayout();
+  ObserverDashboard::drawFull(*_display, layout, ctx, snap);
+  ObserverDashboard::allRowSignatures(layout, ctx, snap, _row_signatures);
+  _rows_valid = true;
+  _next_activity = millis() + ACTIVITY_REFRESH_MILLIS;
+}
+
+// Repaints just the analytics rows whose contents moved. No startFrame(), so
+// the header, the radio strip and the rest of the panel are never cleared.
+void UITask::updateActivityRows() {
+  if (!_rows_valid || _activity == NULL) return;   // not showing the dashboard
+
+  ObserverDashboard::Context ctx;
+  if (!buildDashboardContext(&ctx)) return;
+
+  RadioActivitySnapshot snap;
+  _activity->snapshot(millis(), &snap);
+  ObserverDashboard::drawChangedRows(*_display, ObserverDashboard::activeLayout(), ctx, snap,
+                                     _row_signatures);
+}
+#endif
+
+#ifdef DISPLAY_TOUCH_TOGGLE
+void UITask::toggleDisplay() {
+  if (_display->isOn()) {
+    _display->turnOff();
+  } else {
+    _display->turnOn();
+  }
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+  _frame_valid = false;   // wake draws one complete current frame
+#endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  _rows_valid = false;
+#endif
+  _auto_off = millis() + displayTimeoutMillis();
+}
+#endif
+
 void UITask::loop() {
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
   int ev = user_btn.check();
   if (ev == BUTTON_EVENT_CLICK) {
+#ifdef DISPLAY_TOUCH_TOGGLE
+    toggleDisplay();   // same action as tapping the panel
+#else
     if (_display->isOn()) {
       // TODO: any action ?
     } else {
@@ -229,8 +338,12 @@ void UITask::loop() {
 #ifdef DISPLAY_REDRAW_ON_CHANGE
       _frame_valid = false;
 #endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+      _rows_valid = false;
+#endif
     }
-    _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
+    _auto_off = millis() + displayTimeoutMillis();   // extend auto-off timer
+#endif
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
       _display->turnOn();
       Serial.println("Powering Off");
@@ -247,8 +360,21 @@ void UITask::loop() {
 #ifdef DISPLAY_REDRAW_ON_CHANGE
       _frame_valid = false;
 #endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+      _rows_valid = false;
+#endif
     }
-    _auto_off = millis() + AUTO_OFF_MILLIS;
+    _auto_off = millis() + displayTimeoutMillis();
+  }
+#endif
+
+#ifdef DISPLAY_TOUCH_TOGGLE
+  {
+    unsigned long now = millis();
+    if (millisReached(now, _next_touch)) {
+      _next_touch = now + TOUCH_POLL_MILLIS;
+      if (_touch.checkTap(now)) toggleDisplay();
+    }
   }
 #endif
 
@@ -268,13 +394,30 @@ void UITask::loop() {
         _frame_valid = true;
 #endif
       }
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+      else if (millisReached(millis(), _next_activity)) {
+        updateActivityRows();
+        _next_activity = millis() + ACTIVITY_REFRESH_MILLIS;
+      }
+#endif
 
       _next_refresh = millis() + 1000;   // check for visible changes every second
     }
-    if (millis() > _auto_off) {
+    // `_auto_off` is only armed on activity, so a timeout changed at runtime has
+    // to restart the countdown here - otherwise 0 -> 60 blanks instantly off a
+    // boot-time deadline, and 60 -> 3600 still blanks at the old 60 s mark.
+    unsigned long timeout = displayTimeoutMillis();
+    if (timeout != _timeout_seen) {
+      _timeout_seen = timeout;
+      _auto_off = millis() + timeout;
+    }
+    if (timeout > 0 && millisReached(millis(), _auto_off)) {
       _display->turnOff();
 #ifdef DISPLAY_REDRAW_ON_CHANGE
       _frame_valid = false;
+#endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+      _rows_valid = false;
 #endif
     }
   }

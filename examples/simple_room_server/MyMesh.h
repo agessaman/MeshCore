@@ -15,6 +15,10 @@
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/IdentityStore.h>
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+#include <helpers/RadioActivityWindow.h>
+#endif
+
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/AlertReporter.h>
 #include <helpers/TxtDataHelpers.h>
@@ -117,6 +121,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   uint64_t uptime_millis;
   unsigned long next_local_advert, next_flood_advert;
   bool _logging;
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  RadioActivityWindow _activity;   // rolling RF receive window, for the TFT dashboard
+#endif
   bool region_load_active;
   NodePrefs _prefs;
   TransportKeyStore key_store;
@@ -285,6 +292,14 @@ public:
   NodePrefs* getNodePrefs() {
     return &_prefs;
   }
+
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  RadioActivityWindow* getActivityWindow() { return &_activity; }
+#endif
+
+#ifdef WITH_MQTT_BRIDGE
+  MQTTPrefs* getObserverPrefs() { return _cli.getObserverPrefs(); }
+#endif
 
   void savePrefs() override {
     _cli.savePrefs(_fs);

@@ -116,7 +116,8 @@ static bool isObserverPrefsSetCommand(const char* config) {
       strncmp(config, "mqtt", 4) == 0 ||
       strncmp(config, "wifi.", 5) == 0 ||
       strncmp(config, "timezone", 8) == 0 ||
-      strncmp(config, "alert", 5) == 0;
+      strncmp(config, "alert", 5) == 0 ||
+      strncmp(config, "display.", 8) == 0;
 }
 
 // Keep observer setters atomic from the caller's perspective. The live object
@@ -262,6 +263,30 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           strcpy(reply, "OK - radio watchdog disabled");
         } else {
           sprintf(reply, "OK - radio watchdog %d min", mins);
+        }
+      }
+    }
+  } else if (memcmp(config, "display.timeout ", 16) == 0) {
+    const char* val = &config[16];
+    bool all_digits = (*val != '\0');
+    for (const char* sp = val; *sp; sp++) {
+      if (*sp < '0' || *sp > '9') { all_digits = false; break; }
+    }
+    if (*val == '\0') {
+      strcpy(reply, "Error: missing display.timeout seconds");
+    } else if (!all_digits) {
+      sprintf(reply, "Error: display.timeout must be an integer 0-%d", DISPLAY_TIMEOUT_MAX_SECS);
+    } else {
+      long secs = atol(val);
+      if (secs > DISPLAY_TIMEOUT_MAX_SECS) {
+        sprintf(reply, "Error: display.timeout must be 0-%d seconds", DISPLAY_TIMEOUT_MAX_SECS);
+      } else {
+        _mqtt_prefs.display_timeout_secs = (uint16_t)secs;
+        if (!persistObserverPrefs(reply)) return true;
+        if (secs == 0) {
+          strcpy(reply, "OK - display stays on");
+        } else {
+          sprintf(reply, "OK - display off after %ld s", secs);
         }
       }
     }
@@ -860,6 +885,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     strcpy(reply, _mqtt_prefs.snmp_enabled ? "> on" : "> off");
   } else if (memcmp(config, "radio.watchdog", 14) == 0) {
     sprintf(reply, "> %d", (uint32_t)_mqtt_prefs.radio_watchdog_minutes);
+  } else if (memcmp(config, "display.timeout", 15) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_mqtt_prefs.display_timeout_secs);
 #ifdef WITH_MQTT_BRIDGE
   } else if (memcmp(config, "mqtt.origin", 11) == 0) {
     char effective_origin[32];

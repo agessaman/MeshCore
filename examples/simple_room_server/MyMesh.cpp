@@ -246,6 +246,11 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  // Valid parsed RF packet: the only event the dashboard's window counts.
+  _activity.recordPacket(millis(), (uint16_t)len, _radio->getEstAirtimeFor(len),
+                         (int8_t)(pkt->getSNR() * 4.0f), (int16_t)_radio->getLastRSSI());
+#endif
 #ifdef WITH_MQTT_BRIDGE
   // MQTT bridge: always feed RX packets — bridge decides based on mqtt.rx setting
   if (_prefs.bridge_enabled && bridge) bridge->onPacketReceived(pkt);

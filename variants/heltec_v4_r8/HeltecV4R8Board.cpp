@@ -12,16 +12,15 @@ void HeltecV4R8Board::begin() {
 
   loRaFEMControl.init();
 
-  // GPIO 21 is shared by LCD_RST and TP_RST. Let ST7789LCDDisplay own the
-  // reset sequence; no separate touch reset is needed.
-#ifdef PIN_TOUCH_RST
-  pinMode(PIN_TOUCH_RST, OUTPUT);
-  digitalWrite(PIN_TOUCH_RST, HIGH);
-  delay(10);
-  digitalWrite(PIN_TOUCH_RST, LOW);
-  delay(100);
-  digitalWrite(PIN_TOUCH_RST, HIGH);
-#endif
+  // Expansion Kit V2 display/touch pins, verified against Heltec's
+  // Expansion_board_V2.03 schematic and the V4-R8 datasheet pinout:
+  //   GPIO 17/18  TP_SDA / TP_SCL - the module's OLED_SDA/OLED_SCL I2C bus
+  //   GPIO 21     LCD_RST *and* TP_RST on one net (the module's OLED_RST)
+  //   GPIO 43     TP_INT, optional via R13, and also U0TXD
+  //   GPIO 44     LCD_LEDK backlight, also U0RXD
+  // ST7789LCDDisplay owns GPIO 21, so there is no separate touch reset to do
+  // here - and because that net is shared, it must not be parked low while the
+  // display is off or the touch controller is held in reset with it.
 
   esp_reset_reason_t reason = esp_reset_reason();
   if (reason == ESP_RST_DEEPSLEEP) {

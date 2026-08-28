@@ -112,13 +112,18 @@ void ST7789LCDDisplay::turnOff() {
       digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
     #endif
     }
+  #ifndef HELTEC_V4_R8_TFT
     if (PIN_TFT_RST != -1) {
       digitalWrite(PIN_TFT_RST, LOW);
     }
-  #ifndef HELTEC_V4_R8_TFT
     if (PIN_TFT_LEDA_CTL != -1) {
       digitalWrite(PIN_TFT_LEDA_CTL, LOW);
     }
+  #else
+    // On the V4 R8 Expansion Kit this reset line is shared with the touch
+    // panel's TP_RST, so parking it low would hold the touch controller in
+    // reset for as long as the display is off. Killing the backlight is what
+    // "off" means for this LCD anyway.
   #endif
     _isOn = false;
 

@@ -366,6 +366,24 @@ class MQTTPrefsSerializer : public ConfigSerializer {
     }
   };
 
+  class DisplayPrefs : public ConfigSerializer {
+    MQTTPrefs* _prefs;
+    int32_t _timeout_s;
+    bool _seen_timeout = false;
+  protected:
+    void structure() override { defStrict("timeout_s", _timeout_s, _seen_timeout); }
+  public:
+    explicit DisplayPrefs(MQTTPrefs* prefs)
+        : _prefs(prefs), _timeout_s(prefs->display_timeout_secs) {}
+    void apply(bool* repaired) {
+      if (_timeout_s < 0 || _timeout_s > DISPLAY_TIMEOUT_MAX_SECS) {
+        _timeout_s = DISPLAY_TIMEOUT_DEFAULT_SECS;
+        *repaired = true;
+      }
+      _prefs->display_timeout_secs = static_cast<uint16_t>(_timeout_s);
+    }
+  };
+
   MQTTPrefs* _prefs;
   int32_t _version = MQTT_PREFS_JSON_FORMAT_VERSION;
   bool _seen_version = false;
@@ -375,6 +393,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
   SnmpPrefs _snmp;
   RadioPrefs _radio;
   AlertPrefs _alert;
+  DisplayPrefs _display;
 
 protected:
   void structure() override {
@@ -385,6 +404,7 @@ protected:
     def("snmp", _snmp);
     def("radio", _radio);
     def("alert", _alert);
+    def("display", _display);
   }
 
 public:
@@ -392,7 +412,7 @@ public:
       : _prefs(prefs), _wifi(prefs),
         _time(prefs, repair_defaults ? repair_defaults : prefs),
         _mqtt(prefs, repair_defaults ? repair_defaults : prefs), _snmp(prefs),
-        _radio(prefs), _alert(prefs) {}
+        _radio(prefs), _alert(prefs), _display(prefs) {}
 
   bool hasSupportedVersion() const {
     return _seen_version && _version == MQTT_PREFS_JSON_FORMAT_VERSION;
@@ -410,6 +430,7 @@ public:
     _snmp.apply(repaired);
     _radio.apply(repaired);
     _alert.apply(repaired);
+    _display.apply(repaired);
     return true;
   }
 

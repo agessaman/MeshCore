@@ -109,6 +109,8 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   // (not 0) so an in-lineage upgrade from a pre-neighbors payload is sane.
   prefs->mqtt_neighbors_enabled = 0;
   prefs->mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
+
+  prefs->display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;
 }
 
 #endif // WITH_MQTT_BRIDGE

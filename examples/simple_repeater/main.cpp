@@ -115,7 +115,13 @@ void setup() {
 
 #ifdef DISPLAY_CLASS
   if (display_ready) {
+#ifdef WITH_MQTT_BRIDGE
+    ui_task.setObserverPrefs(the_mesh.getObserverPrefs());
+#endif
     ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+    ui_task.setActivityWindow(the_mesh.getActivityWindow());
+#endif
   }
 #endif
 
