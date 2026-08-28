@@ -13,6 +13,9 @@ class ST7789LCDDisplay : public DisplayDriver {
   #endif
   Adafruit_ST7789 display;
   bool _isOn;
+#ifdef HELTEC_V4_R8_TFT
+  bool _panel_ready = false;   // panel configured once; wake is backlight-only
+#endif
   uint16_t _color;
   RefCountedDigitalPin* _peripher_power;
 

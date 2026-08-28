@@ -50,6 +50,22 @@ ColorVal UIColor::corp_blue = 0x001A;
 
 bool ST7789LCDDisplay::begin() {
   if (!_isOn) {
+  #ifdef HELTEC_V4_R8_TFT
+    // turnOff() leaves this panel configured and powered - its reset line is
+    // shared with the touch controller, so it is never parked low - which makes
+    // waking just a backlight switch. Re-running the init below would re-enter
+    // SPI setup and pulse GPIO 21, resetting the touch controller on every wake
+    // and stalling the UI loop for ~500 ms of reset delays.
+    if (_panel_ready) {
+      if (_peripher_power) _peripher_power->claim();
+      if (PIN_TFT_LEDA_CTL != -1) {
+        digitalWrite(PIN_TFT_LEDA_CTL, PIN_TFT_LEDA_CTL_ACTIVE);
+      }
+      _isOn = true;
+      return true;
+    }
+  #endif
+
     if (_peripher_power) {
       _peripher_power->claim();
     #ifdef HELTEC_V4_R8_TFT
@@ -91,6 +107,7 @@ bool ST7789LCDDisplay::begin() {
     if (PIN_TFT_LEDA_CTL != -1) {
       digitalWrite(PIN_TFT_LEDA_CTL, PIN_TFT_LEDA_CTL_ACTIVE);
     }
+    _panel_ready = true;
   #endif
 
     _isOn = true;

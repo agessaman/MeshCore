@@ -297,6 +297,7 @@ void UITask::toggleDisplay() {
 #ifdef DISPLAY_ACTIVITY_DASHBOARD
   _rows_valid = false;
 #endif
+  _next_refresh = 0;   // redraw at once rather than showing the stale frame
   _auto_off = millis() + displayTimeoutMillis();
 }
 #endif

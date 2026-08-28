@@ -71,8 +71,20 @@ void HeltecV4R8Board::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
 }
 
 void HeltecV4R8Board::powerOff() {
-  enterDeepSleep(0);
+#if defined(HELTEC_V4_R8_TFT) && defined(DISPLAY_CLASS)
+  display.turnOff();
+#endif
+
+  // Deliberately NOT enterDeepSleep(): that always arms an ext1 wake on
+  // P_LORA_DIO_1, so a node sitting in live traffic woke - and a deep-sleep
+  // wake is a full reboot - within seconds of showing "Turning OFF". With every
+  // wake source disabled the node stays down until RST or a power cycle, which
+  // is what asking for power-off means.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  loRaFEMControl.setRxModeEnableWhenMCUSleep();
+  esp_deep_sleep_start();
 }
+
 
 uint16_t HeltecV4R8Board::getBattMilliVolts() {
   analogReadResolution(12);

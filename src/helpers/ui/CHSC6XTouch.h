@@ -18,7 +18,12 @@
 #endif
 
 #define CHSC6X_READ_LEN 5
-#define CHSC6X_MAX_POINTS 1
+
+// Bounds a single read. The shared bus can wedge, and the ESP32 default lets a
+// failed transfer burn ~1 s inside the UI loop.
+#ifndef CHSC6X_I2C_TIMEOUT_MS
+#define CHSC6X_I2C_TIMEOUT_MS 10
+#endif
 
 class CHSC6XTouch {
 public:
@@ -63,32 +68,47 @@ private:
   TouchTapDetector _detector;
 
   bool readPressed() {
+    // Probe the address first. This controller NACKs while it has nothing to
+    // report, and going straight to requestFrom() turns that into a logged bus
+    // error every poll plus, once the bus wedges, a ~1 s timeout stall in the
+    // UI loop. endTransmission() reports the same NACK quietly and cheaply.
+    _wire->beginTransmission((uint8_t)CHSC6X_I2C_ADDR);
+    if (_wire->endTransmission() != 0) return false;
+
+    const uint16_t prev_timeout = _wire->getTimeOut();
+    _wire->setTimeOut(CHSC6X_I2C_TIMEOUT_MS);
     uint8_t got = _wire->requestFrom((uint8_t)CHSC6X_I2C_ADDR, (uint8_t)CHSC6X_READ_LEN);
+    uint8_t buf[CHSC6X_READ_LEN];
+    for (uint8_t i = 0; i < CHSC6X_READ_LEN; i++) {
+      buf[i] = i < got ? (uint8_t)_wire->read() : 0xFF;
+    }
+    while (_wire->available()) _wire->read();   // drain a short read
+    _wire->setTimeOut(prev_timeout);
+
     if (got != CHSC6X_READ_LEN) {
-      while (_wire->available()) _wire->read();   // drain a short read
       logRaw(got, NULL);
       return false;
     }
-
-    uint8_t buf[CHSC6X_READ_LEN];
-    for (uint8_t i = 0; i < CHSC6X_READ_LEN; i++) buf[i] = (uint8_t)_wire->read();
     logRaw(got, buf);
 
-    // buf[0] is the reported touch-point count (buf[2]/buf[4] are x/y). It must
-    // be tested against a *valid* count, not merely against zero: an idle or
-    // NACKed read can come back as 0xFF, which "non-zero" reads as a finger
-    // held down forever - the tap detector then fires once and, seeing no
-    // release, never fires again.
-    return buf[0] >= 1 && buf[0] <= CHSC6X_MAX_POINTS;
+    // Measured on the Expansion Kit V2 panel: byte 0 reads 0x00 while idle and
+    // 0x1F while a finger is down - not the 0x01 point count the reference
+    // CHSC6X drivers document, so testing for a count of 1 never fires. A
+    // partly-failed read leaves 0xFF, which must not register as a press.
+    return buf[0] != 0x00 && buf[0] != 0xFF;
   }
 
 #ifdef DISPLAY_TOUCH_DEBUG
   int16_t _logged = -1;
+  uint8_t _log_budget = 5;   // always show the first few frames, then on change
 
-  // Logs on change only, so a normal boot stays quiet.
+  // Mostly logs on change, so a normal boot stays quiet - but the opening
+  // frames are unconditional so an idle read that never changes is still
+  // visible in the log.
   void logRaw(uint8_t got, const uint8_t* buf) {
     int16_t key = buf ? (int16_t)buf[0] : (int16_t)(-2 - (int16_t)got);
-    if (key == _logged) return;
+    if (key == _logged && _log_budget == 0) return;
+    if (_log_budget > 0) _log_budget--;
     _logged = key;
 
     if (!buf) {
