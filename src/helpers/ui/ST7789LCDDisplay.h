@@ -16,6 +16,14 @@ class ST7789LCDDisplay : public DisplayDriver {
   uint16_t _color;
   RefCountedDigitalPin* _peripher_power;
 
+#ifdef ST7789_PORTRAIT_PROFILE
+  uint8_t _logical_text_size = 1;
+
+  uint16_t measureTextWidth(const char* str, uint8_t physical_scale);
+  uint8_t selectTextScale(const char* str, uint16_t available_width);
+  void printFitted(const char* str, uint16_t available_width);
+#endif
+
   bool i2c_probe(TwoWire& wire, uint8_t addr);
 public:
 #ifdef USE_PIN_TFT

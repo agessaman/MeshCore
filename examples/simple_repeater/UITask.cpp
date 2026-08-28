@@ -3,6 +3,10 @@
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
 
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+#include <helpers/ui/DisplayFrameSignature.h>
+#endif
+
 #ifndef USER_BTN_PRESSED
 #define USER_BTN_PRESSED LOW
 #endif
@@ -40,6 +44,9 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   _started_at = millis();
   _node_prefs = node_prefs;
   _display->turnOn();
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+  _frame_valid = false;
+#endif
 
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
   user_btn.begin();
@@ -163,6 +170,54 @@ void UITask::renderCurrScreen() {
   }
 }
 
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+uint32_t UITask::getFrameSignature() {
+  uint32_t signature = DisplayFrameSignature::INITIAL;
+  char tmp[80];
+
+  if (millis() < _started_at + BOOT_SCREEN_MILLIS) {
+    signature = DisplayFrameSignature::append(signature, "boot");
+    return DisplayFrameSignature::append(signature, _version_info);
+  }
+
+  if (_powering_off_at > 0) {
+    return DisplayFrameSignature::append(signature, "powering-off");
+  }
+
+#ifdef WITH_WEBCONFIG
+  if (WebConfigServer::isRebootPending()) {
+    return DisplayFrameSignature::append(signature, "rebooting");
+  }
+
+  char wc_ssid[33], wc_ip[16];
+  if (WebConfigServer::getSetupInfo(wc_ssid, sizeof(wc_ssid), wc_ip, sizeof(wc_ip))) {
+    signature = DisplayFrameSignature::append(signature, "setup");
+    signature = DisplayFrameSignature::append(signature, wc_ssid);
+    return DisplayFrameSignature::append(signature, wc_ip);
+  }
+#endif
+
+  signature = DisplayFrameSignature::append(signature, "home");
+  signature = DisplayFrameSignature::append(signature, _node_prefs->node_name);
+  snprintf(tmp, sizeof(tmp), "FREQ: %06.3f SF%d", _node_prefs->freq, _node_prefs->sf);
+  signature = DisplayFrameSignature::append(signature, tmp);
+  snprintf(tmp, sizeof(tmp), "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
+  signature = DisplayFrameSignature::append(signature, tmp);
+
+#ifdef WITH_MQTT_BRIDGE
+  if (WiFi.status() == WL_CONNECTED) {
+    IPAddress ip = WiFi.localIP();
+    snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+    signature = DisplayFrameSignature::append(signature, tmp);
+  } else {
+    signature = DisplayFrameSignature::append(signature, "wifi-disconnected");
+  }
+#endif
+
+  return signature;
+}
+#endif
+
 void UITask::loop() {
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
   int ev = user_btn.check();
@@ -171,6 +226,9 @@ void UITask::loop() {
       // TODO: any action ?
     } else {
       _display->turnOn();
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+      _frame_valid = false;
+#endif
     }
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
@@ -184,21 +242,40 @@ void UITask::loop() {
   // While the setup portal is up there's no user button to wake the screen
   // reliably - keep it on so the join instructions stay visible.
   if (WebConfigServer::getSetupInfo(NULL, 0, NULL, 0)) {
-    if (!_display->isOn()) _display->turnOn();
+    if (!_display->isOn()) {
+      _display->turnOn();
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+      _frame_valid = false;
+#endif
+    }
     _auto_off = millis() + AUTO_OFF_MILLIS;
   }
 #endif
 
   if (_display->isOn()) {
     if (millis() >= _next_refresh) {
-      _display->startFrame();
-      renderCurrScreen();
-      _display->endFrame();
+      bool redraw = true;
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+      uint32_t frame_signature = getFrameSignature();
+      redraw = !_frame_valid || frame_signature != _last_frame_signature;
+#endif
+      if (redraw) {
+        _display->startFrame();
+        renderCurrScreen();
+        _display->endFrame();
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+        _last_frame_signature = frame_signature;
+        _frame_valid = true;
+#endif
+      }
 
-      _next_refresh = millis() + 1000;   // refresh every second
+      _next_refresh = millis() + 1000;   // check for visible changes every second
     }
     if (millis() > _auto_off) {
       _display->turnOff();
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+      _frame_valid = false;
+#endif
     }
   }
 

@@ -13,6 +13,13 @@ class UITask {
   unsigned long _powering_off_at = 0;
   unsigned long _started_at = 0;
 
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+  uint32_t _last_frame_signature = 0;
+  bool _frame_valid = false;
+
+  uint32_t getFrameSignature();
+#endif
+
   void renderCurrScreen();
 public:
   UITask(mesh::MainBoard& board, DisplayDriver& display) : _board(&board), _display(&display) { _next_read = _next_refresh = 0; }
