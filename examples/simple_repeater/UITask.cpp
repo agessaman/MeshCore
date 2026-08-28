@@ -39,6 +39,9 @@ void UITask::applyDisplayFlip() {
   if (_observer_prefs == NULL || _observer_prefs->display_flip == _flip_seen) return;
   _flip_seen = _observer_prefs->display_flip;
   _display->setFlipped(_flip_seen != 0);
+  // Logged unconditionally: this is persisted config, so it survives a reflash
+  // and is otherwise invisible when someone is chasing a wrong orientation.
+  Serial.printf("Display: flip %s\n", _flip_seen ? "on (rotated 180)" : "off");
 #ifdef DISPLAY_REDRAW_ON_CHANGE
   _frame_valid = false;
 #endif
