@@ -52,6 +52,8 @@ class UITask {
   MQTTPrefs* _observer_prefs = NULL;
 #endif
   unsigned long _timeout_seen = 0;   // to notice a live `display.timeout` change
+  uint8_t _flip_seen = 0xFF;         // 0xFF forces the first apply
+  void applyDisplayFlip();
 
   unsigned long displayTimeoutMillis() const;
 

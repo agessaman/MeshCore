@@ -79,6 +79,7 @@ static MQTTPrefs defaults() {
   prefs.alert_min_interval_min = 60;
   prefs.mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
   prefs.display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;
+  prefs.display_flip = 0;
   strcpy(prefs.snmp_community, "public");
   for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
     strcpy(prefs.mqtt_slot_preset[i], "none");
@@ -394,6 +395,34 @@ TEST(MQTTPrefsSerializer, DisplayTimeoutRoundTrips) {
     EXPECT_FALSE(repaired) << secs;
     EXPECT_EQ(secs, loaded.display_timeout_secs);
   }
+}
+
+TEST(MQTTPrefsSerializer, DisplayFlipRoundTripsAndRepairs) {
+  MQTTPrefs source = defaults();
+  EXPECT_EQ(0, source.display_flip);
+  source.display_flip = 1;
+
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input));
+  bool repaired = false;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(1, loaded.display_flip);
+
+  MQTTPrefs prefs = defaults();
+  InputStream bogus("{version:1,display:{flip:7}}");
+  MQTTPrefsSerializer bogus_serializer(&prefs);
+  ASSERT_TRUE(bogus_serializer.loadSerial(bogus));
+  repaired = false;
+  ASSERT_TRUE(bogus_serializer.apply(&repaired));
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(0, prefs.display_flip);
 }
 
 TEST(MQTTPrefsSerializer, RepairsDisplayTimeoutOutOfRange) {

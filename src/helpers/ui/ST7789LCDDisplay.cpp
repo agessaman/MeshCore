@@ -33,6 +33,19 @@ static DisplayViewport::Geometry portraitViewport(int16_t physical_width, int16_
 }
 #endif
 
+// The compiled orientation, optionally turned 180 degrees by `display.flip`.
+// Adding 2 keeps portrait portrait and landscape landscape, so the viewport
+// geometry below never has to change with it.
+uint8_t ST7789LCDDisplay::effectiveRotation() const {
+  return (uint8_t)((DISPLAY_ROTATION + (_flipped ? 2 : 0)) & 3);
+}
+
+void ST7789LCDDisplay::setFlipped(bool flipped) {
+  if (_flipped == flipped) return;
+  _flipped = flipped;
+  if (_panel_ready) display.setRotation(effectiveRotation());
+}
+
 bool ST7789LCDDisplay::i2c_probe(TwoWire& wire, uint8_t addr) {
   return true;
 }
@@ -88,7 +101,7 @@ bool ST7789LCDDisplay::begin() {
     #endif
 
     display.init(DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    display.setRotation(DISPLAY_ROTATION);
+    display.setRotation(effectiveRotation());
 
     display.setSPISpeed(40e6);
 
@@ -107,9 +120,9 @@ bool ST7789LCDDisplay::begin() {
     if (PIN_TFT_LEDA_CTL != -1) {
       digitalWrite(PIN_TFT_LEDA_CTL, PIN_TFT_LEDA_CTL_ACTIVE);
     }
-    _panel_ready = true;
   #endif
 
+    _panel_ready = true;
     _isOn = true;
   }
 

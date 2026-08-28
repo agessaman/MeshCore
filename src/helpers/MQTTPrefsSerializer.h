@@ -368,19 +368,24 @@ class MQTTPrefsSerializer : public ConfigSerializer {
 
   class DisplayPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
-    int32_t _timeout_s;
-    bool _seen_timeout = false;
+    int32_t _timeout_s, _flip;
+    bool _seen_timeout = false, _seen_flip = false;
   protected:
-    void structure() override { defStrict("timeout_s", _timeout_s, _seen_timeout); }
+    void structure() override {
+      defStrict("timeout_s", _timeout_s, _seen_timeout);
+      defStrict("flip", _flip, _seen_flip);
+    }
   public:
     explicit DisplayPrefs(MQTTPrefs* prefs)
-        : _prefs(prefs), _timeout_s(prefs->display_timeout_secs) {}
+        : _prefs(prefs), _timeout_s(prefs->display_timeout_secs), _flip(prefs->display_flip) {}
     void apply(bool* repaired) {
       if (_timeout_s < 0 || _timeout_s > DISPLAY_TIMEOUT_MAX_SECS) {
         _timeout_s = DISPLAY_TIMEOUT_DEFAULT_SECS;
         *repaired = true;
       }
+      if (_flip < 0 || _flip > 1) { _flip = 0; *repaired = true; }
       _prefs->display_timeout_secs = static_cast<uint16_t>(_timeout_s);
+      _prefs->display_flip = static_cast<uint8_t>(_flip);
     }
   };
 

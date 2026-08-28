@@ -122,6 +122,10 @@ struct MQTTPrefs {
   // only - deliberately absent from LegacyV1MQTTPrefs, so the frozen binary
   // layout and its four payload sizes are unchanged.
   uint16_t display_timeout_secs;
+
+  // Rotate the panel 180 degrees from its compiled DISPLAY_ROTATION, for boards
+  // mounted the other way up. Runtime only, like display_timeout_secs.
+  uint8_t display_flip;
 };
 
 static const uint16_t DISPLAY_TIMEOUT_DEFAULT_SECS = 60;

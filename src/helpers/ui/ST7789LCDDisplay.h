@@ -13,9 +13,8 @@ class ST7789LCDDisplay : public DisplayDriver {
   #endif
   Adafruit_ST7789 display;
   bool _isOn;
-#ifdef HELTEC_V4_R8_TFT
-  bool _panel_ready = false;   // panel configured once; wake is backlight-only
-#endif
+  bool _panel_ready = false;   // panel has been configured at least once
+  bool _flipped = false;
   uint16_t _color;
   RefCountedDigitalPin* _peripher_power;
 
@@ -27,6 +26,7 @@ class ST7789LCDDisplay : public DisplayDriver {
   void printFitted(const char* str, uint16_t available_width);
 #endif
 
+  uint8_t effectiveRotation() const;
   bool i2c_probe(TwoWire& wire, uint8_t addr);
 public:
 #ifdef USE_PIN_TFT
@@ -59,6 +59,7 @@ public:
   void turnOff() override;
   void clear() override;
   void startFrame(ColorVal bkg = UIColor::window_bkg) override;
+  void setFlipped(bool flipped) override;
   void setTextSize(int sz) override;
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;

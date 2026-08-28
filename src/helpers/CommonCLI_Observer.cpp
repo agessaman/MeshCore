@@ -266,6 +266,18 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         }
       }
     }
+  } else if (memcmp(config, "display.flip ", 13) == 0) {
+    const char* val = &config[13];
+    if (strcmp(val, "0") == 0 || strcmp(val, "off") == 0) {
+      _mqtt_prefs.display_flip = 0;
+    } else if (strcmp(val, "1") == 0 || strcmp(val, "on") == 0) {
+      _mqtt_prefs.display_flip = 1;
+    } else {
+      strcpy(reply, "Error: display.flip must be 0/1 (or off/on)");
+      return true;
+    }
+    if (!persistObserverPrefs(reply)) return true;
+    strcpy(reply, _mqtt_prefs.display_flip ? "OK - display rotated 180" : "OK - display upright");
   } else if (memcmp(config, "display.timeout ", 16) == 0) {
     const char* val = &config[16];
     bool all_digits = (*val != '\0');
@@ -887,6 +899,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     sprintf(reply, "> %d", (uint32_t)_mqtt_prefs.radio_watchdog_minutes);
   } else if (memcmp(config, "display.timeout", 15) == 0) {
     sprintf(reply, "> %d", (uint32_t)_mqtt_prefs.display_timeout_secs);
+  } else if (memcmp(config, "display.flip", 12) == 0) {
+    strcpy(reply, _mqtt_prefs.display_flip ? "> on" : "> off");
 #ifdef WITH_MQTT_BRIDGE
   } else if (memcmp(config, "mqtt.origin", 11) == 0) {
     char effective_origin[32];

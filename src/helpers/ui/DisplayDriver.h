@@ -27,6 +27,8 @@ public:
   virtual void turnOff() = 0;
   virtual void clear() = 0;
   virtual void startFrame(ColorVal bkg = UIColor::window_bkg) = 0;
+  // Rotate 180 degrees from the compiled orientation. No-op where unsupported.
+  virtual void setFlipped(bool flipped) { }
   virtual void setTextSize(int sz) = 0;
   virtual void setColor(ColorVal c) = 0;
   virtual void setCursor(int x, int y) = 0;

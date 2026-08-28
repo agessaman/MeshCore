@@ -31,6 +31,23 @@ static inline bool millisReached(unsigned long now, unsigned long deadline) {
   return (int32_t)((uint32_t)now - (uint32_t)deadline) >= 0;
 }
 
+// Applies `display.flip` when it changes, forcing a complete repaint because
+// the panel's existing contents are now the wrong way up.
+void UITask::applyDisplayFlip() {
+#ifdef WITH_MQTT_BRIDGE
+  if (_observer_prefs == NULL || _observer_prefs->display_flip == _flip_seen) return;
+  _flip_seen = _observer_prefs->display_flip;
+  _display->setFlipped(_flip_seen != 0);
+#ifdef DISPLAY_REDRAW_ON_CHANGE
+  _frame_valid = false;
+#endif
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  _rows_valid = false;
+#endif
+  _next_refresh = 0;
+#endif
+}
+
 // `display.timeout` when the observer prefs are available, otherwise the
 // compiled-in default. Read on every use so a `set display.timeout` takes
 // effect immediately.
@@ -68,6 +85,7 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   ObserverDashboard::applyDarkPalette();   // retunes UIColor for this target only
 #endif
   _display->turnOn();
+  applyDisplayFlip();
 #ifdef DISPLAY_TOUCH_TOGGLE
   _touch.begin();
 #endif
@@ -386,6 +404,7 @@ void UITask::loop() {
     // `_auto_off` is only armed on activity, so a timeout changed at runtime has
     // to restart the countdown here - otherwise 0 -> 60 blanks instantly off a
     // boot-time deadline, and 60 -> 3600 still blanks at the old 60 s mark.
+    applyDisplayFlip();
     unsigned long timeout = displayTimeoutMillis();
     if (timeout != _timeout_seen) {
       _timeout_seen = timeout;
