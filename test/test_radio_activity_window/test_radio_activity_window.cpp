@@ -355,6 +355,23 @@ TEST(RadioActivityWindow, AnOlderTimestampDoesNotExpireTheWindow) {
   EXPECT_EQ(10000u, s.window_ms);
 }
 
+TEST(RadioActivityWindow, AGapLongerThanHalfTheMillisRangeStillExpiresTheRing) {
+  // Display off and no traffic for ~25 days: the elapsed time passes the signed
+  // halfway mark, which must not be mistaken for an out-of-order reading, or a
+  // month-old packet would still be sitting in the "last 20 minutes".
+  RadioActivityWindow w;
+  w.reset(0);
+  recordTypical(w, 1000);
+  ASSERT_EQ(1u, snapshotAt(w, 2000).packets);
+
+  const uint32_t twenty_five_days = 25UL * 24 * 3600 * 1000;
+  ASSERT_GT(twenty_five_days, 0x80000000u) << "gap must cross the halfway mark";
+
+  RadioActivitySnapshot s = snapshotAt(w, twenty_five_days);
+  EXPECT_TRUE(s.isEmpty());
+  EXPECT_FALSE(s.has_last_packet);
+}
+
 TEST(RadioActivityWindow, AveragesHandleNegativeSnrAndMixedSigns) {
   RadioActivityWindow w;
   w.reset(0);

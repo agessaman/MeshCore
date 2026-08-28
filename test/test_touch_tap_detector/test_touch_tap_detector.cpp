@@ -43,7 +43,7 @@ TEST(TouchTapDetector, HoldingAFingerDownDoesNotRepeat) {
   uint32_t now = 1000;
   d.reset(now);
 
-  EXPECT_EQ(1, hold(d, now, true, 100));
+  EXPECT_EQ(1, hold(d, now, true, 200));
   EXPECT_EQ(0, hold(d, now, true, 10000)) << "a long press must not toggle repeatedly";
 }
 
@@ -79,9 +79,9 @@ TEST(TouchTapDetector, SecondTapTooSoonIsSuppressed) {
   uint32_t now = 1000;
   d.reset(now);
 
-  EXPECT_EQ(1, hold(d, now, true, 100));
-  EXPECT_EQ(0, hold(d, now, false, 100));
-  EXPECT_EQ(0, hold(d, now, true, 100)) << "inside TOUCH_TAP_MIN_GAP_MS";
+  EXPECT_EQ(1, hold(d, now, true, 200));
+  EXPECT_EQ(0, hold(d, now, false, 150));   // release long enough to be confirmed
+  EXPECT_EQ(0, hold(d, now, true, 200)) << "inside TOUCH_TAP_MIN_GAP_MS";
 }
 
 TEST(TouchTapDetector, DeliberateSecondTapIsAccepted) {
@@ -89,9 +89,25 @@ TEST(TouchTapDetector, DeliberateSecondTapIsAccepted) {
   uint32_t now = 1000;
   d.reset(now);
 
-  EXPECT_EQ(1, hold(d, now, true, 100));
+  EXPECT_EQ(1, hold(d, now, true, 200));
   EXPECT_EQ(0, hold(d, now, false, 600));   // past the min gap
-  EXPECT_EQ(1, hold(d, now, true, 100));
+  EXPECT_EQ(1, hold(d, now, true, 200));
+}
+
+TEST(TouchTapDetector, ASingleBadSampleDuringATouchDoesNotFakeARelease) {
+  // A NACK or short read reports "not pressed" for that poll. One of those must
+  // not confirm a release, or recovery reads as a second tap and the display
+  // toggles twice on one touch.
+  TouchTapDetector d;
+  uint32_t now = 1000;
+  d.reset(now);
+  EXPECT_EQ(1, hold(d, now, true, 200));
+
+  EXPECT_FALSE(d.update(now, false));
+  now += POLL;
+  EXPECT_TRUE(d.isTouched()) << "one bad sample must not confirm a release";
+
+  EXPECT_EQ(0, hold(d, now, true, 2000)) << "and must not produce a second tap";
 }
 
 TEST(TouchTapDetector, SurvivesMillisRollover) {
@@ -100,10 +116,10 @@ TEST(TouchTapDetector, SurvivesMillisRollover) {
   uint32_t now = start;
   d.reset(now);
 
-  EXPECT_EQ(1, hold(d, now, true, 200));   // the touch itself crosses the wrap
+  EXPECT_EQ(1, hold(d, now, true, 250));   // the touch itself crosses the wrap
   ASSERT_LT(now, start) << "test setup must actually wrap";
   EXPECT_EQ(0, hold(d, now, false, 600));
-  EXPECT_EQ(1, hold(d, now, true, 200));
+  EXPECT_EQ(1, hold(d, now, true, 250));
 }
 
 TEST(TouchTapDetector, ResetClearsPendingState) {

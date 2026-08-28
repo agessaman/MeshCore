@@ -19,16 +19,12 @@
 
 #define CHSC6X_READ_LEN 5
 
-// Bounds a single read. The shared bus can wedge, and the ESP32 default lets a
-// failed transfer burn ~1 s inside the UI loop.
-#ifndef CHSC6X_I2C_TIMEOUT_MS
-#define CHSC6X_I2C_TIMEOUT_MS 10
-#endif
-
 class CHSC6XTouch {
 public:
-  // Probes the bus. Returns false (and disables itself) when nothing answers,
-  // so a board without the touch panel simply carries on without it.
+  // Probes the bus for diagnostics only. The result must NOT gate polling: this
+  // controller NACKs its address whenever it has nothing to report, so a single
+  // idle probe at boot is indistinguishable from absent hardware. checkTap()
+  // keeps polling either way, and a NACK there costs one quiet, fast bus cycle.
   bool begin(TwoWire& wire = Wire) {
     _wire = &wire;
     _wire->beginTransmission((uint8_t)CHSC6X_I2C_ADDR);
@@ -58,8 +54,12 @@ public:
 
   // True exactly once per new touch.
   bool checkTap(uint32_t now_ms) {
-    if (!_present) return false;
-    return _detector.update(now_ms, readPressed());
+    bool pressed = readPressed();
+    if (pressed && !_present) {
+      _present = true;   // answered late; the boot probe caught it mid-idle
+      Serial.println("Touch: CHSC6X responding");
+    }
+    return _detector.update(now_ms, pressed);
   }
 
 private:
@@ -75,15 +75,12 @@ private:
     _wire->beginTransmission((uint8_t)CHSC6X_I2C_ADDR);
     if (_wire->endTransmission() != 0) return false;
 
-    const uint16_t prev_timeout = _wire->getTimeOut();
-    _wire->setTimeOut(CHSC6X_I2C_TIMEOUT_MS);
     uint8_t got = _wire->requestFrom((uint8_t)CHSC6X_I2C_ADDR, (uint8_t)CHSC6X_READ_LEN);
     uint8_t buf[CHSC6X_READ_LEN];
     for (uint8_t i = 0; i < CHSC6X_READ_LEN; i++) {
       buf[i] = i < got ? (uint8_t)_wire->read() : 0xFF;
     }
     while (_wire->available()) _wire->read();   // drain a short read
-    _wire->setTimeOut(prev_timeout);
 
     if (got != CHSC6X_READ_LEN) {
       logRaw(got, NULL);

@@ -22,6 +22,10 @@
 // as a stale or (after a 49-day rollover) nonsensical age.
 #define RADIO_ACTIVITY_MAX_AGE_MS (100UL * RADIO_ACTIVITY_BUCKET_MS)
 
+// How far a timestamp may run behind the previous one and still count as an
+// out-of-order reading rather than a very long forward gap.
+#define RADIO_ACTIVITY_BACKSTEP_TOLERANCE_MS 5000UL
+
 struct RadioActivitySnapshot {
   uint32_t packets;
   uint32_t wire_bytes;
@@ -166,16 +170,22 @@ private:
   uint8_t  _head;                 // ring index of the current minute
   bool     _ever_received;
 
-  // Accumulates the delta since the previous call, which is correct across one
-  // millis() wrap. Read as signed so a caller handing back a slightly older
-  // reading counts as no time passing, rather than as a ~49-day leap forward
-  // that would expire the whole ring. Successive calls must therefore be less
-  // than 2^31 ms (~24.8 days) apart - guaranteed while the tracker is being
-  // serviced, and when it is not the ring is empty anyway.
+  // Accumulates the unsigned delta since the previous call, which is correct
+  // across one millis() wrap.
+  //
+  // A delta past the halfway mark is ambiguous: it is either a slightly stale
+  // reading or a genuine gap of more than ~24.8 days. recordPacket() and
+  // snapshot() sample millis() microseconds apart, so a real stale reading is
+  // tiny - anything larger is treated as the long gap it is, which matters
+  // because rejecting it outright would freeze the ring and leave a
+  // month-old packet looking recently received.
   void tick(uint32_t now_ms) {
-    int32_t delta = (int32_t)(now_ms - _last_input_ms);
-    if (delta <= 0) return;   // stale or repeated reading: no time has passed
-    _now_ms += (uint32_t)delta;
+    uint32_t delta = now_ms - _last_input_ms;
+    if (delta > 0x80000000u &&
+        (uint32_t)(_last_input_ms - now_ms) <= RADIO_ACTIVITY_BACKSTEP_TOLERANCE_MS) {
+      return;   // out-of-order reading: no time has passed
+    }
+    _now_ms += delta;
     _last_input_ms = now_ms;
   }
 

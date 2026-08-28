@@ -9,8 +9,12 @@
 // elapsed-time comparisons are unsigned subtractions, so millis() rollover is
 // a non-event.
 
+// Must exceed the caller's poll interval, or a state change is confirmed by the
+// very next sample and the debounce does nothing. At the 50 ms touch poll this
+// requires two consecutive consistent reads, so one NACK or short read during a
+// continuous touch cannot fake a release (and therefore a second tap).
 #ifndef TOUCH_TAP_DEBOUNCE_MS
-#define TOUCH_TAP_DEBOUNCE_MS 40
+#define TOUCH_TAP_DEBOUNCE_MS 80
 #endif
 
 // Ignores a second tap arriving this soon after an accepted one, so a bouncy
