@@ -48,7 +48,7 @@ class UITask {
   CHSC6XTouch _touch;
   unsigned long _next_touch = 0;
 
-  void toggleDisplay();
+  void toggleDisplay(const char* source);
 #endif
 
 #ifdef WITH_MQTT_BRIDGE

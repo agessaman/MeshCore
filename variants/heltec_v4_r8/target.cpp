@@ -25,7 +25,19 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 
 #ifdef DISPLAY_CLASS
   DISPLAY_CLASS display(&board.periph_power);
-  MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
+  #ifndef USER_BTN_LONG_PRESS_MILLIS
+    #define USER_BTN_LONG_PRESS_MILLIS 1000
+  #endif
+  // Multi-click detection holds a CLICK back for MULTI_CLICK_WINDOW_MS (280 ms)
+  // after release, and folds a second press inside that window into a
+  // DOUBLE_CLICK. Targets that only want a plain click set this to 0 so the
+  // event fires on release instead of being delayed - or swallowed when an
+  // impatient second press arrives.
+  #ifndef USER_BTN_MULTICLICK
+    #define USER_BTN_MULTICLICK 1
+  #endif
+  MomentaryButton user_btn(PIN_USER_BTN, USER_BTN_LONG_PRESS_MILLIS, true, false,
+                           USER_BTN_MULTICLICK);
 #endif
 
 bool radio_init() {

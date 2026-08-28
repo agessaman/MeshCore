@@ -303,12 +303,17 @@ void UITask::updateActivityRows() {
 #endif
 
 #ifdef DISPLAY_TOUCH_TOGGLE
-void UITask::toggleDisplay() {
+void UITask::toggleDisplay(const char* source) {
   if (_display->isOn()) {
     _display->turnOff();
   } else {
     _display->turnOn();
   }
+#ifdef DISPLAY_TOUCH_DEBUG
+  Serial.printf("Display: %s -> %s\n", source, _display->isOn() ? "on" : "off");
+#else
+  (void)source;
+#endif
 #ifdef DISPLAY_REDRAW_ON_CHANGE
   _frame_valid = false;   // wake draws one complete current frame
 #endif
@@ -327,7 +332,7 @@ void UITask::loop() {
     if (btnState != _prevBtnState) {
       if (btnState == USER_BTN_PRESSED) {  // pressed?
 #ifdef DISPLAY_TOUCH_TOGGLE
-        toggleDisplay();   // same action as tapping the panel
+        toggleDisplay("button");   // same action as tapping the panel
 #else
         if (_display->isOn()) {
           // TODO: any action ?
@@ -371,7 +376,7 @@ void UITask::loop() {
     unsigned long now = millis();
     if (millisReached(now, _next_touch)) {
       _next_touch = now + TOUCH_POLL_MILLIS;
-      if (_touch.checkTap(now)) toggleDisplay();
+      if (_touch.checkTap(now)) toggleDisplay("touch");
     }
   }
 #endif
