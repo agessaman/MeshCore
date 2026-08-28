@@ -10,6 +10,11 @@ upstream MeshCore `dev` branch, which generally pulls in a new MeshCore software
 
 ### August 2026
 
+- **New** — Analytics dashboard on the Heltec V4 R8 Expansion Kit V2 TFT: 20-minute rolling RF activity with a packets-per-minute graph, on a dark padded layout that repaints only the rows that changed  <sub>2026-08-28</sub>
+- **New** — `display.timeout` (blank after N seconds, 0 = always on) and `display.flip` (rotate 180 degrees), both applied live  <sub>2026-08-28</sub>
+- **New** — Tap the Expansion Kit V2 panel or press USER to blank/wake the display; hold USER 3 s to power off  <sub>2026-08-28</sub>
+- **Fix** — Power-off on the V4 R8 armed an RF wake, so a node in live traffic rebooted seconds after showing "Turning OFF"  <sub>2026-08-28</sub>
+- **Fix** — The V4 R8 TFT could not be woken once blanked, because waking re-ran a full panel init that also reset the touch controller  <sub>2026-08-28</sub>
 - **New** · `platformio` — MQTT observer repeater and room-server configs for Heltec V4 R8 (OLED and TFT)  <sub>2026-08-20</sub>
 
 ### June 2026

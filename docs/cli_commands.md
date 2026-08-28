@@ -662,6 +662,37 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 
 ---
 
+#### View or change the display timeout
+**Usage:**
+- `get display.timeout`
+- `set display.timeout <seconds>`
+
+**Parameters:**
+- `seconds`: `0` to keep the display on permanently, or `1-3600` seconds of inactivity before it blanks
+
+**Default:** `60`
+
+**Note:** Observer builds with a display only. The change applies immediately and restarts the
+countdown. Tap the panel or press the USER button to wake or blank it by hand.
+
+---
+
+#### Rotate the display 180 degrees
+**Usage:**
+- `get display.flip`
+- `set display.flip <state>`
+
+**Parameters:**
+- `state`: `0`/`off` (as built) or `1`/`on` (rotated 180 degrees)
+
+**Default:** `0`
+
+**Note:** Observer builds with a display only, for a board mounted the other way up. This is
+persisted config, so it survives a firmware update - a node that looks upside down after an
+update may simply still be carrying `display.flip 1`. The boot log reports the current state.
+
+---
+
 #### Enable or disable Multi-Acks support
 **Usage:**
 - `get multi.acks`
