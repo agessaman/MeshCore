@@ -44,6 +44,7 @@ static bool is_value_char(char c) {
 #define EXPECT_COMMA_OR_CLOSE  5
 #define EXPECT_COMMA_OR_KEY    6
 #define EXPECT_COMMA_OR_KEY_OR_CLOSE  7
+#define EXPECT_KEY_OR_CLOSE    8
 
 int ConfigSerializer::Context::readNext() {
   char c;
@@ -60,15 +61,21 @@ int ConfigSerializer::Context::readNext() {
 
   switch (rd_mode) {
     case EXPECT_OPEN_BRACE:
-      if (c == '{') { rd_mode = EXPECT_KEY; return TOK_START_OBJ; }
+      if (c == '{') { rd_mode = EXPECT_KEY_OR_CLOSE; return TOK_START_OBJ; }
       if (is_whitespace(c)) return TOK_WHITESPACE;
       return TOK_ERROR;
+
+    case EXPECT_KEY_OR_CLOSE:
+      if (c == '}') { rd_mode = EXPECT_COMMA_OR_KEY_OR_CLOSE; return TOK_END_OBJ; }
+      rd_mode = EXPECT_KEY;
+      goto read_key;  // a non-empty object must start with a key
 
     case EXPECT_COMMA_OR_KEY_OR_CLOSE:
       if (c == '}') { rd_mode = EXPECT_COMMA_OR_KEY_OR_CLOSE; return TOK_END_OBJ; }
     case EXPECT_COMMA_OR_KEY:
       if (c == ',') { rd_mode = EXPECT_KEY; return TOK_WHITESPACE; }
     case EXPECT_KEY:
+read_key:
       if (rd_len > 0 && c == ':') { rd_buf[rd_len] = 0; rd_len = 0; rd_mode = EXPECT_VAL_OR_OBJ; return TOK_KEY; }
       if (rd_len == 0 && is_whitespace(c)) return TOK_WHITESPACE;
       if (rd_len < CONFIG_MAX_KEYLEN-1 &&
@@ -85,7 +92,7 @@ int ConfigSerializer::Context::readNext() {
         rd_mode = EXPECT_STRING_VAL;
         return TOK_WHITESPACE;
       }
-      if (rd_len == 0 && c == '{') { rd_mode = EXPECT_KEY; return TOK_START_OBJ; }
+      if (rd_len == 0 && c == '{') { rd_mode = EXPECT_KEY_OR_CLOSE; return TOK_START_OBJ; }
       if (is_value_char(c) && rd_len < CONFIG_MAX_TOKEN_LEN-1) {
         if (rd_len == 0) rd_token_quoted = false;
         rd_buf[rd_len++] = c;

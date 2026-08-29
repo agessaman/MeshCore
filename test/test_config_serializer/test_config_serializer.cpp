@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "helpers/ConfigSerializer.h"
+#include "helpers/DynamicConfigSerializer.h"
 
 class NativeFileSystem {
 public:
@@ -192,6 +193,23 @@ TEST(ConfigSerializer, LoadSerial_IgnoreUnknowns) {
     EXPECT_TRUE(match);
 }
 
+TEST(DynamicConfigSerializer, GetSet_Basic) {
+    DynamicConfigSerializer data;
+
+    bool s1 = data.setByKey("age", "11");
+    bool s2 = data.setByKey("name", "Scott");
+    EXPECT_TRUE(s1 && s2);
+
+    char tmp[32];
+    bool g1 = data.getByKey("age", tmp, 31);
+    EXPECT_TRUE(g1);
+    EXPECT_STREQ("11", tmp);
+
+    bool g2 = data.getByKey("name", tmp, 31);
+    EXPECT_TRUE(g2);
+    EXPECT_STREQ("Scott", tmp);
+}
+
 TEST(NodePrefs, FemGainSettingsRoundTrip) {
     NodePrefs saved;
     saved.radio_fem_rxgain = 0;
@@ -209,9 +227,18 @@ TEST(NodePrefs, FemGainSettingsRoundTrip) {
     loaded.radio_fem_rxgain = 1;
     loaded.radio_fem_txgain = 0;
 
-    ASSERT_TRUE(loaded.loadSerial(input));
+    ASSERT_TRUE(loaded.loadSerial(input)) << serialised;
     EXPECT_EQ(0, loaded.radio_fem_rxgain);
     EXPECT_EQ(1, loaded.radio_fem_txgain);
+}
+
+TEST(NodePrefs, TxPowerRemainsSignedThroughRadioPrefs) {
+    NodePrefs prefs;
+    prefs.tx_power_dbm = -9;
+
+    EXPECT_EQ(-9, prefs.getRadioPrefs()->getTxPower());
+    prefs.getRadioPrefs()->setTxPower(-8);
+    EXPECT_EQ(-8, prefs.tx_power_dbm);
 }
 
 TEST(ConfigSerializer, LoadSerial_KeyDigitsAfterFirstCharacter) {
@@ -229,6 +256,12 @@ TEST(ConfigSerializer, LoadSerial_RejectsLeadingDigitKey) {
     MockInputStream s("{1slot:7}");
     TestStruct data;
     EXPECT_FALSE(data.loadSerial(s));
+}
+
+TEST(ConfigSerializer, LoadSerial_AcceptsEmptyObject) {
+    MockInputStream s("{}");
+    TestStruct data;
+    EXPECT_TRUE(data.loadSerial(s));
 }
 
 // ── /prefs.json compatibility under the strict shape checks ─────────────────
@@ -326,6 +359,73 @@ TEST(NodePrefs, ShapeMismatchIsRejectedAndStopsFurtherApplication) {
     EXPECT_EQ(9, nested.sf);
 }
 
+TEST(DynamicConfigSerializer, Set_Replaces) {
+    DynamicConfigSerializer data;
+
+    bool s1 = data.setByKey("age", "11");
+    bool s2 = data.setByKey("name", "Scott");
+    EXPECT_TRUE(s1 && s2);
+
+    bool s3 = data.setByKey("age", "333");
+    EXPECT_TRUE(s3);
+
+    char tmp[32];
+    bool g1 = data.getByKey("age", tmp, 31);
+    EXPECT_TRUE(g1);
+    EXPECT_STREQ("333", tmp);
+
+    bool g2 = data.getByKey("name", tmp, 31);
+    EXPECT_TRUE(g2);
+    EXPECT_STREQ("Scott", tmp);
+}
+
+TEST(DynamicConfigSerializer, GetUnknown_Fail) {
+    DynamicConfigSerializer data;
+
+    bool s1 = data.setByKey("age", "11");
+    EXPECT_TRUE(s1);
+
+    char tmp[32];
+    bool g2 = data.getByKey("name", tmp, 31);
+    EXPECT_FALSE(g2);
+}
+
+TEST(DynamicConfigSerializer, SaveCustom_Basic) {
+    MockPrintStream s;
+    DynamicConfigSerializer data;
+
+    bool s1 = data.setByKey("age", "11");
+    bool s2 = data.setByKey("name", "Scott");
+    EXPECT_TRUE(s1 && s2);
+
+    bool success = data.saveSerial(s);
+    EXPECT_TRUE(success);
+
+    auto l = s.getLength();
+    char tmp[128];
+    memcpy(tmp, s.getBytes(), l);
+    tmp[l] = 0;
+
+    const char* expect = "{age:\"11\",name:\"Scott\"}";
+    EXPECT_STREQ(expect, tmp);
+}
+
+TEST(DynamicConfigSerializer, LoadCustom_Basic) {
+    MockInputStream s("{age:\"" TEST_INT_S "\",name:\"Scott\"}");
+    DynamicConfigSerializer data;
+
+    bool success = data.loadSerial(s);
+    EXPECT_TRUE(success);
+
+    char tmp[32];
+    bool g1 = data.getByKey("age", tmp, 31);
+    EXPECT_TRUE(g1);
+    EXPECT_STREQ(TEST_INT_S, tmp);
+
+    bool g2 = data.getByKey("name", tmp, 31);
+    EXPECT_TRUE(g2);
+    EXPECT_STREQ("Scott", tmp);
+}
 
 // ── main ───────────────────────────────────────────────────────
 

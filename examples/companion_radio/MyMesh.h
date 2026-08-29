@@ -5,7 +5,7 @@
 #include "AbstractUITask.h"
 
 /*------------ Frame Protocol --------------*/
-#define FIRMWARE_VER_CODE 13
+#define FIRMWARE_VER_CODE 14
 
 #ifndef FIRMWARE_BUILD_DATE
 #define FIRMWARE_BUILD_DATE "14 Aug 2026"
@@ -135,6 +135,8 @@ protected:
                      const char *text) override;
   void onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                          const char *text) override;
+  void onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
+                         const char *text, char* reply) override;
   void onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const uint8_t *sender_prefix, const char *text) override;
   void onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
@@ -169,6 +171,7 @@ public:
     _prefs.node_lat = sensors.node_lat;
     _prefs.node_lon = sensors.node_lon;
     _store->savePrefs(_prefs);
+    _prefs.clearDirty();
   }
 
 #if ENV_INCLUDE_GPS == 1
@@ -201,6 +204,7 @@ private:
   }
 
   void checkCLIRescueCmd();
+  bool handleCommand(const char* text, uint32_t sender_timestamp, char* reply);
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
 
@@ -225,6 +229,7 @@ private:
   bool _cli_rescue;
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
   char cli_command[80];
+  char reply_buf[166];
   uint8_t app_target_ver;
   uint8_t *sign_data;
   uint32_t sign_data_len;

@@ -62,6 +62,7 @@
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 #define CMD_SEND_RAW_PACKET           65
+#define CMD_RUN_CLI_COMMAND           66  // v14+
 
 // Stats sub-types for CMD_GET_STATS
 #define STATS_TYPE_CORE               0
@@ -97,6 +98,7 @@
 #define RESP_ALLOWED_REPEAT_FREQ      26
 #define RESP_CODE_CHANNEL_DATA_RECV   27
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
+#define RESP_CODE_CLI_REPLY           29  // v14+, a reply to CMD_RUN_CLI_COMMAND
 
 #define MAX_CHANNEL_DATA_LENGTH       (MAX_FRAME_SIZE - 9)
 
@@ -259,7 +261,7 @@ float MyMesh::getAirtimeBudgetFactor() const {
 }
 
 bool MyMesh::getCADEnabled() const {
-  return false; // hardware CAD before TX (disabled by default, until configurable)
+  return _prefs.cad_enabled;
 }
 
 int MyMesh::getInterferenceThreshold() const {
@@ -529,10 +531,21 @@ void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t 
   queueMessage(from, TXT_TYPE_PLAIN, pkt, sender_timestamp, NULL, 0, text);
 }
 
-void MyMesh::onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
-                               const char *text) {
+void MyMesh::onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp, const char *text) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
   queueMessage(from, TXT_TYPE_CLI_DATA, pkt, sender_timestamp, NULL, 0, text);
+}
+
+void MyMesh::onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
+                               const char *text, char* reply) {
+  markConnectionActive(from); // in case this is from a server, and we have a connection
+  if (from.isRemoteCLIAllowed()) {
+    if (!handleCommand(text, sender_timestamp, reply)) {
+      strcat(reply, "Unknown command");   // reply may have cmd prefix from 'text'
+    }
+  } else {
+    queueMessage(from, TXT_TYPE_CLI_COMMAND, pkt, sender_timestamp, NULL, 0, text);
+  }
 }
 
 void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
@@ -977,8 +990,9 @@ void MyMesh::begin(bool has_display) {
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
-  board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
-  board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
+
+  board.attachDynamicPrefs(_prefs.getCustom());
+
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
   // NOTE: no FEM LNA wiring here — companion has its own NodePrefs without
@@ -1085,6 +1099,20 @@ void MyMesh::handleCmdFrame(size_t len) {
     memcpy(&out_frame[i], _prefs.node_name, tlen);
     i += tlen;
     _serial->writeFrame(out_frame, i);
+  } else if (cmd_frame[0] == CMD_RUN_CLI_COMMAND && len >= 3) { // V14+
+    int i = 1;
+    char *text = (char *)&cmd_frame[i];
+    int tlen = len - i;
+    text[tlen] = 0; // ensure null
+
+    reply_buf[0] = 0;
+    if (!handleCommand(text, 0, reply_buf)) {
+      strcat(reply_buf, "Unknown command");   // reply_buf may have cmd prefix from 'text'
+    }
+    out_frame[0] = RESP_CODE_CLI_REPLY;
+    int rlen = strlen(reply_buf);
+    memcpy(&out_frame[1], reply_buf, rlen);
+    _serial->writeFrame(out_frame, 1 + rlen);
   } else if (cmd_frame[0] == CMD_SEND_TXT_MSG && len >= 14) {
     int i = 1;
     uint8_t txt_type = cmd_frame[i++];
@@ -1095,16 +1123,16 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint8_t *pub_key_prefix = &cmd_frame[i];
     i += 6;
     ContactInfo *recipient = lookupContactByPubKey(pub_key_prefix, 6);
-    if (recipient && (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_CLI_DATA)) {
+    if (recipient && (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_CLI_DATA || txt_type == TXT_TYPE_CLI_COMMAND)) {
       char *text = (char *)&cmd_frame[i];
       int tlen = len - i;
       uint32_t est_timeout;
       text[tlen] = 0; // ensure null
       int result;
       uint32_t expected_ack;
-      if (txt_type == TXT_TYPE_CLI_DATA) {
+      if (txt_type == TXT_TYPE_CLI_DATA || txt_type == TXT_TYPE_CLI_COMMAND) {
         msg_timestamp = getRTCClock()->getCurrentTimeUnique(); // Use node's RTC instead of app timestamp to avoid tripping replay protection
-        result = sendCommandData(*recipient, msg_timestamp, attempt, text, est_timeout);
+        result = sendCommandData(*recipient, msg_timestamp, attempt, txt_type, text, est_timeout);
         expected_ack = 0; // no Ack expected
       } else {
         result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout);
@@ -1514,16 +1542,20 @@ void MyMesh::handleCmdFrame(size_t len) {
 #endif
   } else if (cmd_frame[0] == CMD_SEND_RAW_DATA && len >= 6) {
     int i = 1;
-    int8_t path_len = cmd_frame[i++];
-    if (path_len >= 0 && i + path_len + 4 <= len) { // minimum 4 byte payload
-      uint8_t *path = &cmd_frame[i];
-      i += path_len;
-      auto pkt = createRawData(&cmd_frame[i], len - i);
-      if (pkt) {
-        sendDirect(pkt, path, path_len);
-        writeOKFrame();
+    uint8_t path_len = cmd_frame[i++];
+    if (path_len >= 0 && mesh::Packet::isValidPathLen(path_len)) {
+      uint8_t path[MAX_PATH_SIZE];
+      i += mesh::Packet::writePath(path, &cmd_frame[i], path_len);
+      if (i + 4 > len) {  // min payload 4 bytes
+        writeErrFrame(ERR_CODE_ILLEGAL_ARG);
       } else {
-        writeErrFrame(ERR_CODE_TABLE_FULL);
+        auto pkt = createRawData(&cmd_frame[i], len - i);
+        if (pkt) {
+          sendDirect(pkt, path, path_len);
+          writeOKFrame();
+        } else {
+          writeErrFrame(ERR_CODE_TABLE_FULL);
+        }
       }
     } else {
       writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // flood, not supported (yet)
@@ -2030,6 +2062,62 @@ void MyMesh::enterCLIRescue() {
   Serial.println("========= CLI Rescue =========");
 }
 
+bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
+  while (*command == ' ') command++; // skip leading spaces
+
+  if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
+    memcpy(reply, command, 3);                    // reflect the prefix back
+    reply += 3;
+    *reply = 0;
+    command += 3;
+  }
+
+  if (_prefs.getRadioPrefs()->handleCommand(command, sender_timestamp, reply)) {  // is radio CLI command?
+    if (_prefs.getRadioPrefs()->isDirty()) { savePrefs(); }
+    return true;
+  }
+
+  // hook for variant-specific CLI processing
+  if (board.handleCommand(command, sender_timestamp, reply)) {
+    if (_prefs.isDirty()) { savePrefs(); }
+    return true;
+  }
+
+  if (memcmp(command, "set name ", 9) == 0) {
+    if (AdvertDataParser::isValidName(&command[9])) {
+      StrHelper::strncpy(_prefs.node_name, &command[9], sizeof(_prefs.node_name));
+      savePrefs();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error, bad chars");
+    }
+    return true;
+  }
+  if (strcmp(command, "get name") == 0) {
+    sprintf(reply, "> %s", _prefs.node_name);
+    return true;
+  }
+
+  if (memcmp(command, "set pin ", 8) == 0) {
+    _prefs.ble_pin = atoi(&command[8]);
+    savePrefs();
+    sprintf(reply, "> pin is now %06d", _prefs.ble_pin);
+    return true;
+  }
+
+  if (strcmp(command, "board") == 0) {
+    strcpy(reply, board.getManufacturerName());
+    return true;
+  }
+
+  if (strcmp(command, "ver") == 0) {
+    sprintf(reply, "%s (Build: %s)", FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
+    return true;
+  }
+
+  return false;  // not handled
+}
+
 void MyMesh::checkCLIRescueCmd() {
   int len = strlen(cli_command);
   while (Serial.available() && len < sizeof(cli_command)-1) {
@@ -2047,15 +2135,10 @@ void MyMesh::checkCLIRescueCmd() {
   if (len > 0 && cli_command[len - 1] == '\r') {  // received complete line
     cli_command[len - 1] = 0;  // replace newline with C string null terminator
 
-    if (memcmp(cli_command, "set ", 4) == 0) {
-      const char* config = &cli_command[4];
-      if (memcmp(config, "pin ", 4) == 0) {
-        _prefs.ble_pin = atoi(&config[4]);
-        savePrefs();
-        Serial.printf("  > pin is now %06d\n", _prefs.ble_pin);
-      } else {
-        Serial.printf("  Error: unknown config: %s\n", config);
-      }
+    reply_buf[0] = 0;
+    if (handleCommand(cli_command, 0, reply_buf)) {
+      // command was handled, print reply output
+      Serial.print("  "); Serial.print(reply_buf); Serial.println();
     } else if (strcmp(cli_command, "rebuild") == 0) {
       bool success = _store->formatFileSystem();
       if (success) {

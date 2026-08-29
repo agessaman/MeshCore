@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint> // For uint8_t, uint32_t
 #include <helpers/ConfigSerializer.h>
+#include <helpers/CommonRadioPrefs.h>
+#include <helpers/DynamicConfigSerializer.h>
 
 #define TELEM_MODE_DENY            0
 #define TELEM_MODE_ALLOW_FLAGS     1     // use contact.flags
@@ -38,11 +40,12 @@ public:
   uint8_t _client_repeat = 0;  // DEPRECATED -> use repeat.disable_fwd
   uint8_t path_hash_mode = 0;    // which path mode to use when sending
   uint8_t autoadd_max_hops = 0;  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
+  uint8_t cad_enabled = 0;
   char default_scope_name[31];
   uint8_t default_scope_key[16];
 
 private:
-  class RadioPrefs : public ConfigSerializer {  // COPIED from CommonCLI (for now)
+  class RadioPrefs : public CommonRadioPrefs {
     NodePrefs* _parent;
   protected:
     void structure() override {
@@ -50,15 +53,11 @@ private:
       def("bw", _parent->bw);
       def("sf", _parent->sf);
       def("cr", _parent->cr);
-      //def("cad", _parent->cad_enabled);
+      def("cad", _parent->cad_enabled);
       //def("int_thr", _parent->interference_threshold);
       def("rxgain", _parent->rx_boosted_gain);
-    #if 0
-      // NOTE: these cannot be set (yet) so don't load/save until we can.
-      //       also, fem_rxgain WAS mapped to wrong JSON property previously
-      def("fem_rxgain", _parent->radio_fem_rxgain);
+      def("fem_rxgain", _parent->radio_fem_rxgain);   // fem_rxgain WAS mapped to wrong JSON property previously
       def("fem_txgain", _parent->radio_fem_txgain);
-    #endif
       def("tx", _parent->tx_power_dbm);
       def("af", _parent->airtime_factor);
       def("rxdelay", _parent->rx_delay_base);
@@ -70,6 +69,42 @@ private:
     }
   public:
     RadioPrefs(NodePrefs* parent) : _parent(parent) { }
+
+    // CommonRadioPrefs interface
+    float getFreq() const override { return _parent->freq; }
+    void setFreq(float f) override { _parent->freq = f; markDirty(); }
+    float getBandwidth() const override { return _parent->bw; }
+    void setBandwidth(float bw) override { _parent->bw = bw; markDirty(); }
+    uint8_t getSpreadFactor() const override { return _parent->sf; }
+    void setSpreadFactor(uint8_t sf) override { _parent->sf = sf; markDirty(); }
+    uint8_t getCodingRate() const override { return _parent->cr; }
+    void setCodingRate(uint8_t cr) override { _parent->cr = cr; markDirty(); }
+    float getAirtimeFactor() const override { return _parent->airtime_factor; }
+    void setAirtimeFactor(float af) override { _parent->airtime_factor = af; markDirty(); }
+    bool isCadEnabled() const override { return _parent->cad_enabled; }
+    void setCadEnabled(bool en) override { _parent->cad_enabled = en; markDirty(); }
+    uint8_t getIntThresh() const override { return 0; }
+    void setIntThresh(uint8_t t) override { /* no-op */ }
+    uint8_t getRxGain() const override { return _parent->rx_boosted_gain; }
+    void setRxGain(uint8_t g) override { _parent->rx_boosted_gain = g; markDirty(); }
+    int8_t getTxPower() const override { return _parent->tx_power_dbm; }
+    void setTxPower(int8_t dbm) override { _parent->tx_power_dbm = dbm; markDirty(); }
+    float getRxDelay() const override { return _parent->rx_delay_base; }
+    void setRxDelay(float d) override { _parent->rx_delay_base = d; markDirty(); }
+    uint8_t getAgcResetInt() const override { return 0; }
+    void setAgcResetInt(uint8_t secs) override { /* no-op */ }
+    uint8_t getHashMode() const override { return _parent->path_hash_mode; }
+    void setHashMode(uint8_t m) override { _parent->path_hash_mode = m; markDirty(); }
+    uint8_t getMultiAcks() const override { return _parent->multi_acks; }
+    void setMultiAcks(uint8_t m) override { _parent->multi_acks = m; markDirty(); }
+    float getFloodTxDelay() const override { return 0.5f; }  //   currently hard-coded
+    void setFloodTxDelay(float d) override { /* no-op */ }
+    float getDirectTxDelay() const override { return 0.2f; }  //   currently hard-coded
+    void setDirectTxDelay(float d) override { /* no-op */ }
+    uint8_t getFEMRxGain() const override { return _parent->radio_fem_rxgain; }
+    void setFEMRxGain(uint8_t g) override { _parent->radio_fem_rxgain = g; markDirty(); }
+    uint8_t getFEMTxGain() const override { return _parent->radio_fem_txgain; }
+    void setFEMTxGain(uint8_t g) override { _parent->radio_fem_txgain = g; markDirty(); }
   };
   RadioPrefs radio;
 
@@ -121,6 +156,8 @@ private:
   };
   CompanionPrefs companion;
 
+  DynamicConfigSerializer custom;
+
 protected:
   void structure() override {
     def("name", node_name, sizeof(node_name));
@@ -132,9 +169,10 @@ protected:
     def("gps", gps);
     def("repeat", repeat);
     def("comp", companion);
+    def("custom", custom);
   }
 public:
-  NodePrefs() : radio(this), gps(this), companion(this) {
+  NodePrefs() : radio(this), gps(this), companion(this), custom(&radio) {
     node_name[0] = 0;
     default_scope_name[0] = 0;
     memset(default_scope_key, 0, sizeof(default_scope_key));
@@ -142,4 +180,10 @@ public:
   // new accessor methods
   bool isRepeatEn() const { return repeat.disable_fwd == 0; }
   void setRepeatEn(bool en) { repeat.disable_fwd = en ? 0 : 1; }
+
+  CommonRadioPrefs* getRadioPrefs() { return &radio; }
+  KeyValueStore* getCustom() { return &custom; }
+
+  bool isDirty() const override { return ConfigSerializer::isDirty() || radio.isDirty() || custom.isDirty(); }
+  void clearDirty() override { ConfigSerializer::clearDirty(); radio.clearDirty(); custom.clearDirty(); }
 };
