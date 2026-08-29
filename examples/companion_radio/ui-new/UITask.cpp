@@ -2,8 +2,13 @@
 #include <helpers/TxtDataHelpers.h>
 #include "../MyMesh.h"
 #include "target.h"
+#include <time.h>
 #ifdef WIFI_SSID
   #include <WiFi.h>
+#endif
+
+#ifndef UI_TZ_OFFSET
+  #define UI_TZ_OFFSET 0
 #endif
 
 #ifndef AUTO_OFF_MILLIS
@@ -23,7 +28,7 @@
   #define UI_RECENT_LIST_SIZE 4
 #endif
 
-#if UI_HAS_JOYSTICK
+#if UI_HAS_JOYSTICK || UI_HAS_ROTARY_INPUT
   #define PRESS_LABEL "press Enter"
 #else
   #define PRESS_LABEL "long press"
@@ -97,7 +102,9 @@ class HomeScreen : public UIScreen {
 #if UI_SENSORS_PAGE == 1
     SENSORS,
 #endif
+#ifndef UI_NO_HIBERNATE
     SHUTDOWN,
+#endif
     Count    // keep as last
   };
 
@@ -141,11 +148,24 @@ class HomeScreen : public UIScreen {
     int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
     display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
 
-    // show muted icon if buzzer is muted
+    // while charging, show a bolt (or a plug once full) just left of the battery,
+    // keeping the fill bar itself clean and uninterrupted
+    bool charging = board.isExternalPowered();
+    if (charging) {
+      // There's no charge-complete signal on most boards, so "full" is a high
+      // voltage band rather than an exact 100% (a real pack rarely reads 4.2V).
+      const int BATT_FULL_PCT = 95;
+      const uint8_t* symbol = (batteryPercentage >= BATT_FULL_PCT) ? plug_icon : charging_icon;
+      display.setColor(UIColor::title_txt);
+      display.drawXbm(iconX - 9, iconY + 1, symbol, 8, 8);
+    }
+
+    // show muted icon if buzzer is muted (shifted further left when the charging
+    // icon already occupies the slot immediately left of the battery)
 #ifdef PIN_BUZZER
     if (_task->isBuzzerQuiet()) {
       display.setColor(UIColor::warning_txt);
-      display.drawXbm(iconX - 9, iconY + 1, muted_icon, 8, 8);
+      display.drawXbm(iconX - (charging ? 18 : 9), iconY + 1, muted_icon, 8, 8);
     }
 #endif
   }
@@ -225,6 +245,18 @@ public:
       sprintf(tmp, "MSG: %d", _task->getMsgCount());
       display.drawTextCentered(display.width() / 2, 22, tmp);
 
+      #ifdef UI_SHOW_CLOCK
+      display.setTextSize(3);
+      uint32_t now = _rtc->getCurrentTime();
+      int8_t tz = UI_TZ_OFFSET; // for now draw time from Santo Domingo ...
+      now += (int32_t)tz * 3600;
+      DateTime dt (now);
+      sprintf(tmp, "%02d:%02d", dt.hour(), dt.minute());
+      display.drawTextCentered(display.width() / 2, 60, tmp);
+      display.setTextSize(1);
+      sprintf(tmp, "%02d/%02d/%d", dt.day(), dt.month(), dt.year());
+      display.drawTextCentered(display.width() / 2, 80, tmp);
+      #endif
       #ifdef WIFI_SSID
         IPAddress ip = WiFi.localIP();
         snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
@@ -234,13 +266,21 @@ public:
       if (_task->hasConnection()) {
         display.setColor(UIColor::warning_txt);
         display.setTextSize(1);
+        #ifdef UI_SHOW_CLOCK
+        display.drawTextCentered(display.width() / 2, 110, "< Connected >");
+        #else
         display.drawTextCentered(display.width() / 2, 43, "< Connected >");
-
+        #endif
       } else if (the_mesh.getBLEPin() != 0) { // BT pin
         display.setColor(UIColor::warning_txt);
-        display.setTextSize(2);
         sprintf(tmp, "Pin:%d", the_mesh.getBLEPin());
+        #ifdef UI_SHOW_CLOCK
+        display.setTextSize(1);
+        display.drawTextCentered(display.width() / 2, 110, tmp);
+        #else
+        display.setTextSize(2);
         display.drawTextCentered(display.width() / 2, 43, tmp);
+        #endif
       }
     } else if (_page == HomePage::RECENT) {
       the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
@@ -421,6 +461,7 @@ public:
       if (sensors_scroll) sensors_scroll_offset = (sensors_scroll_offset+1)%sensors_nb;
       else sensors_scroll_offset = 0;
 #endif
+#ifndef UI_NO_HIBERNATE
     } else if (_page == HomePage::SHUTDOWN) {
       display.setColor(UIColor::corp_blue);
       display.setTextSize(1);
@@ -432,6 +473,7 @@ public:
         display.drawXbm((display.width() - 32) / 2, 18, power_icon, 32, 32);
         display.drawTextCentered(display.width() / 2, 64 - 11, "hibernate:" PRESS_LABEL);
       }
+#endif
     }
     return 5000;   // next render after 5000 ms
   }
@@ -478,13 +520,19 @@ public:
       return true;
     }
 #endif
+#ifndef UI_NO_HIBERNATE
     if (c == KEY_ENTER && _page == HomePage::SHUTDOWN) {
       _shutdown_init = true;  // need to wait for button to be released
       return true;
     }
+#endif
     return false;
   }
 };
+
+#ifndef UI_MSG_PREVIEW_SIZE
+  #define UI_MSG_PREVIEW_SIZE 78
+#endif
 
 class MsgPreviewScreen : public UIScreen {
   UITask* _task;
@@ -493,7 +541,7 @@ class MsgPreviewScreen : public UIScreen {
   struct MsgEntry {
     uint32_t timestamp;
     char origin[62];
-    char msg[78];
+    char msg[UI_MSG_PREVIEW_SIZE];
   };
   #define MAX_UNREAD_MSGS   32
   int num_unread;
@@ -720,6 +768,9 @@ void UITask::shutdown(bool restart){
   if (restart) {
     _board->reboot();
   } else {
+    display.forceFullRefresh();
+    display.clear();
+    display.endFrame();
     // Power off board including radio, display, GPS and components
     _board->powerOff();
   }
@@ -760,6 +811,17 @@ void UITask::loop() {
   }
 #elif defined(PIN_USER_BTN)
   int ev = user_btn.check();
+  #ifdef UI_HAS_NAV_INPUT
+  if (ev == BUTTON_EVENT_CLICK) {
+    c = checkDisplayOn(KEY_ENTER);
+  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+    display.turnOff();
+  } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
+    c = handleDoubleClick(KEY_SELECT);
+  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+    c = handleTripleClick(KEY_SELECT);
+  }
+  #else
   if (ev == BUTTON_EVENT_CLICK) {
     c = checkDisplayOn(KEY_NEXT);
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
@@ -769,6 +831,7 @@ void UITask::loop() {
   } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
     c = handleTripleClick(KEY_SELECT);
   }
+  #endif
 #endif
 #if defined(UI_HAS_ROTARY_INPUT)
   RotaryInputEvent rotaryEv = rotary_input.poll();
