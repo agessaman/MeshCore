@@ -9,12 +9,14 @@
 #include <ArduinoJson.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <new>
 
 #include <helpers/CommonCLI.h>
 #include <helpers/MQTTPacketFilter.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
 #include <helpers/bridges/MQTTBridge.h>
+#include <helpers/esp32/HttpPort80Lease.h>
 
 #include "WebConfigHtml.h"
 
@@ -192,6 +194,10 @@ bool WebConfigServer::startSetupMode(char reply[]) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
+  if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
+    snprintf(reply, 160, "Err: port 80 is in use by %s", HttpPort80Lease::ownerName());
+    return false;
+  }
   // AP_STA (not pure AP) so the WiFi scan for the SSID picker works while
   // the AP is up. STA stays unconnected - the bridge won't touch WiFi
   // while wifi_ssid is empty, and `start webconfig ap` requires it stopped.
@@ -213,6 +219,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
 #endif
   if (!ap_ok) {
     WiFi.mode(WIFI_OFF);
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
     strcpy(reply, "Err: failed to start AP");
     return false;
   }
@@ -224,8 +231,20 @@ bool WebConfigServer::startSetupMode(char reply[]) {
 
   _mode = MODE_SETUP;
   _initial_setup = (_obs->wifi_ssid[0] == 0);
-  createServer();
   _was_setup_ap = true;
+  if (!createServer()) {
+    _dns->stop();
+    delete _dns;
+    _dns = NULL;
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(_obs->wifi_ssid[0] == 0 ? WIFI_OFF : WIFI_STA);
+    _mode = MODE_OFF;
+    _initial_setup = false;
+    _was_setup_ap = false;
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
+    strcpy(reply, "Err: failed to bind webconfig server to port 80");
+    return false;
+  }
   _last_activity = millis();
   WiFi.scanNetworks(true);  // pre-populate the SSID picker
 
@@ -242,8 +261,17 @@ bool WebConfigServer::startLanMode(char reply[]) {
     strcpy(reply, "Err: WiFi not connected");
     return false;
   }
+  if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
+    snprintf(reply, 160, "Err: port 80 is in use by %s", HttpPort80Lease::ownerName());
+    return false;
+  }
   _mode = MODE_LAN;
-  createServer();
+  if (!createServer()) {
+    _mode = MODE_OFF;
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
+    strcpy(reply, "Err: failed to bind webconfig server to port 80");
+    return false;
+  }
   _last_activity = millis();
 
   int pos = sprintf(reply, "WebConfig started: http://%s/ (admin password login)",
@@ -254,9 +282,10 @@ bool WebConfigServer::startLanMode(char reply[]) {
   return true;
 }
 
-void WebConfigServer::createServer() {
+bool WebConfigServer::createServer() {
   if (_host == NULL) {
-    _host = new AsyncWebServer(80);
+    _host = new (std::nothrow) AsyncWebServer(80);
+    if (_host == NULL) return false;
     _server = _host;
     registerRoutes();
   } else {
@@ -278,6 +307,13 @@ void WebConfigServer::createServer() {
   }
   attachRoutes();
   _server->begin();
+  if (_server->state() != LISTEN) {
+    detachRoutes();
+    _server->end();
+    _server = NULL;
+    return false;
+  }
+  return true;
 }
 
 void WebConfigServer::requestStop() {
@@ -336,6 +372,7 @@ void WebConfigServer::finalizeTeardown() {
   _batch_reboot_armed = false;
   _session_token[0] = 0;
   _stats_json[0] = 0;
+  HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
   if (_cb) _cb->onWebConfigStopped();
 }
 

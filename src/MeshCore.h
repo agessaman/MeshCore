@@ -69,6 +69,8 @@ public:
   virtual bool startOTAUpdate(const char* id, char reply[], bool force_ap) {
     return startOTAUpdate(id, reply);
   }
+  virtual bool stopOTAUpdate(char reply[]) { return false; }
+  virtual bool isOTAUpdateInProgress() const { return false; }
   // Pull-based OTA: fetch the firmware build for this variant from a baked-in manifest and flash it.
   // current_ver is the running firmware version string (used to skip if already up to date); when
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.

@@ -190,7 +190,7 @@ private:
   uint32_t _stats_built_at = 0;
   char _stats_json[1024] = {0};
 
-  void createServer();
+  bool createServer();
   void registerRoutes();
   typedef void (WebConfigServer::*RequestHandler)(AsyncWebServerRequest*);
   static void dispatchRequest(AsyncWebServerRequest* req, RequestHandler handler);

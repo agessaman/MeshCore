@@ -65,6 +65,12 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         }
 
         if (!index) {
+            // If the uploader disappears mid-transfer, release Update's flash
+            // session so `stop ota` and the idle timeout can safely close the
+            // web server instead of remaining stuck in "upload in progress".
+            request->onDisconnect([]() {
+                if (Update.isRunning()) Update.abort();
+            });
             if(!request->hasParam("MD5", true)) {
                 return request->send(400, "text/plain", "MD5 parameter missing");
             }

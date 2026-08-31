@@ -85,8 +85,9 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ### Start an Over-The-Air (OTA) firmware update
 **Usage:**
-- `start ota` — serves the ElegantOTA web upload page on the station IP if joined to a Wi-Fi network, otherwise raises the `MeshCore-OTA` Wi-Fi hotspot.
-- `start ota ap` — always raises the `MeshCore-OTA` Wi-Fi hotspot, even when joined to a network. Use this when the network applies client isolation and the station IP isn't reachable.
+- `start ota` — prepares the ElegantOTA web upload page on the station IP if joined to Wi-Fi, otherwise raises the `MeshCore-OTA` hotspot. On MQTT observer builds, the start is deferred long enough to send the command reply, then the bridge is paused while uploads are accepted.
+- `start ota ap` — always raises the `MeshCore-OTA` hotspot, even when joined to a network. Use this when the network applies client isolation and the station IP isn't reachable.
+- `stop ota` — stops a pending or active manual OTA web server. On MQTT observer builds, a bridge that was running before `start ota` is resumed. An upload already writing firmware cannot be stopped.
 
 ---
 

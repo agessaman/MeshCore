@@ -32,6 +32,7 @@
 
 #ifdef WITH_MQTT_BRIDGE
 #include "helpers/bridges/MQTTBridge.h"
+#include "helpers/ManualOtaSession.h"
 #define WITH_BRIDGE
 #include "helpers/esp32/WebConfigServer.h"   // defines WITH_WEBCONFIG on ESP32
 #endif
@@ -143,6 +144,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   TransportKey default_scope;
   unsigned long set_radio_at, revert_radio_at;
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
+#ifdef WITH_MQTT_BRIDGE
+  ManualOtaSession _manual_ota;
+#endif
   float pending_freq;
   float pending_bw;
   uint8_t pending_sf;
@@ -451,10 +455,17 @@ public:
   // "Beginning update..." CLI reply (CLI_REPLY_DELAY_MILLIS = 600 ms) to transmit
   // before the flash blocks the loop and reboots.
   bool beginDeferredOtaUpdate() override {
+    if (!_manual_ota.isIdle()) return false;
+#ifdef WITH_WEBCONFIG
+    if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) return false;
+#endif
     _ota_update_at = millis() + 2500;
     if (_ota_update_at == 0) _ota_update_at = 1;  // 0 means "none"
     return true;
   }
+
+  bool beginDeferredManualOta(bool force_ap, char* reply) override;
+  bool stopManualOta(char* reply) override;
 
   int getQueueSize() override {
     return bridge ? bridge->getQueueSize() : 0;
@@ -477,6 +488,8 @@ public:
     if (!bridge || !bridge->isRunning()) return false;
     return bridge->ntpDiag(reply, reply_size, verbose);
   }
+
+  void tickManualOta();
 #endif
 
 #ifdef WITH_WEBCONFIG

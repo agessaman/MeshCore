@@ -8,10 +8,54 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncElegantOTA.h>
+#include <Update.h>
 
 #include <SPIFFS.h>
+#include <new>
+
+#include "esp32/HttpPort80Lease.h"
+
+namespace {
+
+AsyncWebServer* ota_server = nullptr;
+bool ota_routes_registered = false;
+bool ota_server_running = false;
+bool ota_raised_ap = false;
+char ota_id_buf[60];
+char ota_home_buf[90];
+char ota_url_buf[80];
+
+void otaRegisterRoutes() {
+  ota_server->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html", ota_home_buf);
+  });
+  ota_server->on("/log", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(SPIFFS, "/packet_log", "text/plain");
+  });
+  AsyncElegantOTA.begin(ota_server);
+  ota_routes_registered = true;
+}
+
+void otaReleaseFailedStart() {
+  if (ota_server) ota_server->end();
+  if (ota_raised_ap) WiFi.softAPdisconnect(true);
+  ota_raised_ap = false;
+  ota_server_running = false;
+  HttpPort80Lease::release(HttpPort80Lease::Owner::Ota);
+}
+
+}  // namespace
 
 bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
+  if (ota_server_running) {
+    snprintf(reply, 160, "Started: %s", ota_url_buf);
+    return true;
+  }
+  if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::Ota)) {
+    snprintf(reply, 160, "Error: port 80 is in use by %s", HttpPort80Lease::ownerName());
+    return false;
+  }
+
   inhibit_sleep = true;   // prevent sleep during OTA
 
   // If the device is already on a WiFi network (e.g. an observer joined in STA
@@ -24,37 +68,77 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   if (!force_ap && WiFi.status() == WL_CONNECTED) {
     ip = WiFi.localIP();
   } else {
-    WiFi.softAP("MeshCore-OTA", NULL);
+    ota_raised_ap = WiFi.softAP("MeshCore-OTA", NULL);
+    if (!ota_raised_ap) {
+      inhibit_sleep = false;
+      HttpPort80Lease::release(HttpPort80Lease::Owner::Ota);
+      strcpy(reply, "Error: failed to start OTA AP");
+      return false;
+    }
     ip = WiFi.softAPIP();
   }
 
-  sprintf(reply, "Started: http://%s/update", ip.toString().c_str());
+  snprintf(ota_id_buf, sizeof(ota_id_buf), "%s (%s)", id, getManufacturerName());
+  snprintf(ota_home_buf, sizeof(ota_home_buf),
+           "<H2>Hi! I am a MeshCore Repeater. ID: %s</H2>", id);
+  snprintf(ota_url_buf, sizeof(ota_url_buf), "http://%s/update", ip.toString().c_str());
+
+  if (ota_server == nullptr) {
+    ota_server = new (std::nothrow) AsyncWebServer(80);
+    if (ota_server == nullptr) {
+      otaReleaseFailedStart();
+      inhibit_sleep = false;
+      strcpy(reply, "Error: insufficient memory for OTA server");
+      return false;
+    }
+  }
+  AsyncElegantOTA.setID(ota_id_buf);
+  if (!ota_routes_registered) otaRegisterRoutes();
+  ota_server->begin();
+  if (ota_server->state() != LISTEN) {
+    otaReleaseFailedStart();
+    inhibit_sleep = false;
+    strcpy(reply, "Error: failed to bind OTA server to port 80");
+    return false;
+  }
+
+  ota_server_running = true;
+  snprintf(reply, 160, "Started: %s", ota_url_buf);
   MESH_DEBUG_PRINTLN("startOTAUpdate: %s", reply);
 
-  static char id_buf[60];
-  sprintf(id_buf, "%s (%s)", id, getManufacturerName());
-  static char home_buf[90];
-  sprintf(home_buf, "<H2>Hi! I am a MeshCore Repeater. ID: %s</H2>", id);
-
-  AsyncWebServer* server = new AsyncWebServer(80);
-
-  server->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", home_buf);
-  });
-  server->on("/log", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(SPIFFS, "/packet_log", "text/plain");
-  });
-
-  AsyncElegantOTA.setID(id_buf);
-  AsyncElegantOTA.begin(server);    // Start ElegantOTA
-  server->begin();
-
   return true;
+}
+
+bool ESP32Board::stopOTAUpdate(char reply[]) {
+  if (!ota_server_running) return false;
+  if (Update.isRunning()) {
+    strcpy(reply, "Error: firmware upload is in progress");
+    return true;
+  }
+
+  ota_server->end();
+  if (ota_raised_ap) WiFi.softAPdisconnect(true);
+  ota_raised_ap = false;
+  ota_server_running = false;
+  inhibit_sleep = false;
+  HttpPort80Lease::release(HttpPort80Lease::Owner::Ota);
+  strcpy(reply, "OK - OTA web server stopped");
+  return true;
+}
+
+bool ESP32Board::isOTAUpdateInProgress() const {
+  return ota_server_running && Update.isRunning();
 }
 
 #else
 bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   return false; // not supported
+}
+bool ESP32Board::stopOTAUpdate(char reply[]) {
+  return false;
+}
+bool ESP32Board::isOTAUpdateInProgress() const {
+  return false;
 }
 #endif
 

@@ -1267,8 +1267,104 @@ void MyMesh::formatPacketStatsReply(char *reply) {
                                        getNumRecvFlood(), getNumRecvDirect());
 }
 
+#ifdef WITH_MQTT_BRIDGE
+bool MyMesh::beginDeferredManualOta(bool force_ap, char* reply) {
+  if (!_manual_ota.isIdle()) {
+    strcpy(reply, _manual_ota.isPending() ? "Err: OTA web server is already preparing"
+                                         : "Err: OTA web server is already running");
+    return true;
+  }
+  if (_ota_update_at) {
+    strcpy(reply, "Err: online OTA update is already pending");
+    return true;
+  }
+#ifdef WITH_WEBCONFIG
+  if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
+    strcpy(reply, "Err: webconfig is using port 80 - stop webconfig first");
+    return true;
+  }
+#endif
+  _manual_ota.schedule(millis(), force_ap);
+  if (force_ap || WiFi.status() != WL_CONNECTED) {
+    strcpy(reply, "Preparing OTA web server; join MeshCore-OTA, then open http://192.168.4.1/update");
+  } else {
+    snprintf(reply, 160, "Preparing OTA web server at http://%s/update; MQTT will pause",
+             WiFi.localIP().toString().c_str());
+  }
+  return true;
+}
+
+bool MyMesh::stopManualOta(char* reply) {
+  if (_manual_ota.isPending()) {
+    _manual_ota.reset();
+    strcpy(reply, "OK - pending OTA web server start cancelled");
+    return true;
+  }
+  if (!_manual_ota.isActive()) {
+    strcpy(reply, "Err: OTA web server not running");
+    return true;
+  }
+
+  char board_reply[160] = {0};
+  if (!_cli.getBoard()->stopOTAUpdate(board_reply)) {
+    strcpy(reply, "Err: OTA web server state lost");
+    return true;
+  }
+  if (strncmp(board_reply, "Error:", 6) == 0) {
+    strncpy(reply, board_reply, 159);
+    reply[159] = 0;
+    return true;
+  }
+
+  const bool resume_bridge = _manual_ota.bridgeWasRunning();
+  _manual_ota.reset();
+  if (resume_bridge) setBridgeState(true);
+  strcpy(reply, resume_bridge ? "OK - OTA web server stopped; bridge resumed"
+                              : "OK - OTA web server stopped");
+  return true;
+}
+
+void MyMesh::tickManualOta() {
+  uint32_t now = millis();
+  if (_manual_ota.startDue(now)) {
+    const bool force_ap = _manual_ota.forceAp();
+    const bool bridge_was_running = bridge && bridge->isRunning();
+    Serial.println("OTA web: preparing manual upload server");
+    drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
+
+    bool may_start = true;
+    if (bridge_was_running) {
+      setBridgeState(false);
+      may_start = bridge && bridge->canFlashAfterStop();
+    }
+
+    char ota_reply[160] = {0};
+    if (may_start && _cli.getBoard()->startOTAUpdate(_prefs.node_name, ota_reply, force_ap)) {
+      _manual_ota.markActive(millis(), bridge_was_running);
+      Serial.print("OTA web: "); Serial.println(ota_reply);
+    } else {
+      if (!may_start) strcpy(ota_reply, "Error: MQTT stop did not complete cleanly");
+      Serial.print("OTA web: start failed - "); Serial.println(ota_reply);
+      _manual_ota.reset();
+      if (bridge_was_running) setBridgeState(true);
+    }
+    return;
+  }
+
+  if (_manual_ota.timeoutDue(now, _cli.getBoard()->isOTAUpdateInProgress())) {
+    char reply[160] = {0};
+    stopManualOta(reply);
+    Serial.print("OTA web: session timeout - "); Serial.println(reply);
+  }
+}
+#endif
+
 #ifdef WITH_WEBCONFIG
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+  if (!_manual_ota.isIdle()) {
+    strcpy(reply, "Err: OTA web server is pending or running - stop ota first");
+    return true;
+  }
   if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
     strcpy(reply, _webconfig->isStopping() ? "Err: webconfig still stopping, retry shortly"
                                            : "Err: webconfig already running");
@@ -1595,6 +1691,10 @@ void MyMesh::loop() {
       _webconfig = NULL;
     }
   }
+#endif
+
+#ifdef WITH_MQTT_BRIDGE
+  tickManualOta();
 #endif
 
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)

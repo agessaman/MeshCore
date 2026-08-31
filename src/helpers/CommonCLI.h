@@ -336,6 +336,18 @@ public:
     return false;
   };
 
+  // Observer builds use these hooks to coordinate the existing manual OTA web
+  // server with queued mesh replies, MQTT teardown, and restoration. Returning
+  // false leaves the legacy board-direct path available to non-observer builds.
+  virtual bool beginDeferredManualOta(bool force_ap, char* reply) {
+    (void)force_ap; (void)reply;
+    return false;
+  };
+  virtual bool stopManualOta(char* reply) {
+    (void)reply;
+    return false;
+  };
+
   virtual int getQueueSize() {
     return 0; // no op by default
   };

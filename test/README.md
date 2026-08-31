@@ -23,6 +23,7 @@ does not reflect the GoogleTest count — run the built binary directly
 
 | Suite | Source under test | Covers |
 |-------|-------------------|--------|
+| `test_manual_ota_session` | `src/helpers/ManualOtaSession.h`, `src/helpers/esp32/HttpPort80Lease.h` | deferred/manual OTA state, prior bridge state, timeout and rollover behavior; exclusive WebConfig/OTA port-80 ownership |
 | `test_mqtt_presets` | `src/helpers/MQTTPresets.h` | preset lookup; table integrity (unique names, non-empty URLs, JWT-audience invariant, names fit the slot buffer); `mqttPresetNeedsSlotCredentials`; slot-count constants |
 | `test_observer_validation` | `src/helpers/MQTTObserverValidation.h` | IATA (exactly 3 alphanumerics), owner key (64 hex), NTP hostname, and the buffer-fit check behind the #17 length validation — including boundaries and nulls |
 | `test_webconfig_keys` | `src/helpers/WebConfigKeys.h` | POST-key allowlist, secret detection, admin-password classification/validation, slot-index bounds, and the short-key out-of-bounds guard (attacker-supplied keys) |

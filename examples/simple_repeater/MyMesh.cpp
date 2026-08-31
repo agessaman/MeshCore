@@ -1465,8 +1465,107 @@ void MyMesh::clearStats() {
   ((SimpleMeshTables *)getTables())->resetStats();
 }
 
+#ifdef WITH_MQTT_BRIDGE
+bool MyMesh::beginDeferredManualOta(bool force_ap, char* reply) {
+  if (!_manual_ota.isIdle()) {
+    strcpy(reply, _manual_ota.isPending() ? "Err: OTA web server is already preparing"
+                                         : "Err: OTA web server is already running");
+    return true;
+  }
+  if (_ota_update_at) {
+    strcpy(reply, "Err: online OTA update is already pending");
+    return true;
+  }
+#ifdef WITH_WEBCONFIG
+  if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
+    strcpy(reply, "Err: webconfig is using port 80 - stop webconfig first");
+    return true;
+  }
+#endif
+  _manual_ota.schedule(millis(), force_ap);
+  if (force_ap || WiFi.status() != WL_CONNECTED) {
+    strcpy(reply, "Preparing OTA web server; join MeshCore-OTA, then open http://192.168.4.1/update");
+  } else {
+    snprintf(reply, 160, "Preparing OTA web server at http://%s/update; MQTT will pause",
+             WiFi.localIP().toString().c_str());
+  }
+  return true;
+}
+
+bool MyMesh::stopManualOta(char* reply) {
+  if (_manual_ota.isPending()) {
+    _manual_ota.reset();
+    strcpy(reply, "OK - pending OTA web server start cancelled");
+    return true;
+  }
+  if (!_manual_ota.isActive()) {
+    strcpy(reply, "Err: OTA web server not running");
+    return true;
+  }
+
+  char board_reply[160] = {0};
+  if (!_cli.getBoard()->stopOTAUpdate(board_reply)) {
+    strcpy(reply, "Err: OTA web server state lost");
+    return true;
+  }
+  if (strncmp(board_reply, "Error:", 6) == 0) {
+    strncpy(reply, board_reply, 159);
+    reply[159] = 0;
+    return true;
+  }
+
+  const bool resume_bridge = _manual_ota.bridgeWasRunning();
+  _manual_ota.reset();
+  if (resume_bridge) setBridgeState(true);
+  strcpy(reply, resume_bridge ? "OK - OTA web server stopped; bridge resumed"
+                              : "OK - OTA web server stopped");
+  return true;
+}
+
+void MyMesh::tickManualOta() {
+  uint32_t now = millis();
+  if (_manual_ota.startDue(now)) {
+    const bool force_ap = _manual_ota.forceAp();
+    const bool bridge_was_running = bridge && bridge->isRunning();
+    Serial.println("OTA web: preparing manual upload server");
+    drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
+
+    bool may_start = true;
+    if (bridge_was_running) {
+      setBridgeState(false);
+      // Same provisional M7 post-stop mitigation as direct-download OTA. Replace
+      // both with a proven MQTT task/client/callback quiescence barrier.
+      delay(OTA_MQTT_STOP_SETTLE_MS);
+      may_start = bridge && bridge->canFlashAfterStop();
+    }
+
+    char ota_reply[160] = {0};
+    if (may_start && _cli.getBoard()->startOTAUpdate(_prefs.node_name, ota_reply, force_ap)) {
+      _manual_ota.markActive(millis(), bridge_was_running);
+      Serial.print("OTA web: "); Serial.println(ota_reply);
+    } else {
+      if (!may_start) strcpy(ota_reply, "Error: MQTT stop did not complete cleanly");
+      Serial.print("OTA web: start failed - "); Serial.println(ota_reply);
+      _manual_ota.reset();
+      if (bridge_was_running) setBridgeState(true);
+    }
+    return;
+  }
+
+  if (_manual_ota.timeoutDue(now, _cli.getBoard()->isOTAUpdateInProgress())) {
+    char reply[160] = {0};
+    stopManualOta(reply);
+    Serial.print("OTA web: session timeout - "); Serial.println(reply);
+  }
+}
+#endif
+
 #ifdef WITH_WEBCONFIG
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+  if (!_manual_ota.isIdle()) {
+    strcpy(reply, "Err: OTA web server is pending or running - stop ota first");
+    return true;
+  }
   if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
     strcpy(reply, _webconfig->isStopping() ? "Err: webconfig still stopping, retry shortly"
                                            : "Err: webconfig already running");
@@ -1729,36 +1828,46 @@ void MyMesh::loop() {
     MESH_DEBUG_PRINTLN("Radio params restored");
   }
 
+#ifdef WITH_MQTT_BRIDGE
+  tickManualOta();
+#endif
+
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
   if (_ota_update_at && millisHasNowPassed(_ota_update_at)) { // deferred `ota update`
     _ota_update_at = 0;                                       // clear timer
-    // The "Beginning update..." reply has now gone out. Free the bridge for heap
-    // headroom, then flash: otaFromManifest reboots into the new image on success
-    // (so this never returns); on any abort (already up to date, partition change,
-    // download error) it returns and we resume the bridge.
+    // The "Beginning update..." reply has now gone out. Free a running bridge for
+    // heap headroom, then flash. Preserve the prior runtime state: an OTA attempt
+    // must not enable MQTT that an operator deliberately stopped.
     Serial.println("OTA: starting update");
+    const bool bridge_was_running = bridge && bridge->isRunning();
     // Flush the START alert (and CLI reply) out the radio BEFORE teardown blocks
     // the loop until reboot — otherwise a packet still queued here (busy /
     // duty-limited channel) is lost when the flash spins the loop and reboots.
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
-    setBridgeState(false);
-    // TODO: Replace this timed settle with a proven MQTT task/client/callback
-    // quiescence barrier once the teardown race's root cause is identified.
-    delay(OTA_MQTT_STOP_SETTLE_MS);
+
+    bool may_flash = true;
+    if (bridge_was_running) {
+      setBridgeState(false);
+      // TODO: Replace this timed settle with a proven MQTT task/client/callback
+      // quiescence barrier once the teardown race's root cause is identified.
+      delay(OTA_MQTT_STOP_SETTLE_MS);
+      may_flash = bridge && bridge->canFlashAfterStop();
+      if (!may_flash) {
+        Serial.println("OTA: aborted, MQTT stop did not complete cleanly");
+        otaAlert("OTA aborted: MQTT stop unclean");
+      }
+    }
+
     char ota_reply[160];
-    // OTA teardown barrier (Phase 5): only flash after a CLEAN MQTT shutdown.
-    // A timed-out/forced stop leaves mbedTLS/heap ownership uncertain — writing
-    // firmware then is the observed teardown heap-panic path — so abort and
-    // resume the bridge instead of flashing under uncertain ownership.
-    if (bridge && !bridge->canFlashAfterStop()) {
-      Serial.println("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge");
-      otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
-      setBridgeState(true);
-    } else if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
-      Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
+    if (may_flash && !_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+      Serial.print("OTA: aborted - "); Serial.println(ota_reply);
       char ota_alert_msg[160];
       snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);
       otaAlert(ota_alert_msg);
+      may_flash = false;
+    }
+    if (!may_flash && bridge_was_running) {
+      Serial.println("OTA: resuming bridge");
       setBridgeState(true);
     }
     // Success path: otaFromManifest() flashes and reboots into the new image

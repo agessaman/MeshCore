@@ -1276,16 +1276,27 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
               (int)mi.fordblks, (int)mi.uordblks, (int)mi.arena, (int)mi.ordblks,
               _callbacks->getQueueSize());
 #endif
-    } else if (memcmp(command, "start ota", 9) == 0) {
+    } else if (memcmp(command, "start ota", 9) == 0 &&
+               (command[9] == 0 || command[9] == ' ')) {
       // Manual OTA: bring up the ElegantOTA web UI for a hand-uploaded binary.
       // Plain "start ota" serves on the station IP when joined to WiFi, else
       // raises the MeshCore-OTA SoftAP. "start ota ap" forces the SoftAP even
       // when connected, so the UI is reachable when the network applies client
-      // isolation and the station IP can't be reached. (&& short-circuits keep
-      // the [10]/[11] reads in-bounds when command == "start ota".)
-      bool force_ap = (command[9] == ' ' && command[10] == 'a' && command[11] == 'p');
-      if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
-        strcpy(reply, "Error");
+      // isolation and the station IP can't be reached.
+      bool force_ap = command[9] == ' ' && strcmp(&command[10], "ap") == 0;
+      if (command[9] == ' ' && !force_ap) {
+        strcpy(reply, "ERR: usage start ota [ap]");
+      } else {
+        reply[0] = 0;
+        if (!_callbacks->beginDeferredManualOta(force_ap, reply) &&
+            !_board->startOTAUpdate(_prefs->node_name, reply, force_ap) && reply[0] == 0) {
+          strcpy(reply, "Error");
+        }
+      }
+    } else if (strcmp(command, "stop ota") == 0) {
+      reply[0] = 0;
+      if (!_callbacks->stopManualOta(reply) && !_board->stopOTAUpdate(reply) && reply[0] == 0) {
+        strcpy(reply, "ERR: OTA web server not running");
       }
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
