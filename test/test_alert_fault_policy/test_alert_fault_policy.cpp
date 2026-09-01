@@ -350,6 +350,17 @@ TEST(AlertFaultPolicy, FormatWifiAlertUsesSnapshotReason) {
   EXPECT_STREQ("WiFi down 47m", text);
 }
 
+TEST(AlertFaultPolicy, FormatNetworkAlertUsesSelectedMediumLabel) {
+  Alert::Fault f = OkFault();
+  const Alert::OutageSnapshot snap = Down(1000, 0);
+  const Alert::TickResult r = Alert::tick(
+      f, 1000 + kWifiThresh, snap, kWifiThresh, kMinInterval);
+  char text[80];
+  ASSERT_TRUE(Alert::formatNetworkAlert(
+      text, sizeof(text), "Ethernet", r, snap));
+  EXPECT_STREQ("Ethernet down 30m", text);
+}
+
 TEST(AlertFaultPolicy, FormatMqttSlotMessages) {
   char text[100];
   Alert::formatMqttDown(text, sizeof(text), 1, "analyzer-us", 30U * 60000U);

@@ -2,8 +2,8 @@
 
 #include "MeshCore.h"
 #include "helpers/bridges/BridgeBase.h"
+#include "helpers/NetworkInterface.h"
 #include <PsychicMqttClient.h>
-#include <WiFi.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
@@ -219,11 +219,6 @@ private:
   bool _ntp_synced;
   bool _ntp_sync_pending;  // Flag to trigger NTP sync from loop() instead of event handler
   bool _slots_setup_done;  // Deferred: slots set up after NTP sync
-  // WiFi.onEvent() handler registered once and never removed by end(); the bridge
-  // object is reused across restarts, so re-registering would leak handlers and
-  // duplicate every connect/disconnect log line. Inline-initialised so it survives
-  // construction and is NOT reset by end().
-  bool _wifi_event_registered = false;
   int _max_active_slots;   // Runtime limit: 5 with PSRAM, 2 without
 
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
@@ -406,24 +401,7 @@ private:
   unsigned long _last_config_warning; // Throttle configuration mismatch warnings
   static const unsigned long CONFIG_WARNING_INTERVAL = 300000; // Log every 5 minutes max
 
-  // WiFi connection state and exponential backoff
-  unsigned long _last_wifi_check;
-  wl_status_t _last_wifi_status;
-  bool _wifi_status_initialized;
-  // Packed OutageSnapshot; Core 0 (event + MQTT task) stores, Core 1 loads.
-  std::atomic<uint64_t> _wifi_outage_bits;
-  unsigned long _last_wifi_reconnect_attempt;
-  uint8_t _wifi_reconnect_backoff_attempt;  // 0..5 → 15s, 30s, 60s, 120s, 300s; reset on connect
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
-
-  AlertFaultPolicy::OutageSnapshot wifiOutage() const {
-    return AlertFaultPolicy::unpackOutageSnapshot(
-        _wifi_outage_bits.load(std::memory_order_acquire));
-  }
-  void setWifiOutage(AlertFaultPolicy::OutageSnapshot snap) {
-    _wifi_outage_bits.store(AlertFaultPolicy::packOutageSnapshot(snap),
-                            std::memory_order_release);
-  }
 
   // Optional pointers for collecting stats internally (set by mesh if available)
   mesh::Dispatcher* _dispatcher;  // For air times and errors
@@ -483,13 +461,13 @@ private:
 
   void processPacketQueue();
   bool publishStatus();  // Returns true if status was successfully published
-  bool handleWiFiConnection(unsigned long now);
+  bool handleNetworkConnection(unsigned long now);
 
   // FreeRTOS task function (runs on Core 0)
   #ifdef ESP_PLATFORM
   static void mqttTask(void* parameter);
   void mqttTaskLoop();  // Main loop for MQTT task
-  void initializeWiFiInTask();  // WiFi initialization moved to task
+  void initializeNetworkInTask();  // Selected-link initialization moved to task
   #endif
   bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
                      const uint8_t* raw_data = nullptr, int raw_len = 0,
@@ -547,6 +525,7 @@ private:
   // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
   MQTTPrefs* _obs = nullptr;
+  NetworkInterface* _network = nullptr;
 
 public:
   MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
@@ -655,13 +634,17 @@ public:
   static unsigned long getWifiConnectedAtMillis();
 
   /**
-   * Current WiFi outage snapshot for AlertReporter: down, started_ms, and the
+   * Current selected-network outage snapshot for AlertReporter: down,
+   * started_ms, and the
    * initiating disconnect reason. Distinct from getLastWifiDisconnectTime() /
    * getLastWifiDisconnectReason(), which follow the most recent ESP-IDF
    * DISCONNECTED event and are overwritten by STA-backoff WiFi.disconnect()
    * (reason 8 / ASSOC_LEAVE).
    */
-  AlertFaultPolicy::OutageSnapshot getWifiOutageSnapshot() const { return wifiOutage(); }
+  AlertFaultPolicy::OutageSnapshot getWifiOutageSnapshot() const {
+    return _network ? _network->outageSnapshot()
+                    : AlertFaultPolicy::OutageSnapshot{false, 0, 0};
+  }
 
   /**
    * Per-slot outage accessors used by AlertReporter to detect prolonged
@@ -723,7 +706,7 @@ public:
     uint16_t filter_mask;
   };
   static bool getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out);
-  /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
+  /** True when the selected network is configured and at least one MQTT slot can run. */
   static bool isConfigValid(const MQTTPrefs* obs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
   static uint8_t getLastWifiDisconnectReason();

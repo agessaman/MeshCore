@@ -1,7 +1,12 @@
 #include "MyMesh.h"
 #include <algorithm>
+#include <climits>
 #include <stdlib.h>  // for qsort()
 #include <helpers/RxReservePacketManager.h>
+#include <helpers/NetworkInterface.h>
+#if defined(ESP_PLATFORM) && !defined(NETWORK_USE_ETHERNET)
+#include <WiFi.h>
+#endif
 #if defined(WITH_MQTT_NEIGHBORS)
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
 #endif
@@ -1218,11 +1223,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if defined(WITH_WEBCONFIG) && !defined(WEBCONFIG_NO_AUTO_AP)
   // First-boot setup portal: raised only when no WiFi has ever been configured,
   // so an OTA onto a deployed (configured) node can never open an AP.
+  #if !defined(NETWORK_USE_ETHERNET)
   if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
     char wc_reply[160];
     startWebConfig(false, wc_reply);
     Serial.println(wc_reply);
   }
+  #endif
 #endif
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
@@ -1467,6 +1474,11 @@ void MyMesh::clearStats() {
 
 #ifdef WITH_WEBCONFIG
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+#if defined(NETWORK_USE_ETHERNET)
+  (void)force_ap;
+  strcpy(reply, "Err: webconfig unavailable on Ethernet observer; use serial CLI");
+  return true;
+#else
   if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
     strcpy(reply, _webconfig->isStopping() ? "Err: webconfig still stopping, retry shortly"
                                            : "Err: webconfig already running");
@@ -1490,6 +1502,7 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
     _webconfig->startLanMode(reply);     // reports "WiFi not connected" if down
   }
   return true;
+#endif
 }
 
 bool MyMesh::stopWebConfig(char* reply) {
@@ -1523,12 +1536,17 @@ void MyMesh::onConfigBatchEnd() {
 void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
   char ip[20] = "";
   int wifi_rssi = 0;
-  if (WiFi.status() == WL_CONNECTED) {
-    strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
-    wifi_rssi = WiFi.RSSI();
-  } else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
+  NetworkInterface& network = activeNetworkInterface();
+  if (network.isConnected()) {
+    strncpy(ip, network.localIP().toString().c_str(), sizeof(ip) - 1);
+    const int signal = network.rssi();
+    wifi_rssi = signal == INT_MIN ? 0 : signal;
+  }
+#if !defined(NETWORK_USE_ETHERNET)
+  else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
     strncpy(ip, WiFi.softAPIP().toString().c_str(), sizeof(ip) - 1);
   }
+#endif
   int pos = snprintf(buf, buf_size,
       "{\"uptime_s\":%lu,\"batt_mv\":%u,"
       "\"heap_free\":%lu,\"heap_min\":%lu,\"heap_max_alloc\":%lu,"

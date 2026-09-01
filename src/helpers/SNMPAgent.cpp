@@ -1,7 +1,9 @@
 #ifdef WITH_SNMP
 
 #include "SNMPAgent.h"
+#include "NetworkInterface.h"
 #include <esp_heap_caps.h>
+#include <climits>
 
 #define SNMP_PORT 161
 
@@ -67,7 +69,7 @@ void MeshSNMPAgent::begin(const char* community) {
 void MeshSNMPAgent::loop() {
   if (!_running) return;
 
-  // Update memory and network stats locally (we're on Core 0 with WiFi)
+  // Update memory and selected-network stats locally on Core 0.
   _free_heap = (int)ESP.getFreeHeap();
   _max_alloc = (int)ESP.getMaxAllocHeap();
   _internal_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -77,9 +79,8 @@ void MeshSNMPAgent::loop() {
   _psram_free = 0;
 #endif
 
-  if (WiFi.isConnected()) {
-    _wifi_rssi = (int)WiFi.RSSI();
-  }
+  const int signal = activeNetworkInterface().rssi();
+  _wifi_rssi = signal == INT_MIN ? 0 : signal;
 
   _snmp.loop();
 }

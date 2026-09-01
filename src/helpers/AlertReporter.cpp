@@ -6,6 +6,7 @@
 #include <stdio.h>
 #ifdef WITH_MQTT_BRIDGE
 #include "AlertFaultPolicy.h"
+#include "NetworkInterface.h"
 #endif
 
 // Header layout for PAYLOAD_TYPE_GRP_TXT before encryption:
@@ -217,13 +218,21 @@ void AlertReporter::onLoop(unsigned long now_ms) {
           min_interval_ms);
       if (r.action == AlertFaultPolicy::Action::FireDown) {
         char text[80];
-        AlertFaultPolicy::formatWifiAlert(text, sizeof(text), r, snap);
+        AlertFaultPolicy::formatNetworkAlert(
+            text, sizeof(text),
+            strcmp(activeNetworkInterface().mediumName(), "ethernet") == 0
+                ? "Ethernet" : "WiFi",
+            r, snap);
         if (sendChannel(text)) {
           AlertFaultPolicy::commitDown(_wifi, now, snap.started_ms);
         }
       } else if (r.action == AlertFaultPolicy::Action::FireRecovered) {
         char text[80];
-        AlertFaultPolicy::formatWifiAlert(text, sizeof(text), r, snap);
+        AlertFaultPolicy::formatNetworkAlert(
+            text, sizeof(text),
+            strcmp(activeNetworkInterface().mediumName(), "ethernet") == 0
+                ? "Ethernet" : "WiFi",
+            r, snap);
         sendChannel(text);
         AlertFaultPolicy::commitRecovered(_wifi);
       }

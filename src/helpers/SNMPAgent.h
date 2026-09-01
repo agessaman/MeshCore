@@ -2,7 +2,6 @@
 
 #ifdef WITH_SNMP
 
-#include <WiFi.h>
 #include <WiFiUdp.h>
 #include <SNMP_Agent.h>
 
@@ -15,7 +14,7 @@
 //   .2.x.0  = radio    (packets, RSSI, SNR, noise floor, air time)
 //   .3.x.0  = mqtt     (connected slots, queue depth, skipped publishes)
 //   .4.x.0  = memory   (free heap, max alloc, internal free, PSRAM free)
-//   .5.x.0  = network  (WiFi RSSI)
+//   .5.x.0  = network  (RSSI, or 0 when the selected medium has no RSSI)
 
 class MeshSNMPAgent {
 public:

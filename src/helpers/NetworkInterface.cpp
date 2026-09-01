@@ -1,0 +1,296 @@
+#include "NetworkInterface.h"
+
+#if defined(ESP_PLATFORM)
+
+#include "MQTTConnectionPolicy.h"
+
+#include <atomic>
+#include <climits>
+#include <cstring>
+
+#include <WiFi.h>
+#include <esp_wifi.h>
+
+#if defined(NETWORK_USE_ETHERNET)
+#include "ethernet/ch390/CH390Config.h"
+#endif
+
+namespace {
+
+class NetworkInterfaceBase : public NetworkInterface {
+ protected:
+  std::atomic<uint64_t> _outage_bits{AlertFaultPolicy::packOutageSnapshot({false, 0, 0})};
+  std::atomic<unsigned long> _connected_at{0};
+  std::atomic<unsigned long> _last_disconnect_time{0};
+  std::atomic<uint8_t> _last_disconnect_reason{0};
+  bool _status_initialized = false;
+  bool _last_connected = false;
+  unsigned long _last_status_check = 0;
+
+  AlertFaultPolicy::OutageSnapshot outage() const {
+    return AlertFaultPolicy::unpackOutageSnapshot(
+        _outage_bits.load(std::memory_order_acquire));
+  }
+
+  void setOutage(AlertFaultPolicy::OutageSnapshot snapshot) {
+    _outage_bits.store(AlertFaultPolicy::packOutageSnapshot(snapshot),
+                       std::memory_order_release);
+  }
+
+  void noteConnected(unsigned long now_ms) {
+    if (_connected_at.load(std::memory_order_relaxed) == 0) {
+      _connected_at.store(now_ms, std::memory_order_relaxed);
+    }
+    setOutage(AlertFaultPolicy::applyWifiGotIp(outage()));
+  }
+
+  void noteDisconnected(unsigned long now_ms, uint8_t reason) {
+    _last_disconnect_reason.store(reason, std::memory_order_relaxed);
+    _last_disconnect_time.store(now_ms, std::memory_order_relaxed);
+    setOutage(AlertFaultPolicy::applyWifiDisconnectEvent(
+        (uint32_t)now_ms, reason, outage()));
+  }
+
+ public:
+  unsigned long connectedAtMillis() const override {
+    return _connected_at.load(std::memory_order_relaxed);
+  }
+
+  uint8_t lastDisconnectReason() const override {
+    return _last_disconnect_reason.load(std::memory_order_relaxed);
+  }
+
+  unsigned long lastDisconnectTime() const override {
+    return _last_disconnect_time.load(std::memory_order_relaxed);
+  }
+
+  AlertFaultPolicy::OutageSnapshot outageSnapshot() const override {
+    return outage();
+  }
+};
+
+class WiFiNetworkInterface final : public NetworkInterfaceBase {
+  bool _event_registered = false;
+  char _ssid[33] = {};
+  char _password[65] = {};
+  unsigned long _last_reconnect_attempt = 0;
+  uint8_t _reconnect_backoff_attempt = 0;
+
+  void applyPowerPrefs(uint8_t wifi_power_save) {
+    wifi_ps_type_t ps_mode = wifi_power_save == 2 ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE;
+    esp_wifi_set_ps(ps_mode);
+#ifdef MQTT_WIFI_TX_POWER
+    WiFi.setTxPower(MQTT_WIFI_TX_POWER);
+#else
+    WiFi.setTxPower(WIFI_POWER_11dBm);
+#endif
+  }
+
+ public:
+  const char* mediumName() const override { return "wifi"; }
+  const char* statusName() const override {
+    switch (WiFi.status()) {
+      case WL_CONNECTED: return "connected";
+      case WL_NO_SSID_AVAIL: return "no_ssid";
+      case WL_CONNECT_FAILED: return "connect_failed";
+      case WL_CONNECTION_LOST: return "connection_lost";
+      case WL_DISCONNECTED: return "disconnected";
+      case 255: return "not_started";
+      default: return "unknown";
+    }
+  }
+  int statusCode() const override { return (int)WiFi.status(); }
+
+  bool configValid(const char* wifi_ssid) const override {
+    return wifi_ssid && wifi_ssid[0] != '\0';
+  }
+
+  bool begin(const char* wifi_ssid, const char* wifi_password) override {
+    if (!configValid(wifi_ssid)) return false;
+    strncpy(_ssid, wifi_ssid, sizeof(_ssid) - 1);
+    _ssid[sizeof(_ssid) - 1] = '\0';
+    strncpy(_password, wifi_password ? wifi_password : "", sizeof(_password) - 1);
+    _password[sizeof(_password) - 1] = '\0';
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.setAutoConnect(true);
+
+    if (!_event_registered) {
+      WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+        switch (event) {
+          case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            noteConnected(millis());
+            _reconnect_backoff_attempt = 0;
+            break;
+          case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            noteDisconnected(millis(), info.wifi_sta_disconnected.reason);
+            break;
+          default:
+            break;
+        }
+      });
+      _event_registered = true;
+    }
+
+    // Preserve the existing restart behavior: MQTT stop leaves the station up,
+    // and begin() must not force a disconnect that races the first DNS lookup.
+    if (!isConnected()) {
+      WiFi.begin(_ssid, _password);
+    } else {
+      noteConnected(millis());
+    }
+    return true;
+  }
+
+  NetworkTransition maintain(uint32_t now_ms, uint8_t wifi_power_save) override {
+    const bool connected = isConnected();
+    if (connected && connectedAtMillis() == 0) noteConnected(now_ms);
+
+    if (!_status_initialized) {
+      _last_connected = connected;
+      _status_initialized = true;
+      setOutage(AlertFaultPolicy::applyWifiStatus(
+          now_ms, connected, outage(), false));
+    }
+
+    if ((uint32_t)(now_ms - _last_status_check) <= 10000) {
+      if (connected && outage().down) noteConnected(now_ms);
+      return NetworkTransition::None;
+    }
+    _last_status_check = now_ms;
+
+    if (connected) {
+      const bool transitioned = !_last_connected;
+      if (transitioned) {
+        setOutage(AlertFaultPolicy::applyWifiStatus(
+            now_ms, true, outage(), true));
+        _connected_at.store(now_ms, std::memory_order_relaxed);
+        _reconnect_backoff_attempt = 0;
+        applyPowerPrefs(wifi_power_save);
+      }
+      _last_connected = true;
+      return transitioned ? NetworkTransition::Up : NetworkTransition::None;
+    }
+
+    AlertFaultPolicy::OutageSnapshot snapshot = AlertFaultPolicy::applyWifiStatus(
+        now_ms, false, outage(), true);
+    setOutage(snapshot);
+    const bool transitioned = _last_connected;
+    if (transitioned) {
+      _connected_at.store(0, std::memory_order_relaxed);
+    } else if (snapshot.down && MQTTConnectionPolicy::wifiReconnectDue(
+                   now_ms, snapshot.started_ms, (uint32_t)_last_reconnect_attempt,
+                   _reconnect_backoff_attempt)) {
+      _last_reconnect_attempt = now_ms;
+      _reconnect_backoff_attempt =
+          MQTTConnectionPolicy::nextWifiBackoffAttempt(_reconnect_backoff_attempt);
+      WiFi.disconnect();
+      WiFi.begin(_ssid, _password);
+    }
+    _last_connected = false;
+    return transitioned ? NetworkTransition::Down : NetworkTransition::None;
+  }
+
+  bool isConnected() const override { return WiFi.status() == WL_CONNECTED; }
+  IPAddress localIP() const override { return WiFi.localIP(); }
+  int rssi() const override { return isConnected() ? WiFi.RSSI() : INT_MIN; }
+  bool resolveHost(const char* hostname, IPAddress& address) const override {
+    return WiFi.hostByName(hostname, address);
+  }
+};
+
+#if defined(NETWORK_USE_ETHERNET)
+class EthernetNetworkInterface final : public NetworkInterfaceBase {
+  bool _started = false;
+  bool _event_registered = false;
+
+ public:
+  const char* mediumName() const override { return "ethernet"; }
+  const char* statusName() const override {
+    return isConnected() ? "connected" : "disconnected";
+  }
+  int statusCode() const override { return isConnected() ? 1 : 0; }
+  bool configValid(const char*) const override { return true; }
+
+  bool begin(const char*, const char*) override {
+    if (_started) return true;
+    if (!_event_registered) {
+      WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t) {
+        switch (event) {
+          case ARDUINO_EVENT_ETH_GOT_IP:
+            noteConnected(millis());
+            break;
+          case ARDUINO_EVENT_ETH_DISCONNECTED:
+            // Ethernet has no 802.11 reason code; zero means unavailable.
+            noteDisconnected(millis(), 0);
+            _connected_at.store(0, std::memory_order_relaxed);
+            break;
+          default:
+            break;
+        }
+      });
+      _event_registered = true;
+    }
+    _started = beginConfiguredCH390();
+    if (_started && isConnected()) noteConnected(millis());
+    return _started;
+  }
+
+  NetworkTransition maintain(uint32_t now_ms, uint8_t) override {
+    const bool connected = isConnected();
+    if (!_status_initialized) {
+      _last_connected = connected;
+      _status_initialized = true;
+      setOutage(AlertFaultPolicy::applyWifiStatus(
+          now_ms, connected, outage(), false));
+      if (connected) noteConnected(now_ms);
+      return NetworkTransition::None;
+    }
+
+    if (connected == _last_connected) {
+      if (connected && outage().down) noteConnected(now_ms);
+      return NetworkTransition::None;
+    }
+
+    _last_connected = connected;
+    if (connected) {
+      _connected_at.store(now_ms, std::memory_order_relaxed);
+      setOutage(AlertFaultPolicy::applyWifiStatus(
+          now_ms, true, outage(), true));
+      return NetworkTransition::Up;
+    }
+
+    const bool outage_was_down = outage().down;
+    _connected_at.store(0, std::memory_order_relaxed);
+    AlertFaultPolicy::OutageSnapshot snapshot = AlertFaultPolicy::applyWifiStatus(
+        now_ms, false, outage(), true);
+    setOutage(snapshot);
+    if (!outage_was_down) {
+      _last_disconnect_time.store(now_ms, std::memory_order_relaxed);
+    }
+    return NetworkTransition::Down;
+  }
+
+  bool isConnected() const override { return _started && CH390.isConnected(); }
+  IPAddress localIP() const override { return CH390.localIP(); }
+  int rssi() const override { return INT_MIN; }
+  bool resolveHost(const char* hostname, IPAddress& address) const override {
+    // Arduino's hostByName is a thin wrapper over the process-wide lwIP resolver;
+    // DNS follows the selected esp_netif even though this entry point is named WiFi.
+    return WiFi.hostByName(hostname, address);
+  }
+};
+#endif
+
+}  // namespace
+
+NetworkInterface& activeNetworkInterface() {
+#if defined(NETWORK_USE_ETHERNET)
+  static EthernetNetworkInterface network;
+#else
+  static WiFiNetworkInterface network;
+#endif
+  return network;
+}
+#endif

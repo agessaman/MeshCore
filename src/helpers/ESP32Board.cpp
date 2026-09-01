@@ -1,6 +1,7 @@
 #ifdef ESP_PLATFORM
 
 #include "ESP32Board.h"
+#include "NetworkInterface.h"
 #include <target.h>
 
 #if defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)   // Repeater or Room Server only
@@ -14,15 +15,16 @@
 bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   inhibit_sleep = true;   // prevent sleep during OTA
 
-  // If the device is already on a WiFi network (e.g. an observer joined in STA
-  // mode), serve ElegantOTA on the station IP so it's reachable from the LAN
-  // without joining a separate AP. Otherwise raise the MeshCore-OTA SoftAP.
+  // If the device is already on its selected network, serve ElegantOTA on that
+  // address so it is reachable without joining a separate AP. Otherwise raise
+  // the MeshCore-OTA SoftAP.
   // force_ap ("start ota ap") always raises the SoftAP, so the OTA UI stays
   // reachable even when the joined network applies client isolation and the
   // station IP can't be reached.
   IPAddress ip;
-  if (!force_ap && WiFi.status() == WL_CONNECTED) {
-    ip = WiFi.localIP();
+  if (NetworkPolicy::startOtaUsesSelectedNetwork(
+          force_ap, activeNetworkInterface().isConnected())) {
+    ip = activeNetworkInterface().localIP();
   } else {
     WiFi.softAP("MeshCore-OTA", NULL);
     ip = WiFi.softAPIP();
@@ -200,8 +202,9 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   strcpy(reply, "ERR: OTA not configured (build via build.sh)");
   return false;
 #else
-  if (WiFi.status() != WL_CONNECTED) {
-    strcpy(reply, "ERR: WiFi not connected");
+  if (!activeNetworkInterface().isConnected()) {
+    snprintf(reply, 160, "ERR: %s not connected",
+             activeNetworkInterface().mediumName());
     return false;
   }
 

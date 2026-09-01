@@ -100,16 +100,8 @@ void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* ob
   applyEffectiveOrigin(np, obs, buf, buf_size);
 }
 
-// Helper function to check if WiFi credentials are valid
-static bool isWiFiConfigValid(const MQTTPrefs* obs) {
-  // Check if WiFi SSID is configured (not empty)
-  if (!obs || strlen(obs->wifi_ssid) == 0) {
-    return false;
-  }
-
-  // WiFi password can be empty for open networks, so we don't check it
-
-  return true;
+static bool isNetworkConfigValid(const MQTTPrefs* obs) {
+  return obs && activeNetworkInterface().configValid(obs->wifi_ssid);
 }
 
 #ifdef WITH_MQTT_BRIDGE
@@ -122,7 +114,7 @@ static bool customEndpointComplete(const char* host, uint16_t port) {
 }
 
 bool MQTTBridge::isConfigValid(const MQTTPrefs* obs) {
-  if (!obs || !isWiFiConfigValid(obs)) return false;
+  if (!obs || !isNetworkConfigValid(obs)) return false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const char* preset_name = obs->mqtt_slot_preset[i];
     if (preset_name[0] == '\0' || strcmp(preset_name, MQTT_PRESET_NONE) == 0) continue;
@@ -210,13 +202,6 @@ void* MQTTBridge::JsonScratchAllocator::reallocate(void* ptr, size_t new_size) {
   return psram_realloc(ptr, new_size);
 }
 
-// Time (millis()) when WiFi was last seen connected; 0 when disconnected. Used for get wifi.status uptime.
-static unsigned long s_wifi_connected_at = 0;
-
-// Last WiFi disconnect reason (from ESP-IDF event). Used for get wifi.status diagnostics.
-static uint8_t s_wifi_disconnect_reason = 0;
-static unsigned long s_wifi_disconnect_time = 0;
-
 #ifdef MQTT_MEMORY_DEBUG
 // #region agent log
 static void agentLogHeap(const char* location, const char* message, const char* hypothesisId,
@@ -236,7 +221,7 @@ static void agentLogHeap(const char* location, const char* message, const char* 
 static MQTTBridge* s_mqtt_bridge_instance = nullptr;
 
 unsigned long MQTTBridge::getWifiConnectedAtMillis() {
-  return s_wifi_connected_at;
+  return activeNetworkInterface().connectedAtMillis();
 }
 
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -427,8 +412,12 @@ int MQTTBridge::getMaxActiveSlots() {
 #endif
 }
 
-uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
-unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
+uint8_t MQTTBridge::getLastWifiDisconnectReason() {
+  return activeNetworkInterface().lastDisconnectReason();
+}
+unsigned long MQTTBridge::getLastWifiDisconnectTime() {
+  return activeNetworkInterface().lastDisconnectTime();
+}
 
 unsigned long MQTTBridge::getSlotCurrentOutageStartMs(int slot_index) const {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return 0;
@@ -635,6 +624,7 @@ static inline uint32_t mqttStopTimeoutForSlots(int slots) {
 MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
     : BridgeBase(prefs, mgr, rtc),
       _obs(obs),
+      _network(&activeNetworkInterface()),
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
       _ntp_client(_ntp_udp, effectiveNtpPrimary(obs), 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
@@ -661,8 +651,6 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #ifdef WITH_SNMP
       _snmp_agent(nullptr),
 #endif
-      _last_wifi_check(0), _last_wifi_status(WL_DISCONNECTED), _wifi_status_initialized(false),
-      _wifi_outage_bits{0}, _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
       _last_slot_reconnect_ms(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
@@ -857,9 +845,10 @@ void MQTTBridge::begin() {
   _max_active_slots = getMaxActiveSlots();
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
-  // Check if WiFi credentials are configured first
-  if (!isWiFiConfigValid(_obs)) {
-    MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - WiFi credentials not configured");
+  // Ethernet needs no credentials; Wi-Fi preserves the existing SSID gate.
+  if (!isNetworkConfigValid(_obs)) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - %s is not configured",
+                       _network->mediumName());
     return;
   }
 
@@ -1043,11 +1032,8 @@ void MQTTBridge::begin() {
 
   MQTT_DEBUG_PRINTLN("MQTT task created on Core %d", MQTT_TASK_CORE);
   #else
-  // Non-ESP32: Initialize WiFi directly (no task)
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.setAutoConnect(true);
-  WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
+  // Non-ESP32: initialize the selected network directly (no task).
+  _network->begin(_obs->wifi_ssid, _obs->wifi_password);
 
   // NOTE: Slot setup deferred until after NTP sync in loop()
   #endif
@@ -1237,75 +1223,31 @@ void MQTTBridge::mqttTask(void* parameter) {
   vTaskDelete(nullptr);
 }
 
-void MQTTBridge::initializeWiFiInTask() {
-  MQTT_DEBUG_PRINTLN("Initializing WiFi in MQTT task...");
+void MQTTBridge::initializeNetworkInTask() {
+  MQTT_DEBUG_PRINTLN("Initializing %s network in MQTT task...", _network->mediumName());
 
-  // Initialize WiFi
-  WiFi.mode(WIFI_STA);
-
-  // Enable automatic reconnection - ESP32 will handle reconnection automatically
-  WiFi.setAutoReconnect(true);
-  WiFi.setAutoConnect(true);
-
-  // Set up WiFi event handlers for better diagnostics and immediate disconnection
-  // detection. Register ONCE — the bridge is reused across restarts (e.g. stopped
-  // for `ota check`/`ota update`, or `set mqtt…` reconfigure) and WiFi.onEvent()
-  // never removes prior callbacks, so re-registering leaks handlers and duplicates
-  // every log line.
-  if (!_wifi_event_registered) {
-    WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
-      switch(event) {
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-          MQTT_DEBUG_PRINTLN("WiFi connected: %s", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
-          setWifiOutage(AlertFaultPolicy::applyWifiGotIp(wifiOutage()));
-          _wifi_reconnect_backoff_attempt = 0;
-          // Set flag to trigger NTP sync from loop() instead of doing it here
-          if (!_ntp_synced && !_ntp_sync_pending) {
-            _ntp_sync_pending = true;
-          }
-          break;
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
-          const uint8_t reason = info.wifi_sta_disconnected.reason;
-          const unsigned long t = millis();
-          s_wifi_disconnect_reason = reason;
-          s_wifi_disconnect_time = t;
-          setWifiOutage(AlertFaultPolicy::applyWifiDisconnectEvent(
-              (uint32_t)t, reason, wifiOutage()));
-          MQTT_DEBUG_PRINTLN("WiFi disconnected: reason %d", s_wifi_disconnect_reason);
-          break;
-        }
-        default:
-          break;
-      }
-    });
-    _wifi_event_registered = true;
-  }
-
-  // Only (re)start the WiFi association if it isn't already up. end() leaves the
-  // STA link connected, so on a restart (e.g. after `ota check`) calling
-  // WiFi.begin() again forces a needless disconnect/reconnect — which also races
-  // the MQTT task's first DNS lookup (getaddrinfo fails until WiFi/DNS recovers).
-  // When already connected, the deferred slot setup still fires in mqttTaskLoop()
-  // because _ntp_synced persists across end() (only _slots_setup_done is reset).
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
-  } else if (!_ntp_synced && !_ntp_sync_pending) {
-    _ntp_sync_pending = true;  // already connected but never synced — kick NTP now
+  // begin() is idempotent and deliberately leaves an already-up link alone.
+  // MQTT end()/begin() cycles therefore keep the transport alive for OTA and do
+  // not race the first DNS lookup after a bridge restart.
+  if (!_network->begin(_obs->wifi_ssid, _obs->wifi_password)) {
+    MQTT_DEBUG_PRINTLN("%s network initialization failed", _network->mediumName());
+  } else if (_network->isConnected() && !_ntp_synced && !_ntp_sync_pending) {
+    _ntp_sync_pending = true;
   }
 
   // NOTE: Slot setup is deferred until after NTP sync in mqttTaskLoop().
   // JWT-auth slots need valid timestamps for token creation, and connecting
   // before NTP sync just wastes heap on TLS handshakes that will be rejected.
 
-  MQTT_DEBUG_PRINTLN("WiFi initialization started in task");
+  MQTT_DEBUG_PRINTLN("%s network initialization started in task", _network->mediumName());
 }
 
 // ---------------------------------------------------------------------------
 // mqttTaskLoop() - main loop running on Core 0
 // ---------------------------------------------------------------------------
 void MQTTBridge::mqttTaskLoop() {
-  // Initialize WiFi first
-  initializeWiFiInTask();
+  // Initialize the selected physical network first.
+  initializeNetworkInTask();
 
   // Wait a bit for WiFi to start connecting
   vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1362,9 +1304,9 @@ void MQTTBridge::mqttTaskLoop() {
     }
     #endif
 
-    bool wifi_just_connected = handleWiFiConnection(now);
-    if (wifi_just_connected) {
-      // WiFi recovered — reset last_reconnect_attempt for disconnected slots so they
+    bool network_just_connected = handleNetworkConnection(now);
+    if (network_just_connected) {
+      // The uplink recovered — reset last_reconnect_attempt for disconnected slots so they
       // retry immediately rather than waiting up to 5 min for backoff timers to expire.
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         if (_slots[i].enabled && _slots[i].initial_connect_done && !_slots[i].connected) {
@@ -1373,14 +1315,18 @@ void MQTTBridge::mqttTaskLoop() {
       }
     }
 
-    // Check for pending NTP sync (triggered from WiFi event handler)
-    if (_ntp_sync_pending && WiFi.status() == WL_CONNECTED) {
+    // A connected observation is enough to schedule NTP; physical event callbacks
+    // stay encapsulated in the selected network adapter.
+    if (!_ntp_synced && _network->isConnected() && !_ntp_sync_pending) {
+      _ntp_sync_pending = true;
+    }
+    if (_ntp_sync_pending && _network->isConnected()) {
       _ntp_sync_pending = false;
       syncTimeWithNTP();
     }
 
     // Retry NTP every 30s if initial sync failed (slots can't start without valid time)
-    if (!_ntp_synced && WiFi.status() == WL_CONNECTED) {
+    if (!_ntp_synced && _network->isConnected()) {
       static unsigned long last_ntp_retry = 0;
       if (now - last_ntp_retry >= 30000) {
         last_ntp_retry = now;
@@ -1495,7 +1441,7 @@ void MQTTBridge::mqttTaskLoop() {
 #ifdef WITH_SNMP
     // SNMP agent loop — process incoming UDP requests
     if (_snmp_agent) {
-      if (!_snmp_agent->isRunning() && WiFi.isConnected() && _obs->snmp_enabled) {
+      if (!_snmp_agent->isRunning() && _network->isConnected() && _obs->snmp_enabled) {
         _snmp_agent->begin(_obs->snmp_community);
         MQTT_DEBUG_PRINTLN("SNMP agent started on port 161 (community: %s)", _obs->snmp_community);
       }
@@ -1517,7 +1463,7 @@ void MQTTBridge::mqttTaskLoop() {
     // Periodic NTP refresh (every hour) — lightweight, non-blocking.
     // Uses async SNTP instead of the heavy syncTimeWithNTP() which blocks Core 0
     // for up to 20+ seconds with DNS lookups, UDP sockets, and retry loops.
-    if (WiFi.status() == WL_CONNECTED && now - _last_ntp_sync > 3600000) {
+    if (_network->isConnected() && now - _last_ntp_sync > 3600000) {
       refreshNTP();
     }
 
@@ -2062,7 +2008,7 @@ void MQTTBridge::maintainSlotConnections() {
   if (!_identity) return;
 
   // Check WiFi status first
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (!_network->isConnected()) return;
 
   unsigned long now_millis = millis();
   unsigned long current_time = time(nullptr);
@@ -2792,98 +2738,26 @@ void MQTTBridge::checkConfigurationMismatch() {
   }
 }
 
-bool MQTTBridge::handleWiFiConnection(unsigned long now) {
-  wl_status_t current_wifi_status = WiFi.status();
-  bool transitioned_to_connected = false;
-
-  if (current_wifi_status == WL_CONNECTED && s_wifi_connected_at == 0) {
-    s_wifi_connected_at = now;
-  }
-  if (!_wifi_status_initialized) {
-    _last_wifi_status = current_wifi_status;
-    _wifi_status_initialized = true;
-    setWifiOutage(AlertFaultPolicy::applyWifiStatus(
-        (uint32_t)now, current_wifi_status == WL_CONNECTED, wifiOutage(), false));
-  }
-  if (now - _last_wifi_check <= 10000) {
-    // Events own the snapshot between 10 s polls. If STA is associated again
-    // and GOT_IP was missed, still close the outage so a flap contained
-    // between polls does not look like one continuous downtime.
-    if (current_wifi_status == WL_CONNECTED) {
-      AlertFaultPolicy::OutageSnapshot snap = wifiOutage();
-      if (snap.down) {
-        setWifiOutage(AlertFaultPolicy::applyWifiGotIp(snap));
+bool MQTTBridge::handleNetworkConnection(unsigned long now) {
+  const NetworkTransition transition =
+      _network->maintain((uint32_t)now, _obs->wifi_power_save);
+  const NetworkPolicy::MQTTTransitionActions actions =
+      NetworkPolicy::mqttActions(transition);
+  if (actions.disconnect_slots) {
+    // Broker ownership stays in the bridge. The physical adapter reports the
+    // edge; the bridge explicitly closes every slot instead of waiting for
+    // eventual socket timeouts.
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      if (_slots[i].client && _slots[i].connected) {
+        _slots[i].client->disconnect();
       }
     }
-    return false;
   }
-  _last_wifi_check = now;
-
-  if (current_wifi_status == WL_CONNECTED) {
-    if (_last_wifi_status != WL_CONNECTED) {
-      transitioned_to_connected = true;
-      setWifiOutage(AlertFaultPolicy::applyWifiStatus(
-          (uint32_t)now, true, wifiOutage(), true));
-      s_wifi_connected_at = now;
-      _wifi_reconnect_backoff_attempt = 0;
-      #ifdef ESP_PLATFORM
-      wifi_ps_type_t ps_mode;
-      uint8_t ps_pref = _obs->wifi_power_save;
-      if (ps_pref == 1) {
-        ps_mode = WIFI_PS_NONE;
-      } else if (ps_pref == 2) {
-        ps_mode = WIFI_PS_MAX_MODEM;
-      } else {
-        ps_mode = WIFI_PS_NONE;  // default: no power save; eliminates DTIM wake latency on mains-powered bridges
-      }
-      esp_wifi_set_ps(ps_mode);
-      #ifdef MQTT_WIFI_TX_POWER
-      WiFi.setTxPower(MQTT_WIFI_TX_POWER);
-      #else
-      WiFi.setTxPower(WIFI_POWER_11dBm);
-      #endif
-      #endif
-    }
-    if (s_wifi_connected_at == 0) {
-      s_wifi_connected_at = now;
-    }
-    _last_wifi_status = WL_CONNECTED;
-  } else {
-    const bool last_connected = (_last_wifi_status == WL_CONNECTED);
-    AlertFaultPolicy::OutageSnapshot snap = AlertFaultPolicy::applyWifiStatus(
-        (uint32_t)now, false, wifiOutage(), true);
-    setWifiOutage(snap);
-    if (last_connected) {
-      s_wifi_connected_at = 0;
-      // Disconnect all slot clients when WiFi drops
-      for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-        if (_slots[i].client && _slots[i].connected) {
-          _slots[i].client->disconnect();
-        }
-      }
-    } else if (snap.down) {
-      // Backoff ladder + wrap-safe timing live in MQTTConnectionPolicy (Phase 6),
-      // exercised by host tests. Behavior is unchanged: both the link-down
-      // duration and the since-last-attempt interval must clear the current rung
-      // (elapsedMs is the wrap-safe form of the old ULONG_MAX branch).
-      if (MQTTConnectionPolicy::wifiReconnectDue(
-              (uint32_t)now, snap.started_ms,
-              (uint32_t)_last_wifi_reconnect_attempt,
-              _wifi_reconnect_backoff_attempt)) {
-        _last_wifi_reconnect_attempt = now;
-        _wifi_reconnect_backoff_attempt =
-            MQTTConnectionPolicy::nextWifiBackoffAttempt(_wifi_reconnect_backoff_attempt);
-        WiFi.disconnect();
-        WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
-      }
-    }
-    _last_wifi_status = current_wifi_status;
-  }
-  return transitioned_to_connected;
+  return actions.retry_disconnected_slots_now;
 }
 
 bool MQTTBridge::isReady() const {
-  return _initialized && isWiFiConfigValid(_obs);
+  return _initialized && isNetworkConfigValid(_obs);
 }
 
 bool MQTTBridge::isIATAValid() const {
@@ -2943,10 +2817,10 @@ void MQTTBridge::loop() {
   return;
   #else
   unsigned long now = millis();
-  if (handleWiFiConnection(now) && !_ntp_synced) {
+  if (handleNetworkConnection(now) && !_ntp_synced) {
     syncTimeWithNTP();
   }
-  if (_ntp_sync_pending && WiFi.status() == WL_CONNECTED) {
+  if (_ntp_sync_pending && _network->isConnected()) {
     _ntp_sync_pending = false;
     syncTimeWithNTP();
   }
@@ -2986,7 +2860,7 @@ void MQTTBridge::loop() {
   checkConfigurationMismatch();
 
   // Periodic NTP refresh (every hour) — lightweight, non-blocking.
-  if (WiFi.status() == WL_CONNECTED && millis() - _last_ntp_sync > 3600000) {
+  if (_network->isConnected() && millis() - _last_ntp_sync > 3600000) {
     refreshNTP();
   }
 
@@ -3977,8 +3851,8 @@ void MQTTBridge::refreshNTP() {
 }
 
 bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
-  if (!WiFi.isConnected()) {
-    MQTT_DEBUG_PRINTLN("Cannot sync time - WiFi not connected");
+  if (!_network->isConnected()) {
+    MQTT_DEBUG_PRINTLN("Cannot sync time - %s not connected", _network->mediumName());
     return false;
   }
 
@@ -4026,7 +3900,7 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     // Skipping is what keeps the credit honest; the name that answered is the name
     // recorded.
     IPAddress resolved_ip;
-    if (!WiFi.hostByName(server, resolved_ip)) {
+    if (!_network->resolveHost(server, resolved_ip)) {
       MQTT_DEBUG_PRINTLN("NTP: %s does not resolve — skipping, not attempting a send", server);
       continue;
     }

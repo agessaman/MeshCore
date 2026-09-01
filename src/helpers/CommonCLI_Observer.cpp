@@ -15,7 +15,9 @@
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
+#include "NetworkInterface.h"
 #include <Utils.h>
+#include <climits>
 #include <new>
 #ifdef ESP_PLATFORM
 #include <WiFi.h>
@@ -414,8 +416,9 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       // runs on the Arduino loop task, shared with mesh/radio processing and the
       // web config batch, so a synchronous wait of up to 30 s would stall the
       // node. The sync runs in the background; verify with `get mqtt.ntp.diag`.
-      if (WiFi.status() != WL_CONNECTED) {
-        strcpy(reply, "OK - saved (WiFi not connected; NTP sync pending)");
+      if (!activeNetworkInterface().isConnected()) {
+        snprintf(reply, 160, "OK - saved (%s not connected; NTP sync pending)",
+                 activeNetworkInterface().mediumName());
       } else if (!_callbacks->isMqttBridgeRunning()) {
         strcpy(reply, "OK - saved (MQTT bridge not running)");
       } else if (_callbacks->syncMqttNtp()) {
@@ -457,7 +460,8 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       _mqtt_prefs.wifi_power_save = ps_value;
       if (!persistObserverPrefs(reply)) return true;
 #ifdef ESP_PLATFORM
-      if (WiFi.status() == WL_CONNECTED) {
+      if (strcmp(activeNetworkInterface().mediumName(), "wifi") == 0 &&
+          activeNetworkInterface().isConnected()) {
         wifi_ps_type_t ps_mode = (ps_value == 1) ? WIFI_PS_NONE :
                                 (ps_value == 2) ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
         esp_err_t ps_result = esp_wifi_set_ps(ps_mode);
@@ -958,8 +962,9 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #ifdef ESP_PLATFORM
     // Connectivity probe across all configured NTP servers; never updates the clock.
     // Serial console (sender_timestamp == 0) gets a detailed table; LoRa gets a compact list.
-    if (WiFi.status() != WL_CONNECTED) {
-      strcpy(reply, "Error: WiFi not connected");
+    if (!activeNetworkInterface().isConnected()) {
+      snprintf(reply, 160, "Error: %s not connected",
+               activeNetworkInterface().mediumName());
     } else if (!_callbacks->isMqttBridgeRunning()) {
       strcpy(reply, "Error: MQTT bridge not running");
     } else if (!_callbacks->runMqttNtpDiag(reply, 160, sender_timestamp == 0)) {
@@ -1033,20 +1038,28 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       strcpy(reply, _mqtt_prefs.wifi_password[0] ? "> ******** (serial only)" : "> (not set)");
     }
-  } else if (memcmp(config, "wifi.status", 11) == 0) {
-    wl_status_t status = WiFi.status();
-    const char* status_str;
-    switch (status) {
-      case WL_CONNECTED: status_str = "connected"; break;
-      case WL_NO_SSID_AVAIL: status_str = "no_ssid"; break;
-      case WL_CONNECT_FAILED: status_str = "connect_failed"; break;
-      case WL_CONNECTION_LOST: status_str = "connection_lost"; break;
-      case WL_DISCONNECTED: status_str = "disconnected"; break;
-      case 255: status_str = "not_started"; break;
-      default: status_str = "unknown"; break;
+  } else if (memcmp(config, "link.status", 11) == 0 ||
+             memcmp(config, "wifi.status", 11) == 0) {
+    NetworkInterface& network = activeNetworkInterface();
+    const bool wifi_alias = config[0] == 'w';
+    if (wifi_alias && strcmp(network.mediumName(), "wifi") != 0) {
+      snprintf(reply, 160, "> n/a (%s selected; use get link.status)",
+               network.mediumName());
+      return true;
     }
-    if (status == WL_CONNECTED) {
-      sprintf(reply, "> %s, IP: %s, RSSI: %d dBm", status_str, WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    const bool connected = network.isConnected();
+    if (connected) {
+      const int signal = network.rssi();
+      if (wifi_alias) {
+        snprintf(reply, 160, "> %s, IP: %s, RSSI: %d dBm",
+                 network.statusName(), network.localIP().toString().c_str(), signal);
+      } else if (signal == INT_MIN) {
+        snprintf(reply, 160, "> %s: connected, IP: %s", network.mediumName(),
+                 network.localIP().toString().c_str());
+      } else {
+        snprintf(reply, 160, "> %s: connected, IP: %s, RSSI: %d dBm",
+                 network.mediumName(), network.localIP().toString().c_str(), signal);
+      }
 #ifdef WITH_MQTT_BRIDGE
       unsigned long connect_at = MQTTBridge::getWifiConnectedAtMillis();
       if (connect_at != 0) {
@@ -1074,19 +1087,35 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #endif
     } else {
 #ifdef WITH_MQTT_BRIDGE
-      uint8_t reason = MQTTBridge::getLastWifiDisconnectReason();
+      uint8_t reason = network.lastDisconnectReason();
       if (reason != 0) {
         const char* desc = MQTTBridge::wifiReasonStr(reason);
         if (desc) {
-          sprintf(reply, "> %s: %s (reason: %d)", status_str, desc, reason);
+          if (wifi_alias) {
+            sprintf(reply, "> %s: %s (reason: %d)", network.statusName(), desc, reason);
+          } else {
+            sprintf(reply, "> %s: %s (reason: %d)", network.mediumName(), desc, reason);
+          }
         } else {
-          sprintf(reply, "> %s: reason %d", status_str, reason);
+          if (wifi_alias) {
+            sprintf(reply, "> %s: reason %d", network.statusName(), reason);
+          } else {
+            sprintf(reply, "> %s: reason %d", network.mediumName(), reason);
+          }
         }
       } else {
-        sprintf(reply, "> %s (code: %d)", status_str, status);
+        if (wifi_alias) {
+          sprintf(reply, "> %s (code: %d)", network.statusName(), network.statusCode());
+        } else {
+          sprintf(reply, "> %s: %s", network.mediumName(), network.statusName());
+        }
       }
 #else
-      sprintf(reply, "> %s (code: %d)", status_str, status);
+      if (wifi_alias) {
+        sprintf(reply, "> %s (code: %d)", network.statusName(), network.statusCode());
+      } else {
+        sprintf(reply, "> %s: %s", network.mediumName(), network.statusName());
+      }
 #endif
     }
   } else if (memcmp(config, "wifi.powersave", 14) == 0) {
@@ -1150,8 +1179,9 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
 #ifdef WITH_MQTT_BRIDGE
   if (memcmp(command, "tls.bundletest ", 15) == 0) {
 #ifdef ESP_PLATFORM
-    if (WiFi.status() != WL_CONNECTED) {
-      strcpy(reply, "ERR: WiFi not connected");
+    if (!activeNetworkInterface().isConnected()) {
+      snprintf(reply, 160, "ERR: %s not connected",
+               activeNetworkInterface().mediumName());
     } else {
       size_t bundle_len = 0;
       if (rootca_crt_bundle_start != nullptr &&
@@ -1196,8 +1226,9 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     //   ota check  -> report available build, do not flash
     //   ota update -> download and flash, then reboot
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
-    if (WiFi.status() != WL_CONNECTED) {
-      strcpy(reply, "ERR: WiFi not connected");
+    if (!activeNetworkInterface().isConnected()) {
+      snprintf(reply, 160, "ERR: %s not connected",
+               activeNetworkInterface().mediumName());
     } else if (memcmp(command, "ota check", 9) == 0) {
       // Check is synchronous so its result lands in this reply, and runs with the
       // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only
