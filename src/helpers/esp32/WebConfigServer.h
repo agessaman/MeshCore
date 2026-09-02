@@ -6,8 +6,9 @@
 //  - SETUP: open SoftAP + captive portal, raised automatically on first boot
 //    when no WiFi is configured (wifi_ssid empty), or manually via
 //    `start webconfig ap`. Save -> reboot; auto-stops after an idle timeout.
-//  - LAN: bound to the existing STA connection (owned by the MQTT bridge
-//    task), started via `start webconfig`, admin-password login required.
+//  - LAN: bound to the selected network, started via `start webconfig`,
+//    admin-password login required. First-run Ethernet uses a random one-time
+//    login code and requires the operator to replace the admin password.
 //
 // Concurrency model: AsyncWebServer handlers run on the async_tcp task and
 // must never touch the CLI, prefs persistence, or the radio. Config writes
@@ -57,6 +58,9 @@ public:
     // `set` handlers can be coalesced into one.
     virtual void onConfigBatchStart() {}
     virtual void onConfigBatchEnd() {}
+    // Persist completion of Ethernet onboarding after its password-setting
+    // batch succeeds. Called from the loop task.
+    virtual bool onInitialSetupComplete() { return false; }
     // Fill buf with the stats JSON snapshot. Called from tick() (loop task).
     virtual void buildStatsJson(char* buf, size_t buf_size) = 0;
     // Teardown finished (session + DNS freed, WiFi mode restored).
@@ -72,6 +76,7 @@ public:
   // Fills the AP SSID and portal IP; either buffer may be NULL to just poll.
   // Call from the loop task only (same task that changes the mode).
   static bool getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t ip_len);
+  static bool isLanSetup();
 
   // For the device display: true once a config save completed and the node is
   // about to reboot — ground truth for the user even if the browser lost its
@@ -79,7 +84,7 @@ public:
   static bool isRebootPending();
 
   bool startSetupMode(char reply[]);   // open SoftAP + DNS captive portal
-  bool startLanMode(char reply[]);     // bind to existing STA connection
+  bool startLanMode(IPAddress ip, bool initial_setup, char reply[]);
   void requestStop();                  // stop listening and detach this session
   void tick(uint32_t now);             // call every loop iteration
 
@@ -136,11 +141,13 @@ private:
   bool _stopping = false;
   bool _was_setup_ap = false;
   bool _initial_setup = false;
+  bool _network_locked = false;
   // A `password` command has succeeded this session. Lets the CLI satisfy the
   // initial-setup invariant across separate submissions; the form batch always
   // sends the password with the rest, so it never needed the memory.
   bool _admin_pwd_set = false;
   char _ap_ssid[33] = {0};
+  char _setup_code[13] = {0};
 
   // Currently attached session, also used by the display's setup-info poll.
   static WebConfigServer* _active;
@@ -166,6 +173,7 @@ private:
   // LAN-mode session (single slot; new login evicts the old session)
   char _session_token[33] = {0};
   uint32_t _session_last_seen = 0;
+  uint32_t _setup_reminder_at = 0;
   uint8_t _login_fails = 0;
   uint32_t _login_lock_until = 0;
 

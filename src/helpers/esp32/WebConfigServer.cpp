@@ -11,6 +11,7 @@
 #include <esp_heap_caps.h>
 
 #include <helpers/CommonCLI.h>
+#include <helpers/NetworkInterface.h>
 #include <helpers/MQTTPacketFilter.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
@@ -172,15 +173,26 @@ bool WebConfigServer::isRebootPending() {
 
 bool WebConfigServer::getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t ip_len) {
   WebConfigServer* w = _active;
-  if (w == NULL || w->_mode != MODE_SETUP || w->_stopping) return false;
+  if (w == NULL || w->_stopping ||
+      (w->_mode != MODE_SETUP && !(w->_mode == MODE_LAN && w->_initial_setup))) {
+    return false;
+  }
   if (ssid && ssid_len > 0) {
-    strncpy(ssid, w->_ap_ssid, ssid_len - 1);
+    const char* label = w->_mode == MODE_LAN ? w->_setup_code : w->_ap_ssid;
+    strncpy(ssid, label, ssid_len - 1);
     ssid[ssid_len - 1] = 0;
   }
   if (ip && ip_len > 0) {
-    snprintf(ip, ip_len, "%s", WiFi.softAPIP().toString().c_str());
+    const IPAddress address = w->_mode == MODE_LAN
+        ? activeNetworkInterface().localIP() : WiFi.softAPIP();
+    snprintf(ip, ip_len, "%s", address.toString().c_str());
   }
   return true;
+}
+
+bool WebConfigServer::isLanSetup() {
+  WebConfigServer* w = _active;
+  return w != NULL && !w->_stopping && w->_initial_setup && w->_mode == MODE_LAN;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,8 +235,10 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _dns->start(53, "*", ip);  // captive portal: every name resolves to us
 
   _mode = MODE_SETUP;
-  _initial_setup = (_obs->wifi_ssid[0] == 0);
+  _initial_setup = !mqttNetworkSetupComplete(_obs);
   createServer();
+  activeNetworkInterface().lockSwitching();
+  _network_locked = true;
   _was_setup_ap = true;
   _last_activity = millis();
   WiFi.scanNetworks(true);  // pre-populate the SSID picker
@@ -233,21 +247,42 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   return true;
 }
 
-bool WebConfigServer::startLanMode(char reply[]) {
+bool WebConfigServer::startLanMode(IPAddress ip, bool initial_setup, char reply[]) {
   if (_mode != MODE_OFF || _stopping) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
-  if (WiFi.status() != WL_CONNECTED) {
-    strcpy(reply, "Err: WiFi not connected");
+  activeNetworkInterface().lockSwitching();
+  _network_locked = true;
+  if (!activeNetworkInterface().isConnected() || ip == IPAddress()) {
+    activeNetworkInterface().unlockSwitching();
+    _network_locked = false;
+    strcpy(reply, "Err: selected network not connected");
     return false;
+  }
+  _initial_setup = initial_setup;
+  if (_initial_setup) {
+    for (int i = 0; i < 3; ++i) {
+      sprintf(&_setup_code[i * 4], "%04X", (unsigned)(esp_random() & 0xffff));
+    }
+    _setup_code[12] = 0;
+  } else {
+    _setup_code[0] = 0;
   }
   _mode = MODE_LAN;
   createServer();
   _last_activity = millis();
 
-  int pos = sprintf(reply, "WebConfig started: http://%s/ (admin password login)",
-                    WiFi.localIP().toString().c_str());
+  int pos;
+  if (_initial_setup) {
+    pos = sprintf(reply, "WebConfig Ethernet setup: http://%s/ code %s",
+                  ip.toString().c_str(), _setup_code);
+    _setup_reminder_at = millis() + 60000;
+    if (_setup_reminder_at == 0) _setup_reminder_at = 1;
+  } else {
+    pos = sprintf(reply, "WebConfig started: http://%s/ (admin password login)",
+                  ip.toString().c_str());
+  }
   if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 60 * 1024) {
     sprintf(reply + pos, " WARN: low heap");
   }
@@ -317,8 +352,8 @@ void WebConfigServer::finalizeTeardown() {
   _dns = NULL;
   if (_was_setup_ap) {
     WiFi.softAPdisconnect(true);
-    // Nothing else owns WiFi when we raised the AP: either the node is
-    // unconfigured, or `start webconfig ap` required the bridge stopped.
+    // A Wi-Fi-selected bridge must be stopped before a forced AP. An
+    // Ethernet-selected bridge can remain up because it does not own the STA.
     if (_obs->wifi_ssid[0] == 0) {
       WiFi.mode(WIFI_OFF);
     } else {
@@ -336,6 +371,12 @@ void WebConfigServer::finalizeTeardown() {
   _batch_reboot_armed = false;
   _session_token[0] = 0;
   _stats_json[0] = 0;
+  _setup_code[0] = 0;
+  _setup_reminder_at = 0;
+  if (_network_locked) {
+    activeNetworkInterface().unlockSwitching();
+    _network_locked = false;
+  }
   if (_cb) _cb->onWebConfigStopped();
 }
 
@@ -357,6 +398,15 @@ void WebConfigServer::tick(uint32_t now) {
     return;
   }
   if (_mode == MODE_OFF) return;
+
+  if (_mode == MODE_LAN && _initial_setup && _setup_reminder_at != 0 &&
+      (int32_t)(now - _setup_reminder_at) >= 0) {
+    Serial.printf("WC: Ethernet setup http://%s/ code %s\n",
+                  activeNetworkInterface().localIP().toString().c_str(),
+                  _setup_code);
+    _setup_reminder_at = now + 60000;
+    if (_setup_reminder_at == 0) _setup_reminder_at = 1;
+  }
 
   if (_dns) _dns->processNextRequest();
 
@@ -457,6 +507,15 @@ void WebConfigServer::drainBatch(uint32_t now) {
     }
     if (!WebConfigBatch::drainFinished(_batch_next, _batch_count)) {
       return;  // more commands next tick
+    }
+  }
+  if (_initial_setup && _admin_pwd_set && _batch_all_ok &&
+      (_mode == MODE_LAN || _obs->wifi_ssid[0] != '\0')) {
+    if (_cb->onInitialSetupComplete()) {
+      _initial_setup = false;
+      _setup_code[0] = 0;
+    } else {
+      _batch_all_ok = false;
     }
   }
   _cb->onConfigBatchEnd();
@@ -611,7 +670,7 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   DynamicJsonDocument doc(512);
   doc["mode"] = (_mode == MODE_SETUP) ? "setup" : "lan";
   doc["auth"] = authed;
-  doc["needs_setup"] = (_obs->wifi_ssid[0] == 0);
+  doc["needs_setup"] = !mqttNetworkSetupComplete(_obs);
   doc["name"] = (const char*)_prefs->node_name;
   char node_id[17];
   for (int i = 0; i < 8; i++) sprintf(&node_id[i * 2], "%02x", _pub_key[i]);
@@ -657,7 +716,10 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
     return;
   }
   const char* pwd = doc["password"] | "";
-  if (!fixedTimeEquals(pwd, _prefs->password, sizeof(_prefs->password))) {
+  const char* expected = _initial_setup ? _setup_code : _prefs->password;
+  const size_t expected_size = _initial_setup ? sizeof(_setup_code)
+                                               : sizeof(_prefs->password);
+  if (!fixedTimeEquals(pwd, expected, expected_size)) {
     if (++_login_fails >= 5) {
       _login_lock_until = now + 30000;
       if (_login_lock_until == 0) _login_lock_until = 1;
@@ -836,7 +898,7 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
   // First onboarding is not complete until the known factory password has
   // been replaced. Enforce this server-side so the Advanced editor or a crafted
   // request cannot save WiFi and strand the node with the default password.
-  if (_mode == MODE_SETUP && _initial_setup && !set.containsKey("password") &&
+  if (_initial_setup && !set.containsKey("password") &&
       (reboot_after || set.containsKey("wifi.ssid"))) {
     req->send(400, "application/json", "{\"error\":\"admin password required for initial setup\"}");
     return;
@@ -1148,7 +1210,7 @@ void WebConfigServer::handleCliPost(AsyncWebServerRequest* req) {
   // LAN still holding the factory password is a known credential on someone
   // else's network. The terminal warned about this client-side, which is a
   // reminder, not a rule — a pasted script or a direct POST ignored it.
-  if (_mode == MODE_SETUP && _initial_setup && !seq_sets_pwd && !_admin_pwd_set &&
+  if (_initial_setup && !seq_sets_pwd && !_admin_pwd_set &&
       (defer_reboot || seq_sets_ssid)) {
     req->send(400, "application/json",
               "{\"error\":\"admin password required for initial setup — "

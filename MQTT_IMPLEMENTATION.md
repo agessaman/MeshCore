@@ -80,7 +80,7 @@ reboot
 **9. Verify configuration**
 ```bash
 get wifi.ssid
-get wifi.status
+get link.status
 get bridge.enabled
 get mqtt.rx
 get mqtt.tx
@@ -541,12 +541,13 @@ These settings apply across all MQTT slots:
 - `set mqtt.owner <64-hex-char-public-key>` - Set owner public key
 - `set mqtt.email <email>` - Set owner email address
 
-### WiFi Commands
+### Network and WiFi Commands
 
 #### Get Commands
 - `get wifi.ssid` - Get WiFi SSID
 - `get wifi.pwd` - Get WiFi password
-- `get wifi.status` - Get WiFi connection status, IP, RSSI, and uptime
+- `get link.status` - Get the selected network medium, connection status, IP, signal when available, and uptime
+- `get wifi.status` - WiFi-only compatibility alias; reports n/a when another medium is selected
 - `get wifi.powersave` - Get WiFi power save mode (none/min/max)
 
 #### Set Commands

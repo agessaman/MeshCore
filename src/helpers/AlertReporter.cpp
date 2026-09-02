@@ -220,7 +220,7 @@ void AlertReporter::onLoop(unsigned long now_ms) {
         char text[80];
         AlertFaultPolicy::formatNetworkAlert(
             text, sizeof(text),
-            strcmp(activeNetworkInterface().mediumName(), "ethernet") == 0
+            activeNetworkInterface().medium() == NetworkMedium::Ethernet
                 ? "Ethernet" : "WiFi",
             r, snap);
         if (sendChannel(text)) {
@@ -230,7 +230,7 @@ void AlertReporter::onLoop(unsigned long now_ms) {
         char text[80];
         AlertFaultPolicy::formatNetworkAlert(
             text, sizeof(text),
-            strcmp(activeNetworkInterface().mediumName(), "ethernet") == 0
+            activeNetworkInterface().medium() == NetworkMedium::Ethernet
                 ? "Ethernet" : "WiFi",
             r, snap);
         sendChannel(text);

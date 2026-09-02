@@ -1252,6 +1252,9 @@ void MQTTBridge::mqttTaskLoop() {
   // Wait a bit for WiFi to start connecting
   vTaskDelay(pdMS_TO_TICKS(1000));
 
+  bool network_was_connected = _network->isConnected();
+  unsigned long last_ntp_attempt = 0;
+
   // Main task loop
   #ifdef MQTT_MEMORY_DEBUG
   static unsigned long last_agent_log = 0;
@@ -1315,23 +1318,26 @@ void MQTTBridge::mqttTaskLoop() {
       }
     }
 
-    // A connected observation is enough to schedule NTP; physical event callbacks
-    // stay encapsulated in the selected network adapter.
-    if (!_ntp_synced && _network->isConnected() && !_ntp_sync_pending) {
-      _ntp_sync_pending = true;
-    }
-    if (_ntp_sync_pending && _network->isConnected()) {
+    // Schedule once per link-up edge. Failed syncs are owned by the 30-second
+    // retry below; re-arming here on every loop would make a blocked NTP path
+    // run the multi-second sync sequence back-to-back forever.
+    const bool network_connected = _network->isConnected();
+    _ntp_sync_pending = NetworkPolicy::ntpPendingAfterConnectivitySample(
+        _ntp_synced, _ntp_sync_pending, network_was_connected,
+        network_connected);
+    network_was_connected = network_connected;
+    if (_ntp_sync_pending && network_connected) {
       _ntp_sync_pending = false;
+      last_ntp_attempt = now;
       syncTimeWithNTP();
     }
 
     // Retry NTP every 30s if initial sync failed (slots can't start without valid time)
-    if (!_ntp_synced && _network->isConnected()) {
-      static unsigned long last_ntp_retry = 0;
-      if (now - last_ntp_retry >= 30000) {
-        last_ntp_retry = now;
-        syncTimeWithNTP();
-      }
+    if (NetworkPolicy::ntpRetryDue(
+            _ntp_synced, network_connected, (uint32_t)now,
+            (uint32_t)last_ntp_attempt)) {
+      last_ntp_attempt = now;
+      syncTimeWithNTP();
     }
 
     // Process a CLI-requested forced NTP sync (queued from Core 1). Running it here

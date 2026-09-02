@@ -11,7 +11,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
-#if defined(NETWORK_USE_ETHERNET)
+#if defined(NETWORK_PREFER_ETHERNET)
 #include "ethernet/ch390/CH390Config.h"
 #endif
 
@@ -88,6 +88,7 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
 
  public:
   const char* mediumName() const override { return "wifi"; }
+  NetworkMedium medium() const override { return NetworkMedium::WiFi; }
   const char* statusName() const override {
     switch (WiFi.status()) {
       case WL_CONNECTED: return "connected";
@@ -200,13 +201,14 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
   }
 };
 
-#if defined(NETWORK_USE_ETHERNET)
+#if defined(NETWORK_PREFER_ETHERNET)
 class EthernetNetworkInterface final : public NetworkInterfaceBase {
   bool _started = false;
   bool _event_registered = false;
 
  public:
   const char* mediumName() const override { return "ethernet"; }
+  NetworkMedium medium() const override { return NetworkMedium::Ethernet; }
   const char* statusName() const override {
     return isConnected() ? "connected" : "disconnected";
   }
@@ -281,13 +283,234 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
     return WiFi.hostByName(hostname, address);
   }
 };
+
+class AutomaticNetworkInterface final : public NetworkInterface {
+  EthernetNetworkInterface _ethernet;
+  WiFiNetworkInterface _wifi;
+  NetworkMedium _selected = NetworkMedium::None;
+  bool _ethernet_started = false;
+  bool _wifi_started = false;
+  char _wifi_ssid[33] = {};
+  char _wifi_password[65] = {};
+  uint32_t _ethernet_stable_since = 0;
+  uint32_t _selected_down_since = 0;
+  std::atomic<uint8_t> _switch_locks{0};
+
+  NetworkInterface& selectedInterface() {
+    return _selected == NetworkMedium::Ethernet
+        ? static_cast<NetworkInterface&>(_ethernet)
+        : static_cast<NetworkInterface&>(_wifi);
+  }
+  const NetworkInterface& selectedInterface() const {
+    return _selected == NetworkMedium::Ethernet
+        ? static_cast<const NetworkInterface&>(_ethernet)
+        : static_cast<const NetworkInterface&>(_wifi);
+  }
+
+  bool wifiConfigured() const { return _wifi_ssid[0] != '\0'; }
+
+  void rememberWifi(const char* ssid, const char* password) {
+    strncpy(_wifi_ssid, ssid ? ssid : "", sizeof(_wifi_ssid) - 1);
+    _wifi_ssid[sizeof(_wifi_ssid) - 1] = '\0';
+    strncpy(_wifi_password, password ? password : "", sizeof(_wifi_password) - 1);
+    _wifi_password[sizeof(_wifi_password) - 1] = '\0';
+  }
+
+  void startWifiFallback() {
+    if (_wifi_started || !wifiConfigured()) return;
+    _wifi_started = _wifi.begin(_wifi_ssid, _wifi_password);
+  }
+
+  void select(NetworkMedium medium) {
+    if (medium == NetworkMedium::Ethernet) {
+      // ESP-IDF gives Wi-Fi a higher default-route priority than Ethernet.
+      // Keep only the selected STA associated so sockets cannot silently stay
+      // on Wi-Fi after the manager has declared Ethernet active.
+      WiFi.setAutoReconnect(false);
+      WiFi.disconnect(false, false);
+      _wifi_started = false;
+    }
+    _selected = medium;
+    _selected_down_since = 0;
+  }
+
+ public:
+  const char* mediumName() const override {
+    if (_selected == NetworkMedium::Ethernet) return "ethernet";
+    if (_selected == NetworkMedium::WiFi) return "wifi";
+    return "none";
+  }
+  NetworkMedium medium() const override { return _selected; }
+  const char* statusName() const override {
+    return _selected == NetworkMedium::None ? "not_selected"
+                                            : selectedInterface().statusName();
+  }
+  int statusCode() const override {
+    return _selected == NetworkMedium::None ? 0 : selectedInterface().statusCode();
+  }
+  bool configValid(const char* wifi_ssid) const override {
+    // Hardware availability and stored credentials are configuration. Current
+    // link/DHCP state is runtime state and must not permanently suppress the
+    // MQTT task that monitors for a late cable or lease.
+    return _ethernet_started || (wifi_ssid && wifi_ssid[0] != '\0');
+  }
+  bool isAutomatic() const override { return true; }
+
+  bool begin(const char* wifi_ssid, const char* wifi_password) override {
+    rememberWifi(wifi_ssid, wifi_password);
+    if (!_ethernet_started) {
+      _ethernet_started = _ethernet.begin(nullptr, nullptr);
+    }
+    // bootstrap() owns the initial choice. MQTT begin() is intentionally
+    // idempotent and cannot demote a boot-selected Ethernet link because of a
+    // momentary status sample between tasks.
+    if (_selected == NetworkMedium::None) {
+      if (_ethernet.isConnected()) {
+        select(NetworkMedium::Ethernet);
+      } else if (wifiConfigured()) {
+        startWifiFallback();
+        _selected = NetworkMedium::WiFi;
+      }
+    } else if (_selected == NetworkMedium::WiFi) {
+      startWifiFallback();
+    }
+    return _ethernet_started || _wifi_started;
+  }
+
+  bool bootstrap(const char* wifi_ssid, const char* wifi_password,
+                 uint32_t wait_ms) override {
+    rememberWifi(wifi_ssid, wifi_password);
+    if (!_ethernet_started) {
+      _ethernet_started = _ethernet.begin(nullptr, nullptr);
+    }
+
+    const uint32_t started_at = millis();
+    const uint32_t link_wait_ms = wait_ms < 1500 ? wait_ms : 1500;
+    while (_ethernet_started && !CH390.linkUp() &&
+           (uint32_t)(millis() - started_at) < link_wait_ms) {
+      delay(25);
+    }
+    while (_ethernet_started && CH390.linkUp() && !_ethernet.isConnected() &&
+           (uint32_t)(millis() - started_at) < wait_ms) {
+      delay(25);
+    }
+
+    const NetworkMedium initial = NetworkPolicy::bootSelection(
+        _ethernet.isConnected(), wifiConfigured());
+    if (initial == NetworkMedium::Ethernet) {
+      select(initial);
+    } else {
+      startWifiFallback();
+      _selected = initial;
+    }
+    return initial != NetworkMedium::None;
+  }
+
+  NetworkTransition maintain(uint32_t now_ms, uint8_t wifi_power_save) override {
+    const NetworkTransition ethernet_transition =
+        _ethernet.maintain(now_ms, wifi_power_save);
+    const NetworkTransition wifi_transition = _wifi_started
+        ? _wifi.maintain(now_ms, wifi_power_save)
+        : NetworkTransition::None;
+
+    // Ethernet may recover while a Wi-Fi fallback is still associating. In
+    // that sequence the selected enum never changes, but Wi-Fi would win
+    // ESP-IDF's default-route priority once it came up. Tear the unused STA
+    // down even without a selection edge, and force MQTT to reconnect if it
+    // had already become reachable.
+    if (_selected == NetworkMedium::Ethernet && _ethernet.isConnected() &&
+        _wifi_started) {
+      const bool wifi_had_route = _wifi.isConnected();
+      select(NetworkMedium::Ethernet);
+      if (wifi_had_route) return NetworkTransition::Switched;
+    }
+
+    if (_ethernet.isConnected()) {
+      if (_ethernet_stable_since == 0) _ethernet_stable_since = now_ms;
+    } else {
+      _ethernet_stable_since = 0;
+    }
+
+    const bool selected_connected = isConnected();
+    if (!selected_connected) {
+      if (_selected_down_since == 0) _selected_down_since = now_ms;
+    } else {
+      _selected_down_since = 0;
+    }
+
+    const uint32_t selected_down_ms = _selected_down_since == 0
+        ? 0 : (uint32_t)(now_ms - _selected_down_since);
+    if (_selected == NetworkMedium::Ethernet && !_ethernet.isConnected() &&
+        selected_down_ms >= NetworkPolicy::kEthernetDownGraceMs) {
+      startWifiFallback();
+    }
+
+    const uint32_t ethernet_stable_ms = _ethernet_stable_since == 0
+        ? 0 : (uint32_t)(now_ms - _ethernet_stable_since);
+    const NetworkPolicy::AutomaticSelectionInput input = {
+        _selected, _ethernet.isConnected(),
+        _wifi_started && _wifi.isConnected(), wifiConfigured(),
+        _switch_locks.load(std::memory_order_relaxed) != 0,
+        ethernet_stable_ms, selected_down_ms};
+    const NetworkMedium next = NetworkPolicy::automaticSelection(input);
+
+    if (next != _selected) {
+      const NetworkMedium previous = _selected;
+      select(next);
+      return previous == NetworkMedium::None ? NetworkTransition::Up
+                                             : NetworkTransition::Switched;
+    }
+
+    if (_selected == NetworkMedium::Ethernet) return ethernet_transition;
+    if (_selected == NetworkMedium::WiFi) return wifi_transition;
+    return NetworkTransition::None;
+  }
+
+  void lockSwitching() override {
+    _switch_locks.fetch_add(1, std::memory_order_relaxed);
+  }
+  void unlockSwitching() override {
+    uint8_t value = _switch_locks.load(std::memory_order_relaxed);
+    while (value != 0 && !_switch_locks.compare_exchange_weak(
+               value, static_cast<uint8_t>(value - 1),
+               std::memory_order_relaxed, std::memory_order_relaxed)) {}
+  }
+
+  bool isConnected() const override {
+    return _selected != NetworkMedium::None && selectedInterface().isConnected();
+  }
+  IPAddress localIP() const override {
+    return _selected == NetworkMedium::None ? IPAddress() : selectedInterface().localIP();
+  }
+  int rssi() const override {
+    return _selected == NetworkMedium::None ? INT_MIN : selectedInterface().rssi();
+  }
+  bool resolveHost(const char* hostname, IPAddress& address) const override {
+    return _selected != NetworkMedium::None &&
+           selectedInterface().resolveHost(hostname, address);
+  }
+  unsigned long connectedAtMillis() const override {
+    return _selected == NetworkMedium::None ? 0 : selectedInterface().connectedAtMillis();
+  }
+  uint8_t lastDisconnectReason() const override {
+    return _selected == NetworkMedium::None ? 0 : selectedInterface().lastDisconnectReason();
+  }
+  unsigned long lastDisconnectTime() const override {
+    return _selected == NetworkMedium::None ? 0 : selectedInterface().lastDisconnectTime();
+  }
+  AlertFaultPolicy::OutageSnapshot outageSnapshot() const override {
+    return _selected == NetworkMedium::None
+        ? AlertFaultPolicy::OutageSnapshot{false, 0, 0}
+        : selectedInterface().outageSnapshot();
+  }
+};
 #endif
 
 }  // namespace
 
 NetworkInterface& activeNetworkInterface() {
-#if defined(NETWORK_USE_ETHERNET)
-  static EthernetNetworkInterface network;
+#if defined(NETWORK_PREFER_ETHERNET)
+  static AutomaticNetworkInterface network;
 #else
   static WiFiNetworkInterface network;
 #endif

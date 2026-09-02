@@ -3,7 +3,7 @@
 #include <climits>
 #include <helpers/RxReservePacketManager.h>
 #include <helpers/NetworkInterface.h>
-#if defined(ESP_PLATFORM) && !defined(NETWORK_USE_ETHERNET)
+#if defined(ESP_PLATFORM)
 #include <WiFi.h>
 #endif
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -948,6 +948,17 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
 
+  NetworkInterface& boot_network = activeNetworkInterface();
+  if (boot_network.isAutomatic()) {
+    MQTTPrefs* obs = _cli.getObserverPrefs();
+    Serial.printf("Network: probing Ethernet for up to %lums\n",
+                  (unsigned long)NETWORK_ETHERNET_BOOT_WAIT_MS);
+    boot_network.bootstrap(obs->wifi_ssid, obs->wifi_password,
+                           NETWORK_ETHERNET_BOOT_WAIT_MS);
+    Serial.printf("Network: selected %s (%s)\n", boot_network.mediumName(),
+                  boot_network.statusName());
+  }
+
   acl.load(_fs, self_id);
   region_map.load(_fs);
 
@@ -1023,15 +1034,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
 
 #if defined(WITH_WEBCONFIG) && !defined(WEBCONFIG_NO_AUTO_AP)
-  // First-boot setup portal: raised only when no WiFi has ever been configured,
-  // so an OTA onto a deployed (configured) node can never open an AP.
-  #if !defined(NETWORK_USE_ETHERNET)
-  if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+  // Existing Wi-Fi installs are complete by virtue of their stored SSID. An
+  // Ethernet-only install uses the explicit completion marker instead.
+  if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
     char wc_reply[160];
     startWebConfig(false, wc_reply);
     Serial.println(wc_reply);
   }
-  #endif
 #endif
 }
 
@@ -1276,11 +1285,6 @@ void MyMesh::formatPacketStatsReply(char *reply) {
 
 #ifdef WITH_WEBCONFIG
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
-#if defined(NETWORK_USE_ETHERNET)
-  (void)force_ap;
-  strcpy(reply, "Err: webconfig unavailable on Ethernet observer; use serial CLI");
-  return true;
-#else
   if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
     strcpy(reply, _webconfig->isStopping() ? "Err: webconfig still stopping, retry shortly"
                                            : "Err: webconfig already running");
@@ -1293,18 +1297,21 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   }
   if (force_ap) {
     // The setup AP owns WiFi outright; refuse while the bridge holds the STA.
-    if (bridge && bridge->isRunning()) {
+    if (bridge && bridge->isRunning() &&
+        activeNetworkInterface().medium() != NetworkMedium::Ethernet) {
       strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
       return true;
     }
     _webconfig->startSetupMode(reply);
-  } else if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
-    _webconfig->startSetupMode(reply);   // unconfigured: same portal as first boot
+  } else if (activeNetworkInterface().isConnected()) {
+    _webconfig->startLanMode(activeNetworkInterface().localIP(),
+                             !mqttNetworkSetupComplete(_cli.getObserverPrefs()), reply);
+  } else if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
+    _webconfig->startSetupMode(reply);
   } else {
-    _webconfig->startLanMode(reply);     // reports "WiFi not connected" if down
+    strcpy(reply, "Err: selected network not connected");
   }
   return true;
-#endif
 }
 
 bool MyMesh::stopWebConfig(char* reply) {
@@ -1344,11 +1351,9 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
     const int signal = network.rssi();
     wifi_rssi = signal == INT_MIN ? 0 : signal;
   }
-#if !defined(NETWORK_USE_ETHERNET)
   else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
     strncpy(ip, WiFi.softAPIP().toString().c_str(), sizeof(ip) - 1);
   }
-#endif
   int pos = snprintf(buf, buf_size,
       "{\"uptime_s\":%lu,\"batt_mv\":%u,"
       "\"heap_free\":%lu,\"heap_min\":%lu,\"heap_max_alloc\":%lu,"

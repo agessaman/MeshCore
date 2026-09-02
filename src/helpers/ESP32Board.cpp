@@ -14,6 +14,9 @@
 
 bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   inhibit_sleep = true;   // prevent sleep during OTA
+  // Manual ElegantOTA owns port 80 and remains active until a successful upload
+  // reboots the device, so its route lock is intentionally reboot-scoped.
+  activeNetworkInterface().lockSwitching();
 
   // If the device is already on its selected network, serve ElegantOTA on that
   // address so it is reachable without joining a separate AP. Otherwise raise
@@ -184,16 +187,20 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
   // dedicated 24 KB-stack task and block here until it finishes. The big stack is
   // freed when the task exits; on a successful update the chip reboots inside it.
+  NetworkInterface& network = activeNetworkInterface();
+  network.lockSwitching();
   OtaTaskArgs args = { this, current_ver, dry_run, reply, false, false };
   TaskHandle_t handle = nullptr;
   BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
   if (ok != pdPASS) {
+    network.unlockSwitching();
     strcpy(reply, "ERR: OTA task spawn failed");
     return false;
   }
   while (!args.done) {
     delay(50);  // Arduino delay() yields to other tasks
   }
+  network.unlockSwitching();
   return args.result;
 }
 

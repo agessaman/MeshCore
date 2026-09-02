@@ -39,22 +39,31 @@ class MQTTPrefsSerializer : public ConfigSerializer {
 
   class WifiPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
-    int32_t _power_save;
+    int32_t _power_save, _setup_complete;
     bool _seen_ssid = false, _seen_password = false, _seen_power_save = false;
+    bool _seen_setup_complete = false;
   protected:
     void structure() override {
       defStrict("ssid", _prefs->wifi_ssid, sizeof(_prefs->wifi_ssid), _seen_ssid);
       defStrict("password", _prefs->wifi_password, sizeof(_prefs->wifi_password), _seen_password);
       defStrict("power_save", _power_save, _seen_power_save);
+      defStrict("setup_complete", _setup_complete, _seen_setup_complete);
     }
   public:
-    explicit WifiPrefs(MQTTPrefs* prefs) : _prefs(prefs), _power_save(prefs->wifi_power_save) {}
+    explicit WifiPrefs(MQTTPrefs* prefs)
+        : _prefs(prefs), _power_save(prefs->wifi_power_save),
+          _setup_complete(prefs->network_setup_complete) {}
     bool apply(bool* repaired) {
       if (_power_save < 0 || _power_save > 2) {
         _power_save = 1;
         *repaired = true;
       }
+      if (_setup_complete < 0 || _setup_complete > 1) {
+        _setup_complete = 0;
+        *repaired = true;
+      }
       _prefs->wifi_power_save = static_cast<uint8_t>(_power_save);
+      _prefs->network_setup_complete = static_cast<uint8_t>(_setup_complete);
       return true;
     }
   };

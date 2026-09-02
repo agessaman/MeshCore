@@ -112,6 +112,7 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
 
   prefs->display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;
   prefs->display_flip = 0;
+  prefs->network_setup_complete = 0;
 }
 
 #endif // WITH_MQTT_BRIDGE

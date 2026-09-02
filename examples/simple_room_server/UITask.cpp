@@ -155,15 +155,16 @@ void UITask::renderCurrScreen() {
     }
     char wc_ssid[33], wc_ip[16];
     if (WebConfigServer::getSetupInfo(wc_ssid, sizeof(wc_ssid), wc_ip, sizeof(wc_ip))) {
+      const bool lan_setup = WebConfigServer::isLanSetup();
       // setup portal active: show join instructions instead of the home screen
       _display->setTextSize(1);
       _display->setColor(UIColor::corp_blue);
       _display->setCursor(0, 0);
-      _display->print("Observer WiFi Setup");
+      _display->print(lan_setup ? "Observer Ethernet Setup" : "Observer WiFi Setup");
 
       _display->setColor(UIColor::primary_txt);
       _display->setCursor(0, 14);
-      _display->print("Join WiFi:");
+      _display->print(lan_setup ? "Login code:" : "Join WiFi:");
       _display->setColor(UIColor::warning_txt);
       _display->setCursor(6, 24);
       _display->print(wc_ssid);

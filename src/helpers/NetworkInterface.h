@@ -8,6 +8,10 @@
 #include <IPAddress.h>
 #include "AlertFaultPolicy.h"
 
+#ifndef NETWORK_ETHERNET_BOOT_WAIT_MS
+#define NETWORK_ETHERNET_BOOT_WAIT_MS 8000UL
+#endif
+
 /**
  * Physical network selected for IP-based services.
  *
@@ -21,11 +25,26 @@ class NetworkInterface {
   virtual ~NetworkInterface() = default;
 
   virtual const char* mediumName() const = 0;
+  virtual NetworkMedium medium() const = 0;
   virtual const char* statusName() const = 0;
   virtual int statusCode() const = 0;
   virtual bool configValid(const char* wifi_ssid) const = 0;
   virtual bool begin(const char* wifi_ssid, const char* wifi_password) = 0;
   virtual NetworkTransition maintain(uint32_t now_ms, uint8_t wifi_power_save) = 0;
+
+  // Automatic selectors are boot-owned so first-run services can use the
+  // chosen link before MQTT starts. Compatibility Wi-Fi builds keep the
+  // original MQTT-task-owned begin() path.
+  virtual bool isAutomatic() const { return false; }
+  virtual bool bootstrap(const char* wifi_ssid, const char* wifi_password,
+                         uint32_t wait_ms) {
+    (void)wait_ms;
+    return begin(wifi_ssid, wifi_password);
+  }
+
+  // WebConfig and OTA pin the current route for the lifetime of their session.
+  virtual void lockSwitching() {}
+  virtual void unlockSwitching() {}
 
   virtual bool isConnected() const = 0;
   virtual IPAddress localIP() const = 0;
