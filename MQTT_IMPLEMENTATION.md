@@ -864,6 +864,8 @@ the radio actually performs in that case.
 - Ethernet-preferred builds wait the full configured boot probe window for an Ethernet IP;
   delayed or unavailable PHY carrier reporting does not shorten the DHCP deadline. The boot
   selection log includes the measured probe duration.
+- CH390 startup initializes Arduino's shared network event runtime without associating WiFi;
+  this keeps the framework's DNS and TLS hostname paths safe when Ethernet wins directly.
 - Ethernet/WiFi transitions are logged. A lost or changed route stops every started MQTT
   client, including one whose disconnect callback arrived first; once a usable route returns,
   route-caused backoff is cleared and one immediate reconnect is allowed

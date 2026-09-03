@@ -13,6 +13,12 @@
 
 #if defined(NETWORK_PREFER_ETHERNET)
 #include "ethernet/ch390/CH390Config.h"
+
+// Arduino-ESP32's built-in ETH implementation calls this before bringing up
+// Ethernet. It creates the shared Arduino network event group/task used by
+// WiFiGenericClass::hostByName(), even when no Wi-Fi interface is started.
+// ESP32-CH390 initializes esp_netif directly and omits this Arduino layer.
+extern void tcpipInit();
 #endif
 
 namespace {
@@ -236,6 +242,10 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
 
   bool begin(const char*, const char*) override {
     if (_started) return true;
+    // DNS and WiFiClientSecure are transport-neutral sockets in this Arduino
+    // core, but their hostname path still uses WiFiGeneric's event group.
+    // Initialize that shared runtime without enabling or associating Wi-Fi.
+    tcpipInit();
     if (!_event_registered) {
       WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t) {
         switch (event) {
