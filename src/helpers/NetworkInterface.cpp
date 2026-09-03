@@ -199,12 +199,31 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
   bool resolveHost(const char* hostname, IPAddress& address) const override {
     return WiFi.hostByName(hostname, address);
   }
+  void formatDiagnostics(char* reply, size_t reply_size) const override {
+    snprintf(reply, reply_size,
+             "> why:ethernet-not-enabled selected:wifi\n"
+             "wifi:state:%s ip:%s",
+             statusName(),
+             localIP().toString().c_str());
+  }
 };
 
 #if defined(NETWORK_PREFER_ETHERNET)
 class EthernetNetworkInterface final : public NetworkInterfaceBase {
+ public:
+  enum class EventState : uint8_t {
+    None,
+    Started,
+    LinkDown,
+    LinkUp,
+    GotIp,
+    Stopped,
+  };
+
+ private:
   bool _started = false;
   bool _event_registered = false;
+  std::atomic<uint8_t> _event_state{static_cast<uint8_t>(EventState::None)};
 
  public:
   const char* mediumName() const override { return "ethernet"; }
@@ -220,13 +239,29 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
     if (!_event_registered) {
       WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t) {
         switch (event) {
+          case ARDUINO_EVENT_ETH_START:
+            _event_state.store(static_cast<uint8_t>(EventState::Started),
+                               std::memory_order_relaxed);
+            break;
+          case ARDUINO_EVENT_ETH_CONNECTED:
+            _event_state.store(static_cast<uint8_t>(EventState::LinkUp),
+                               std::memory_order_relaxed);
+            break;
           case ARDUINO_EVENT_ETH_GOT_IP:
+            _event_state.store(static_cast<uint8_t>(EventState::GotIp),
+                               std::memory_order_relaxed);
             noteConnected(millis());
             break;
           case ARDUINO_EVENT_ETH_DISCONNECTED:
+            _event_state.store(static_cast<uint8_t>(EventState::LinkDown),
+                               std::memory_order_relaxed);
             // Ethernet has no 802.11 reason code; zero means unavailable.
             noteDisconnected(millis(), 0);
             _connected_at.store(0, std::memory_order_relaxed);
+            break;
+          case ARDUINO_EVENT_ETH_STOP:
+            _event_state.store(static_cast<uint8_t>(EventState::Stopped),
+                               std::memory_order_relaxed);
             break;
           default:
             break;
@@ -281,6 +316,49 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
     // Arduino's hostByName is a thin wrapper over the process-wide lwIP resolver;
     // DNS follows the selected esp_netif even though this entry point is named WiFi.
     return WiFi.hostByName(hostname, address);
+  }
+  void formatDiagnostics(char* reply, size_t reply_size) const override {
+    snprintf(reply, reply_size, "> ethernet:%s ip=%s",
+             statusName(), localIP().toString().c_str());
+  }
+
+  EventState eventState() const {
+    return static_cast<EventState>(
+        _event_state.load(std::memory_order_relaxed));
+  }
+  bool sampleLink(bool& known) const {
+    known = false;
+    if (!_started) return false;
+
+    // IEEE 802.3 BMSR link status is latch-low. Read it twice so the second
+    // value is the current carrier state rather than a remembered link flap.
+    (void)CH390.readPHY(0x01);
+    const uint32_t bmsr = CH390.readPHY(0x01) & 0xffffu;
+    if (bmsr != 0 && bmsr != 0xffffu) {
+      known = true;
+      return (bmsr & (1u << 2)) != 0;
+    }
+
+    // A failed/unsupported direct PHY read can still use the driver's events.
+    const EventState state = eventState();
+    known = state == EventState::LinkDown || state == EventState::LinkUp ||
+            state == EventState::GotIp || state == EventState::Stopped;
+    return state == EventState::LinkUp || state == EventState::GotIp;
+  }
+  bool linkUp() const {
+    bool known = false;
+    return sampleLink(known);
+  }
+  const char* eventName() const {
+    switch (eventState()) {
+      case EventState::None: return "none";
+      case EventState::Started: return "started";
+      case EventState::LinkDown: return "link-down";
+      case EventState::LinkUp: return "link-up";
+      case EventState::GotIp: return "got-ip";
+      case EventState::Stopped: return "stopped";
+    }
+    return "unknown";
   }
 };
 
@@ -385,13 +463,9 @@ class AutomaticNetworkInterface final : public NetworkInterface {
     }
 
     const uint32_t started_at = millis();
-    const uint32_t link_wait_ms = wait_ms < 1500 ? wait_ms : 1500;
-    while (_ethernet_started && !CH390.linkUp() &&
-           (uint32_t)(millis() - started_at) < link_wait_ms) {
-      delay(25);
-    }
-    while (_ethernet_started && CH390.linkUp() && !_ethernet.isConnected() &&
-           (uint32_t)(millis() - started_at) < wait_ms) {
+    while (NetworkPolicy::ethernetBootProbePending(
+        _ethernet_started, _ethernet.isConnected(),
+        (uint32_t)(millis() - started_at), wait_ms)) {
       delay(25);
     }
 
@@ -488,6 +562,35 @@ class AutomaticNetworkInterface final : public NetworkInterface {
   bool resolveHost(const char* hostname, IPAddress& address) const override {
     return _selected != NetworkMedium::None &&
            selectedInterface().resolveHost(hostname, address);
+  }
+  void formatDiagnostics(char* reply, size_t reply_size) const override {
+    const bool ethernet_connected = _ethernet.isConnected();
+    bool ethernet_link_known = false;
+    bool ethernet_link_up = _ethernet.sampleLink(ethernet_link_known);
+    ethernet_link_known = ethernet_link_known || ethernet_connected;
+    ethernet_link_up = ethernet_link_up || ethernet_connected;
+    const bool switching_locked =
+        _switch_locks.load(std::memory_order_relaxed) != 0;
+    const uint32_t now_ms = millis();
+    const uint32_t ethernet_stable_ms = _ethernet_stable_since == 0
+        ? 0 : (uint32_t)(now_ms - _ethernet_stable_since);
+    const NetworkDiagnosticReason reason =
+        NetworkPolicy::automaticDiagnosticReason(
+            _ethernet_started, ethernet_link_known, ethernet_link_up,
+            ethernet_connected, _selected, switching_locked,
+            ethernet_stable_ms);
+    snprintf(reply, reply_size,
+             "> why:%s selected:%s lock:%s\n"
+             "eth:init:%s evt:%s link:%s ip:%s\n"
+             "wifi:cfg:%s started:%s link:%s",
+             NetworkPolicy::diagnosticReasonName(reason), mediumName(),
+             switching_locked ? "yes" : "no",
+             _ethernet_started ? "ok" : "failed", _ethernet.eventName(),
+             ethernet_link_known ? (ethernet_link_up ? "up" : "down")
+                                 : "unknown",
+             _ethernet.localIP().toString().c_str(),
+             wifiConfigured() ? "yes" : "no", _wifi_started ? "yes" : "no",
+             (_wifi_started && _wifi.isConnected()) ? "up" : "down");
   }
   unsigned long connectedAtMillis() const override {
     return _selected == NetworkMedium::None ? 0 : selectedInterface().connectedAtMillis();

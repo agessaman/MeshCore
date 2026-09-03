@@ -50,6 +50,7 @@ class NetworkInterface {
   virtual IPAddress localIP() const = 0;
   virtual int rssi() const = 0;  // INT_MIN when the selected medium has no RSSI.
   virtual bool resolveHost(const char* hostname, IPAddress& address) const = 0;
+  virtual void formatDiagnostics(char* reply, size_t reply_size) const = 0;
 
   virtual unsigned long connectedAtMillis() const = 0;
   virtual uint8_t lastDisconnectReason() const = 0;

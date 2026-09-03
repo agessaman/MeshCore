@@ -500,6 +500,9 @@ GETTERS = {
     "link.status": lambda c: (
         "wifi: connected, IP: 192.168.1.42, RSSI: -58 dBm, Uptime: %dm"
         % (int(time.time() - ST.start) // 60)),
+    "link.diag": lambda c: (
+        "why:ethernet-not-enabled selected:wifi\n"
+        "wifi:state:connected ip:192.168.1.42"),
     "mqtt.status": lambda c: cli_mqtt_status(c),
     "mqtt.presets": lambda c: "\n".join(
         "%2d. %s%s" % (i + 1, n, "" if nd == "none" else "  (needs %s)" % nd)

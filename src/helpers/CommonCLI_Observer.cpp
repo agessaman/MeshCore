@@ -1038,6 +1038,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       strcpy(reply, _mqtt_prefs.wifi_password[0] ? "> ******** (serial only)" : "> (not set)");
     }
+  } else if (strcmp(config, "link.diag") == 0) {
+    activeNetworkInterface().formatDiagnostics(reply, 160);
   } else if (memcmp(config, "link.status", 11) == 0 ||
              memcmp(config, "wifi.status", 11) == 0) {
     NetworkInterface& network = activeNetworkInterface();

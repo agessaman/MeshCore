@@ -1152,10 +1152,12 @@ void MyMesh::begin(FILESYSTEM *fs) {
     MQTTPrefs* obs = _cli.getObserverPrefs();
     Serial.printf("Network: probing Ethernet for up to %lums\n",
                   (unsigned long)NETWORK_ETHERNET_BOOT_WAIT_MS);
+    const uint32_t ethernet_probe_started_at = millis();
     boot_network.bootstrap(obs->wifi_ssid, obs->wifi_password,
                            NETWORK_ETHERNET_BOOT_WAIT_MS);
-    Serial.printf("Network: selected %s (%s)\n", boot_network.mediumName(),
-                  boot_network.statusName());
+    Serial.printf("Network: selected %s (%s) after %lums\n",
+                  boot_network.mediumName(), boot_network.statusName(),
+                  (unsigned long)(millis() - ethernet_probe_started_at));
   }
 
   acl.load(_fs, self_id);

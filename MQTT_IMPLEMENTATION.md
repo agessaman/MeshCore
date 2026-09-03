@@ -81,6 +81,7 @@ reboot
 ```bash
 get wifi.ssid
 get link.status
+get link.diag
 get bridge.enabled
 get mqtt.rx
 get mqtt.tx
@@ -547,6 +548,7 @@ These settings apply across all MQTT slots:
 - `get wifi.ssid` - Get WiFi SSID
 - `get wifi.pwd` - Get WiFi password
 - `get link.status` - Get the selected network medium, connection status, IP, signal when available, and uptime
+- `get link.diag` - Explain automatic Ethernet selection using controller initialization, link event, IP, WiFi fallback, route-lock, and reason state
 - `get wifi.status` - WiFi-only compatibility alias; reports n/a when another medium is selected
 - `get wifi.powersave` - Get WiFi power save mode (none/min/max)
 
@@ -859,6 +861,12 @@ the radio actually performs in that case.
 ### Connection Handling
 - Automatic reconnection with exponential backoff per slot; a slot that stays down through
   the full backoff ladder is retried on a slow periodic probe instead of hammering the broker
+- Ethernet-preferred builds wait the full configured boot probe window for an Ethernet IP;
+  delayed or unavailable PHY carrier reporting does not shorten the DHCP deadline. The boot
+  selection log includes the measured probe duration.
+- Ethernet/WiFi transitions are logged. A lost or changed route stops every started MQTT
+  client, including one whose disconnect callback arrived first; once a usable route returns,
+  route-caused backoff is cleared and one immediate reconnect is allowed
 - Packets are queued while a slot is disconnected and flushed when it recovers
 
 ### Raw Radio Data Capture

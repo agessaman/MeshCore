@@ -1307,16 +1307,7 @@ void MQTTBridge::mqttTaskLoop() {
     }
     #endif
 
-    bool network_just_connected = handleNetworkConnection(now);
-    if (network_just_connected) {
-      // The uplink recovered — reset last_reconnect_attempt for disconnected slots so they
-      // retry immediately rather than waiting up to 5 min for backoff timers to expire.
-      for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-        if (_slots[i].enabled && _slots[i].initial_connect_done && !_slots[i].connected) {
-          _slots[i].last_reconnect_attempt = 0;
-        }
-      }
-    }
+    handleNetworkConnection(now);
 
     // Schedule once per link-up edge. Failed syncs are owned by the 30-second
     // retry below; re-arming here on every loop would make a blocked NTP path
@@ -2745,19 +2736,58 @@ void MQTTBridge::checkConfigurationMismatch() {
 }
 
 bool MQTTBridge::handleNetworkConnection(unsigned long now) {
+  const NetworkMedium previous_medium = _network->medium();
   const NetworkTransition transition =
       _network->maintain((uint32_t)now, _obs->wifi_power_save);
+  const NetworkMedium selected_medium = _network->medium();
+
+  if (transition == NetworkTransition::Down) {
+    MQTT_DEBUG_PRINTLN("Network: %s link down", NetworkPolicy::mediumName(previous_medium));
+  } else if (transition == NetworkTransition::Up) {
+    MQTT_DEBUG_PRINTLN("Network: %s link up (%s, IP %s)",
+                       NetworkPolicy::mediumName(selected_medium),
+                       _network->statusName(), _network->localIP().toString().c_str());
+  } else if (transition == NetworkTransition::Switched) {
+    MQTT_DEBUG_PRINTLN("Network: switched %s -> %s (%s, IP %s)",
+                       NetworkPolicy::mediumName(previous_medium),
+                       NetworkPolicy::mediumName(selected_medium),
+                       _network->statusName(), _network->localIP().toString().c_str());
+  }
+
   const NetworkPolicy::MQTTTransitionActions actions =
       NetworkPolicy::mqttActions(transition);
-  if (actions.disconnect_slots) {
+  if (actions.stop_started_slots) {
     // Broker ownership stays in the bridge. The physical adapter reports the
-    // edge; the bridge explicitly closes every slot instead of waiting for
-    // eventual socket timeouts.
+    // edge; the bridge explicitly stops every started slot instead of waiting
+    // for eventual socket timeouts. Do not gate this on slot.connected: the
+    // ESP-MQTT disconnect callback can clear that flag before the network edge
+    // reaches this task, but its client task and transport can still be alive.
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slots[i].client && _slots[i].connected) {
+      if (_slots[i].client && _slots[i].client->isStarted()) {
+        MQTT_DEBUG_PRINTLN("MQTT%d stopping for network transition", i + 1);
         _slots[i].client->disconnect();
       }
+      _slots[i].connected = false;
+      _slots[i].connected_at_ms = 0;
     }
+    updateCachedConnectionStatus();
+  }
+
+  if (actions.reset_reconnect_backoff) {
+    // A usable route is a new connection epoch. Failures earned on the old
+    // route must not strand the replacement route on the 5-minute rung or at
+    // the circuit breaker. Preserve JWTs and slot configuration, but give each
+    // disconnected active slot one immediate, freshly guarded attempt.
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      if (_slots[i].enabled && _slots[i].initial_connect_done && !_slots[i].connected) {
+        _slots[i].reconnect_backoff = 0;
+        _slots[i].max_backoff_failures = 0;
+        _slots[i].circuit_breaker_tripped = false;
+        _slots[i].last_reconnect_attempt =
+            now - MQTTConnectionPolicy::reconnectDelayMs(0, static_cast<uint8_t>(i));
+      }
+    }
+    _last_slot_reconnect_ms = now - MQTTConnectionPolicy::kReconnectGuardMs;
   }
   return actions.retry_disconnected_slots_now;
 }
