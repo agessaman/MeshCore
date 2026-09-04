@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <helpers/ESP32Board.h>
 #include "variant.h"
 
@@ -28,18 +30,53 @@
 //   - Battery must support 2A+ discharge for high-power TX
 
 class TBeam1WBoard : public ESP32Board {
+public:
+  enum FanMode { FAN_ON, FAN_OFF, FAN_AUTO };
+  enum FanDrive { FAN_DRIVE_PWM, FAN_DRIVE_ONOFF };
+
 private:
   bool radio_powered = false;
+  bool _stopped = false;
+  bool _pwm_attached = false;
+  KeyValueStore* _prefs = nullptr;
+  FanMode _mode = FAN_AUTO;
+  FanDrive _drive = FAN_DRIVE_ONOFF;
+  int _lo_c = FAN_DEFAULT_LO_C;
+  int _hi_c = FAN_DEFAULT_HI_C;
+  int _manual_duty = -1;   // -1 = follow mode; 0..100 = CLI override
+  bool _thermal_on = false;  // onoff hysteresis; TX boost must not latch this
+  volatile float _temp_c = NAN;
+  volatile int _duty_pct = 100;
+  volatile bool _tx_active = false;
+  volatile bool _tx_cooldown_active = false;
+  volatile uint32_t _tx_until_ms = 0;
+  TaskHandle_t _fan_task = nullptr;
+
+  void startFanTask();
+  void updateFan();
+  void applyDuty(int pct);
+  float readNtcTempC();
+  int rampDuty(float temp_c) const;
+  int cooldownSecs();
+  bool isTxCooling(uint32_t now);
+  bool ntcImplausible(float temp_c) const;
+  bool persistKey(const char* key, const char* value);
+  static bool parseIntArg(const char* text, int& value);
+  void loadFanPrefs();
+  const char* modeName() const;
+  const char* driveName() const;
+  static void fanTaskThunk(void* arg);
 
 public:
   void begin();
+  void attachDynamicPrefs(KeyValueStore* prefs);
+  bool handleCommand(const char* command, uint32_t sender_timestamp, char* reply) override;
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override;
   void powerOff() override;
 
-  // Fan control methods
   void setFanEnabled(bool enabled);
   bool isFanEnabled() const;
 };
