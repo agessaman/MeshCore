@@ -171,6 +171,8 @@ private:
   BatchEntry _batch[MAX_BATCH];
 
   // LAN-mode session (single slot; new login evicts the old session)
+  uint8_t _session_secret[32] = {0};
+  uint32_t _session_generation = 0;
   char _session_token[33] = {0};
   uint32_t _session_last_seen = 0;
   uint32_t _setup_reminder_at = 0;

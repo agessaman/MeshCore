@@ -96,6 +96,19 @@ TEST(MQTTConnectionPolicy, CircuitBreakerProbeHasExactThirtyMinuteBoundary) {
   EXPECT_TRUE(Policy::circuitBreakerProbeDue(900000U, last));
 }
 
+TEST(MQTTConnectionPolicy, LinkRecoveryMakesCurrentBackoffDueImmediately) {
+  const uint32_t now = 1234U;
+  const uint32_t last = Policy::immediateRetryLastAttempt(now, false, 4, 2);
+  EXPECT_TRUE(Policy::reconnectDue(now, last, 4, 2));
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(now, last));
+}
+
+TEST(MQTTConnectionPolicy, LinkRecoveryMakesBreakerProbeDueWithoutClearingIt) {
+  const uint32_t now = 1234U;
+  const uint32_t last = Policy::immediateRetryLastAttempt(now, true, 5, 2);
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(now, last));
+}
+
 TEST(MQTTConnectionPolicy, JwtLifetimeUsesCappedPerSlotStagger) {
   EXPECT_EQ(86400U, Policy::jwtLifetimeSecs(86400U, 0));
   EXPECT_EQ(86100U, Policy::jwtLifetimeSecs(86400U, 1));

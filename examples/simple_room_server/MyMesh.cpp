@@ -1352,15 +1352,17 @@ void MyMesh::onConfigBatchEnd() {
 // same sources as the stats CLI replies and `get mqtt.stats`.
 void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
   char ip[20] = "";
-  int wifi_rssi = 0;
+  char wifi_rssi[12] = "null";
   NetworkInterface& network = activeNetworkInterface();
+  const char* network_medium = network.mediumName();
   if (network.isConnected()) {
     strncpy(ip, network.localIP().toString().c_str(), sizeof(ip) - 1);
     const int signal = network.rssi();
-    wifi_rssi = signal == INT_MIN ? 0 : signal;
+    if (signal != INT_MIN) snprintf(wifi_rssi, sizeof(wifi_rssi), "%d", signal);
   }
   else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
     strncpy(ip, WiFi.softAPIP().toString().c_str(), sizeof(ip) - 1);
+    network_medium = "wifi-ap";
   }
   int pos = snprintf(buf, buf_size,
       "{\"uptime_s\":%lu,\"batt_mv\":%u,"
@@ -1369,7 +1371,8 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
       "\"airtime_s\":%lu,\"rx_airtime_s\":%lu,"
       "\"recv\":%lu,\"sent\":%lu,\"rx_err\":%lu,"
       "\"sent_flood\":%lu,\"sent_direct\":%lu,\"recv_flood\":%lu,\"recv_direct\":%lu,"
-      "\"tx_queue\":%d,\"wifi_rssi\":%d,\"ip\":\"%s\",\"mqtt_queue\":%d,\"slots\":[",
+      "\"tx_queue\":%d,\"wifi_rssi\":%s,\"network_medium\":\"%s\","
+      "\"ip\":\"%s\",\"mqtt_queue\":%d,\"slots\":[",
       (unsigned long)(uptime_millis / 1000), (unsigned)board.getBattMilliVolts(),
       (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
       (unsigned long)ESP.getMaxAllocHeap(),
@@ -1380,7 +1383,7 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
       (unsigned long)radio_driver.getPacketsRecvErrors(),
       (unsigned long)getNumSentFlood(), (unsigned long)getNumSentDirect(),
       (unsigned long)getNumRecvFlood(), (unsigned long)getNumRecvDirect(),
-      (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, ip,
+      (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, network_medium, ip,
       bridge ? bridge->getQueueSize() : 0);
   if (pos < 0 || pos >= (int)buf_size - 3) return;  // truncated; snprintf terminated it
   bool first = true;

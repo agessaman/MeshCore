@@ -17,7 +17,7 @@ MeshSNMPAgent::MeshSNMPAgent()
     _total_air_time_secs(0),
     _mqtt_connected_slots(0), _mqtt_queue_depth(0), _mqtt_skipped_publishes(0),
     _free_heap(0), _max_alloc(0), _internal_free(0), _psram_free(0),
-    _wifi_rssi(0)
+    _wifi_rssi(-127)
 {
   _firmware_version[0] = '\0';
   _node_name[0] = '\0';
@@ -80,7 +80,7 @@ void MeshSNMPAgent::loop() {
 #endif
 
   const int signal = activeNetworkInterface().rssi();
-  _wifi_rssi = signal == INT_MIN ? 0 : signal;
+  _wifi_rssi = signal == INT_MIN ? -127 : signal;
 
   _snmp.loop();
 }

@@ -236,7 +236,7 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
   };
 
  private:
-  bool _started = false;
+  std::atomic<bool> _started{false};
   bool _event_registered = false;
   char _hostname[32] = {};
   std::atomic<uint8_t> _event_state{static_cast<uint8_t>(EventState::None)};
@@ -256,7 +256,7 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
   }
 
   bool begin(const char*, const char*) override {
-    if (_started) return true;
+    if (_started.load(std::memory_order_acquire)) return true;
     // DNS and WiFiClientSecure are transport-neutral sockets in this Arduino
     // core, but their hostname path still uses WiFiGeneric's event group.
     // Initialize that shared runtime without enabling or associating Wi-Fi.
@@ -294,9 +294,21 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
       });
       _event_registered = true;
     }
-    _started = beginConfiguredCH390(_hostname);
-    if (_started && isConnected()) noteConnected(millis());
-    return _started;
+    _event_state.store(static_cast<uint8_t>(EventState::None),
+                       std::memory_order_relaxed);
+    const bool started = beginConfiguredCH390(_hostname);
+    _started.store(started, std::memory_order_release);
+    if (started && isConnected()) noteConnected(millis());
+    return started;
+  }
+
+  bool restart() {
+    CH390.end();
+    _started.store(false, std::memory_order_release);
+    // Preserve status/outage history across attempts. maintain() observes the
+    // resulting edge in this same task iteration, so a retry cannot reset a
+    // prolonged-down alert timer or hide a previously connected transition.
+    return begin(nullptr, nullptr);
   }
 
   NetworkTransition maintain(uint32_t now_ms, uint8_t) override {
@@ -334,7 +346,9 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
     return NetworkTransition::Down;
   }
 
-  bool isConnected() const override { return _started && CH390.isConnected(); }
+  bool isConnected() const override {
+    return _started.load(std::memory_order_acquire) && CH390.isConnected();
+  }
   IPAddress localIP() const override { return CH390.localIP(); }
   int rssi() const override { return INT_MIN; }
   bool resolveHost(const char* hostname, IPAddress& address) const override {
@@ -351,9 +365,10 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
     return static_cast<EventState>(
         _event_state.load(std::memory_order_relaxed));
   }
+  bool started() const { return _started.load(std::memory_order_acquire); }
   bool sampleLink(bool& known) const {
     known = false;
-    if (!_started) return false;
+    if (!_started.load(std::memory_order_acquire)) return false;
 
     // IEEE 802.3 BMSR link status is latch-low. Read it twice so the second
     // value is the current carrier state rather than a remembered link flap.
@@ -390,22 +405,26 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
 class AutomaticNetworkInterface final : public NetworkInterface {
   EthernetNetworkInterface _ethernet;
   WiFiNetworkInterface _wifi;
-  NetworkMedium _selected = NetworkMedium::None;
-  bool _ethernet_started = false;
-  bool _wifi_started = false;
+  std::atomic<NetworkMedium> _selected{NetworkMedium::None};
+  std::atomic<bool> _ethernet_started{false};
+  std::atomic<bool> _wifi_started{false};
   char _wifi_ssid[33] = {};
   char _wifi_password[65] = {};
-  uint32_t _ethernet_stable_since = 0;
-  uint32_t _selected_down_since = 0;
+  std::atomic<uint32_t> _ethernet_stable_since{0};
+  std::atomic<uint32_t> _selected_down_since{0};
+  std::atomic<uint32_t> _last_ethernet_init_attempt{0};
+  std::atomic<uint8_t> _ethernet_retry_attempt{0};
+  std::atomic<uint32_t> _ethernet_no_ip_since{0};
   std::atomic<uint8_t> _switch_locks{0};
+  std::atomic<bool> _switch_in_progress{false};
 
-  NetworkInterface& selectedInterface() {
-    return _selected == NetworkMedium::Ethernet
+  NetworkInterface& selectedInterface(NetworkMedium selected) {
+    return selected == NetworkMedium::Ethernet
         ? static_cast<NetworkInterface&>(_ethernet)
         : static_cast<NetworkInterface&>(_wifi);
   }
-  const NetworkInterface& selectedInterface() const {
-    return _selected == NetworkMedium::Ethernet
+  const NetworkInterface& selectedInterface(NetworkMedium selected) const {
+    return selected == NetworkMedium::Ethernet
         ? static_cast<const NetworkInterface&>(_ethernet)
         : static_cast<const NetworkInterface&>(_wifi);
   }
@@ -420,8 +439,40 @@ class AutomaticNetworkInterface final : public NetworkInterface {
   }
 
   void startWifiFallback() {
-    if (_wifi_started || !wifiConfigured()) return;
-    _wifi_started = _wifi.begin(_wifi_ssid, _wifi_password);
+    if (_wifi_started.load(std::memory_order_acquire) || !wifiConfigured()) return;
+    _wifi_started.store(_wifi.begin(_wifi_ssid, _wifi_password),
+                        std::memory_order_release);
+  }
+
+  bool beginUnlockedMutation() {
+    bool expected = false;
+    if (!_switch_in_progress.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_relaxed)) {
+      return false;
+    }
+    if (_switch_locks.load(std::memory_order_acquire) != 0) {
+      _switch_in_progress.store(false, std::memory_order_release);
+      return false;
+    }
+    return true;
+  }
+
+  void endUnlockedMutation() {
+    _switch_in_progress.store(false, std::memory_order_release);
+  }
+
+  bool selectIfUnlocked(NetworkMedium medium) {
+    if (!beginUnlockedMutation()) return false;
+    select(medium);
+    endUnlockedMutation();
+    return true;
+  }
+
+  void startWifiFallbackIfUnlocked() {
+    if (!beginUnlockedMutation()) return;
+    startWifiFallback();
+    endUnlockedMutation();
   }
 
   void select(NetworkMedium medium) {
@@ -431,25 +482,46 @@ class AutomaticNetworkInterface final : public NetworkInterface {
       // on Wi-Fi after the manager has declared Ethernet active.
       WiFi.setAutoReconnect(false);
       WiFi.disconnect(false, false);
-      _wifi_started = false;
+      _wifi_started.store(false, std::memory_order_release);
     }
-    _selected = medium;
-    _selected_down_since = 0;
+    _selected_down_since.store(0, std::memory_order_relaxed);
+    _selected.store(medium, std::memory_order_release);
+  }
+
+  bool startOrRetryEthernet(uint32_t now_ms, bool restart) {
+    const bool started = restart ? _ethernet.restart()
+                                 : _ethernet.begin(nullptr, nullptr);
+    _last_ethernet_init_attempt.store(now_ms, std::memory_order_relaxed);
+    _ethernet_started.store(started, std::memory_order_release);
+    if (started) {
+      _ethernet_retry_attempt.store(0, std::memory_order_relaxed);
+    } else {
+      uint8_t attempt = _ethernet_retry_attempt.load(std::memory_order_relaxed);
+      if (attempt != UINT8_MAX) ++attempt;
+      _ethernet_retry_attempt.store(attempt, std::memory_order_relaxed);
+    }
+    return started;
   }
 
  public:
   const char* mediumName() const override {
-    if (_selected == NetworkMedium::Ethernet) return "ethernet";
-    if (_selected == NetworkMedium::WiFi) return "wifi";
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    if (selected == NetworkMedium::Ethernet) return "ethernet";
+    if (selected == NetworkMedium::WiFi) return "wifi";
     return "none";
   }
-  NetworkMedium medium() const override { return _selected; }
+  NetworkMedium medium() const override {
+    return _selected.load(std::memory_order_acquire);
+  }
   const char* statusName() const override {
-    return _selected == NetworkMedium::None ? "not_selected"
-                                            : selectedInterface().statusName();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None ? "not_selected"
+                                            : selectedInterface(selected).statusName();
   }
   int statusCode() const override {
-    return _selected == NetworkMedium::None ? 0 : selectedInterface().statusCode();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None ? 0
+                                           : selectedInterface(selected).statusCode();
   }
   bool configValid(const char* wifi_ssid) const override {
     // Hardware availability and stored credentials are configuration. Current
@@ -469,36 +541,51 @@ class AutomaticNetworkInterface final : public NetworkInterface {
 
   bool begin(const char* wifi_ssid, const char* wifi_password) override {
     rememberWifi(wifi_ssid, wifi_password);
-    if (!_ethernet_started) {
-      _ethernet_started = _ethernet.begin(nullptr, nullptr);
+    if (!_ethernet_started.load(std::memory_order_acquire)) {
+      const uint32_t now_ms = millis();
+      const uint8_t attempt =
+          _ethernet_retry_attempt.load(std::memory_order_relaxed);
+      if (NetworkPolicy::ethernetInitRetryDue(
+              attempt, now_ms,
+              _last_ethernet_init_attempt.load(std::memory_order_relaxed))) {
+        startOrRetryEthernet(now_ms, attempt != 0);
+      }
     }
     // bootstrap() owns the initial choice. MQTT begin() is intentionally
     // idempotent and cannot demote a boot-selected Ethernet link because of a
     // momentary status sample between tasks.
-    if (_selected == NetworkMedium::None) {
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    if (selected == NetworkMedium::None) {
       if (_ethernet.isConnected()) {
         select(NetworkMedium::Ethernet);
       } else if (wifiConfigured()) {
         startWifiFallback();
-        _selected = NetworkMedium::WiFi;
+        _selected.store(NetworkMedium::WiFi, std::memory_order_release);
       }
-    } else if (_selected == NetworkMedium::WiFi) {
+    } else if (selected == NetworkMedium::WiFi) {
       startWifiFallback();
     }
-    return _ethernet_started || _wifi_started;
+    return _ethernet_started.load(std::memory_order_acquire) ||
+           _wifi_started.load(std::memory_order_acquire);
   }
 
   bool bootstrap(const char* wifi_ssid, const char* wifi_password,
                  uint32_t wait_ms) override {
     rememberWifi(wifi_ssid, wifi_password);
-    if (!_ethernet_started) {
-      _ethernet_started = _ethernet.begin(nullptr, nullptr);
+    if (!_ethernet_started.load(std::memory_order_acquire)) {
+      startOrRetryEthernet(millis(), false);
     }
 
     const uint32_t started_at = millis();
-    while (NetworkPolicy::ethernetBootProbePending(
-        _ethernet_started, _ethernet.isConnected(),
-        (uint32_t)(millis() - started_at), wait_ms)) {
+    for (;;) {
+      bool link_known = false;
+      const bool link_up = _ethernet.sampleLink(link_known);
+      if (!NetworkPolicy::ethernetBootProbePending(
+              _ethernet_started.load(std::memory_order_acquire),
+              _ethernet.isConnected(), link_known, link_up,
+              (uint32_t)(millis() - started_at), wait_ms)) {
+        break;
+      }
       delay(25);
     }
 
@@ -508,15 +595,60 @@ class AutomaticNetworkInterface final : public NetworkInterface {
       select(initial);
     } else {
       startWifiFallback();
-      _selected = initial;
+      _selected.store(initial, std::memory_order_release);
     }
     return initial != NetworkMedium::None;
   }
 
   NetworkTransition maintain(uint32_t now_ms, uint8_t wifi_power_save) override {
+    bool ethernet_started = _ethernet_started.load(std::memory_order_acquire);
+    const bool switching_locked =
+        _switch_locks.load(std::memory_order_acquire) != 0;
+    const bool ethernet_stopped =
+        ethernet_started &&
+        _ethernet.eventState() == EthernetNetworkInterface::EventState::Stopped;
+    if (ethernet_stopped) {
+      _ethernet_started.store(false, std::memory_order_release);
+      ethernet_started = false;
+      if (_ethernet_retry_attempt.load(std::memory_order_relaxed) == 0) {
+        _ethernet_retry_attempt.store(1, std::memory_order_relaxed);
+        _last_ethernet_init_attempt.store(now_ms, std::memory_order_relaxed);
+      }
+    }
+    const EthernetNetworkInterface::EventState ethernet_event =
+        _ethernet.eventState();
+    const bool ethernet_link_up =
+        ethernet_event == EthernetNetworkInterface::EventState::LinkUp ||
+        ethernet_event == EthernetNetworkInterface::EventState::GotIp;
+    if (ethernet_started && ethernet_link_up && !_ethernet.isConnected()) {
+      if (_ethernet_no_ip_since.load(std::memory_order_relaxed) == 0) {
+        uint32_t started_at = now_ms;
+        if (started_at == 0) started_at = 1;
+        _ethernet_no_ip_since.store(started_at, std::memory_order_relaxed);
+      }
+    } else {
+      _ethernet_no_ip_since.store(0, std::memory_order_relaxed);
+    }
+    if (!switching_locked && NetworkPolicy::ethernetNoIpRecoveryDue(
+            ethernet_started, ethernet_link_up, _ethernet.isConnected(),
+            now_ms, _ethernet_no_ip_since.load(std::memory_order_relaxed))) {
+      ethernet_started = startOrRetryEthernet(now_ms, true);
+      _ethernet_no_ip_since.store(0, std::memory_order_relaxed);
+    }
+    if (!ethernet_started && !switching_locked) {
+      const uint8_t attempt =
+          _ethernet_retry_attempt.load(std::memory_order_relaxed);
+      if (NetworkPolicy::ethernetInitRetryDue(
+              attempt, now_ms,
+              _last_ethernet_init_attempt.load(std::memory_order_relaxed))) {
+        ethernet_started = startOrRetryEthernet(now_ms, true);
+      }
+    }
+
     const NetworkTransition ethernet_transition =
         _ethernet.maintain(now_ms, wifi_power_save);
-    const NetworkTransition wifi_transition = _wifi_started
+    const bool wifi_started = _wifi_started.load(std::memory_order_acquire);
+    const NetworkTransition wifi_transition = wifi_started
         ? _wifi.maintain(now_ms, wifi_power_save)
         : NetworkTransition::None;
 
@@ -525,56 +657,73 @@ class AutomaticNetworkInterface final : public NetworkInterface {
     // ESP-IDF's default-route priority once it came up. Tear the unused STA
     // down even without a selection edge, and force MQTT to reconnect if it
     // had already become reachable.
-    if (_selected == NetworkMedium::Ethernet && _ethernet.isConnected() &&
-        _wifi_started) {
+    NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    if (selected == NetworkMedium::Ethernet && _ethernet.isConnected() &&
+        wifi_started) {
       const bool wifi_had_route = _wifi.isConnected();
-      select(NetworkMedium::Ethernet);
-      if (wifi_had_route) return NetworkTransition::Switched;
+      if (selectIfUnlocked(NetworkMedium::Ethernet) && wifi_had_route) {
+        return NetworkTransition::Switched;
+      }
     }
 
     if (_ethernet.isConnected()) {
-      if (_ethernet_stable_since == 0) _ethernet_stable_since = now_ms;
+      if (_ethernet_stable_since.load(std::memory_order_relaxed) == 0) {
+        _ethernet_stable_since.store(now_ms, std::memory_order_relaxed);
+      }
     } else {
-      _ethernet_stable_since = 0;
+      _ethernet_stable_since.store(0, std::memory_order_relaxed);
     }
 
     const bool selected_connected = isConnected();
     if (!selected_connected) {
-      if (_selected_down_since == 0) _selected_down_since = now_ms;
+      if (_selected_down_since.load(std::memory_order_relaxed) == 0) {
+        _selected_down_since.store(now_ms, std::memory_order_relaxed);
+      }
     } else {
-      _selected_down_since = 0;
+      _selected_down_since.store(0, std::memory_order_relaxed);
     }
 
-    const uint32_t selected_down_ms = _selected_down_since == 0
-        ? 0 : (uint32_t)(now_ms - _selected_down_since);
-    if (_selected == NetworkMedium::Ethernet && !_ethernet.isConnected() &&
+    const uint32_t selected_down_since =
+        _selected_down_since.load(std::memory_order_relaxed);
+    const uint32_t selected_down_ms = selected_down_since == 0
+        ? 0 : (uint32_t)(now_ms - selected_down_since);
+    selected = _selected.load(std::memory_order_acquire);
+    if (selected == NetworkMedium::Ethernet && !_ethernet.isConnected() &&
         selected_down_ms >= NetworkPolicy::kEthernetDownGraceMs) {
-      startWifiFallback();
+      startWifiFallbackIfUnlocked();
     }
 
-    const uint32_t ethernet_stable_ms = _ethernet_stable_since == 0
-        ? 0 : (uint32_t)(now_ms - _ethernet_stable_since);
+    const uint32_t ethernet_stable_since =
+        _ethernet_stable_since.load(std::memory_order_relaxed);
+    const uint32_t ethernet_stable_ms = ethernet_stable_since == 0
+        ? 0 : (uint32_t)(now_ms - ethernet_stable_since);
+    const bool selection_locked =
+        _switch_locks.load(std::memory_order_acquire) != 0;
     const NetworkPolicy::AutomaticSelectionInput input = {
-        _selected, _ethernet.isConnected(),
-        _wifi_started && _wifi.isConnected(), wifiConfigured(),
-        _switch_locks.load(std::memory_order_relaxed) != 0,
+        selected, _ethernet.isConnected(),
+        _wifi_started.load(std::memory_order_acquire) && _wifi.isConnected(),
+        wifiConfigured(), selection_locked,
         ethernet_stable_ms, selected_down_ms};
     const NetworkMedium next = NetworkPolicy::automaticSelection(input);
 
-    if (next != _selected) {
-      const NetworkMedium previous = _selected;
-      select(next);
-      return previous == NetworkMedium::None ? NetworkTransition::Up
-                                             : NetworkTransition::Switched;
+    if (next != selected) {
+      if (selectIfUnlocked(next)) {
+        return selected == NetworkMedium::None ? NetworkTransition::Up
+                                               : NetworkTransition::Switched;
+      }
     }
 
-    if (_selected == NetworkMedium::Ethernet) return ethernet_transition;
-    if (_selected == NetworkMedium::WiFi) return wifi_transition;
+    if (selected == NetworkMedium::Ethernet) return ethernet_transition;
+    if (selected == NetworkMedium::WiFi) return wifi_transition;
     return NetworkTransition::None;
   }
 
   void lockSwitching() override {
-    _switch_locks.fetch_add(1, std::memory_order_relaxed);
+    uint8_t value = _switch_locks.load(std::memory_order_relaxed);
+    while (value != UINT8_MAX && !_switch_locks.compare_exchange_weak(
+               value, static_cast<uint8_t>(value + 1),
+               std::memory_order_acq_rel, std::memory_order_relaxed)) {}
+    while (_switch_in_progress.load(std::memory_order_acquire)) delay(1);
   }
   void unlockSwitching() override {
     uint8_t value = _switch_locks.load(std::memory_order_relaxed);
@@ -584,60 +733,96 @@ class AutomaticNetworkInterface final : public NetworkInterface {
   }
 
   bool isConnected() const override {
-    return _selected != NetworkMedium::None && selectedInterface().isConnected();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected != NetworkMedium::None &&
+           selectedInterface(selected).isConnected();
   }
   IPAddress localIP() const override {
-    return _selected == NetworkMedium::None ? IPAddress() : selectedInterface().localIP();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None ? IPAddress()
+                                           : selectedInterface(selected).localIP();
   }
   int rssi() const override {
-    return _selected == NetworkMedium::None ? INT_MIN : selectedInterface().rssi();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None ? INT_MIN
+                                           : selectedInterface(selected).rssi();
   }
   bool resolveHost(const char* hostname, IPAddress& address) const override {
-    return _selected != NetworkMedium::None &&
-           selectedInterface().resolveHost(hostname, address);
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected != NetworkMedium::None &&
+           selectedInterface(selected).resolveHost(hostname, address);
   }
   void formatDiagnostics(char* reply, size_t reply_size) const override {
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    const bool ethernet_started =
+        _ethernet_started.load(std::memory_order_acquire);
+    const bool wifi_started = _wifi_started.load(std::memory_order_acquire);
     const bool ethernet_connected = _ethernet.isConnected();
     bool ethernet_link_known = false;
     bool ethernet_link_up = _ethernet.sampleLink(ethernet_link_known);
     ethernet_link_known = ethernet_link_known || ethernet_connected;
     ethernet_link_up = ethernet_link_up || ethernet_connected;
     const bool switching_locked =
-        _switch_locks.load(std::memory_order_relaxed) != 0;
+        _switch_locks.load(std::memory_order_acquire) != 0;
     const uint32_t now_ms = millis();
-    const uint32_t ethernet_stable_ms = _ethernet_stable_since == 0
-        ? 0 : (uint32_t)(now_ms - _ethernet_stable_since);
+    const uint32_t ethernet_stable_since =
+        _ethernet_stable_since.load(std::memory_order_relaxed);
+    const uint32_t ethernet_stable_ms = ethernet_stable_since == 0
+        ? 0 : (uint32_t)(now_ms - ethernet_stable_since);
+    const uint8_t retry_attempt =
+        _ethernet_retry_attempt.load(std::memory_order_relaxed);
+    const uint32_t retry_delay =
+        NetworkPolicy::ethernetInitRetryDelayMs(retry_attempt);
+    const uint32_t since_attempt = (uint32_t)(
+        now_ms - _last_ethernet_init_attempt.load(std::memory_order_relaxed));
+    const uint32_t retry_in = !ethernet_started && retry_delay > since_attempt
+        ? retry_delay - since_attempt : 0;
     const NetworkDiagnosticReason reason =
         NetworkPolicy::automaticDiagnosticReason(
-            _ethernet_started, ethernet_link_known, ethernet_link_up,
-            ethernet_connected, _selected, switching_locked,
+            ethernet_started, ethernet_link_known, ethernet_link_up,
+            ethernet_connected, selected, switching_locked,
             ethernet_stable_ms);
     snprintf(reply, reply_size,
              "> why:%s selected:%s lock:%s\n"
-             "eth:init:%s evt:%s link:%s ip:%s\n"
+             "eth:init:%s retry:%u/%lums evt:%s link:%s ip:%s\n"
              "wifi:cfg:%s started:%s link:%s",
-             NetworkPolicy::diagnosticReasonName(reason), mediumName(),
+             NetworkPolicy::diagnosticReasonName(reason),
+             NetworkPolicy::mediumName(selected),
              switching_locked ? "yes" : "no",
-             _ethernet_started ? "ok" : "failed", _ethernet.eventName(),
+             ethernet_started ? "ok" : "failed", retry_attempt,
+             (unsigned long)retry_in, _ethernet.eventName(),
              ethernet_link_known ? (ethernet_link_up ? "up" : "down")
                                  : "unknown",
              _ethernet.localIP().toString().c_str(),
-             wifiConfigured() ? "yes" : "no", _wifi_started ? "yes" : "no",
-             (_wifi_started && _wifi.isConnected()) ? "up" : "down");
+             wifiConfigured() ? "yes" : "no", wifi_started ? "yes" : "no",
+             (wifi_started && _wifi.isConnected()) ? "up" : "down");
   }
   unsigned long connectedAtMillis() const override {
-    return _selected == NetworkMedium::None ? 0 : selectedInterface().connectedAtMillis();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None
+        ? 0 : selectedInterface(selected).connectedAtMillis();
   }
   uint8_t lastDisconnectReason() const override {
-    return _selected == NetworkMedium::None ? 0 : selectedInterface().lastDisconnectReason();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None
+        ? 0 : selectedInterface(selected).lastDisconnectReason();
   }
   unsigned long lastDisconnectTime() const override {
-    return _selected == NetworkMedium::None ? 0 : selectedInterface().lastDisconnectTime();
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None
+        ? 0 : selectedInterface(selected).lastDisconnectTime();
   }
   AlertFaultPolicy::OutageSnapshot outageSnapshot() const override {
-    return _selected == NetworkMedium::None
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    return selected == NetworkMedium::None
         ? AlertFaultPolicy::OutageSnapshot{false, 0, 0}
-        : selectedInterface().outageSnapshot();
+        : selectedInterface(selected).outageSnapshot();
+  }
+  NetworkMedium alertMedium() const override {
+    return NetworkMedium::Ethernet;
+  }
+  AlertFaultPolicy::OutageSnapshot alertOutageSnapshot() const override {
+    return _ethernet.outageSnapshot();
   }
 };
 #endif

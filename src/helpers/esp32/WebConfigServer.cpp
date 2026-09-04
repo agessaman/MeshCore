@@ -7,9 +7,10 @@
 #include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
 #include <ArduinoJson.h>
-#include <bootloader_random.h>
+#include <esp_random.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <SHA256.h>
 
 #include <helpers/CommonCLI.h>
 #include <helpers/NetworkInterface.h>
@@ -18,29 +19,57 @@
 #include <helpers/WebConfigKeys.h>
 #include <helpers/bridges/MQTTBridge.h>
 
+#include "HttpPort80Lease.h"
+
 #include "WebConfigHtml.h"
 
 // Placeholder sent instead of stored secrets; POSTs carrying it are dropped
 // so an untouched password field never overwrites the stored value.
 static const char SECRET_SENTINEL[] = "********";
 
-// esp_random() has a true entropy source only while RF is active. Ethernet
-// LAN mode deliberately keeps Wi-Fi and Bluetooth down, so temporarily enable
-// the bootloader RNG source while generating authentication secrets there.
+// The ESP hardware RNG has a continuous entropy source only while an RF block
+// is running. Ethernet LAN mode deliberately keeps Wi-Fi and Bluetooth down,
+// so briefly start an unassociated station while creating login secrets. The
+// bootloader RNG helper is intentionally not used here: ESP-IDF limits it to
+// early boot, before normal RF/ADC/I2S operation begins.
 class WebConfigEntropyGuard {
-  bool _enabled;
+  wifi_mode_t _previous_mode;
+  bool _started_wifi;
+  bool _ready;
 
  public:
   WebConfigEntropyGuard()
-      : _enabled(activeNetworkInterface().medium() ==
-                 NetworkMedium::Ethernet) {
-    if (_enabled) bootloader_random_enable();
+      : _previous_mode(WiFi.getMode()), _started_wifi(false), _ready(true) {
+    if (_previous_mode == WIFI_MODE_NULL) {
+      _ready = WiFi.mode(WIFI_MODE_STA);
+      _started_wifi = _ready;
+    }
   }
 
   ~WebConfigEntropyGuard() {
-    if (_enabled) bootloader_random_disable();
+    if (_started_wifi) WiFi.mode(_previous_mode);
   }
+
+  bool ready() const { return _ready; }
 };
+
+static bool fillRandomBytes(uint8_t* output, size_t byte_count) {
+  if (!output || byte_count == 0) return false;
+  WebConfigEntropyGuard entropy;
+  if (!entropy.ready()) return false;
+
+  esp_fill_random(output, byte_count);
+  return true;
+}
+
+static void bytesToHex(char* output, const uint8_t* bytes, size_t byte_count) {
+  static const char HEX_DIGITS[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < byte_count; ++i) {
+    output[i * 2] = HEX_DIGITS[bytes[i] >> 4];
+    output[i * 2 + 1] = HEX_DIGITS[bytes[i] & 0x0f];
+  }
+  output[byte_count * 2] = '\0';
+}
 
 // Key classification (allowlist, secret detection, slot-prefix parsing) lives in
 // helpers/WebConfigKeys.h so it can be unit-tested on the host. Thin aliases keep
@@ -223,6 +252,11 @@ bool WebConfigServer::startSetupMode(char reply[]) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
+  if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
+    snprintf(reply, 160, "Err: port 80 is in use by %s",
+             HttpPort80Lease::ownerName());
+    return false;
+  }
   // AP_STA (not pure AP) so the WiFi scan for the SSID picker works while
   // the AP is up. STA stays unconnected - the bridge won't touch WiFi
   // while wifi_ssid is empty, and `start webconfig ap` requires it stopped.
@@ -244,6 +278,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
 #endif
   if (!ap_ok) {
     WiFi.mode(WIFI_OFF);
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
     strcpy(reply, "Err: failed to start AP");
     return false;
   }
@@ -271,26 +306,38 @@ bool WebConfigServer::startLanMode(IPAddress ip, bool initial_setup, char reply[
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
+  if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
+    snprintf(reply, 160, "Err: port 80 is in use by %s",
+             HttpPort80Lease::ownerName());
+    return false;
+  }
   activeNetworkInterface().lockSwitching();
   _network_locked = true;
   if (!activeNetworkInterface().isConnected() || ip == IPAddress()) {
     activeNetworkInterface().unlockSwitching();
     _network_locked = false;
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
     strcpy(reply, "Err: selected network not connected");
     return false;
   }
   _initial_setup = initial_setup;
+  uint8_t session_entropy[sizeof(_session_secret) + 6];
+  const size_t entropy_size = sizeof(_session_secret) + (_initial_setup ? 6 : 0);
+  if (!fillRandomBytes(session_entropy, entropy_size)) {
+    activeNetworkInterface().unlockSwitching();
+    _network_locked = false;
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
+    strcpy(reply, "Err: secure random source unavailable");
+    return false;
+  }
+  memcpy(_session_secret, session_entropy, sizeof(_session_secret));
+  _session_generation = 0;
   if (_initial_setup) {
-    {
-      WebConfigEntropyGuard entropy;
-      for (int i = 0; i < 3; ++i) {
-        sprintf(&_setup_code[i * 4], "%04X", (unsigned)(esp_random() & 0xffff));
-      }
-    }
-    _setup_code[12] = 0;
+    bytesToHex(_setup_code, session_entropy + sizeof(_session_secret), 6);
   } else {
     _setup_code[0] = 0;
   }
+  memset(session_entropy, 0, sizeof(session_entropy));
   _mode = MODE_LAN;
   createServer();
   _last_activity = millis();
@@ -391,6 +438,8 @@ void WebConfigServer::finalizeTeardown() {
   _batch_state = BATCH_IDLE;
   _batch_next = 0;
   _batch_reboot_armed = false;
+  memset(_session_secret, 0, sizeof(_session_secret));
+  _session_generation = 0;
   _session_token[0] = 0;
   _stats_json[0] = 0;
   _setup_code[0] = 0;
@@ -399,6 +448,7 @@ void WebConfigServer::finalizeTeardown() {
     activeNetworkInterface().unlockSwitching();
     _network_locked = false;
   }
+  HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
   if (_cb) _cb->onWebConfigStopped();
 }
 
@@ -653,13 +703,14 @@ bool WebConfigServer::checkAuth(AsyncWebServerRequest* req) {
   _last_activity = millis();
   if (_mode == MODE_SETUP) return true;  // physical proximity implied, nothing configured
   if (_mode != MODE_LAN) return false;
-  if (_session_token[0] == 0) return false;
   if (!req->hasHeader("Cookie")) return false;
   const String& cookies = req->getHeader("Cookie")->value();
   int idx = cookies.indexOf("wcs=");
   if (idx < 0 || (int)cookies.length() < idx + 4 + 32) return false;
   String token = cookies.substring(idx + 4, idx + 4 + 32);
   uint32_t now = millis();
+  WCLock lock(_mux);
+  if (_session_token[0] == 0) return false;
   if ((uint32_t)(now - _session_last_seen) > WEBCONFIG_SESSION_TTL_MS) return false;
   if (!fixedTimeEquals(token.c_str(), _session_token, 32)) return false;
   _session_last_seen = now;  // sliding expiry
@@ -752,25 +803,41 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
   }
   _login_fails = 0;
   _login_lock_until = 0;
+  uint32_t generation;
   {
-    WebConfigEntropyGuard entropy;
-    for (int i = 0; i < 4; i++) {
-      sprintf(&_session_token[i * 8], "%08lx",
-              (unsigned long)esp_random());
-    }
+    WCLock lock(_mux);
+    generation = ++_session_generation;
+    if (generation == 0) generation = ++_session_generation;
   }
-  _session_last_seen = now;
+  uint8_t token_bytes[16];
+  SHA256 token_hmac;
+  token_hmac.resetHMAC(_session_secret, sizeof(_session_secret));
+  token_hmac.update(reinterpret_cast<const uint8_t*>(&generation),
+                    sizeof(generation));
+  token_hmac.finalizeHMAC(_session_secret, sizeof(_session_secret),
+                          token_bytes, sizeof(token_bytes));
+  char session_token[33];
+  bytesToHex(session_token, token_bytes, sizeof(token_bytes));
+  memset(token_bytes, 0, sizeof(token_bytes));
+  {
+    WCLock lock(_mux);
+    memcpy(_session_token, session_token, sizeof(_session_token));
+    _session_last_seen = now;
+  }
 
   AsyncWebServerResponse* res = req->beginResponse(200, "application/json", "{\"ok\":true}");
   char cookie[80];
-  sprintf(cookie, "wcs=%s; HttpOnly; SameSite=Lax; Path=/", _session_token);
+  sprintf(cookie, "wcs=%s; HttpOnly; SameSite=Lax; Path=/", session_token);
   res->addHeader("Set-Cookie", cookie);
   req->send(res);
 }
 
 void WebConfigServer::handleLogout(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
-  _session_token[0] = 0;
+  {
+    WCLock lock(_mux);
+    _session_token[0] = 0;
+  }
   AsyncWebServerResponse* res = req->beginResponse(200, "application/json", "{\"ok\":true}");
   res->addHeader("Set-Cookie", "wcs=; Max-Age=0; Path=/");
   req->send(res);

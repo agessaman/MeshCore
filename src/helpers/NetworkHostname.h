@@ -25,8 +25,10 @@ static inline char asciiLower(uint8_t ch) {
  *
  * The result is lowercase, starts with "meshcore-", contains only letters,
  * digits and hyphens, and never exceeds ESP-IDF's practical 31-character
- * payload limit. If the readable name must be shortened, six hex digits from
- * the stable node identity are retained to reduce truncation collisions.
+ * payload limit. Six hex digits from the stable node identity are retained
+ * whenever non-ASCII bytes are removed, a fallback is needed, or the readable
+ * name must be shortened. This keeps lossy sanitization from assigning the
+ * same DHCP identity to unrelated nodes.
  */
 static inline bool build(char* dest, size_t dest_size, const char* node_name,
                          const uint8_t* stable_id, size_t stable_id_size) {
@@ -44,6 +46,7 @@ static inline bool build(char* dest, size_t dest_size, const char* node_name,
   char slug[64];
   size_t slug_length = 0;
   bool separator_pending = false;
+  bool removed_non_ascii = false;
   if (node_name) {
     for (size_t i = 0; node_name[i] != '\0' && slug_length < sizeof(slug) - 1;
          ++i) {
@@ -57,12 +60,14 @@ static inline bool build(char* dest, size_t dest_size, const char* node_name,
           slug[slug_length++] = asciiLower(ch);
         }
         separator_pending = false;
-      } else if (slug_length > 0) {
-        separator_pending = true;
+      } else {
+        if (ch >= 0x80) removed_non_ascii = true;
+        if (slug_length > 0) separator_pending = true;
       }
     }
   }
 
+  const bool used_fallback = slug_length == 0;
   if (slug_length == 0) {
     for (size_t i = 0; i < sizeof(kFallback) - 1; ++i) {
       slug[slug_length++] = kFallback[i];
@@ -75,7 +80,8 @@ static inline bool build(char* dest, size_t dest_size, const char* node_name,
   if (max_length == 0) return false;
 
   const bool needs_truncation = kPrefixLength + slug_length > max_length;
-  const bool can_add_identity = needs_truncation && stable_id &&
+  const bool needs_identity = needs_truncation || removed_non_ascii || used_fallback;
+  const bool can_add_identity = needs_identity && stable_id &&
       stable_id_size >= 3 && max_length > kPrefixLength + kSuffixLength;
   const size_t suffix_length = can_add_identity ? kSuffixLength : 0;
   const size_t prefix_length = kPrefixLength < max_length

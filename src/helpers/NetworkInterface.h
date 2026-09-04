@@ -59,6 +59,15 @@ class NetworkInterface {
   virtual uint8_t lastDisconnectReason() const = 0;
   virtual unsigned long lastDisconnectTime() const = 0;
   virtual AlertFaultPolicy::OutageSnapshot outageSnapshot() const = 0;
+
+  // Fault reporting normally follows the selected interface. Automatic
+  // Ethernet-preferred builds instead keep reporting the primary Ethernet
+  // outage while healthy Wi-Fi carries traffic, so prolonged degradation is
+  // not hidden by a successful fallback.
+  virtual NetworkMedium alertMedium() const { return medium(); }
+  virtual AlertFaultPolicy::OutageSnapshot alertOutageSnapshot() const {
+    return outageSnapshot();
+  }
 };
 
 /** Build-selected singleton. Wi-Fi is the compatibility default. */

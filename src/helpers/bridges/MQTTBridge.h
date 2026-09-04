@@ -634,16 +634,20 @@ public:
   static unsigned long getWifiConnectedAtMillis();
 
   /**
-   * Current selected-network outage snapshot for AlertReporter: down,
-   * started_ms, and the
-   * initiating disconnect reason. Distinct from getLastWifiDisconnectTime() /
+   * Current alert-network outage snapshot for AlertReporter: down, started_ms,
+   * and the initiating disconnect reason. Ethernet-preferred builds continue
+   * tracking Ethernet after a Wi-Fi fallback. Distinct from
+   * getLastWifiDisconnectTime() /
    * getLastWifiDisconnectReason(), which follow the most recent ESP-IDF
    * DISCONNECTED event and are overwritten by STA-backoff WiFi.disconnect()
    * (reason 8 / ASSOC_LEAVE).
    */
-  AlertFaultPolicy::OutageSnapshot getWifiOutageSnapshot() const {
-    return _network ? _network->outageSnapshot()
+  AlertFaultPolicy::OutageSnapshot getNetworkOutageSnapshot() const {
+    return _network ? _network->alertOutageSnapshot()
                     : AlertFaultPolicy::OutageSnapshot{false, 0, 0};
+  }
+  NetworkMedium getNetworkAlertMedium() const {
+    return _network ? _network->alertMedium() : NetworkMedium::None;
   }
 
   /**

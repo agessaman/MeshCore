@@ -2776,18 +2776,20 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
     updateCachedConnectionStatus();
   }
 
-  if (actions.reset_reconnect_backoff) {
-    // A usable route is a new connection epoch. Failures earned on the old
-    // route must not strand the replacement route on the 5-minute rung or at
-    // the circuit breaker. Preserve JWTs and slot configuration, but give each
-    // disconnected active slot one immediate, freshly guarded attempt.
+  if (actions.retry_disconnected_slots_now) {
+    // Link recovery gets one immediate attempt without forgiving broker
+    // failures earned on the same route. A medium switch is a new connection
+    // epoch, so only that transition clears the old route's ladder/breaker.
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       if (_slots[i].enabled && _slots[i].initial_connect_done && !_slots[i].connected) {
-        _slots[i].reconnect_backoff = 0;
-        _slots[i].max_backoff_failures = 0;
-        _slots[i].circuit_breaker_tripped = false;
-        _slots[i].last_reconnect_attempt =
-            now - MQTTConnectionPolicy::reconnectDelayMs(0, static_cast<uint8_t>(i));
+        if (actions.reset_reconnect_backoff) {
+          _slots[i].reconnect_backoff = 0;
+          _slots[i].max_backoff_failures = 0;
+          _slots[i].circuit_breaker_tripped = false;
+        }
+        _slots[i].last_reconnect_attempt = MQTTConnectionPolicy::immediateRetryLastAttempt(
+            static_cast<uint32_t>(now), _slots[i].circuit_breaker_tripped,
+            _slots[i].reconnect_backoff, static_cast<uint8_t>(i));
       }
     }
     _last_slot_reconnect_ms = now - MQTTConnectionPolicy::kReconnectGuardMs;

@@ -91,6 +91,20 @@ static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt) {
   return elapsedMs(now, last_attempt) >= kCircuitBreakerProbeMs;
 }
 
+// Move a disconnected slot's deadline to "due now" after the physical link
+// returns. Preserve its earned backoff and breaker state: a normal reconnect
+// gets one immediate attempt at its current rung, while a tripped breaker gets
+// one immediate probe. Unsigned subtraction keeps this wrap-safe.
+static inline uint32_t immediateRetryLastAttempt(uint32_t now,
+                                                bool circuit_breaker_tripped,
+                                                uint8_t reconnect_backoff,
+                                                uint8_t slot_index) {
+  const uint32_t delay = circuit_breaker_tripped
+      ? kCircuitBreakerProbeMs
+      : reconnectDelayMs(reconnect_backoff, slot_index);
+  return now - delay;
+}
+
 // WiFi station reconnect backoff. The bridge drives its own STA reconnect loop
 // separate from the per-slot MQTT reconnects, with a slightly longer first rung
 // (15 s vs the slot ladder's 10 s). Extracted from handleWiFiConnection() so the

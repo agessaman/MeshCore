@@ -42,13 +42,54 @@ TEST(NetworkPolicy, BootPrefersEthernetAndOtherwiseUsesConfiguredWifi) {
   EXPECT_EQ(NetworkMedium::None, NetworkPolicy::bootSelection(false, false));
 }
 
-TEST(NetworkPolicy, EthernetBootProbeHonorsFullDeadlineUntilConnected) {
-  EXPECT_TRUE(NetworkPolicy::ethernetBootProbePending(true, false, 0, 8000));
-  EXPECT_TRUE(NetworkPolicy::ethernetBootProbePending(true, false, 1500, 8000));
-  EXPECT_TRUE(NetworkPolicy::ethernetBootProbePending(true, false, 7999, 8000));
-  EXPECT_FALSE(NetworkPolicy::ethernetBootProbePending(true, false, 8000, 8000));
-  EXPECT_FALSE(NetworkPolicy::ethernetBootProbePending(true, true, 100, 8000));
-  EXPECT_FALSE(NetworkPolicy::ethernetBootProbePending(false, false, 100, 8000));
+TEST(NetworkPolicy, EthernetBootProbeUsesFullDeadlineForLinkOrUnknownState) {
+  EXPECT_TRUE(NetworkPolicy::ethernetBootProbePending(
+      true, false, false, false, 1500, 8000));
+  EXPECT_TRUE(NetworkPolicy::ethernetBootProbePending(
+      true, false, true, true, 7999, 8000));
+  EXPECT_FALSE(NetworkPolicy::ethernetBootProbePending(
+      true, false, true, true, 8000, 8000));
+  EXPECT_FALSE(NetworkPolicy::ethernetBootProbePending(
+      true, true, true, true, 100, 8000));
+  EXPECT_FALSE(NetworkPolicy::ethernetBootProbePending(
+      false, false, false, false, 100, 8000));
+}
+
+TEST(NetworkPolicy, EthernetBootProbeStopsEarlyOnKnownCableDown) {
+  EXPECT_TRUE(NetworkPolicy::ethernetBootProbePending(
+      true, false, true, false,
+      NetworkPolicy::kEthernetNoLinkBootGraceMs - 1, 8000));
+  EXPECT_FALSE(NetworkPolicy::ethernetBootProbePending(
+      true, false, true, false,
+      NetworkPolicy::kEthernetNoLinkBootGraceMs, 8000));
+}
+
+TEST(NetworkPolicy, EthernetInitRetryUsesBoundedExponentialBackoff) {
+  EXPECT_EQ(0u, NetworkPolicy::ethernetInitRetryDelayMs(0));
+  EXPECT_EQ(5000u, NetworkPolicy::ethernetInitRetryDelayMs(1));
+  EXPECT_EQ(10000u, NetworkPolicy::ethernetInitRetryDelayMs(2));
+  EXPECT_EQ(300000u, NetworkPolicy::ethernetInitRetryDelayMs(8));
+  EXPECT_EQ(300000u, NetworkPolicy::ethernetInitRetryDelayMs(255));
+
+  EXPECT_FALSE(NetworkPolicy::ethernetInitRetryDue(1, 4999, 0));
+  EXPECT_TRUE(NetworkPolicy::ethernetInitRetryDue(1, 5000, 0));
+  EXPECT_TRUE(NetworkPolicy::ethernetInitRetryDue(1, 10, 10u - 5000u));
+}
+
+TEST(NetworkPolicy, EthernetNoIpRecoveryRequiresSustainedCarrier) {
+  const uint32_t timeout = NetworkPolicy::kEthernetNoIpRecoveryMs;
+  EXPECT_FALSE(NetworkPolicy::ethernetNoIpRecoveryDue(
+      true, true, false, timeout, 0));
+  EXPECT_FALSE(NetworkPolicy::ethernetNoIpRecoveryDue(
+      true, true, false, timeout, 1));
+  EXPECT_TRUE(NetworkPolicy::ethernetNoIpRecoveryDue(
+      true, true, false, timeout + 1, 1));
+  EXPECT_FALSE(NetworkPolicy::ethernetNoIpRecoveryDue(
+      true, false, false, timeout + 1, 1));
+  EXPECT_FALSE(NetworkPolicy::ethernetNoIpRecoveryDue(
+      true, true, true, timeout + 1, 1));
+  EXPECT_TRUE(NetworkPolicy::ethernetNoIpRecoveryDue(
+      true, true, false, 100, 100u - timeout));
 }
 
 TEST(NetworkPolicy, EthernetFailureWaitsForGraceAndConnectedWifi) {
@@ -144,6 +185,15 @@ TEST(NetworkPolicy, StartOtaUsesReachableSelectedNetworkByDefault) {
 TEST(NetworkPolicy, StartOtaForceApOverridesAReachableSelectedNetwork) {
   EXPECT_FALSE(NetworkPolicy::startOtaUsesSelectedNetwork(true, true));
   EXPECT_FALSE(NetworkPolicy::startOtaUsesSelectedNetwork(true, false));
+}
+
+TEST(NetworkPolicy, ManualOtaTimeoutIsUploadSafeAndWrapSafe) {
+  const uint32_t timeout = NetworkPolicy::kManualOtaSessionTimeoutMs;
+  EXPECT_FALSE(NetworkPolicy::manualOtaTimeoutDue(timeout - 1, 0, false));
+  EXPECT_TRUE(NetworkPolicy::manualOtaTimeoutDue(timeout, 0, false));
+  EXPECT_FALSE(NetworkPolicy::manualOtaTimeoutDue(timeout, 0, true));
+  EXPECT_TRUE(NetworkPolicy::manualOtaTimeoutDue(
+      100, 100 - timeout, false));
 }
 
 int main(int argc, char** argv) {

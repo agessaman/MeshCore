@@ -1156,7 +1156,9 @@ function pollStats(){
       tile("Direct RX/TX",s.recv_direct+" / "+s.sent_direct)+
       tile("TX queue",s.tx_queue)+
       tile("MQTT queue",s.mqtt_queue)+
-      tile("WiFi RSSI",s.wifi_rssi,"dBm")+
+      (s.wifi_rssi==null
+        ? tile("Network",s.network_medium||"—","RSSI unavailable")
+        : tile("WiFi RSSI",s.wifi_rssi,"dBm"))+
       tile("IP",s.ip||"—");
     push(st.hist.heap,kb);push(st.hist.noise,s.noise);
     spark($("#spark-heap"),st.hist.heap);spark($("#spark-noise"),st.hist.noise);

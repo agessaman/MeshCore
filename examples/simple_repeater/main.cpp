@@ -138,6 +138,8 @@ void setup() {
 }
 
 void loop() {
+  board.maintainOTAUpdate(millis());
+
   // Handle Serial CLI
   int len = strlen(command);
   while (Serial.available() && len < sizeof(command)-1) {

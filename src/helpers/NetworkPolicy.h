@@ -63,7 +63,40 @@ struct AutomaticSelectionInput {
 // preempt a working Wi-Fi fallback.
 static constexpr uint32_t kEthernetDownGraceMs = 3000;
 static constexpr uint32_t kEthernetFailbackStableMs = 10000;
+static constexpr uint32_t kEthernetNoLinkBootGraceMs = 750;
+static constexpr uint32_t kEthernetNoIpRecoveryMs = 120000;
+static constexpr uint32_t kEthernetInitRetryMinMs = 5000;
+static constexpr uint32_t kEthernetInitRetryMaxMs = 300000;
 static constexpr uint32_t kNtpRetryMs = 30000;
+static constexpr uint32_t kManualOtaSessionTimeoutMs =
+    15UL * 60UL * 1000UL;
+
+static inline uint32_t ethernetInitRetryDelayMs(uint8_t attempt) {
+  if (attempt == 0) return 0;
+  uint32_t delay_ms = kEthernetInitRetryMinMs;
+  for (uint8_t i = 1; i < attempt && delay_ms < kEthernetInitRetryMaxMs; ++i) {
+    delay_ms = delay_ms > kEthernetInitRetryMaxMs / 2
+        ? kEthernetInitRetryMaxMs : delay_ms * 2;
+  }
+  return delay_ms;
+}
+
+static inline bool ethernetInitRetryDue(uint8_t attempt,
+                                        uint32_t now_ms,
+                                        uint32_t last_attempt_ms) {
+  return attempt == 0 ||
+         (uint32_t)(now_ms - last_attempt_ms) >=
+             ethernetInitRetryDelayMs(attempt);
+}
+
+static constexpr bool ethernetNoIpRecoveryDue(bool initialized,
+                                              bool link_up,
+                                              bool connected,
+                                              uint32_t now_ms,
+                                              uint32_t no_ip_since_ms) {
+  return initialized && link_up && !connected && no_ip_since_ms != 0 &&
+         (uint32_t)(now_ms - no_ip_since_ms) >= kEthernetNoIpRecoveryMs;
+}
 
 static inline NetworkDiagnosticReason automaticDiagnosticReason(
     bool ethernet_initialized, bool ethernet_link_known,
@@ -135,14 +168,17 @@ static constexpr NetworkMedium bootSelection(bool ethernet_connected,
                          : NetworkMedium::None;
 }
 
-// Once the Ethernet controller has initialized, allow the entire boot probe
-// window for link negotiation and DHCP. PHY carrier is useful diagnostic data,
-// but it must not shorten the advertised deadline when carrier reporting lags.
+// Give the PHY a short window to report carrier. Once a definitive link-down
+// sample arrives, do not stall mesh startup for the full DHCP deadline. A
+// present link (or an unknown PHY state) still receives the entire probe.
 static constexpr bool ethernetBootProbePending(bool ethernet_initialized,
                                                 bool ethernet_connected,
+                                                bool link_known,
+                                                bool link_up,
                                                 uint32_t elapsed_ms,
                                                 uint32_t wait_ms) {
-  return ethernet_initialized && !ethernet_connected && elapsed_ms < wait_ms;
+  return ethernet_initialized && !ethernet_connected && elapsed_ms < wait_ms &&
+         (!link_known || link_up || elapsed_ms < kEthernetNoLinkBootGraceMs);
 }
 
 static inline NetworkMedium automaticSelection(
@@ -177,6 +213,13 @@ static inline NetworkMedium automaticSelection(
 static constexpr bool startOtaUsesSelectedNetwork(bool force_ap,
                                                   bool network_connected) {
   return !force_ap && network_connected;
+}
+
+static constexpr bool manualOtaTimeoutDue(uint32_t now_ms,
+                                          uint32_t started_ms,
+                                          bool upload_in_progress) {
+  return !upload_in_progress &&
+         (uint32_t)(now_ms - started_ms) >= kManualOtaSessionTimeoutMs;
 }
 
 }  // namespace NetworkPolicy

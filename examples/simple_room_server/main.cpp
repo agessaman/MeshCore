@@ -114,6 +114,8 @@ void setup() {
 }
 
 void loop() {
+  board.maintainOTAUpdate(millis());
+
   int len = strlen(command);
   while (Serial.available() && len < sizeof(command)-1) {
     char c = Serial.read();
