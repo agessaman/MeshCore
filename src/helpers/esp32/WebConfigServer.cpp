@@ -7,6 +7,7 @@
 #include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
 #include <ArduinoJson.h>
+#include <bootloader_random.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 
@@ -22,6 +23,24 @@
 // Placeholder sent instead of stored secrets; POSTs carrying it are dropped
 // so an untouched password field never overwrites the stored value.
 static const char SECRET_SENTINEL[] = "********";
+
+// esp_random() has a true entropy source only while RF is active. Ethernet
+// LAN mode deliberately keeps Wi-Fi and Bluetooth down, so temporarily enable
+// the bootloader RNG source while generating authentication secrets there.
+class WebConfigEntropyGuard {
+  bool _enabled;
+
+ public:
+  WebConfigEntropyGuard()
+      : _enabled(activeNetworkInterface().medium() ==
+                 NetworkMedium::Ethernet) {
+    if (_enabled) bootloader_random_enable();
+  }
+
+  ~WebConfigEntropyGuard() {
+    if (_enabled) bootloader_random_disable();
+  }
+};
 
 // Key classification (allowlist, secret detection, slot-prefix parsing) lives in
 // helpers/WebConfigKeys.h so it can be unit-tested on the host. Thin aliases keep
@@ -262,8 +281,11 @@ bool WebConfigServer::startLanMode(IPAddress ip, bool initial_setup, char reply[
   }
   _initial_setup = initial_setup;
   if (_initial_setup) {
-    for (int i = 0; i < 3; ++i) {
-      sprintf(&_setup_code[i * 4], "%04X", (unsigned)(esp_random() & 0xffff));
+    {
+      WebConfigEntropyGuard entropy;
+      for (int i = 0; i < 3; ++i) {
+        sprintf(&_setup_code[i * 4], "%04X", (unsigned)(esp_random() & 0xffff));
+      }
     }
     _setup_code[12] = 0;
   } else {
@@ -730,7 +752,13 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
   }
   _login_fails = 0;
   _login_lock_until = 0;
-  for (int i = 0; i < 4; i++) sprintf(&_session_token[i * 8], "%08lx", (unsigned long)esp_random());
+  {
+    WebConfigEntropyGuard entropy;
+    for (int i = 0; i < 4; i++) {
+      sprintf(&_session_token[i * 8], "%08lx",
+              (unsigned long)esp_random());
+    }
+  }
   _session_last_seen = now;
 
   AsyncWebServerResponse* res = req->beginResponse(200, "application/json", "{\"ok\":true}");

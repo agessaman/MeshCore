@@ -38,7 +38,7 @@ static constexpr MQTTTransitionActions mqttActions(NetworkTransition transition)
   return {
       transition == NetworkTransition::Down || transition == NetworkTransition::Switched,
       transition == NetworkTransition::Up || transition == NetworkTransition::Switched,
-      transition == NetworkTransition::Up || transition == NetworkTransition::Switched,
+      transition == NetworkTransition::Switched,
   };
 }
 
@@ -160,7 +160,8 @@ static inline NetworkMedium automaticSelection(
 
   if (input.selected == NetworkMedium::WiFi) {
     if (input.ethernet_connected &&
-        input.ethernet_stable_ms >= kEthernetFailbackStableMs) {
+        (!input.wifi_connected ||
+         input.ethernet_stable_ms >= kEthernetFailbackStableMs)) {
       return NetworkMedium::Ethernet;
     }
     return NetworkMedium::WiFi;

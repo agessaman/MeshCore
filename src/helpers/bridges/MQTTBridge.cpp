@@ -1252,7 +1252,10 @@ void MQTTBridge::mqttTaskLoop() {
   // Wait a bit for WiFi to start connecting
   vTaskDelay(pdMS_TO_TICKS(1000));
 
-  bool network_was_connected = _network->isConnected();
+  // Treat the first post-settle sample as an edge. A fast Wi-Fi association
+  // may complete during the delay above, before the task has sampled state;
+  // initializing from the live value would then defer NTP until its retry.
+  bool network_was_connected = false;
   unsigned long last_ntp_attempt = 0;
 
   // Main task loop

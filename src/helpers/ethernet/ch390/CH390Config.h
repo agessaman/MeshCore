@@ -17,7 +17,6 @@ static inline bool beginConfiguredCH390(const char* hostname = nullptr) {
   if (hostname && hostname[0] != '\0') {
     if (!CH390.setHostname(hostname)) {
       Serial.printf("Network: invalid Ethernet hostname %s\n", hostname);
-      return false;
     }
   }
   if (!CH390.begin(config)) return false;

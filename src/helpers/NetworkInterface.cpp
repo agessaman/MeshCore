@@ -455,7 +455,8 @@ class AutomaticNetworkInterface final : public NetworkInterface {
     // Hardware availability and stored credentials are configuration. Current
     // link/DHCP state is runtime state and must not permanently suppress the
     // MQTT task that monitors for a late cable or lease.
-    return _ethernet_started || (wifi_ssid && wifi_ssid[0] != '\0');
+    (void)wifi_ssid;
+    return true;
   }
   bool isAutomatic() const override { return true; }
 

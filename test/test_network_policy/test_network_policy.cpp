@@ -9,11 +9,11 @@ TEST(NetworkPolicy, MqttDownDisconnectsSlotsWithoutRequestingImmediateRetry) {
   EXPECT_FALSE(actions.reset_reconnect_backoff);
 }
 
-TEST(NetworkPolicy, MqttUpRequestsImmediateRetryWithoutDisconnectingSlots) {
+TEST(NetworkPolicy, MqttUpRetriesWithoutClearingBrokerCircuitBreaker) {
   const auto actions = NetworkPolicy::mqttActions(NetworkTransition::Up);
   EXPECT_FALSE(actions.stop_started_slots);
   EXPECT_TRUE(actions.retry_disconnected_slots_now);
-  EXPECT_TRUE(actions.reset_reconnect_backoff);
+  EXPECT_FALSE(actions.reset_reconnect_backoff);
 }
 
 TEST(NetworkPolicy, NoTransitionHasNoMqttSideEffects) {
@@ -66,6 +66,12 @@ TEST(NetworkPolicy, FailbackRequiresStableEthernet) {
       NetworkPolicy::kEthernetFailbackStableMs - 1, 0};
   EXPECT_EQ(NetworkMedium::WiFi, NetworkPolicy::automaticSelection(input));
   input.ethernet_stable_ms = NetworkPolicy::kEthernetFailbackStableMs;
+  EXPECT_EQ(NetworkMedium::Ethernet, NetworkPolicy::automaticSelection(input));
+}
+
+TEST(NetworkPolicy, DeadWifiFailsBackToReadyEthernetImmediately) {
+  const NetworkPolicy::AutomaticSelectionInput input = {
+      NetworkMedium::WiFi, true, false, true, false, 0, 0};
   EXPECT_EQ(NetworkMedium::Ethernet, NetworkPolicy::automaticSelection(input));
 }
 
