@@ -3,6 +3,7 @@
 #include <climits>
 #include <helpers/RxReservePacketManager.h>
 #include <helpers/NetworkInterface.h>
+#include <helpers/NetworkHostname.h>
 #if defined(ESP_PLATFORM)
 #include <WiFi.h>
 #endif
@@ -950,6 +951,11 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   NetworkInterface& boot_network = activeNetworkInterface();
   if (boot_network.isAutomatic()) {
+    char network_hostname[NetworkHostname::kBufferSize];
+    NetworkHostname::build(network_hostname, sizeof(network_hostname),
+                           _prefs.node_name, self_id.pub_key, PUB_KEY_SIZE);
+    boot_network.setHostname(network_hostname);
+    Serial.printf("Network: hostname %s\n", network_hostname);
     MQTTPrefs* obs = _cli.getObserverPrefs();
     Serial.printf("Network: probing Ethernet for up to %lums\n",
                   (unsigned long)NETWORK_ETHERNET_BOOT_WAIT_MS);

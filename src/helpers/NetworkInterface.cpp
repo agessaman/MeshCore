@@ -77,6 +77,7 @@ class NetworkInterfaceBase : public NetworkInterface {
 
 class WiFiNetworkInterface final : public NetworkInterfaceBase {
   bool _event_registered = false;
+  char _hostname[32] = {};
   char _ssid[33] = {};
   char _password[65] = {};
   unsigned long _last_reconnect_attempt = 0;
@@ -112,6 +113,11 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
     return wifi_ssid && wifi_ssid[0] != '\0';
   }
 
+  void setHostname(const char* hostname) override {
+    strncpy(_hostname, hostname ? hostname : "", sizeof(_hostname) - 1);
+    _hostname[sizeof(_hostname) - 1] = '\0';
+  }
+
   bool begin(const char* wifi_ssid, const char* wifi_password) override {
     if (!configValid(wifi_ssid)) return false;
     strncpy(_ssid, wifi_ssid, sizeof(_ssid) - 1);
@@ -119,6 +125,9 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
     strncpy(_password, wifi_password ? wifi_password : "", sizeof(_password) - 1);
     _password[sizeof(_password) - 1] = '\0';
 
+    // Arduino-ESP32 applies this stored value when it creates the STA netif.
+    // It must be set before WiFi.mode()/begin() for the first DHCP exchange.
+    if (_hostname[0] != '\0') WiFi.setHostname(_hostname);
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.setAutoConnect(true);
@@ -229,6 +238,7 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
  private:
   bool _started = false;
   bool _event_registered = false;
+  char _hostname[32] = {};
   std::atomic<uint8_t> _event_state{static_cast<uint8_t>(EventState::None)};
 
  public:
@@ -239,6 +249,11 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
   }
   int statusCode() const override { return isConnected() ? 1 : 0; }
   bool configValid(const char*) const override { return true; }
+
+  void setHostname(const char* hostname) override {
+    strncpy(_hostname, hostname ? hostname : "", sizeof(_hostname) - 1);
+    _hostname[sizeof(_hostname) - 1] = '\0';
+  }
 
   bool begin(const char*, const char*) override {
     if (_started) return true;
@@ -279,7 +294,7 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
       });
       _event_registered = true;
     }
-    _started = beginConfiguredCH390();
+    _started = beginConfiguredCH390(_hostname);
     if (_started && isConnected()) noteConnected(millis());
     return _started;
   }
@@ -443,6 +458,13 @@ class AutomaticNetworkInterface final : public NetworkInterface {
     return _ethernet_started || (wifi_ssid && wifi_ssid[0] != '\0');
   }
   bool isAutomatic() const override { return true; }
+
+  void setHostname(const char* hostname) override {
+    // Whichever medium wins now or during a later failover presents the same
+    // stable DHCP identity to the LAN.
+    _ethernet.setHostname(hostname);
+    _wifi.setHostname(hostname);
+  }
 
   bool begin(const char* wifi_ssid, const char* wifi_password) override {
     rememberWifi(wifi_ssid, wifi_password);

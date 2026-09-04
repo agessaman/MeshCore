@@ -29,6 +29,9 @@ class NetworkInterface {
   virtual const char* statusName() const = 0;
   virtual int statusCode() const = 0;
   virtual bool configValid(const char* wifi_ssid) const = 0;
+  // Configure the DHCP hostname before begin()/bootstrap(). Implementations
+  // retain it for any later fallback interface start.
+  virtual void setHostname(const char* hostname) = 0;
   virtual bool begin(const char* wifi_ssid, const char* wifi_password) = 0;
   virtual NetworkTransition maintain(uint32_t now_ms, uint8_t wifi_power_save) = 0;
 
