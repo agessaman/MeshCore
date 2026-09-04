@@ -85,16 +85,11 @@
 #define NTC_R_FIXED 10000.0f
 #define NTC_VCC_MV 3300.0f
 
-// Fan control (GPIO41). Default auto + on/off: NTC is PA-adjacent PCB temp,
-// not die temp, so trip well below the SX1262/ESP32 85C operating limit.
-// This fan/MOSFET path does not respond to PWM below 100% duty.
+// Fan control (GPIO41). NTC is PA-adjacent PCB temp, not die temp, so trip
+// well below the SX1262/ESP32 85C operating limit. Hardware testing confirmed
+// that this fan/MOSFET path is on/off; PWM below 100% does not spin the fan.
 #define FAN_CTRL_PIN 41
-#define FAN_PWM_CHANNEL 4
-#define FAN_PWM_FREQ_HZ 25000
-#define FAN_PWM_RES_BITS 8
-#define FAN_MIN_DUTY_PCT 40
 #define FAN_TX_COOLDOWN_MS 15000
-#define FAN_TX_FLOOR_PCT 100
 #define FAN_DEFAULT_LO_C 30   // off below typical indoor idle (~86F)
 #define FAN_DEFAULT_HI_C 36   // on at ~97F PCB; still far below 85C chip ratings
 
