@@ -211,6 +211,8 @@ pio run -e Station_G2_repeater_observer_mqtt
 # Station G3 (ESP32)
 pio run -e Station_G3_ESP32_repeater_observer_mqtt
 pio run -e Station_G3_ESP32_room_server_observer_mqtt
+pio run -e Station_G3_ESP32_r2_repeater_observer_mqtt   # second RF slot
+pio run -e Station_G3_ESP32_r2_room_server_observer_mqtt   # second RF slot
 
 # LilyGo T-LoRa V2.1-1.6 (TTGO LoRa32 V1.0)
 pio run -e LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt
@@ -245,6 +247,8 @@ Some MQTT observer builds use a non-default partition table to accommodate the l
 | `Station_G2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
 | `Station_G3_ESP32_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
 | `Station_G3_ESP32_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+| `Station_G3_ESP32_r2_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | Second RF slot; same board and layout as the slot-1 env |
+| `Station_G3_ESP32_r2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | same |
 | `LilyGo_TBeam_1W_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | Set in `boards/t_beam_1w.json`; required vs implicit `default.csv` |
 | `LilyGo_TBeam_1W_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | same |
 
