@@ -444,7 +444,15 @@ void MQTTBridge::applyWifiPowerSave() {
   static_assert((int)WifiPowerSavePolicy::kModeMinModem == (int)WIFI_PS_MIN_MODEM, "wifi_ps_type_t drift");
   static_assert((int)WifiPowerSavePolicy::kModeMaxModem == (int)WIFI_PS_MAX_MODEM, "wifi_ps_type_t drift");
   if (!_obs) return;
-  esp_wifi_set_ps((wifi_ps_type_t)WifiPowerSavePolicy::modeFor(_obs->wifi_power_save));
+  const uint8_t stored = _obs->wifi_power_save;
+  esp_wifi_set_ps((wifi_ps_type_t)WifiPowerSavePolicy::modeFor(stored));
+  // Read back rather than logging what we asked for: this is the only place the
+  // mode is observable on a running node, and the setting used to change
+  // meaning between the CLI and this path.
+  wifi_ps_type_t applied = WIFI_PS_NONE;
+  esp_wifi_get_ps(&applied);
+  MQTT_DEBUG_PRINTLN("WiFi power save: %s (mode=%d)",
+                     WifiPowerSavePolicy::nameFor(stored), (int)applied);
   #endif
 }
 
