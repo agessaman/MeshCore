@@ -2604,6 +2604,16 @@ void MQTTBridge::publishStatusToSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
   if (!slot.client || !slot.connected) return;
+  // `set mqtt.status off` disables status messages, on-connect ones included
+  // (MQTT_IMPLEMENTATION.md: "Enable/disable status messages"). Read live from
+  // prefs like the periodic path, and checked here rather than at the pending
+  // flag so the setting that counts is the one in force when we publish.
+  if (!_obs->mqtt_status_enabled) return;
+  // A disabled slot can still hold a connection that was established before it
+  // was switched off (teardown only stops a client reporting connected), and
+  // its callback arms this publish. Do not speak for a slot the operator
+  // turned off.
+  if (!slot.enabled) return;
 
   refreshOriginFromPrefs();
 

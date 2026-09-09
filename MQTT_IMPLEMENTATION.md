@@ -531,7 +531,7 @@ These settings apply across all MQTT slots:
 #### Set Commands
 - `set mqtt.origin <name>` - Set device origin name
 - `set mqtt.iata <code>` - Set IATA code (auto-uppercased)
-- `set mqtt.status on|off` - Enable/disable status messages
+- `set mqtt.status on|off` - Enable/disable status messages (periodic *and* the one sent on each broker connect)
 - `set mqtt.packets on|off` - Enable/disable packet messages
 - `set mqtt.raw on|off` - Enable/disable raw messages
 - `set mqtt.rx on|off` - Enable/disable RX (received) packet uplinking
