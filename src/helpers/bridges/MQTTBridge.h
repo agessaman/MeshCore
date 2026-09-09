@@ -135,6 +135,10 @@ private:
     int32_t last_tls_err;           // esp_tls_last_esp_err (0 = no error)
     int32_t last_tls_stack_err;     // mbedTLS stack error
     int last_sock_errno;            // socket errno
+    // CONNACK return code from the last broker refusal (0 = none). A refusal is
+    // not a transport failure, and without this the diag shows a slot with wrong
+    // credentials as an unexplained disconnect.
+    uint8_t last_connack_code;
     unsigned long last_error_time;  // millis() of last error
     uint32_t disconnect_count;      // Number of disconnect callbacks since boot
     unsigned long first_disconnect_time; // millis() of first disconnect after boot

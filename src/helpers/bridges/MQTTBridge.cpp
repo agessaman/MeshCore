@@ -1,4 +1,5 @@
 #include "MQTTBridge.h"
+#include "MQTTErrorLabels.h"
 #include "../WifiPowerSavePolicy.h"
 #include "../MQTTConnectionPolicy.h"
 #include "../MQTTMessageBuilder.h"
@@ -22,6 +23,7 @@
 
 #ifdef ESP_PLATFORM
 #include <esp_wifi.h>
+#include <esp_tls.h>
 #include <esp_sntp.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -463,41 +465,52 @@ const char* MQTTBridge::getSlotPresetName(int slot_index) const {
   return MQTT_PRESET_CUSTOM;
 }
 
+// The label tables live in MQTTErrorLabels.h so host tests can exercise them.
+// These asserts are the contract between that pure table and the SDK actually
+// being compiled against: a framework bump that renumbers a reason or an
+// esp-tls error fails here instead of silently mislabelling it in the field.
+#ifdef ESP_PLATFORM
+static_assert(MQTTErrorLabels::kWifiNoApFound == WIFI_REASON_NO_AP_FOUND, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiAuthFail == WIFI_REASON_AUTH_FAIL, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiAssocFail == WIFI_REASON_ASSOC_FAIL, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiHandshakeTimeout == WIFI_REASON_HANDSHAKE_TIMEOUT, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiConnectionFail == WIFI_REASON_CONNECTION_FAIL, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiBeaconTimeout == WIFI_REASON_BEACON_TIMEOUT, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiApTsfReset == WIFI_REASON_AP_TSF_RESET, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiRoaming == WIFI_REASON_ROAMING, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiSaQueryTimeout == WIFI_REASON_SA_QUERY_TIMEOUT, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiAuthExpire == WIFI_REASON_AUTH_EXPIRE, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiAssocExpire == WIFI_REASON_ASSOC_EXPIRE, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiAssocLeave == WIFI_REASON_ASSOC_LEAVE, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiBssTransitionDisassoc == WIFI_REASON_BSS_TRANSITION_DISASSOC, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifi4WayHandshakeTimeout == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiGroupCipherInvalid == WIFI_REASON_GROUP_CIPHER_INVALID, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiCipherSuiteRejected == WIFI_REASON_CIPHER_SUITE_REJECTED, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiMissingAcks == WIFI_REASON_MISSING_ACKS, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiTimeout == WIFI_REASON_TIMEOUT, "wifi reason drift");
+static_assert(MQTTErrorLabels::kWifiInvalidPmkid == WIFI_REASON_INVALID_PMKID, "wifi reason drift");
+
+static_assert(MQTTErrorLabels::kTlsCannotResolveHostname == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsCannotCreateSocket == ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsUnsupportedProtoFamily == ESP_ERR_ESP_TLS_UNSUPPORTED_PROTOCOL_FAMILY, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsFailedConnectToHost == ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsSocketSetoptFailed == ESP_ERR_ESP_TLS_SOCKET_SETOPT_FAILED, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsConnectionTimeout == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsTcpClosedFin == ESP_ERR_ESP_TLS_TCP_CLOSED_FIN, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsMbedtlsCertPartlyOk == ESP_ERR_MBEDTLS_CERT_PARTLY_OK, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsMbedtlsSetHostname == ESP_ERR_MBEDTLS_SSL_SET_HOSTNAME_FAILED, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsMbedtlsX509ParseFailed == ESP_ERR_MBEDTLS_X509_CRT_PARSE_FAILED, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsMbedtlsSslSetupFailed == ESP_ERR_MBEDTLS_SSL_SETUP_FAILED, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsMbedtlsSslWriteFailed == ESP_ERR_MBEDTLS_SSL_WRITE_FAILED, "esp-tls error drift");
+static_assert(MQTTErrorLabels::kTlsMbedtlsHandshakeFailed == ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED, "esp-tls error drift");
+#endif
+
 const char* MQTTBridge::wifiReasonStr(uint8_t reason) {
-  switch (reason) {
-    case 2:   return "auth expired";
-    case 4:   return "assoc timeout";
-    case 8:   return "AP disconnected";
-    case 15:  return "4-way handshake timeout";
-    case 18:  return "group cipher mismatch";
-    case 40:  return "cipher suite rejected";
-    case 49:  return "invalid PMKID";
-    case 61:  return "AP BSS management";
-    case 88:  return "AP BSS management";
-    case 168: return "AP band-steering kick";
-    case 34:  return "AP state mismatch (class 3 frame)";
-    case 39:  return "SSID not found";
-    case 63:  return "SA query timeout (PMF)";
-    case 200: return "signal lost";
-    case 201: return "security mismatch";
-    case 202: return "auth mode rejected";
-    case 204: return "handshake timeout";
-    default:  return nullptr;
-  }
+  return MQTTErrorLabels::wifiReason(reason);
 }
 
 const char* MQTTBridge::tlsErrorStr(int32_t err) {
-  switch (err) {
-    case 0x8001: return "DNS failed";
-    case 0x8002: return "socket error";
-    case 0x8004: return "connect refused";
-    case 0x8006: return "TLS timeout";
-    case 0x8008: return "connection timeout";
-    case 0x800B: return "cert verify failed";
-    case 0x8010: return "mbedTLS error";
-    case 0x801A: return "TLS handshake failed";
-    default:     return nullptr;
-  }
+  return MQTTErrorLabels::tlsError(err);
 }
 
 void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) {
@@ -564,6 +577,16 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
   if (slot.connected && slot.last_error_time == 0) {
     replyAppendf(buf, bufsize, &pos, ", no errors");
   } else if (slot.last_error_time > 0) {
+    // Broker refusal: the CONNECT reached a broker that answered "no". Reported
+    // first because the transport fields below are empty or irrelevant then.
+    if (slot.last_connack_code != 0) {
+      const char* why = MQTTErrorLabels::connackReason(slot.last_connack_code);
+      if (why) {
+        replyAppendf(buf, bufsize, &pos, ", refused: %s (%u)", why, (unsigned)slot.last_connack_code);
+      } else {
+        replyAppendf(buf, bufsize, &pos, ", refused: code %u", (unsigned)slot.last_connack_code);
+      }
+    }
     // TLS error with human-friendly description
     if (slot.last_tls_err != 0) {
       const char* desc = tlsErrorStr(slot.last_tls_err);
@@ -1660,6 +1683,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
     _slots[index].last_tls_err = 0;
     _slots[index].last_tls_stack_err = 0;
     _slots[index].last_sock_errno = 0;
+    _slots[index].last_connack_code = 0;
     _slots[index].last_error_time = 0;
     _slots[index].current_outage_started_ms = 0;  // clear current-outage timer for AlertReporter
     updateCachedConnectionStatus();  // bool store — safe from this (esp-mqtt) task
@@ -1689,6 +1713,11 @@ bool MQTTBridge::ensureSlotClient(int index) {
     _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
     _slots[index].last_sock_errno = error.esp_transport_sock_errno;
     _slots[index].last_error_time = millis();
+    // Cleared on any other error type so the diag describes the latest failure
+    // rather than pairing a fresh transport error with an old refusal.
+    _slots[index].last_connack_code =
+        (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED)
+            ? (uint8_t)error.connect_return_code : 0;
     if (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
       _slot_force_jwt_mint[index] = true;
       // Broker rejected the MQTT CONNECT itself — not a transport failure.
