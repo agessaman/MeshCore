@@ -5,6 +5,9 @@
 #include <Packet.h>
 #include <Utils.h>
 #include <string.h>
+#ifdef WITH_MQTT_BRIDGE
+  #include "helpers/RadioWatchdog.h"
+#endif
 
 namespace mesh {
 
@@ -135,8 +138,10 @@ typedef uint32_t  DispatcherAction;
 class Dispatcher {
   Packet* outbound;  // current outbound packet
   unsigned long outbound_expiry, outbound_start, total_air_time, rx_air_time;
-  unsigned long last_watchdog_recovery;
   unsigned long last_radio_active_ms;   // updated on any TX or RX event; used by watchdog
+#ifdef WITH_MQTT_BRIDGE
+  RadioWatchdog radio_watchdog;
+#endif
   unsigned long next_tx_time;
   unsigned long cad_busy_start;
   unsigned long radio_nonrx_start;
@@ -171,7 +176,6 @@ protected:
     tx_budget_ms = 0;
     last_budget_update = 0;
     duty_cycle_window_ms = 3600000;
-    last_watchdog_recovery = 0;
     last_radio_active_ms = 0;
   }
 
