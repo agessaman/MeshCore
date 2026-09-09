@@ -1,4 +1,5 @@
 #include "MQTTBridge.h"
+#include "../WifiPowerSavePolicy.h"
 #include "../MQTTConnectionPolicy.h"
 #include "../MQTTMessageBuilder.h"
 #include "../MQTTPacketQueuePolicy.h"
@@ -425,6 +426,19 @@ int MQTTBridge::getMaxActiveSlots() {
 #else
   return 2;
 #endif
+}
+
+// One mapping for startup, reconnect and CLI (see WifiPowerSavePolicy). The
+// stored default is `none`; `min` means MIN_MODEM here exactly as the CLI says
+// it does.
+void MQTTBridge::applyWifiPowerSave() {
+  #ifdef ESP_PLATFORM
+  static_assert((int)WifiPowerSavePolicy::kModeNone == (int)WIFI_PS_NONE, "wifi_ps_type_t drift");
+  static_assert((int)WifiPowerSavePolicy::kModeMinModem == (int)WIFI_PS_MIN_MODEM, "wifi_ps_type_t drift");
+  static_assert((int)WifiPowerSavePolicy::kModeMaxModem == (int)WIFI_PS_MAX_MODEM, "wifi_ps_type_t drift");
+  if (!_obs) return;
+  esp_wifi_set_ps((wifi_ps_type_t)WifiPowerSavePolicy::modeFor(_obs->wifi_power_save));
+  #endif
 }
 
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
@@ -2804,6 +2818,12 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
     _wifi_status_initialized = true;
     setWifiOutage(AlertFaultPolicy::applyWifiStatus(
         (uint32_t)now, current_wifi_status == WL_CONNECTED, wifiOutage(), false));
+    #ifdef ESP_PLATFORM
+    // Already associated at bridge start (end()/begin() leaves STA up): there is
+    // no connect transition below to carry the setting, so apply it here or the
+    // node runs on whatever the previous mode was.
+    if (current_wifi_status == WL_CONNECTED) applyWifiPowerSave();
+    #endif
   }
   if (now - _last_wifi_check <= 10000) {
     // Events own the snapshot between 10 s polls. If STA is associated again
@@ -2827,16 +2847,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
       s_wifi_connected_at = now;
       _wifi_reconnect_backoff_attempt = 0;
       #ifdef ESP_PLATFORM
-      wifi_ps_type_t ps_mode;
-      uint8_t ps_pref = _obs->wifi_power_save;
-      if (ps_pref == 1) {
-        ps_mode = WIFI_PS_NONE;
-      } else if (ps_pref == 2) {
-        ps_mode = WIFI_PS_MAX_MODEM;
-      } else {
-        ps_mode = WIFI_PS_NONE;  // default: no power save; eliminates DTIM wake latency on mains-powered bridges
-      }
-      esp_wifi_set_ps(ps_mode);
+      applyWifiPowerSave();
       #ifdef MQTT_WIFI_TX_POWER
       WiFi.setTxPower(MQTT_WIFI_TX_POWER);
       #else

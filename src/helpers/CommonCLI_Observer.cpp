@@ -15,6 +15,7 @@
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
+#include "WifiPowerSavePolicy.h"     // one powersave value->mode/name mapping
 #include <Utils.h>
 #include <new>
 #ifdef ESP_PLATFORM
@@ -438,41 +439,28 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     if (!persistObserverPrefs(reply)) return true;
     strcpy(reply, "OK");
   } else if (memcmp(config, "wifi.powersave ", 15) == 0) {
-    const char* value = &config[15];
     uint8_t ps_value;
-    bool valid = false;
-    if (memcmp(value, "min", 3) == 0 && (value[3] == 0 || value[3] == ' ')) {
-      ps_value = 0;
-      valid = true;
-    } else if (memcmp(value, "none", 4) == 0 && (value[4] == 0 || value[4] == ' ')) {
-      ps_value = 1;
-      valid = true;
-    } else if (memcmp(value, "max", 3) == 0 && (value[3] == 0 || value[3] == ' ')) {
-      ps_value = 2;
-      valid = true;
-    }
-    if (!valid) {
+    if (!WifiPowerSavePolicy::parseName(&config[15], &ps_value)) {
       strcpy(reply, "Error: must be none, min, or max");
     } else {
       _mqtt_prefs.wifi_power_save = ps_value;
       if (!persistObserverPrefs(reply)) return true;
+      const char* ps_name = WifiPowerSavePolicy::nameFor(ps_value);
 #ifdef ESP_PLATFORM
       if (WiFi.status() == WL_CONNECTED) {
-        wifi_ps_type_t ps_mode = (ps_value == 1) ? WIFI_PS_NONE :
-                                (ps_value == 2) ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
-        esp_err_t ps_result = esp_wifi_set_ps(ps_mode);
+        // Same mapping the bridge applies on every association, so this cannot
+        // drift back apart (see WifiPowerSavePolicy).
+        esp_err_t ps_result =
+            esp_wifi_set_ps((wifi_ps_type_t)WifiPowerSavePolicy::modeFor(ps_value));
         if (ps_result == ESP_OK) {
-          const char* ps_name = (ps_value == 1) ? "none" : (ps_value == 2) ? "max" : "min";
           sprintf(reply, "OK - power save set to %s", ps_name);
         } else {
           sprintf(reply, "OK - saved, but failed to apply: %d", ps_result);
         }
       } else {
-        const char* ps_name = (ps_value == 1) ? "none" : (ps_value == 2) ? "max" : "min";
         sprintf(reply, "OK - saved as %s (will apply on next WiFi connection)", ps_name);
       }
 #else
-      const char* ps_name = (ps_value == 1) ? "none" : (ps_value == 2) ? "max" : "min";
       sprintf(reply, "OK - saved as %s", ps_name);
 #endif
     }
@@ -1090,9 +1078,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #endif
     }
   } else if (memcmp(config, "wifi.powersave", 14) == 0) {
-    uint8_t ps = _mqtt_prefs.wifi_power_save;
-    const char* ps_name = (ps == 1) ? "none" : (ps == 2) ? "max" : "min";
-    sprintf(reply, "> %s", ps_name);
+    sprintf(reply, "> %s", WifiPowerSavePolicy::nameFor(_mqtt_prefs.wifi_power_save));
   } else if (memcmp(config, "timezone.offset", 15) == 0) {
     // Must precede the "timezone" (8-byte) check below — that prefix-matches
     // "timezone.offset" too, so the more-specific key has to come first or
