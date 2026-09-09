@@ -2,13 +2,13 @@
 #include "MQTTErrorLabels.h"
 #include "../WifiPowerSavePolicy.h"
 #include "../MQTTConnectionPolicy.h"
+#include "../NtpValidation.h"
 #include "../MQTTMessageBuilder.h"
 #include "../MQTTPacketQueuePolicy.h"
 #include "../MQTTReplyFormat.h"
 #include "../MQTTRuntimeBufferLifecycle.h"
 #include "../MQTTTopicRouter.h"
 #include "../TxtDataHelpers.h"
-#include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include <time.h>
@@ -24,6 +24,7 @@
 #ifdef ESP_PLATFORM
 #include <esp_wifi.h>
 #include <esp_tls.h>
+#include <esp_random.h>
 #include <esp_sntp.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -56,6 +57,10 @@ static constexpr size_t kNtpBuiltinFallbackCount =
     sizeof(kNtpBuiltinFallbacks) / sizeof(kNtpBuiltinFallbacks[0]);
 static_assert(MQTTBridge::kMaxNtpServers >= 1 + (int)kNtpBuiltinFallbackCount,
               "kMaxNtpServers must hold the custom primary plus all built-in fallbacks");
+
+// Shared so the retry loop can recognise "this name did not resolve" by pointer
+// and stop retrying: nothing was sent, so a second attempt changes nothing.
+static const char* const kNtpDnsFailedReason = "DNS failed";
 
 static bool ntpHostnameEquals(const char* a, const char* b) {
   if (!a || !b) return false;
@@ -674,7 +679,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _obs(obs),
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
-      _ntp_client(_ntp_udp, effectiveNtpPrimary(obs), 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
+      _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
       _ntp_force_requested(false), _ntp_force_done(false), _ntp_force_result(false),
       _ntp_diag_requested(false), _ntp_diag_done(false), _ntp_diag_count(0),
       // Default to UTC; setRules() will be called from syncTimeWithNTP when a
@@ -4026,6 +4031,106 @@ void MQTTBridge::refreshNTP() {
   MQTT_DEBUG_PRINTLN("NTP refresh triggered (async SNTP)");
 }
 
+// One validated NTP exchange with one named server, on a fresh ephemeral socket.
+//
+// Replaces NTPClient, which accepted any datagram that arrived on its fixed
+// local port 1337 as time — no length, mode, stratum, leap or request/response
+// check — and fed it straight into the system clock, the RTC and JWT issuance
+// (F07). Everything that makes a reply trustworthy is checked here or in
+// NtpValidation; a rejected reply leaves the clock alone and the loop keeps
+// listening until the deadline, so an early bogus datagram cannot cancel the
+// real answer.
+//
+// Returns false with *why set to a short reason for the diagnostic. The socket
+// is opened and closed inside this call: no listener outlives the probe, and
+// each server gets its own local port, so no reply can be credited to the wrong
+// name (F08).
+bool MQTTBridge::probeNtpServer(const char* server, uint32_t min_epoch,
+                                uint32_t* epoch_out, const char** why) {
+  if (why) *why = "no reply";
+  if (!server || server[0] == '\0') { if (why) *why = "no server"; return false; }
+
+  bool have_expected_ip = false;
+  IPAddress expected_ip;
+  #ifdef ESP_PLATFORM
+  // Authoritative, not advisory. WiFiUDP leaves remote_ip/remote_port at the
+  // previous destination when a name fails to resolve, so sending anyway asks
+  // whichever server resolved last and credits its genuine reply to this name.
+  // Observed on d4: `set mqtt.ntp bogus.invalid` reported success with a correct
+  // epoch, answered by the pool address left over from boot.
+  if (!WiFi.hostByName(server, expected_ip)) {
+    if (why) *why = kNtpDnsFailedReason;
+    return false;
+  }
+  have_expected_ip = true;
+  #endif
+
+  // Ephemeral local port: nothing to aim unsolicited traffic at between probes.
+  if (!_ntp_udp.begin(0)) {
+    if (why) *why = "no socket";
+    return false;
+  }
+
+  NtpValidation::Nonce nonce;
+  #ifdef ESP_PLATFORM
+  nonce.seconds = esp_random();
+  nonce.fraction = esp_random();
+  #else
+  nonce.seconds = (uint32_t)millis() * 2654435761UL;
+  nonce.fraction = (uint32_t)random(0, 0x7FFFFFFF);
+  #endif
+
+  uint8_t packet[NtpValidation::kPacketSize];
+  NtpValidation::buildRequest(packet, nonce);
+
+  bool sent;
+  if (have_expected_ip) {
+    sent = _ntp_udp.beginPacket(expected_ip, kNtpPort) != 0;
+  } else {
+    sent = _ntp_udp.beginPacket(server, kNtpPort) != 0;
+  }
+  if (sent) {
+    _ntp_udp.write(packet, sizeof(packet));
+    sent = _ntp_udp.endPacket() != 0;
+  }
+  if (!sent) {
+    _ntp_udp.stop();
+    if (why) *why = "send failed";
+    return false;
+  }
+
+  bool accepted = false;
+  const unsigned long started = millis();
+  while (millis() - started < kNtpProbeTimeoutMs) {
+    delay(10);
+    int len = _ntp_udp.parsePacket();
+    if (len <= 0) continue;
+
+    uint8_t reply[NtpValidation::kPacketSize];
+    const int read_len = _ntp_udp.read(reply, sizeof(reply));
+    // Discard any tail: WiFiUDP::parsePacket() refuses to read the next datagram
+    // while an unread one is still buffered, so an oversized reply would
+    // otherwise block the rest of this wait.
+    _ntp_udp.flush();
+    const bool source_ok = (!have_expected_ip || _ntp_udp.remoteIP() == expected_ip) &&
+                           _ntp_udp.remotePort() == kNtpPort;
+    NtpValidation::Result r = NtpValidation::validate(
+        reply, read_len > 0 ? (size_t)read_len : 0, source_ok, nonce,
+        min_epoch, kNtpMaxValidEpoch);
+    if (r.reject == NtpValidation::kAccepted) {
+      if (epoch_out) *epoch_out = r.epoch;
+      if (why) *why = "ok";
+      accepted = true;
+      break;
+    }
+    // Keep waiting: a rejected datagram must not consume this server's chance.
+    if (why) *why = NtpValidation::rejectReason(r.reject);
+  }
+
+  _ntp_udp.stop();
+  return accepted;
+}
+
 bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
   if (!WiFi.isConnected()) {
     MQTT_DEBUG_PRINTLN("Cannot sync time - WiFi not connected");
@@ -4058,49 +4163,32 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
 
   bool ntp_ok = false;
   unsigned long epochTime = 0;
-  const unsigned long kMinValidEpoch = 1767225600;  // 2026-01-01 00:00:00 UTC
+  const uint32_t kMinValidEpoch = kNtpMinValidEpoch;
   const char* ntp_server_used = nullptr;
 
-  _ntp_client.begin();
   const int kMaxNtpRetriesPerServer = 2;
   for (int s = 0; s < server_count && !ntp_ok; s++) {
     const char* server = servers[s];
-
-    #ifdef ESP_PLATFORM
-    // Authoritative, not advisory. NTPClient::sendNTPPacket() ignores what
-    // beginPacket() returns, and WiFiUDP leaves remote_ip/remote_port at the previous
-    // destination when a name fails to resolve — so asking an unresolvable host sends
-    // the request to whichever server resolved last, and that server's genuine reply
-    // gets credited to this name. Observed on d4: `set mqtt.ntp bogus.invalid` reported
-    // success with a correct epoch, answered by the pool address left over from boot.
-    // Skipping is what keeps the credit honest; the name that answered is the name
-    // recorded.
-    IPAddress resolved_ip;
-    if (!WiFi.hostByName(server, resolved_ip)) {
-      MQTT_DEBUG_PRINTLN("NTP: %s does not resolve — skipping, not attempting a send", server);
-      continue;
-    }
-    #endif
-
-    _ntp_client.setPoolServerName(server);
 
     for (int attempt = 1; attempt <= kMaxNtpRetriesPerServer && !ntp_ok; attempt++) {
       if (attempt > 1) {
         MQTT_DEBUG_PRINTLN("NTP retry %d/%d on %s...", attempt, kMaxNtpRetriesPerServer, server);
         delay(1000);
       }
-      if (_ntp_client.forceUpdate()) {
-        epochTime = _ntp_client.getEpochTime();
-        if (epochTime >= kMinValidEpoch) {
-          ntp_ok = true;
-          ntp_server_used = server;
-        }
+      uint32_t probed_epoch = 0;
+      const char* why = nullptr;
+      if (probeNtpServer(server, kMinValidEpoch, &probed_epoch, &why)) {
+        epochTime = probed_epoch;
+        ntp_ok = true;
+        ntp_server_used = server;
+      } else {
+        MQTT_DEBUG_PRINTLN("NTP: %s rejected (%s)", server, why ? why : "no reply");
+        if (why == kNtpDnsFailedReason) break;   // no send happened; try the next server
       }
     }
   }
-  _ntp_client.end();
 
-  // Fallback: use ESP32 built-in SNTP (configTime) when NTPClient fails
+  // Fallback: use ESP32 built-in SNTP (configTime) when no server passed validation
   #ifdef ESP_PLATFORM
   if (!ntp_ok) {
     MQTT_DEBUG_PRINTLN("NTP client failed, trying SNTP fallback...");
@@ -4304,15 +4392,18 @@ void MQTTBridge::runNtpDiagProbe() {
   int count = 0;
   fillNtpServerList(_obs, servers, count);
 
-  _ntp_client.begin();
   for (int i = 0; i < count; i++) {
-    _ntp_client.setPoolServerName(servers[i]);
-    bool ok = _ntp_client.forceUpdate();
+    // Same validated probe the real sync uses, so the diagnostic answers the
+    // question an operator is actually asking: would this server be trusted?
+    uint32_t epoch = 0;
+    const char* why = nullptr;
+    bool ok = probeNtpServer(servers[i], kNtpMinValidEpoch, &epoch, &why);
     NtpDiagResult& r = _ntp_diag_results[i];
     strncpy(r.server, servers[i], sizeof(r.server) - 1);
     r.server[sizeof(r.server) - 1] = '\0';
     r.ok = ok;
-    r.epoch = ok ? (uint32_t)_ntp_client.getEpochTime() : 0;
+    r.epoch = ok ? epoch : 0;
+    r.why = why;   // static literal from NtpValidation/probeNtpServer
   }
   _ntp_diag_count = count;
 }
@@ -4346,12 +4437,13 @@ bool MQTTBridge::ntpDiag(char* reply, size_t reply_size, bool verbose) {
       const NtpDiagResult& r = _ntp_diag_results[i];
       if (r.ok) {
         time_t t = (time_t)r.epoch;
-        struct tm* tmv = gmtime(&t);
+        struct tm tmv;
+        gmtime_r(&t, &tmv);   // caller-owned storage: gmtime()'s buffer is shared
         Serial.printf("  %-20s OK    %04d-%02d-%02d %02d:%02d:%02d UTC\r\n",
-                      r.server, tmv->tm_year + 1900, tmv->tm_mon + 1, tmv->tm_mday,
-                      tmv->tm_hour, tmv->tm_min, tmv->tm_sec);
+                      r.server, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                      tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
       } else {
-        Serial.printf("  %-20s FAIL\r\n", r.server);
+        Serial.printf("  %-20s FAIL  %s\r\n", r.server, r.why ? r.why : "no reply");
       }
     }
     snprintf(reply, reply_size, "> NTP diag: %d/%d OK (see console)", ok_count, _ntp_diag_count);

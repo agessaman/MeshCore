@@ -524,7 +524,7 @@ These settings apply across all MQTT slots:
 - `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; neighbors-enabled builds)
 - `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (neighbors-enabled builds)
 - `get mqtt.ntp` - Get effective NTP server hostname
-- `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, LoRa shows a compact `<server> ok|fail` list)
+- `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, or why a probe was rejected — `DNS failed`, `unsolicited reply`, `server unsynced`, ... — and LoRa shows a compact `<server> ok|fail` list)
 - `get mqtt.owner` - Get owner public key (serial console only)
 - `get mqtt.email` - Get owner email address (serial console only)
 
@@ -884,6 +884,7 @@ the radio actually performs in that case.
 - Automatic time synchronization with NTP servers (required for JWT authentication)
 - Default primary: `pool.ntp.org`; built-in fallbacks (tried sequentially on failure): `time.google.com`, `time.cloudflare.com`, `time.aws.com`, `time.nist.gov`
 - Periodic time updates (every hour) on the effective primary only; system time is kept in UTC
+- Replies are validated before they are trusted: the datagram must be a full-length NTPv3/v4 server reply from the queried address and port, from a synchronised server (stratum 1-15, no leap alarm), echoing the random transmit timestamp of the request, with a plausible epoch. Anything else is discarded and the clock, the RTC and JWT issuance are left alone
 - Configure and diagnose with `set mqtt.ntp` / `get mqtt.ntp` / `get mqtt.ntp.diag` — see [MQTT Shared Commands](#mqtt-shared-commands)
 
 ### Authentication

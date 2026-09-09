@@ -4,7 +4,6 @@
 #include "helpers/bridges/BridgeBase.h"
 #include <PsychicMqttClient.h>
 #include <WiFi.h>
-#include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include "helpers/JWTHelper.h"
@@ -91,6 +90,13 @@ public:
 
 private:
   static const size_t AUTH_TOKEN_SIZE = 768;
+
+  // NTP acceptance bounds. A reply outside them is rejected outright rather
+  // than allowed to set the clock, the RTC and every JWT minted afterwards.
+  static const uint16_t kNtpPort = 123;
+  static const uint32_t kNtpProbeTimeoutMs = 1000;
+  static const uint32_t kNtpMinValidEpoch = 1767225600UL;  // 2026-01-01 UTC
+  static const uint32_t kNtpMaxValidEpoch = 4102444800UL;  // 2100-01-01 UTC
 
   // Connection slot - each slot holds one MQTT connection
   struct MQTTSlot {
@@ -216,9 +222,9 @@ private:
   #endif
   int _queue_count;  // Protected by queue operations or mutex
 
-  // NTP time sync
+  // NTP time sync. The socket is opened per probe and closed again (see
+  // probeNtpServer); nothing listens between syncs.
   WiFiUDP _ntp_udp;
-  NTPClient _ntp_client;
   unsigned long _last_ntp_sync;
   bool _ntp_synced;
   bool _ntp_sync_pending;  // Flag to trigger NTP sync from loop() instead of event handler
@@ -266,6 +272,10 @@ private:
     char     server[64];
     bool     ok;
     uint32_t epoch;  // server-reported UTC epoch when ok
+    // Why a probe failed, as a static literal ("DNS failed", "unsolicited
+    // reply", ...). Previously every failure looked alike, and a name that never
+    // resolved could be credited with another server's reply.
+    const char* why;
   };
   NtpDiagResult _ntp_diag_results[kMaxNtpServers];
   int _ntp_diag_count;
@@ -509,6 +519,10 @@ private:
   bool isAnySlotConnected();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
   void runNtpDiagProbe();  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  // One validated NTP exchange with one server on a fresh ephemeral socket.
+  // Core 0 only; never touches the clock. *why receives a static reason literal.
+  bool probeNtpServer(const char* server, uint32_t min_epoch,
+                      uint32_t* epoch_out, const char** why);
   // Populates dst_out/std_out with TimeChangeRules for the given IANA or
   // abbreviation string. Returns false if the string is not recognized
   // (callers should fall back to UTC). Zero-allocation.
