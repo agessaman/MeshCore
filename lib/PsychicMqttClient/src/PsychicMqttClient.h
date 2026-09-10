@@ -349,8 +349,17 @@ public:
      * @brief Connects the MQTT client to the server.
      *
      * @note All parameters must be set before calling this method.
+     *
+     * @return ESP_OK when esp_mqtt_client_start() accepted the client.
+     *         ESP_ERR_INVALID_STATE if no URI is set, ESP_ERR_NO_MEM if the
+     *         client or its reassembly buffer could not be allocated, or the
+     *         error from esp_mqtt_set_config()/esp_mqtt_client_start().
+     *
+     * A failed configuration update does NOT start the client: starting with a
+     * half-updated config is how a slot ends up connected with the previous
+     * broker's credentials.
      */
-    void connect();
+    esp_err_t connect();
 
     /**
      * @brief Reconnects a previously started MQTT client.
@@ -359,14 +368,28 @@ public:
      * re-initiating a connection on an already-started client, especially
      * when auto-reconnect is disabled. Updates config before reconnecting
      * so credential changes (e.g., refreshed JWT tokens) take effect.
+     *
+     * @return ESP_OK when the reconnect was requested, ESP_ERR_INVALID_STATE on
+     *         an uninitialised client, or the error from esp_mqtt_set_config().
+     *         A failed config update aborts the reconnect rather than
+     *         reconnecting with the previous configuration.
      */
-    void reconnect();
+    esp_err_t reconnect();
 
     /**
-     * @brief Disconnects the MQTT client from the server.
-     * This call might be blocking until the client is stopped cleanly
+     * @brief Disconnects the MQTT client and stops its task.
+     *
+     * Blocks until the DISCONNECTED event arrives or timeout_ms elapses, then
+     * stops the client either way. The wait used to be unbounded, which turned
+     * a lost event into a wedged caller — and that caller is the MQTT task
+     * whose acknowledgement the bridge's shutdown waits on.
+     *
+     * @return ESP_OK when the client stopped after a clean disconnect,
+     *         ESP_ERR_TIMEOUT when the DISCONNECTED event never arrived (the
+     *         stop still ran), ESP_ERR_INVALID_STATE on an uninitialised
+     *         client, or the error from esp_mqtt_client_stop().
      */
-    void disconnect();
+    esp_err_t disconnect(unsigned long timeout_ms = 10000);
 
     /**
      * @brief Closes the transport but leaves the client task running.
@@ -380,8 +403,12 @@ public:
      * @param timeout_ms how long to wait for the DISCONNECTED event before
      *                   giving up. Bounded on purpose: disconnect()'s wait is
      *                   unbounded and a lost event would wedge the caller.
+     *
+     * @return ESP_OK when the DISCONNECTED event arrived, ESP_ERR_TIMEOUT if it
+     *         did not (the transport may still be open), ESP_ERR_INVALID_STATE
+     *         on an uninitialised client, ESP_OK when already disconnected.
      */
-    void softDisconnect(unsigned long timeout_ms = 5000);
+    esp_err_t softDisconnect(unsigned long timeout_ms = 5000);
 
     /**
      * @brief True once esp_mqtt_client_start() has succeeded and no stop has run.
@@ -392,10 +419,14 @@ public:
     bool isStarted() const { return _started; }
 
     /**
-     * @brief Forcefully stops the MQTT client and disconnects from the server.
+     * @brief Stops the MQTT client without waiting for a DISCONNECTED event.
      * This does not trigger the onDisconnect callbacks.
+     *
+     * @return the result of esp_mqtt_client_stop(), or ESP_ERR_INVALID_STATE on
+     *         an uninitialised client. A non-OK result means the SDK task was
+     *         NOT joined: the caller must not destroy the client after it.
      */
-    void forceStop();
+    esp_err_t forceStop();
 
     /**
      * @brief Subscribes to a topic. Server must be connected

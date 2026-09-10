@@ -371,20 +371,20 @@ bool PsychicMqttClient::connected()
     return _connected;
 }
 
-void PsychicMqttClient::connect()
+esp_err_t PsychicMqttClient::connect()
 {
 #if ESP_IDF_VERSION_MAJOR == 5
     if (_mqtt_cfg.broker.address.uri == nullptr)
     {
         ESP_LOGE(TAG, "MQTT URI not set.");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     int desired_buffer = _mqtt_cfg.buffer.size > 0 ? _mqtt_cfg.buffer.size : 1024;
 #else
     if (_mqtt_cfg.uri == nullptr)
     {
         ESP_LOGE(TAG, "MQTT URI not set.");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     int desired_buffer = _mqtt_cfg.buffer_size > 0 ? _mqtt_cfg.buffer_size : 1024;
 #endif
@@ -400,41 +400,44 @@ void PsychicMqttClient::connect()
         {
             ESP_LOGE(TAG, "Failed to allocate reassembly buffer (%u bytes)", (unsigned)_buffer_capacity);
             _buffer_capacity = 0;
+            return ESP_ERR_NO_MEM;
         }
     }
 
     if (_client == nullptr)
     {
         _client = esp_mqtt_client_init(&_mqtt_cfg);
+        if (_client == nullptr)
+        {
+            ESP_LOGE(TAG, "esp_mqtt_client_init failed");
+            return ESP_ERR_NO_MEM;
+        }
         // Register event handler only once when client is first created
         // to avoid memory leak from repeated registrations
         esp_mqtt_client_register_event(_client, MQTT_EVENT_ANY, _onMqttEventStatic, this);
         _config_dirty = false;
     }
+    else if (_config_dirty)
+    {
+        // A failed config update must not be followed by a start: the client
+        // would come up on a partly-updated configuration, which is how a slot
+        // connects with the previous broker's credentials. Leave _config_dirty
+        // set so the next attempt retries the whole transaction.
+        esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
+        if (cfg_result != ESP_OK)
+        {
+            ESP_LOGE(TAG, "connect(): failed to apply mqtt config: %s", esp_err_to_name(cfg_result));
+            return cfg_result;
+        }
+        _config_dirty = false;
+        ESP_LOGD(TAG, "connect(): applied mqtt config update");
+    }
     else
     {
-        if (_config_dirty)
-        {
-            esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
-            ESP_ERROR_CHECK_WITHOUT_ABORT(cfg_result);
-            if (cfg_result == ESP_OK)
-            {
-                _config_dirty = false;
-                ESP_LOGD(TAG, "connect(): applied mqtt config update");
-            }
-            else
-            {
-                ESP_LOGW(TAG, "connect(): failed to apply mqtt config, will retry");
-            }
-        }
-        else
-        {
-            ESP_LOGD(TAG, "connect(): mqtt config unchanged, skipping set_config");
-        }
+        ESP_LOGD(TAG, "connect(): mqtt config unchanged, skipping set_config");
     }
 
     esp_err_t start_result = esp_mqtt_client_start(_client);
-    ESP_ERROR_CHECK_WITHOUT_ABORT(start_result);
     if (start_result == ESP_OK)
     {
         _started = true;
@@ -445,76 +448,103 @@ void PsychicMqttClient::connect()
         // Reporting success here hides the one state reconnect() cannot recover from.
         ESP_LOGE(TAG, "MQTT client failed to start: %s", esp_err_to_name(start_result));
     }
+    return start_result;
 }
 
-void PsychicMqttClient::reconnect()
+esp_err_t PsychicMqttClient::reconnect()
 {
     if (_client == nullptr)
     {
         ESP_LOGW(TAG, "MQTT client not initialized, cannot reconnect.");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     if (_config_dirty)
     {
-        // Apply config only when mutating setters changed _mqtt_cfg.
+        // Apply config only when mutating setters changed _mqtt_cfg. A failure
+        // aborts the reconnect: reconnecting on the previous config was how a
+        // renewed token silently failed to reach the connection.
         esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
-        ESP_ERROR_CHECK_WITHOUT_ABORT(cfg_result);
-        if (cfg_result == ESP_OK)
+        if (cfg_result != ESP_OK)
         {
-            _config_dirty = false;
-            ESP_LOGD(TAG, "reconnect(): applied mqtt config update");
+            ESP_LOGE(TAG, "reconnect(): failed to apply mqtt config: %s", esp_err_to_name(cfg_result));
+            return cfg_result;
         }
-        else
-        {
-            ESP_LOGW(TAG, "reconnect(): failed to apply mqtt config, reconnecting with previous config");
-        }
+        _config_dirty = false;
+        ESP_LOGD(TAG, "reconnect(): applied mqtt config update");
     }
     else
     {
         ESP_LOGD(TAG, "reconnect(): mqtt config unchanged, skipping set_config");
     }
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_reconnect(_client));
+    esp_err_t r = esp_mqtt_client_reconnect(_client);
+    if (r != ESP_OK)
+    {
+        ESP_LOGE(TAG, "MQTT reconnect request failed: %s", esp_err_to_name(r));
+        return r;
+    }
     ESP_LOGI(TAG, "MQTT client reconnect requested.");
+    return ESP_OK;
 }
 
-void PsychicMqttClient::disconnect()
+esp_err_t PsychicMqttClient::disconnect(unsigned long timeout_ms)
 {
     if (_client == nullptr)
     {
         ESP_LOGW(TAG, "MQTT client not started.");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
+    bool clean = true;
     if (_connected)
     {
         ESP_LOGI(TAG, "Disconnecting MQTT client.");
         _stopMqttClient = false;
         esp_mqtt_client_disconnect(_client);
 
-        // Wait for all disconnect events to be processed
-        while (!_stopMqttClient)
+        // Bounded, unlike the original: this runs on the MQTT task whose stop
+        // acknowledgement the bridge's shutdown waits for, so a lost
+        // DISCONNECTED event used to wedge the whole teardown.
+        unsigned long waited = 0;
+        while (!_stopMqttClient && waited < timeout_ms)
         {
             vTaskDelay(10 / portTICK_PERIOD_MS);
+            waited += 10;
+        }
+        if (!_stopMqttClient)
+        {
+            ESP_LOGW(TAG, "disconnect: no DISCONNECTED event in %lums; stopping anyway", timeout_ms);
+            clean = false;
         }
     }
 
-    esp_mqtt_client_stop(_client);
-    _started = false;
-    ESP_LOGI(TAG, "MQTT client stopped.");
+    esp_err_t stop_result = esp_mqtt_client_stop(_client);
+    if (stop_result == ESP_OK)
+    {
+        _started = false;
+        ESP_LOGI(TAG, "MQTT client stopped.");
+    }
+    else
+    {
+        // The SDK task was not joined. Saying otherwise is what let the caller
+        // destroy the client from under a live task.
+        ESP_LOGE(TAG, "esp_mqtt_client_stop failed: %s", esp_err_to_name(stop_result));
+        return stop_result;
+    }
+    return clean ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
-void PsychicMqttClient::softDisconnect(unsigned long timeout_ms)
+esp_err_t PsychicMqttClient::softDisconnect(unsigned long timeout_ms)
 {
     if (_client == nullptr)
     {
         ESP_LOGW(TAG, "MQTT client not started.");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (!_connected)
     {
         // Nothing to close; leaving the task alone is the whole point.
-        return;
+        return ESP_OK;
     }
 
     ESP_LOGI(TAG, "Disconnecting MQTT transport (client task retained).");
@@ -530,25 +560,34 @@ void PsychicMqttClient::softDisconnect(unsigned long timeout_ms)
     if (!_stopMqttClient)
     {
         ESP_LOGW(TAG, "softDisconnect: no DISCONNECTED event in %lums", timeout_ms);
+        return ESP_ERR_TIMEOUT;
     }
+    return ESP_OK;
 }
 
-void PsychicMqttClient::forceStop()
+esp_err_t PsychicMqttClient::forceStop()
 {
     if (_client == nullptr)
     {
         ESP_LOGW(TAG, "MQTT client not started.");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (_connected)
     {
         ESP_LOGI(TAG, "Forced stop MQTT client.");
     }
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_stop(_client));
+    esp_err_t r = esp_mqtt_client_stop(_client);
+    if (r != ESP_OK)
+    {
+        // The SDK task was not joined: the caller must not destroy this client.
+        ESP_LOGE(TAG, "forceStop: esp_mqtt_client_stop failed: %s", esp_err_to_name(r));
+        return r;
+    }
     _connected = false;
     _started = false;
     ESP_LOGI(TAG, "MQTT client forcefully stopped.");
+    return ESP_OK;
 }
 
 int PsychicMqttClient::subscribe(const char *topic, int qos)
