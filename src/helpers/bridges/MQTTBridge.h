@@ -12,6 +12,7 @@
 #include "helpers/MQTTLifecycle.h"
 #include "helpers/AlertFaultPolicy.h"
 #include "helpers/MQTTEffectiveConfig.h"
+#include "helpers/MQTTClientState.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -105,29 +106,12 @@ private:
   static const uint32_t kNtpMinValidEpoch = 1767225600UL;  // 2026-01-01 UTC
   static const uint32_t kNtpMaxValidEpoch = 4102444800UL;  // 2100-01-01 UTC
 
-  // What the SDK client is doing, as opposed to whether the network is up.
-  // `client->connected()` answers the second question and was being used for
-  // the first: a client resolving DNS, negotiating TLS or waiting after a
-  // failed CONNECT reports not-connected, so teardown skipped it and left its
-  // task running (F04). Absent is 0 so a memset-initialised slot is correct.
-  enum class ClientState : uint8_t {
-    Absent = 0,    // no client object
-    Configured,    // client allocated, never started
-    Starting,      // start/reconnect requested, awaiting CONNECTED
-    Connected,     // CONNECTED received
-    Disconnected,  // started, no session (our reconnect ladder governs it)
-    Stopped,       // stop completed; the SDK task is joined and gone
-    Quarantined,   // stop failed: the SDK task was NOT joined. Never destroy,
-                   // never reuse, never free anything it still points at.
-  };
-
-  static const char* clientStateName(ClientState s);
-  // True while the SDK client has been started and not proven stopped, i.e.
-  // while it may still own a task, a socket and a TLS context.
-  static bool clientStateIsLive(ClientState s) {
-    return s == ClientState::Starting || s == ClientState::Connected ||
-           s == ClientState::Disconnected;
-  }
+  // Per-slot SDK client state and the shutdown contract live in
+  // MQTTClientState.h so both are host-testable; ClientState is an alias so the
+  // bridge code reads naturally.
+  using ClientState = MqttClientState;
+  static const char* clientStateName(ClientState s) { return mqttClientStateName(s); }
+  static bool clientStateIsLive(ClientState s) { return mqttClientStateIsLive(s); }
 
   // Connection slot - each slot holds one MQTT connection
   struct MQTTSlot {
@@ -158,7 +142,14 @@ private:
     // esp-mqtt re-reads it whenever a later connect() re-applies a dirtied config.
     // Freed only alongside the client in destroySlotClients().
     char* auth_token;               // nullptr or empty string = no valid token
+    // Two expiries, deliberately. token_expires_at describes the token in the
+    // buffer (minting updates it immediately); applied_token_expires_at
+    // describes the credential the CONNECTION is actually using, and only
+    // advances when a connect/reconnect has carried it. The renewal decision
+    // reads the applied one, so a renewal whose bounce failed stays due and is
+    // retried instead of looking complete (F06).
     unsigned long token_expires_at;
+    unsigned long applied_token_expires_at;
     unsigned long last_token_renewal;
 
     // Custom broker settings (only used when preset_name is "custom")
@@ -547,6 +538,11 @@ private:
   //    with it. Here the stop IS the point.
   enum class TeardownReason : uint8_t { Reconfigure, Disable };
   void teardownSlot(int index, TeardownReason reason = TeardownReason::Disable);
+  // Close a live client for a reconfigure: softDisconnect where that is enough,
+  // a real stop where an in-flight connection attempt has to be cancelled.
+  void closeLiveClientForReconfigure(int index);
+  // Stop a live client, recording Stopped (proven) or Quarantined (not joined).
+  void stopSlotClient(int index);
   // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a
   // no-op on a stopped client). See the definition.
   // ESP_OK when the reconnect/start was accepted by the SDK. A local failure

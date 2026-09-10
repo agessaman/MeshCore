@@ -463,19 +463,6 @@ void MQTTBridge::applyWifiPowerSave() {
   #endif
 }
 
-const char* MQTTBridge::clientStateName(ClientState st) {
-  switch (st) {
-    case ClientState::Absent:       return "absent";
-    case ClientState::Configured:   return "configured";
-    case ClientState::Starting:     return "starting";
-    case ClientState::Connected:    return "connected";
-    case ClientState::Disconnected: return "disconnected";
-    case ClientState::Stopped:      return "stopped";
-    case ClientState::Quarantined:  return "quarantined";
-  }
-  return "?";
-}
-
 bool MQTTBridge::stopUnprovenLatched() { return s_stop_unproven; }
 
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
@@ -1444,6 +1431,29 @@ void MQTTBridge::mqttTaskLoop() {
         teardownSlot(i);
       }
       destroySlotClients();
+
+      // The acknowledgement means "every client is destroyed, nothing I own is
+      // still running". One client whose esp_mqtt_client_stop() never completed
+      // makes that false — destroySlotClients() deliberately skipped it and its
+      // SDK task may still be executing — so the ack must be WITHHELD, whatever
+      // the other slots did. Publishing it anyway would tell the owner to free
+      // the queue and buffers and allow a restart while that task lives, which
+      // is the ownership ambiguity this whole contract exists to remove.
+      MqttClientState states[RUNTIME_MQTT_SLOTS];
+      for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) states[i] = _slots[i].client_state;
+      if (!mqttStopMayBeAcknowledged(states, RUNTIME_MQTT_SLOTS)) {
+        for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+          if (!mqttClientStateIsProvenStopped(states[i])) {
+            MQTT_DEBUG_PRINTLN("MQTT%d stop unproven (%s) - withholding the bridge stop ack",
+                               i + 1, mqttClientStateName(states[i]));
+          }
+        }
+        // Leave _teardown_complete false: the trampoline publishes no ack, the
+        // owner's stop times out into StopUnproven, and nothing is released or
+        // restarted for the rest of this boot.
+        return;
+      }
+
       // Record that the ordered teardown finished, but do NOT publish the ack
       // here: the owner treats the ack as permission to free everything this
       // task can reach, and between this point and vTaskDelete(nullptr) the task
@@ -1881,6 +1891,7 @@ void MQTTBridge::releaseSlotAuthToken(int index) {
   slot.auth_token = static_cast<char*>(
       MQTTRuntimeBufferLifecycle::release(slot.auth_token, psram_free));
   slot.token_expires_at = 0;
+  slot.applied_token_expires_at = 0;
   slot.last_token_renewal = 0;
 }
 
@@ -1902,14 +1913,11 @@ void MQTTBridge::destroySlotClients() {
     }
 
     if (clientStateIsLive(slot.client_state)) {
-      const esp_err_t r = slot.client->disconnect();
-      if (r != ESP_OK && r != ESP_ERR_TIMEOUT) {
-        MQTT_DEBUG_PRINTLN("MQTT%d stop FAILED during shutdown (%s) - not destroying", i + 1,
-                           esp_err_to_name(r));
-        slot.client_state = ClientState::Quarantined;
+      stopSlotClient(i);
+      if (slot.client_state == ClientState::Quarantined) {
+        MQTT_DEBUG_PRINTLN("MQTT%d not destroyed: stop unproven during shutdown", i + 1);
         continue;
       }
-      slot.client_state = ClientState::Stopped;
       #ifdef ESP_PLATFORM
       vTaskDelay(pdMS_TO_TICKS(50));
       #else
@@ -1996,17 +2004,17 @@ bool MQTTBridge::setupSlot(int index) {
   // them. setCredentials / setServer below overwrite the config fields in place
   // before connect() restarts the ESP-IDF client.
   if (slot.initial_connect_done) {
-    // Close the transport (keeping the task) if this client is live, for the
-    // same reason applySlotPreset() does: a handshake in flight against the
-    // previous endpoint must not complete after the new config is applied.
+    // Same rule as applySlotPreset(): a handshake in flight against the previous
+    // endpoint must not survive the new configuration, and only a stop can
+    // cancel one. One helper so the two paths cannot drift apart.
     if (clientStateIsLive(slot.client_state)) {
-      const esp_err_t r = slot.client->softDisconnect();
-      if (r != ESP_OK) {
-        MQTT_DEBUG_PRINTLN("MQTT%d re-apply: transport did not close cleanly (%s)",
-                           index + 1, esp_err_to_name(r));
-      }
-      slot.client_state = ClientState::Disconnected;
+      closeLiveClientForReconfigure(index);
       slot.generation++;
+      if (slot.client_state == ClientState::Quarantined) {
+        MQTT_DEBUG_PRINTLN("MQTT%d: cannot re-apply, stop unproven", index + 1);
+        slot.last_reconnect_attempt = millis();
+        return false;
+      }
     }
     // The config fields are NOT cleared here any more. Two reasons: this block
     // only ran when initial_connect_done was set, which teardownSlot() clears
@@ -2018,11 +2026,10 @@ bool MQTTBridge::setupSlot(int index) {
     if (slot.auth_token) slot.auth_token[0] = '\0';
     slot.connected = false;
     slot.token_expires_at = 0;
+    slot.applied_token_expires_at = 0;
     slot.last_token_renewal = 0;
-    slot.reconnect_backoff = 0;
-    slot.max_backoff_failures = 0;
-    slot.circuit_breaker_tripped = false;
     slot.last_reconnect_attempt = 0;
+    // Ladder reset happens after the new configuration commits, below.
     // The refusal that set this belonged to the credentials being cleared here.
     _slot_force_jwt_mint[index] = false;
   }
@@ -2243,6 +2250,18 @@ bool MQTTBridge::setupSlot(int index) {
   // credentials are written as "" rather than left alone: NULL means "leave
   // unchanged" to esp_mqtt_set_config(), while an empty string clears the
   // stored value and leaves the CONNECT's username flag clear.
+  // cfg_uri points at storage the slot owns (slot.broker_uri) or at flash
+  // (preset->server_url), and esp-mqtt keeps the pointer, so it must still hold
+  // what `desired` was built from. This caught a real bug: an earlier version of
+  // recreateSlotClient() ran the full slot teardown, which cleared broker_uri
+  // out from under the configuration that had already been decided, and the SDK
+  // was then handed an empty URI.
+  if (cfg_uri == nullptr || strcmp(cfg_uri, desired.uri) != 0) {
+    MQTT_DEBUG_PRINTLN("MQTT%d: broker URI changed under the config apply - not connecting",
+                       index + 1);
+    slot.last_reconnect_attempt = millis();
+    return false;
+  }
   slot.client->setServer(cfg_uri);
   if (desired.trust == MqttTrust::PemCert) {
     slot.client->setCACert(desired.pem);
@@ -2254,6 +2273,29 @@ bool MQTTBridge::setupSlot(int index) {
   }
   slot.client->setCredentials(mqttFieldOrEmpty(desired.username),
                               mqttFieldOrEmpty(desired.password));
+
+  // Commit the configuration as its own transaction, and record it as applied
+  // the moment it commits — not after the client starts. The SDK really does
+  // hold this configuration once set_config/init returns OK, so a start that
+  // fails afterwards must not leave the bridge believing the PREVIOUS config is
+  // applied: the next recreate-or-reuse decision would compare against it and
+  // could reuse a client whose trust policy is not the one it thinks.
+  const esp_err_t config_result = slot.client->applyConfig();
+  if (config_result != ESP_OK) {
+    MQTT_DEBUG_PRINTLN("MQTT%d config transaction failed (%s) - will retry", index + 1,
+                       esp_err_to_name(config_result));
+    slot.last_reconnect_attempt = millis();
+    return false;
+  }
+  slot.applied_config = desired;
+
+  // The new endpoint's history starts here, now that the configuration it
+  // belongs to is committed. Resetting the ladder in teardownSlot() cleared it
+  // before there was any replacement config — so a reconfigure that then failed
+  // to commit lost the backoff state that still applied to the old endpoint.
+  slot.reconnect_backoff = 0;
+  slot.max_backoff_failures = 0;
+  slot.circuit_breaker_tripped = false;
 
   // Start or reconnect according to what the SDK client actually is, not what
   // the network is doing. esp_mqtt_client_start() fails on an already-started
@@ -2268,9 +2310,8 @@ bool MQTTBridge::setupSlot(int index) {
     return false;
   }
   // reconnectSlotClient() moved the state to Starting and bumped the generation.
-  // Record what the client is now configured with, so the next apply can tell
-  // an in-place change from a structural one.
-  slot.applied_config = desired;
+  // applied_config was recorded at the commit above; activation records that the
+  // client also started.
   slot.initial_connect_done = true;
   return true;
 }
@@ -2288,11 +2329,25 @@ bool MQTTBridge::recreateSlotClient(int index) {
   MQTTSlot& slot = _slots[index];
   if (slot.client == nullptr) return ensureSlotClient(index);
 
-  teardownSlot(index, TeardownReason::Disable);   // stop, do not just close the transport
+  // Stop the client only. NOT teardownSlot(): that is the "this slot is going
+  // away" path, and it clears the very state the in-flight setup is holding —
+  // broker_uri (which cfg_uri points at), the token just minted for this
+  // configuration, and both expiries. Recreation swaps the client object under
+  // a configuration that has already been decided; it must not disturb it.
+  if (clientStateIsLive(slot.client_state)) {
+    stopSlotClient(index);
+    slot.generation++;
+    #ifdef ESP_PLATFORM
+    vTaskDelay(pdMS_TO_TICKS(50));
+    #else
+    delay(50);
+    #endif
+  }
   if (slot.client_state == ClientState::Quarantined) {
     MQTT_DEBUG_PRINTLN("MQTT%d cannot recreate: previous stop unproven", index + 1);
     return false;
   }
+  slot.connected = false;
 
   delete slot.client;
   slot.client = nullptr;
@@ -2308,6 +2363,80 @@ bool MQTTBridge::recreateSlotClient(int index) {
 // the client object alive so a subsequent setupSlot() can reuse its mbedTLS
 // context. This is called both on reconfigure (preset change) and at shutdown;
 // destruction of the underlying client happens once in destroySlotClients().
+// Close a live client for a reconfigure: cheap where that is safe, a real stop
+// where it is not.
+//
+// softDisconnect() cannot cancel a connection that has not completed.
+// esp_mqtt_client_disconnect() acts on a live session, and the wrapper returns
+// ESP_OK immediately when the client is not connected — so for a client
+// mid-DNS/TLS/CONNECT nothing is closed and nothing is cancelled. That attempt
+// would run to completion against the OLD endpoint and deliver its CONNECTED
+// event after the new configuration was applied, indistinguishable from the new
+// attempt's (F04): esp-mqtt gives events no generation of their own, and the
+// callbacks are registered once per client, so there is nothing in the event to
+// tell them apart. The only way to separate them is to make sure the old
+// attempt is dead first, which means stopping the client and joining its task.
+//
+// That costs a stop/start cycle, but only when an operator reconfigures a slot
+// *while it is connecting*. A Connected client still takes the cheap route,
+// which is where the fragmentation argument actually applies.
+void MQTTBridge::closeLiveClientForReconfigure(int index) {
+  MQTTSlot& slot = _slots[index];
+  if (mqttClientStateHasAttemptInFlight(slot.client_state)) {
+    MQTT_DEBUG_PRINTLN("MQTT%d reconfigure during connect - stopping to cancel the attempt",
+                       index + 1);
+    stopSlotClient(index);
+    return;
+  }
+  const esp_err_t r = slot.client->softDisconnect();
+  if (r != ESP_OK) {
+    MQTT_DEBUG_PRINTLN("MQTT%d reconfigure: transport did not close cleanly (%s)",
+                       index + 1, esp_err_to_name(r));
+  }
+  slot.client_state = ClientState::Disconnected;
+}
+
+// Stop a live client and record whether the stop was proven. ESP_ERR_TIMEOUT
+// means no DISCONNECTED event arrived but esp_mqtt_client_stop() itself
+// returned OK, so the SDK task is joined and the object is safe to reuse; any
+// other error means it was NOT joined, and that client is out of service for
+// the rest of the boot.
+void MQTTBridge::stopSlotClient(int index) {
+  MQTTSlot& slot = _slots[index];
+  const esp_err_t r = slot.client->disconnect();
+
+  // What the SDK's results actually mean here (mqtt_client.h documents
+  // esp_mqtt_client_stop as "ESP_OK on success, ESP_ERR_INVALID_ARG on wrong
+  // initialization, ESP_FAIL if client is in invalid state"):
+  //
+  //   ESP_OK          the SDK task was joined.
+  //   ESP_ERR_TIMEOUT our own wrapper's code for "no DISCONNECTED event, but
+  //                   the stop itself returned OK" — the task is still joined.
+  //   ESP_FAIL        the client was not started. There was no task to join,
+  //                   which is the safest state of all. Treating this as a
+  //                   failure quarantined perfectly healthy clients — observed
+  //                   on hardware when a reconfigure landed on a slot whose
+  //                   connect attempt had already failed.
+  //
+  // The case that genuinely cannot be proven is a stop that never RETURNS: the
+  // SDK waits on its API mutex and the task's stopped event without a bound.
+  // That does not surface here at all — it hangs this task, which is exactly
+  // what the bridge-level stop timeout (StopUnproven) exists to contain. So
+  // with IDF 4.4's contract the branch below should be unreachable; it stays
+  // because acting on an unexpected result by not touching the client again is
+  // the only safe response if that ever changes.
+  if (r == ESP_OK || r == ESP_ERR_TIMEOUT || r == ESP_FAIL) {
+    if (r == ESP_FAIL) {
+      MQTT_DEBUG_PRINTLN("MQTT%d stop: client was not started (nothing to join)", index + 1);
+    }
+    slot.client_state = ClientState::Stopped;
+    return;
+  }
+  MQTT_DEBUG_PRINTLN("MQTT%d stop returned %s - client quarantined for this boot",
+                     index + 1, esp_err_to_name(r));
+  slot.client_state = ClientState::Quarantined;
+}
+
 void MQTTBridge::teardownSlot(int index, TeardownReason reason) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
@@ -2319,30 +2448,9 @@ void MQTTBridge::teardownSlot(int index, TeardownReason reason) {
   // already replaced or switched off (F04).
   if (slot.client && clientStateIsLive(slot.client_state)) {
     if (reason == TeardownReason::Reconfigure) {
-      // Close the transport, keep the task. The in-flight handshake cannot
-      // complete against the old endpoint any more, and the esp-mqtt task's
-      // 6 KiB stack does not get returned into the hole the mbedTLS record
-      // buffers just vacated (the documented fragmentation driver).
-      const esp_err_t r = slot.client->softDisconnect();
-      if (r != ESP_OK) {
-        MQTT_DEBUG_PRINTLN("MQTT%d reconfigure: transport did not close cleanly (%s)",
-                           index + 1, esp_err_to_name(r));
-      }
-      slot.client_state = ClientState::Disconnected;
+      closeLiveClientForReconfigure(index);
     } else {
-      const esp_err_t r = slot.client->disconnect();
-      if (r == ESP_OK || r == ESP_ERR_TIMEOUT) {
-        // ESP_ERR_TIMEOUT: no DISCONNECTED event, but the stop itself returned
-        // OK, so the SDK task is joined and the object is safe to reuse.
-        slot.client_state = ClientState::Stopped;
-      } else {
-        // The stop did not complete: the SDK task was not joined. Never touch
-        // this client again — not to reuse it, not to destroy it, and do not
-        // free the token buffer its config still points at.
-        MQTT_DEBUG_PRINTLN("MQTT%d stop FAILED (%s) - client quarantined for this boot",
-                           index + 1, esp_err_to_name(r));
-        slot.client_state = ClientState::Quarantined;
-      }
+      stopSlotClient(index);
     }
     slot.generation++;
     #ifdef ESP_PLATFORM
@@ -2359,10 +2467,13 @@ void MQTTBridge::teardownSlot(int index, TeardownReason reason) {
   slot.initial_connect_done = false;
   slot.broker_uri[0] = '\0';
   slot.token_expires_at = 0;
+  slot.applied_token_expires_at = 0;
   slot.last_token_renewal = 0;
-  slot.reconnect_backoff = 0;
-  slot.max_backoff_failures = 0;
-  slot.circuit_breaker_tripped = false;
+  // The reconnect ladder is deliberately NOT cleared here. It describes the
+  // endpoint this slot has been failing against, and that history still applies
+  // until a replacement configuration actually commits — setupSlot() clears it
+  // there. Clearing it on teardown meant a reconfigure that never committed
+  // (bad URI, failed config transaction) also forgave a tripped breaker.
   slot.last_reconnect_attempt = 0;
   slot.last_log_time = 0;
   slot.last_deferred_log_ms = 0;
@@ -2397,6 +2508,9 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
   if (r == ESP_OK) {
     slot.client_state = ClientState::Starting;
     slot.generation++;
+    // The attempt carries whatever credential is configured right now, so this
+    // is the point at which a freshly minted token becomes the one in use.
+    slot.applied_token_expires_at = slot.token_expires_at;
   }
   return r;
 }
@@ -2513,9 +2627,15 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
     // exp on live sessions (waev's 55-minute tokens).
     const unsigned long renewal_buffer = MQTTConnectionPolicy::renewalBufferSecs(
         static_cast<uint32_t>(slotTokenLifetime(index)));
+    // Against the APPLIED expiry — the credential the live connection is using —
+    // not the one sitting in the token buffer. Minting updates the buffer's
+    // expiry immediately, so reading that here meant a renewal whose bounce
+    // failed looked complete: the next pass saw a fresh future expiry, decided
+    // no renewal was due, and never retried the bounce. The connection stayed on
+    // the old credential until the broker enforced exp (F06).
     bool token_needs_renewal = MQTTConnectionPolicy::tokenNeedsRenewal(
         time_synced, static_cast<uint32_t>(current_time),
-        static_cast<uint32_t>(slot.token_expires_at),
+        static_cast<uint32_t>(slot.applied_token_expires_at),
         static_cast<uint32_t>(renewal_buffer));
 
     // Throttle renewal attempts to once per minute
@@ -2525,7 +2645,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
     if (token_needs_renewal && can_attempt_renewal) {
       slot.last_token_renewal = now_millis;
 
-      unsigned long old_token_expires_at = slot.token_expires_at;
+      unsigned long old_token_expires_at = slot.applied_token_expires_at;
 
       if (createSlotAuthToken(index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d token renewed", index + 1);
@@ -2549,6 +2669,11 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         if (!exp_forces_bounce && old_token_expired_or_imminent && slot.client->connected()) {
           MQTT_DEBUG_PRINTLN("MQTT%d token renewed, no bounce (broker does not enforce exp)",
               index + 1);
+          // This broker does not act on exp, so the live session's older
+          // credential is not a problem and the renewal is complete. Recording
+          // it stops the renewal from staying due and re-attempting every
+          // minute for the rest of the token's life.
+          slot.applied_token_expires_at = slot.token_expires_at;
         }
         if (exp_forces_bounce || !slot.client->connected()) {
           // Disconnect + reconnect with fresh credentials, reusing existing client
@@ -2585,9 +2710,13 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
             // the renewal instead so the next maintenance pass retries the
             // bounce, and leave the reconnect ladder alone — this is a local
             // failure, not a broker fault.
-            MQTT_DEBUG_PRINTLN("MQTT%d renewal bounce failed (%s) - retrying next pass",
+            // Leave applied_token_expires_at pointing at the OLD credential:
+            // that is still what the connection is using, so the renewal stays
+            // due and the next pass retries the bounce (paced by the one-a-
+            // minute renewal throttle). The freshly minted token stays in the
+            // buffer and will be used by that retry, or by the next reconnect.
+            MQTT_DEBUG_PRINTLN("MQTT%d renewal bounce failed (%s) - still due, retrying",
                                index + 1, esp_err_to_name(bounce_result));
-            slot.last_token_renewal = 0;
             return;
           }
           MQTT_TRACE_HEAP("renewal:after-reconnect", index);
@@ -2601,10 +2730,14 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         } else {
           // Token renewed but old one still valid — just update credentials for next reconnect
           slot.client->setCredentials(_jwt_username, slot.auth_token);
+          // Staged for the next reconnect, and the credential in use is still
+          // valid, so the renewal decision is settled for this token.
+          slot.applied_token_expires_at = slot.token_expires_at;
         }
       } else {
         MQTT_DEBUG_PRINTLN("MQTT%d token renewal failed", index + 1);
         slot.token_expires_at = 0;
+        slot.applied_token_expires_at = 0;
       }
       return; // Token renewal handled connect; skip backoff logic below
     }

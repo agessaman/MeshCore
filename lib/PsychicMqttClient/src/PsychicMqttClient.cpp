@@ -371,21 +371,59 @@ bool PsychicMqttClient::connected()
     return _connected;
 }
 
-esp_err_t PsychicMqttClient::connect()
+esp_err_t PsychicMqttClient::applyConfig()
 {
 #if ESP_IDF_VERSION_MAJOR == 5
     if (_mqtt_cfg.broker.address.uri == nullptr)
-    {
-        ESP_LOGE(TAG, "MQTT URI not set.");
-        return ESP_ERR_INVALID_STATE;
-    }
-    int desired_buffer = _mqtt_cfg.buffer.size > 0 ? _mqtt_cfg.buffer.size : 1024;
 #else
     if (_mqtt_cfg.uri == nullptr)
+#endif
     {
         ESP_LOGE(TAG, "MQTT URI not set.");
         return ESP_ERR_INVALID_STATE;
     }
+
+    if (_client == nullptr)
+    {
+        // esp_mqtt_client_init() takes the whole configuration, including the
+        // buffer sizes it allocates once and never resizes.
+        _client = esp_mqtt_client_init(&_mqtt_cfg);
+        if (_client == nullptr)
+        {
+            ESP_LOGE(TAG, "esp_mqtt_client_init failed");
+            return ESP_ERR_NO_MEM;
+        }
+        // Register event handler only once when client is first created
+        // to avoid memory leak from repeated registrations
+        esp_mqtt_client_register_event(_client, MQTT_EVENT_ANY, _onMqttEventStatic, this);
+        _config_dirty = false;
+        return ESP_OK;
+    }
+
+    if (!_config_dirty)
+    {
+        ESP_LOGD(TAG, "applyConfig(): mqtt config unchanged, skipping set_config");
+        return ESP_OK;
+    }
+
+    esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
+    if (cfg_result != ESP_OK)
+    {
+        // Leave _config_dirty set so the next attempt retries the whole
+        // transaction rather than starting on a partly-updated configuration.
+        ESP_LOGE(TAG, "applyConfig(): failed to apply mqtt config: %s", esp_err_to_name(cfg_result));
+        return cfg_result;
+    }
+    _config_dirty = false;
+    ESP_LOGD(TAG, "applyConfig(): applied mqtt config update");
+    return ESP_OK;
+}
+
+esp_err_t PsychicMqttClient::connect()
+{
+#if ESP_IDF_VERSION_MAJOR == 5
+    int desired_buffer = _mqtt_cfg.buffer.size > 0 ? _mqtt_cfg.buffer.size : 1024;
+#else
     int desired_buffer = _mqtt_cfg.buffer_size > 0 ? _mqtt_cfg.buffer_size : 1024;
 #endif
 
@@ -404,38 +442,11 @@ esp_err_t PsychicMqttClient::connect()
         }
     }
 
-    if (_client == nullptr)
-    {
-        _client = esp_mqtt_client_init(&_mqtt_cfg);
-        if (_client == nullptr)
-        {
-            ESP_LOGE(TAG, "esp_mqtt_client_init failed");
-            return ESP_ERR_NO_MEM;
-        }
-        // Register event handler only once when client is first created
-        // to avoid memory leak from repeated registrations
-        esp_mqtt_client_register_event(_client, MQTT_EVENT_ANY, _onMqttEventStatic, this);
-        _config_dirty = false;
-    }
-    else if (_config_dirty)
-    {
-        // A failed config update must not be followed by a start: the client
-        // would come up on a partly-updated configuration, which is how a slot
-        // connects with the previous broker's credentials. Leave _config_dirty
-        // set so the next attempt retries the whole transaction.
-        esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
-        if (cfg_result != ESP_OK)
-        {
-            ESP_LOGE(TAG, "connect(): failed to apply mqtt config: %s", esp_err_to_name(cfg_result));
-            return cfg_result;
-        }
-        _config_dirty = false;
-        ESP_LOGD(TAG, "connect(): applied mqtt config update");
-    }
-    else
-    {
-        ESP_LOGD(TAG, "connect(): mqtt config unchanged, skipping set_config");
-    }
+    // A failed config transaction must not be followed by a start: the client
+    // would come up on a partly-updated configuration, which is how a slot
+    // connects with the previous broker's credentials.
+    esp_err_t cfg_result = applyConfig();
+    if (cfg_result != ESP_OK) return cfg_result;
 
     esp_err_t start_result = esp_mqtt_client_start(_client);
     if (start_result == ESP_OK)
@@ -458,24 +469,11 @@ esp_err_t PsychicMqttClient::reconnect()
         ESP_LOGW(TAG, "MQTT client not initialized, cannot reconnect.");
         return ESP_ERR_INVALID_STATE;
     }
-    if (_config_dirty)
-    {
-        // Apply config only when mutating setters changed _mqtt_cfg. A failure
-        // aborts the reconnect: reconnecting on the previous config was how a
-        // renewed token silently failed to reach the connection.
-        esp_err_t cfg_result = esp_mqtt_set_config(_client, &_mqtt_cfg);
-        if (cfg_result != ESP_OK)
-        {
-            ESP_LOGE(TAG, "reconnect(): failed to apply mqtt config: %s", esp_err_to_name(cfg_result));
-            return cfg_result;
-        }
-        _config_dirty = false;
-        ESP_LOGD(TAG, "reconnect(): applied mqtt config update");
-    }
-    else
-    {
-        ESP_LOGD(TAG, "reconnect(): mqtt config unchanged, skipping set_config");
-    }
+    // A failed config update aborts the reconnect: reconnecting on the previous
+    // config was how a renewed token silently failed to reach the connection.
+    esp_err_t cfg_result = applyConfig();
+    if (cfg_result != ESP_OK) return cfg_result;
+
     esp_err_t r = esp_mqtt_client_reconnect(_client);
     if (r != ESP_OK)
     {

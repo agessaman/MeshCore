@@ -346,6 +346,22 @@ public:
     bool connected();
 
     /**
+     * @brief Commits the pending configuration to the SDK client, creating it
+     *        if it does not exist yet, WITHOUT starting it.
+     *
+     * Exists so a caller can tell "the configuration is now what I asked for"
+     * from "the client started": esp_mqtt_client_start() can fail after the
+     * configuration has been committed, and a caller that cannot distinguish
+     * those records a stale view of what the SDK actually holds.
+     *
+     * @return ESP_OK when the SDK client holds this configuration.
+     *         ESP_ERR_INVALID_STATE if no URI is set, ESP_ERR_NO_MEM if the
+     *         client could not be allocated, or the error from
+     *         esp_mqtt_set_config() (which leaves the update pending).
+     */
+    esp_err_t applyConfig();
+
+    /**
      * @brief Connects the MQTT client to the server.
      *
      * @note All parameters must be set before calling this method.
