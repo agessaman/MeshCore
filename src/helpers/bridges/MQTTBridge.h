@@ -280,15 +280,22 @@ private:
   NtpDiagResult _ntp_diag_results[kMaxNtpServers];
   int _ntp_diag_count;
 
-  // Cooperative-shutdown handshake (Phase 5). The loop task (Core 1) raises
+  // Cooperative-shutdown handshake. The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
   // sees it, tears down its own clients on Core 0 (where the mbedTLS contexts
-  // live), sets _stop_acked LAST, and self-terminates. end() waits for the ack
-  // before freeing the queue/buffers. Plain volatile matches the existing
-  // NTP/reconfigure handshake idiom above; replacing all of these with a command
-  // channel / task notifications is explicitly deferred (see MQTT_OWNERSHIP.md).
-  volatile bool _stop_requested = false;
-  volatile bool _stop_acked = false;
+  // live), records _teardown_complete, and publishes _stop_acked from the task
+  // trampoline immediately before vTaskDelete(nullptr). end() waits for that ack
+  // before anything is freed.
+  //
+  // std::atomic, not volatile: this is a two-flag release/acquire handshake
+  // across cores, and the owner acts on it by freeing memory the other task can
+  // reach. `volatile` orders nothing and was the soak campaign's blocker #20.
+  // Publishing the ack from the trampoline is what makes it mean "this task is
+  // about to cease executing" rather than "teardown returned"; _teardown_complete
+  // gates it so an unexpected return from mqttTaskLoop() cannot claim a clean stop.
+  std::atomic<bool> _stop_requested{false};
+  std::atomic<bool> _stop_acked{false};
+  std::atomic<bool> _teardown_complete{false};
 
   // Timezone handling.
   // _timezone_storage is inline class storage (zero heap) that is reconfigured
@@ -467,10 +474,11 @@ private:
   bool ensureSlotClient(int index);    // Allocate this slot's persistent client + callbacks on first use
   bool ensureSlotAuthToken(int index); // Allocate this slot's JWT token buffer on first token creation
   void releaseSlotAuthToken(int index);// Free the token buffer (only with the client — see MQTTSlot)
-  // force=true stops each client without waiting for its DISCONNECTED event. Only the
-  // dirty-stop fallback passes it: disconnect()'s wait is unbounded, so a client already
-  // wedged in mbedTLS would block the caller — MyMesh::loop() — indefinitely.
-  void destroySlotClients(bool force = false);  // Delete all persistent clients (shutdown only)
+  // No force variant: the only caller that ever passed one was the dirty-stop
+  // fallback, and that fallback is gone (F01). A client whose stop cannot be
+  // proven is now left alone rather than force-stopped and deleted under a
+  // possibly-live SDK task.
+  void destroySlotClients();  // Delete all persistent clients (shutdown only)
   bool setupSlot(int index);           // Configure and connect the slot; false = not activated
   // Single definition of "this slot holds one of the _max_active_slots positions":
   // it is enabled and has been through a successful setupSlot(). Startup, the
@@ -479,7 +487,7 @@ private:
   int activatedSlotCount() const;
   bool canActivateSlot(int index) const;
   // force as in destroySlotClients(): skip the unbounded wait, dirty-stop path only.
-  void teardownSlot(int index, bool force = false);  // Disconnect the slot's client (keeps the object alive)
+  void teardownSlot(int index);  // Disconnect the slot's client (keeps the object alive)
   // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a
   // no-op on a stopped client). See the definition.
   void reconnectSlotClient(int index);
@@ -536,6 +544,9 @@ private:
   void logMemoryStatus();
   void refreshOriginFromPrefs();
   void applyWifiPowerSave();   // one mapping, applied on every association
+  // Honours a stop acknowledgement that arrived after the deadline: releases the
+  // withheld resources and makes the bridge restartable. Loop task only.
+  void pollLateStopAck();
   // begin()/end()-scoped PSRAM buffers. Each allocation is independent so a
   // transient heap shortage degrades to the existing stack fallback instead
   // of making the bridge unusable.
@@ -670,6 +681,13 @@ public:
    *  OTA flashing is withheld until a clean start/stop cycle. Mirrors
    *  MQTTLifecycle::mayBeginFlash(); read on the loop task (Core 1). */
   bool canFlashAfterStop() const { return _lifecycle.mayBeginFlash(); }
+  // True when a stop passed its deadline without the MQTT task acknowledging:
+  // the bridge is down, nothing was released, and it will not restart until the
+  // task acknowledges late (pollLateStopAck) or the node reboots.
+  bool isStopUnproven() const { return _lifecycle.isStopUnproven(); }
+  // Survives end() clearing the diagnostic singleton, so `get mqtt.status` can
+  // still explain why a stopped bridge will not come back without a reboot.
+  static bool stopUnprovenLatched();
 
   static unsigned long getWifiConnectedAtMillis();
 

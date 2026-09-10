@@ -40,6 +40,13 @@ enum class State : uint8_t {
   Running,
   StopRequested,
   Stopping,
+  // A requested stop passed its deadline without an acknowledgement. The MQTT
+  // task may still be alive inside mbedTLS or holding the SDK's API mutex, so
+  // NOTHING it can reach may be released and the bridge may not restart. This
+  // is deliberately not Stopped: releasing on a stop we cannot prove is the
+  // reviewed teardown-heap-panic path (F01). Appended so the values above keep
+  // their numbering.
+  StopUnproven,
 };
 
 // Events driven either by the owner (loop task) or by the MQTT task reporting
@@ -135,9 +142,14 @@ inline Result apply(State s, Event e) {
           r.accepted = true;
           break;
         case Event::StopAcknowledged:
-        case Event::StopTimedOut:
           r.next = State::Stopped;
           r.effects.release_resources = true;
+          r.effects.ota_release = true;
+          r.accepted = true;
+          break;
+        case Event::StopTimedOut:
+          // Unblock the OTA barrier (so it aborts) but release nothing.
+          r.next = State::StopUnproven;
           r.effects.ota_release = true;
           r.accepted = true;
           break;
@@ -150,14 +162,31 @@ inline Result apply(State s, Event e) {
     case State::Stopping:
       switch (e) {
         case Event::StopAcknowledged:
-        case Event::StopTimedOut:
           r.next = State::Stopped;
           r.effects.release_resources = true;
           r.effects.ota_release = true;
           r.accepted = true;
           break;
+        case Event::StopTimedOut:
+          r.next = State::StopUnproven;
+          r.effects.ota_release = true;
+          r.accepted = true;
+          break;
         default:
           break;
+      }
+      break;
+
+    case State::StopUnproven:
+      // A late acknowledgement proves exactly what a timely one proves: the
+      // task published it only after tearing its clients down. The deadline was
+      // an availability policy, not a statement about what the ack means — so
+      // honour it, release, and let the bridge be restartable again. A start
+      // before that proof is refused (see mayRestart).
+      if (e == Event::StopAcknowledged) {
+        r.next = State::Stopped;
+        r.effects.release_resources = true;
+        r.accepted = true;
       }
       break;
   }
@@ -182,6 +211,11 @@ inline bool mayTouchOwnedState(State s) { return s != State::Stopped; }
 // A restart (begin()) is safe only from a completed stop.
 inline bool mayRestart(State s) { return s == State::Stopped; }
 
+// True while a stop has passed its deadline unproven: the owner must keep every
+// resource the MQTT task can reach (queue, buffers, clients, its own task) and
+// must not restart. Cleared only by a late StopAcknowledged.
+inline bool isStopUnproven(State s) { return s == State::StopUnproven; }
+
 inline bool isStopInProgress(State s) {
   return s == State::StopRequested || s == State::Stopping;
 }
@@ -193,6 +227,7 @@ inline const char* stateName(State s) {
     case State::Running:       return "Running";
     case State::StopRequested: return "StopRequested";
     case State::Stopping:      return "Stopping";
+    case State::StopUnproven:  return "StopUnproven";
   }
   return "?";
 }
@@ -264,10 +299,16 @@ class Coordinator {
   bool isStopInProgress() const {
     return MQTTLifecycle::isStopInProgress(_state);
   }
-  // A restart is safe from a completed stop. A stop that reached Stopped via
-  // the timeout fallback still allows restart (the bridge is down); only OTA
-  // flashing is withheld after a dirty stop.
+  // A restart is safe only from a PROVEN stop. An unproven stop keeps the
+  // bridge down until the task acknowledges late (or the node reboots): a new
+  // start is not proof that the previous clients stopped, and starting on top
+  // of them is what the review refused to approve. Because a start is
+  // impossible while unproven, clearing the dirty latch on start (below) can no
+  // longer erase an unproven stop's OTA block.
   bool mayRestart() const { return MQTTLifecycle::mayRestart(_state); }
+  // The owner polls this to decide whether it may release/restart, and calls
+  // onTaskStopped() again if the task acknowledges late.
+  bool isStopUnproven() const { return MQTTLifecycle::isStopUnproven(_state); }
   // OTA erase/write is permitted only after a CLEAN stop. A timed-out stop
   // leaves ownership uncertain, so flashing stays blocked until a clean
   // start/stop cycle clears the latch.

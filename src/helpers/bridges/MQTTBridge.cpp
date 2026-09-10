@@ -223,6 +223,11 @@ static unsigned long s_wifi_connected_at = 0;
 
 // Last WiFi disconnect reason (from ESP-IDF event). Used for get wifi.status diagnostics.
 static uint8_t s_wifi_disconnect_reason = 0;
+// Latched by end() when a stop passes its deadline unacknowledged. end() clears
+// the diagnostic singleton, so without this `get mqtt.status` could only say
+// "not running" and an operator would have no way to learn that the bridge is
+// down for the rest of the boot and why.
+static bool s_stop_unproven = false;
 static unsigned long s_wifi_disconnect_time = 0;
 
 #ifdef MQTT_MEMORY_DEBUG
@@ -267,7 +272,9 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
   if (buf == nullptr || bufsize == 0) return;
   const char* msgs = (obs && obs->mqtt_status_enabled) ? "on" : "off";
   if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) {
-    snprintf(buf, bufsize, "> msgs: %s (bridge not running)", msgs);
+    snprintf(buf, bufsize, "> msgs: %s (bridge %s)", msgs,
+             s_stop_unproven ? "stopped: previous stop unproven, reboot to recover"
+                             : "not running");
     return;
   }
   MQTTBridge* b = s_mqtt_bridge_instance;
@@ -455,6 +462,8 @@ void MQTTBridge::applyWifiPowerSave() {
                      WifiPowerSavePolicy::nameFor(stored), (int)applied);
   #endif
 }
+
+bool MQTTBridge::stopUnprovenLatched() { return s_stop_unproven; }
 
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
@@ -871,6 +880,18 @@ void MQTTBridge::begin() {
     return;
   }
 
+  // A stop that never acknowledged leaves its task possibly still running and
+  // everything it can reach still owned. Starting on top of that is the failure
+  // F01 describes: a new start is not proof the previous clients stopped. Check
+  // once for a late acknowledgement (which releases and clears this), then
+  // refuse. Recovery is the task finishing, or a reboot.
+  pollLateStopAck();
+  if (!_lifecycle.mayRestart()) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge start refused: previous stop unproven (%s) - reboot to recover",
+                       MQTTLifecycle::stateName(_lifecycle.state()));
+    return;
+  }
+
   // PSRAM diagnostic - helps debug memory fragmentation on boards with external RAM
   #ifdef BOARD_HAS_PSRAM
   {
@@ -1067,8 +1088,9 @@ void MQTTBridge::begin() {
   // Clear the cooperative-stop handshake before the new task starts reading it.
   // deliverStop() leaves _stop_requested latched true after a stop cycle, so a
   // restart must reset it or the fresh task would self-terminate immediately.
-  _stop_requested = false;
-  _stop_acked = false;
+  _stop_requested.store(false, std::memory_order_relaxed);
+  _stop_acked.store(false, std::memory_order_relaxed);
+  _teardown_complete.store(false, std::memory_order_relaxed);
   BaseType_t create_result = xTaskCreatePinnedToCore(
     mqttTask,
     "MQTTBridge",
@@ -1161,14 +1183,14 @@ void MQTTBridge::end() {
 
 #ifdef ESP_PLATFORM
   // Wait (bounded) for the task to acknowledge. tick() synthesizes the timeout
-  // fallback if the task never acks. Checking the ack first each iteration means
-  // a stop that completes right as the timeout expires is still treated as clean.
+  // if the task never acks. Checking the ack first each iteration means a stop
+  // that completes right as the timeout expires is still treated as clean.
   while (_lifecycle.isStopInProgress()) {
-    if (_stop_acked) {
-      _lifecycle.onTaskStopped();   // StopRequested -> Stopped (clean): releaseResources()
+    if (_stop_acked.load(std::memory_order_acquire)) {
+      _lifecycle.onTaskStopped();   // -> Stopped (proven): releaseResources()
       break;
     }
-    _lifecycle.tick();              // may fire StopTimedOut -> Stopped (dirty): releaseResources()
+    _lifecycle.tick();              // may fire StopTimedOut -> StopUnproven: releases NOTHING
     if (!_lifecycle.isStopInProgress()) break;
     vTaskDelay(pdMS_TO_TICKS(20));
   }
@@ -1182,10 +1204,38 @@ void MQTTBridge::end() {
 
   // Timezone is inline class storage (_timezone_storage) — nothing to delete.
   // The shared JSON document's pools were freed by releaseRuntimeBuffers() above.
+  // Not running either way, so diagnostics and publishing stop. What differs is
+  // ownership: after an unproven stop the task may still be alive and every
+  // resource it can reach is deliberately still allocated (nothing was freed
+  // above). begin() refuses until the task acknowledges, so _initialized == false
+  // cannot be turned into a second task over the same state.
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
-  MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (%s)",
-                     _lifecycle.stopTimedOut() ? "forced/timeout - OTA blocked" : "clean");
+  s_stop_unproven = _lifecycle.isStopUnproven();
+  if (_lifecycle.isStopUnproven()) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge stop UNPROVEN after %lu ms: task did not acknowledge. "
+                       "Nothing released, restart refused, OTA blocked - reboot to recover.",
+                       (unsigned long)_lifecycle.stopTimeoutMs());
+  } else {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (clean)");
+  }
+}
+
+// A stop whose deadline passed unproven is not necessarily wedged forever: the
+// MQTT task may simply have been slow (a blackholed WSS broker can hold
+// esp_mqtt_client_stop() well past the budget). Its acknowledgement means the
+// same thing whenever it arrives — teardown finished and the task is about to
+// stop executing — so honour it late: release the resources that were withheld
+// and let the bridge be restartable again. Called from begin() (the moment it
+// matters) and from the diagnostics path, both on the loop task.
+void MQTTBridge::pollLateStopAck() {
+  if (!_lifecycle.isStopUnproven()) return;
+#ifdef ESP_PLATFORM
+  if (!_stop_acked.load(std::memory_order_acquire)) return;
+  MQTT_DEBUG_PRINTLN("MQTT task acknowledged its stop late - releasing withheld resources");
+  _lifecycle.onTaskStopped();   // StopUnproven -> Stopped: releaseResources()
+  s_stop_unproven = false;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,38 +1253,27 @@ void MQTTBridge::LifecycleOps::startTask() {
 }
 
 void MQTTBridge::LifecycleOps::deliverStop() {
-  // Clear any stale ack before raising the request (same ordering as the NTP
-  // handshake: clear the done-flag, then set the request). The MQTT task polls
-  // _stop_requested at the top of mqttTaskLoop().
-  _b->_stop_acked = false;
-  _b->_stop_requested = true;
+  // Clear the completion flags before raising the request, so the task cannot
+  // observe a stale ack from a previous cycle. Release on the request store
+  // publishes those clears to the MQTT task.
+  _b->_stop_acked.store(false, std::memory_order_relaxed);
+  _b->_teardown_complete.store(false, std::memory_order_relaxed);
+  _b->_stop_requested.store(true, std::memory_order_release);
 }
 
 void MQTTBridge::LifecycleOps::releaseResources() {
   MQTTBridge* b = _b;
 #ifdef ESP_PLATFORM
-  // stopTimedOut() is set before this effect fires (Coordinator::dispatch), so
-  // it reliably distinguishes a clean ack from the timeout fallback.
-  const bool dirty = b->_lifecycle.stopTimedOut();
-  if (dirty && !b->_stop_acked) {
-    // Reviewed fallback: the task never acknowledged (likely wedged in mbedTLS).
-    // Force-kill it and tear down clients here on Core 1 — the pre-cooperative
-    // behavior — accepting the heap risk. The dirty latch keeps OTA flashing
-    // blocked (canFlashAfterStop() == false) so firmware is never written after
-    // this path.
-    if (b->_mqtt_task_handle != nullptr) {
-      vTaskDelete(b->_mqtt_task_handle);
-    }
-    // force: the task is already gone and the client is presumed wedged, so waiting on a
-    // DISCONNECTED event that may never arrive would hang this task (the app loop) forever.
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) b->teardownSlot(i, /*force=*/true);
-    b->destroySlotClients(/*force=*/true);
-  }
-  // Clean path (or a task that acked right at the deadline): the MQTT task
-  // already disconnected/deleted its clients on Core 0 and self-terminated, so
-  // we must NOT touch slots here (that would be a cross-core double-delete).
-  // Just drop our handle reference; FreeRTOS reclaims the self-deleted task's
-  // dynamically-allocated stack/TCB in the idle task.
+  // This effect now fires ONLY after an acknowledged stop — timely or late (see
+  // MQTTLifecycle: StopTimedOut leads to StopUnproven, which releases nothing).
+  // So there is no force-kill branch here any more, and there must not be one:
+  // the task published the ack from its trampoline immediately before
+  // vTaskDelete(nullptr), after destroying its own clients on Core 0. Deleting
+  // that task from here, or tearing its clients down a second time, was the
+  // reviewed use-after-free (F01, soak blocker #20).
+  //
+  // The MQTT task self-terminates; FreeRTOS reclaims its stack/TCB in the idle
+  // task. We only drop our handle reference.
   b->_mqtt_task_handle = nullptr;
 
   // Drain and delete the FreeRTOS packet queue (value-copied packets, no
@@ -1282,8 +1321,14 @@ void MQTTBridge::mqttTask(void* parameter) {
   MQTTBridge* bridge = static_cast<MQTTBridge*>(parameter);
   if (bridge) {
     bridge->mqttTaskLoop();
+    // Last act before ceasing to execute: publish the stop acknowledgement, but
+    // only if the loop actually completed its ordered teardown. An unexpected
+    // return (mqttTaskLoop() has no other exit) must not tell the owner it is
+    // safe to free the queue, the buffers and the clients.
+    if (bridge->_teardown_complete.load(std::memory_order_acquire)) {
+      bridge->_stop_acked.store(true, std::memory_order_release);
+    }
   }
-  // Task should never return, but if it does, delete itself
   vTaskDelete(nullptr);
 }
 
@@ -1371,13 +1416,17 @@ void MQTTBridge::mqttTaskLoop() {
     // vTaskDelete. Acknowledge LAST so end() only frees the queue/buffers once
     // this teardown has completed, then self-terminate via the mqttTask()
     // trampoline (vTaskDelete(nullptr)).
-    if (_stop_requested) {
+    if (_stop_requested.load(std::memory_order_acquire)) {
       MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop - tearing down clients on Core 0");
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         teardownSlot(i);
       }
       destroySlotClients();
-      _stop_acked = true;   // release semantics: set only after teardown is done
+      // Record that the ordered teardown finished, but do NOT publish the ack
+      // here: the owner treats the ack as permission to free everything this
+      // task can reach, and between this point and vTaskDelete(nullptr) the task
+      // is still executing. mqttTask() publishes it as its last act.
+      _teardown_complete.store(true, std::memory_order_release);
       return;
     }
 
@@ -1789,17 +1838,11 @@ void MQTTBridge::releaseSlotAuthToken(int index) {
   slot.last_token_renewal = 0;
 }
 
-void MQTTBridge::destroySlotClients(bool force) {
+void MQTTBridge::destroySlotClients() {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     MQTTSlot& slot = _slots[i];
     if (slot.client != nullptr) {
-      // force is deliberately NOT gated on connected(). The state it exists for — a client
-      // that already took its DISCONNECTED callback and is now stuck inside
-      // esp_mqtt_client_stop() — reports not-connected, so gating skipped the stop exactly
-      // when it mattered and left the object to be deleted from under a live IDF task.
-      if (force) {
-        slot.client->forceStop();
-      } else if (slot.client->connected()) {
+      if (slot.client->connected()) {
         slot.client->disconnect();
       }
       #ifdef ESP_PLATFORM
@@ -2057,18 +2100,12 @@ bool MQTTBridge::setupSlot(int index) {
 // the client object alive so a subsequent setupSlot() can reuse its mbedTLS
 // context. This is called both on reconfigure (preset change) and at shutdown;
 // destruction of the underlying client happens once in destroySlotClients().
-void MQTTBridge::teardownSlot(int index, bool force) {
+void MQTTBridge::teardownSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
 
-  // As in destroySlotClients(): force is not gated on connected(), because the wedged
-  // mid-stop state it exists for already reports not-connected.
-  if (slot.client && (force || slot.client->connected())) {
-    if (force) {
-      slot.client->forceStop();
-    } else {
-      slot.client->disconnect();
-    }
+  if (slot.client && slot.client->connected()) {
+    slot.client->disconnect();
     #ifdef ESP_PLATFORM
     vTaskDelay(pdMS_TO_TICKS(50));
     #else
