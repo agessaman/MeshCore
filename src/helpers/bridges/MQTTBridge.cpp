@@ -463,6 +463,19 @@ void MQTTBridge::applyWifiPowerSave() {
   #endif
 }
 
+const char* MQTTBridge::clientStateName(ClientState st) {
+  switch (st) {
+    case ClientState::Absent:       return "absent";
+    case ClientState::Configured:   return "configured";
+    case ClientState::Starting:     return "starting";
+    case ClientState::Connected:    return "connected";
+    case ClientState::Disconnected: return "disconnected";
+    case ClientState::Stopped:      return "stopped";
+    case ClientState::Quarantined:  return "quarantined";
+  }
+  return "?";
+}
+
 bool MQTTBridge::stopUnprovenLatched() { return s_stop_unproven; }
 
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
@@ -561,6 +574,11 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
     // is configured but missing a token/IATA/credential, so it was never set up and
     // has no client yet. Previously reported "disc", which read as a network fault.
     state = "wait";
+  } else if (slot.client && slot.client_state == ClientState::Quarantined) {
+    // Its stop did not complete, so the SDK task was never joined: the slot is
+    // out of service for the rest of the boot and its resources are retained
+    // on purpose.
+    state = "quarantined";
   } else if (!slot.client) {
     // Ready to connect but the client object could not be allocated.
     state = "no client";
@@ -1723,10 +1741,24 @@ bool MQTTBridge::ensureSlotClient(int index) {
     MQTT_DEBUG_PRINTLN("MQTT%d: out of memory allocating client", index + 1);
     return false;
   }
+  slot.client_state = ClientState::Configured;
   slot.client->setAutoReconnect(false);  // we handle reconnect with our own backoff
 
   slot.client->onConnect([this, index](bool sessionPresent) {
+    // A CONNECT started before this slot was disabled or reconfigured can still
+    // complete afterwards. Accepting it marked a slot connected that the
+    // operator had switched off, scheduled its status publish, and published
+    // through the old session (F04). The bridge task owns client_state, so it
+    // is the authority on whether this event was asked for.
+    const ClientState st = _slots[index].client_state;
+    if (!_slots[index].enabled || !(st == ClientState::Starting || st == ClientState::Disconnected)) {
+      MQTT_DEBUG_PRINTLN("MQTT%d ignoring late CONNECTED (state=%s, gen=%lu, enabled=%d)",
+                         index + 1, clientStateName(st),
+                         (unsigned long)_slots[index].generation, (int)_slots[index].enabled);
+      return;
+    }
     MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
+    _slots[index].client_state = ClientState::Connected;
     _slots[index].connected = true;
     _slot_force_jwt_mint[index] = false;
     // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
@@ -1759,6 +1791,11 @@ bool MQTTBridge::ensureSlotClient(int index) {
   });
   slot.client->onDisconnect([this, index](bool sessionPresent) {
     MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
+    // Only a live client's disconnect is news. One arriving for a client we
+    // already stopped (or quarantined) must not resurrect its state.
+    if (clientStateIsLive(_slots[index].client_state)) {
+      _slots[index].client_state = ClientState::Disconnected;
+    }
     _slots[index].disconnect_count++;
     if (_slots[index].first_disconnect_time == 0) {
       _slots[index].first_disconnect_time = millis();
@@ -1841,20 +1878,42 @@ void MQTTBridge::releaseSlotAuthToken(int index) {
 void MQTTBridge::destroySlotClients() {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     MQTTSlot& slot = _slots[i];
-    if (slot.client != nullptr) {
-      if (slot.client->connected()) {
-        slot.client->disconnect();
+    if (slot.client == nullptr) {
+      releaseSlotAuthToken(i);
+      continue;
+    }
+
+    if (slot.client_state == ClientState::Quarantined) {
+      // A previous stop failed, so this client's SDK task was never joined.
+      // Deleting it now is the use-after-free F01 is about, and freeing its
+      // token would pull the buffer out from under a config the task may still
+      // read. Leak both, deliberately, until the node reboots.
+      MQTT_DEBUG_PRINTLN("MQTT%d client quarantined - not destroyed, token retained", i + 1);
+      continue;
+    }
+
+    if (clientStateIsLive(slot.client_state)) {
+      const esp_err_t r = slot.client->disconnect();
+      if (r != ESP_OK && r != ESP_ERR_TIMEOUT) {
+        MQTT_DEBUG_PRINTLN("MQTT%d stop FAILED during shutdown (%s) - not destroying", i + 1,
+                           esp_err_to_name(r));
+        slot.client_state = ClientState::Quarantined;
+        continue;
       }
+      slot.client_state = ClientState::Stopped;
       #ifdef ESP_PLATFORM
       vTaskDelay(pdMS_TO_TICKS(50));
       #else
       delay(50);
       #endif
-      delete slot.client;
-      slot.client = nullptr;
     }
-    // Unconditional: only now is the token unreachable from the client's stored
-    // config, and a token without a client would otherwise leak.
+
+    delete slot.client;
+    slot.client = nullptr;
+    slot.client_state = ClientState::Absent;
+    slot.generation++;
+    // Only now is the token unreachable from the client's stored config, and a
+    // token without a client would otherwise leak.
     releaseSlotAuthToken(i);
   }
 }
@@ -1862,7 +1921,18 @@ void MQTTBridge::destroySlotClients() {
 int MQTTBridge::activatedSlotCount() const {
   int n = 0;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slots[i].enabled && _slots[i].initial_connect_done) n++;
+    const MQTTSlot& s = _slots[i];
+    // Two ways to hold a position, and the cap must respect both. The original
+    // one is the configuration view: enabled and through a successful setup.
+    // The second is the resource view: a client that has been started still
+    // owns a task, a socket and an mbedTLS context — which is what the cap
+    // actually protects — and a quarantined one owns them for the rest of the
+    // boot. `initial_connect_done` alone missed those, because teardown clears
+    // it, so a board could oversubscribe past _max_active_slots.
+    const bool holds_config_position = s.enabled && s.initial_connect_done;
+    const bool holds_resources = s.client != nullptr &&
+        (clientStateIsLive(s.client_state) || s.client_state == ClientState::Quarantined);
+    if (holds_config_position || holds_resources) n++;
   }
   return n;
 }
@@ -1909,8 +1979,17 @@ bool MQTTBridge::setupSlot(int index) {
   // them. setCredentials / setServer below overwrite the config fields in place
   // before connect() restarts the ESP-IDF client.
   if (slot.initial_connect_done) {
-    if (slot.client->connected()) {
-      slot.client->disconnect();
+    // Close the transport (keeping the task) if this client is live, for the
+    // same reason applySlotPreset() does: a handshake in flight against the
+    // previous endpoint must not complete after the new config is applied.
+    if (clientStateIsLive(slot.client_state)) {
+      const esp_err_t r = slot.client->softDisconnect();
+      if (r != ESP_OK) {
+        MQTT_DEBUG_PRINTLN("MQTT%d re-apply: transport did not close cleanly (%s)",
+                           index + 1, esp_err_to_name(r));
+      }
+      slot.client_state = ClientState::Disconnected;
+      slot.generation++;
     }
     // Clear TLS verification fields so a stale CA-bundle attach or cert
     // pointer from a prior preset doesn't override the new one.
@@ -2097,13 +2176,20 @@ bool MQTTBridge::setupSlot(int index) {
   // positions, the reconnect ladder (which is gated on activation) governed it,
   // and nothing retried the setup. Leaving it unactivated hands it to the
   // existing deferred-setup retry in maintainSlotConnections() instead.
-  const esp_err_t connect_result = slot.client->connect();
+  // Start or reconnect according to what the SDK client actually is, not what
+  // the network is doing. esp_mqtt_client_start() fails on an already-started
+  // client, so a reconfigure that kept the task (TeardownReason::Reconfigure)
+  // has to reconnect instead — and with connect()'s result now honoured, using
+  // the wrong one would leave the slot permanently unactivated.
+  const esp_err_t connect_result = reconnectSlotClient(index);
   if (connect_result != ESP_OK) {
     MQTT_DEBUG_PRINTLN("MQTT%d start failed (%s) - will retry", index + 1,
                        esp_err_to_name(connect_result));
     slot.last_reconnect_attempt = millis();
     return false;
   }
+  slot.client_state = ClientState::Starting;
+  slot.generation++;
   slot.initial_connect_done = true;
   return true;
 }
@@ -2112,12 +2198,43 @@ bool MQTTBridge::setupSlot(int index) {
 // the client object alive so a subsequent setupSlot() can reuse its mbedTLS
 // context. This is called both on reconfigure (preset change) and at shutdown;
 // destruction of the underlying client happens once in destroySlotClients().
-void MQTTBridge::teardownSlot(int index) {
+void MQTTBridge::teardownSlot(int index, TeardownReason reason) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
 
-  if (slot.client && slot.client->connected()) {
-    slot.client->disconnect();
+  // Gated on the SDK lifecycle state, not on connectivity: a client resolving
+  // DNS, negotiating TLS or waiting after a failed CONNECT reports
+  // not-connected, and the old `connected()` gate left exactly those running —
+  // free to complete their handshake against an endpoint the operator had
+  // already replaced or switched off (F04).
+  if (slot.client && clientStateIsLive(slot.client_state)) {
+    if (reason == TeardownReason::Reconfigure) {
+      // Close the transport, keep the task. The in-flight handshake cannot
+      // complete against the old endpoint any more, and the esp-mqtt task's
+      // 6 KiB stack does not get returned into the hole the mbedTLS record
+      // buffers just vacated (the documented fragmentation driver).
+      const esp_err_t r = slot.client->softDisconnect();
+      if (r != ESP_OK) {
+        MQTT_DEBUG_PRINTLN("MQTT%d reconfigure: transport did not close cleanly (%s)",
+                           index + 1, esp_err_to_name(r));
+      }
+      slot.client_state = ClientState::Disconnected;
+    } else {
+      const esp_err_t r = slot.client->disconnect();
+      if (r == ESP_OK || r == ESP_ERR_TIMEOUT) {
+        // ESP_ERR_TIMEOUT: no DISCONNECTED event, but the stop itself returned
+        // OK, so the SDK task is joined and the object is safe to reuse.
+        slot.client_state = ClientState::Stopped;
+      } else {
+        // The stop did not complete: the SDK task was not joined. Never touch
+        // this client again — not to reuse it, not to destroy it, and do not
+        // free the token buffer its config still points at.
+        MQTT_DEBUG_PRINTLN("MQTT%d stop FAILED (%s) - client quarantined for this boot",
+                           index + 1, esp_err_to_name(r));
+        slot.client_state = ClientState::Quarantined;
+      }
+    }
+    slot.generation++;
     #ifdef ESP_PLATFORM
     vTaskDelay(pdMS_TO_TICKS(50));
     #else
@@ -2154,11 +2271,24 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
   MQTTSlot& slot = _slots[index];
   if (slot.client == nullptr) return ESP_ERR_INVALID_STATE;
 
+  if (slot.client_state == ClientState::Quarantined) {
+    // Its SDK task was never joined; touching it again is exactly what F01
+    // forbids.
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t r;
   if (!slot.client->isStarted()) {
     MQTT_DEBUG_PRINTLN("MQTT%d start (client was stopped)", index + 1);
-    return slot.client->connect();
+    r = slot.client->connect();
+  } else {
+    r = slot.client->reconnect();
   }
-  return slot.client->reconnect();
+  if (r == ESP_OK) {
+    slot.client_state = ClientState::Starting;
+    slot.generation++;
+  }
+  return r;
 }
 
 
@@ -2841,9 +2971,15 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[slot_index];
 
-  teardownSlot(slot_index);
+  const bool disabling = (strcmp(preset_name, MQTT_PRESET_NONE) == 0 || preset_name[0] == '\0');
+  // Selecting `none` must actually stop the client: clearing the bridge flags
+  // used to leave its task and transport running until full shutdown, and an
+  // in-flight handshake could still complete and mark the disabled slot
+  // connected (F04). Every other case keeps the task and only closes the
+  // transport.
+  teardownSlot(slot_index, disabling ? TeardownReason::Disable : TeardownReason::Reconfigure);
 
-  if (strcmp(preset_name, MQTT_PRESET_NONE) == 0 || preset_name[0] == '\0') {
+  if (disabling) {
     slot.enabled = false;
     slot.preset = nullptr;
     return;

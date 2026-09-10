@@ -98,9 +98,38 @@ private:
   static const uint32_t kNtpMinValidEpoch = 1767225600UL;  // 2026-01-01 UTC
   static const uint32_t kNtpMaxValidEpoch = 4102444800UL;  // 2100-01-01 UTC
 
+  // What the SDK client is doing, as opposed to whether the network is up.
+  // `client->connected()` answers the second question and was being used for
+  // the first: a client resolving DNS, negotiating TLS or waiting after a
+  // failed CONNECT reports not-connected, so teardown skipped it and left its
+  // task running (F04). Absent is 0 so a memset-initialised slot is correct.
+  enum class ClientState : uint8_t {
+    Absent = 0,    // no client object
+    Configured,    // client allocated, never started
+    Starting,      // start/reconnect requested, awaiting CONNECTED
+    Connected,     // CONNECTED received
+    Disconnected,  // started, no session (our reconnect ladder governs it)
+    Stopped,       // stop completed; the SDK task is joined and gone
+    Quarantined,   // stop failed: the SDK task was NOT joined. Never destroy,
+                   // never reuse, never free anything it still points at.
+  };
+
+  static const char* clientStateName(ClientState s);
+  // True while the SDK client has been started and not proven stopped, i.e.
+  // while it may still own a task, a socket and a TLS context.
+  static bool clientStateIsLive(ClientState s) {
+    return s == ClientState::Starting || s == ClientState::Connected ||
+           s == ClientState::Disconnected;
+  }
+
   // Connection slot - each slot holds one MQTT connection
   struct MQTTSlot {
     PsychicMqttClient* client;
+    ClientState client_state;
+    // Bumped on every start/stop. Only used for diagnostics and log lines: the
+    // accept/reject decision for a late callback is made on client_state, which
+    // the bridge task owns.
+    uint32_t generation;
     const MQTTPresetDef* preset;    // Points to MQTT_PRESETS[] entry, nullptr for custom/none
     bool enabled;                   // true when preset is not "none"
     bool connected;                 // Updated in callbacks
@@ -487,7 +516,17 @@ private:
   int activatedSlotCount() const;
   bool canActivateSlot(int index) const;
   // force as in destroySlotClients(): skip the unbounded wait, dirty-stop path only.
-  void teardownSlot(int index);  // Disconnect the slot's client (keeps the object alive)
+  // Why a slot is being torn down. The distinction is not cosmetic:
+  //  - Reconfigure: the slot is about to connect somewhere else, so the
+  //    transport must close (or an in-flight handshake could complete against
+  //    the OLD endpoint) but the esp-mqtt task should stay. Stopping it returns
+  //    its 6 KiB stack into the hole the two 16 KiB mbedTLS record buffers just
+  //    vacated, which is the fork's documented internal-heap fragmentation
+  //    driver; softDisconnect() avoids exactly that.
+  //  - Disable: the slot is going away, so the task and its transport must go
+  //    with it. Here the stop IS the point.
+  enum class TeardownReason : uint8_t { Reconfigure, Disable };
+  void teardownSlot(int index, TeardownReason reason = TeardownReason::Disable);
   // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a
   // no-op on a stopped client). See the definition.
   // ESP_OK when the reconnect/start was accepted by the SDK. A local failure
