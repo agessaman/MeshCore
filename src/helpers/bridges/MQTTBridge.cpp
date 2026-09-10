@@ -4674,15 +4674,23 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
   // preserving at-least-once delivery while capping duplicates at one.
   client->setMessageRetransmitTimeout(15000);
 
-  // Buffer sizing: 896 is the minimum safe size for JWT clients (CONNECT + 768-byte JWT).
-  // On PSRAM boards, use a uniform size to reduce fragmentation from mixed allocations.
-  // On non-PSRAM boards, use smaller buffers for non-JWT slots to reduce heap usage and
-  // leave smaller holes during teardown/recreate cycles.
-#if defined(BOARD_HAS_PSRAM)
+  // Buffer sizing: 896 is the minimum safe size for a JWT CONNECT (frame plus a
+  // 768-byte token). Every client gets it, on every board.
+  //
+  // Non-PSRAM boards used to get 512 for non-JWT slots, which made the *desired*
+  // size a per-slot variable while the *allocated* size was fixed at client init
+  // — IDF 4.4 allocates the MQTT buffers in esp_mqtt_client_init() and
+  // esp_mqtt_set_config() does not resize them, and the wrapper's own reassembly
+  // buffer is likewise allocated once (F03). A slot reconfigured from non-JWT to
+  // JWT therefore kept 512-byte buffers and its valid CONNECT could not fit,
+  // with no error that named the cause. Sizing every client for the largest
+  // CONNECT it might ever have to send removes the transition entirely.
+  //
+  // The cost is 384 bytes per client on a non-PSRAM board (at most 2 active
+  // slots there), against a handshake that needs 16 KB of *contiguous* internal
+  // DRAM — noise, and it buys the removal of a recreate case.
   static const int MQTT_CLIENT_BUFFER_SIZE = 896;
-#else
-  const int MQTT_CLIENT_BUFFER_SIZE = needs_large_buffer ? 896 : 512;
-#endif
+  (void)needs_large_buffer;   // kept: callers still express the intent
 
   client->setBufferSize(MQTT_CLIENT_BUFFER_SIZE);
 
