@@ -11,6 +11,7 @@
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
 #include "helpers/AlertFaultPolicy.h"
+#include "helpers/MQTTEffectiveConfig.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -91,6 +92,12 @@ public:
 private:
   static const size_t AUTH_TOKEN_SIZE = 768;
 
+  // Every client gets buffers sized for a JWT CONNECT (frame + 768-byte token),
+  // on every board: the SDK fixes the allocation at client init and does not
+  // resize it, so a per-slot size made the desired and allocated capacities
+  // disagree (F03).
+  static const uint16_t kMqttClientBufferSize = 896;
+
   // NTP acceptance bounds. A reply outside them is rejected outright rather
   // than allowed to set the clock, the RTC and every JWT minted afterwards.
   static const uint16_t kNtpPort = 123;
@@ -126,6 +133,12 @@ private:
   struct MQTTSlot {
     PsychicMqttClient* client;
     ClientState client_state;
+    // What this client was last successfully configured with, and the buffer
+    // capacity it actually owns (the SDK fixes that at client init). Together
+    // they answer "can the next configuration be applied in place?" — the
+    // question `initial_connect_done` was standing in for, wrongly.
+    MqttEffectiveConfig applied_config;
+    uint16_t allocated_buffer_size;
     // Bumped on every start/stop. Only used for diagnostics and log lines: the
     // accept/reject decision for a late callback is made on client_state, which
     // the bridge task owns.
@@ -501,6 +514,10 @@ private:
   // This avoids delete/new cycles that shed ~40 KB of mbedTLS buffers per
   // reconfigure and fragment the internal heap on non-PSRAM boards.
   bool ensureSlotClient(int index);    // Allocate this slot's persistent client + callbacks on first use
+  // Stop, destroy and re-allocate this slot's client. Only for configuration
+  // changes that cannot be applied to a live client, and only after the stop is
+  // proven — false means the client is quarantined and must not be reused.
+  bool recreateSlotClient(int index);
   bool ensureSlotAuthToken(int index); // Allocate this slot's JWT token buffer on first token creation
   void releaseSlotAuthToken(int index);// Free the token buffer (only with the client — see MQTTSlot)
   // No force variant: the only caller that ever passed one was the dirty-stop
@@ -514,6 +531,9 @@ private:
   // setup-retry path, and live reconfigure all gate on these so the cap cannot be
   // exceeded by one route while another enforces it.
   int activatedSlotCount() const;
+  // Positions held by every slot except `skip` (-1 for none). canActivateSlot()
+  // excludes the candidate so a live reconfigure cannot fail its own cap check.
+  int activatedSlotCountExcluding(int skip) const;
   bool canActivateSlot(int index) const;
   // force as in destroySlotClients(): skip the unbounded wait, dirty-stop path only.
   // Why a slot is being torn down. The distinction is not cosmetic:

@@ -783,6 +783,10 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].last_reconnect_attempt = 0;
     _slots[i].last_log_time = 0;
     _slots[i].port = 1883;
+    _slots[i].client_state = ClientState::Absent;
+    _slots[i].generation = 0;
+    _slots[i].applied_config = MqttEffectiveConfig();
+    _slots[i].allocated_buffer_size = 0;
     _slot_reconfigure_pending[i] = false;
     _slot_force_jwt_mint[i] = false;
     _status_publish_pending[i] = false;
@@ -1742,6 +1746,11 @@ bool MQTTBridge::ensureSlotClient(int index) {
     return false;
   }
   slot.client_state = ClientState::Configured;
+  // The SDK allocates its buffers in esp_mqtt_client_init() (inside the first
+  // connect()) from the size set before it, and never resizes them. Record what
+  // this client will therefore own, so a later config that needs more capacity
+  // is recognised as needing a new client rather than silently truncating.
+  slot.allocated_buffer_size = kMqttClientBufferSize;
   slot.client->setAutoReconnect(false);  // we handle reconnect with our own backoff
 
   slot.client->onConnect([this, index](bool sessionPresent) {
@@ -1918,9 +1927,12 @@ void MQTTBridge::destroySlotClients() {
   }
 }
 
-int MQTTBridge::activatedSlotCount() const {
+int MQTTBridge::activatedSlotCount() const { return activatedSlotCountExcluding(-1); }
+
+int MQTTBridge::activatedSlotCountExcluding(int skip) const {
   int n = 0;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (i == skip) continue;
     const MQTTSlot& s = _slots[i];
     // Two ways to hold a position, and the cap must respect both. The original
     // one is the configuration view: enabled and through a successful setup.
@@ -1939,9 +1951,14 @@ int MQTTBridge::activatedSlotCount() const {
 
 bool MQTTBridge::canActivateSlot(int index) const {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
-  // Already holding a position (a reconfigure of a live slot) — no new position needed.
-  if (_slots[index].enabled && _slots[index].initial_connect_done) return true;
-  return activatedSlotCount() < _max_active_slots;
+  // Count what the OTHER slots hold. A slot being set up or reconfigured must
+  // not count itself out of its own position — and it can now hold resources
+  // while being reconfigured, because a reconfigure keeps the esp-mqtt task
+  // alive (TeardownReason::Reconfigure). Asking "is there room for this slot"
+  // rather than "is there room for one more" is also what makes the count safe
+  // to base on live resources instead of on initial_connect_done, which
+  // teardown clears.
+  return activatedSlotCountExcluding(index) < _max_active_slots;
 }
 
 // Returns true only when the slot reached connect(). A false result leaves the slot
@@ -1991,22 +2008,13 @@ bool MQTTBridge::setupSlot(int index) {
       slot.client_state = ClientState::Disconnected;
       slot.generation++;
     }
-    // Clear TLS verification fields so a stale CA-bundle attach or cert
-    // pointer from a prior preset doesn't override the new one.
-    esp_mqtt_client_config_t* cfg = slot.client->getMqttConfig();
-    #if ESP_IDF_VERSION_MAJOR == 5
-    cfg->broker.verification.certificate = nullptr;
-    cfg->broker.verification.certificate_len = 0;
-    cfg->broker.verification.crt_bundle_attach = nullptr;
-    cfg->credentials.username = nullptr;
-    cfg->credentials.authentication.password = nullptr;
-    #else
-    cfg->cert_pem = nullptr;
-    cfg->cert_len = 0;
-    cfg->crt_bundle_attach = nullptr;
-    cfg->username = nullptr;
-    cfg->password = nullptr;
-    #endif
+    // The config fields are NOT cleared here any more. Two reasons: this block
+    // only ran when initial_connect_done was set, which teardownSlot() clears
+    // first, so live reconfiguration always skipped it (F02); and nulling a
+    // wrapper pointer cannot clear an SDK-held string anyway, because IDF's
+    // esp_mqtt_set_if_config() treats NULL as "leave unchanged". Every owned
+    // field is written unconditionally below instead, with absent credentials
+    // written as "" — which does clear them.
     if (slot.auth_token) slot.auth_token[0] = '\0';
     slot.connected = false;
     slot.token_expires_at = 0;
@@ -2032,11 +2040,25 @@ bool MQTTBridge::setupSlot(int index) {
   #endif
   #endif
 
+  // What this slot should be configured with. Decided first, in full, and
+  // applied in one place below: field-by-field application interleaved with
+  // decisions is what let a stale credential survive a reconfigure (F02).
+  // Every pointer here must outlive the client — esp-mqtt stores the pointer
+  // and re-reads it whenever a later connect() re-applies the config — so these
+  // are preset literals in flash, or slot/bridge members, never locals.
+  const char* cfg_uri = nullptr;
+  MqttAuth cfg_auth = MqttAuth::None;
+  const char* cfg_user = nullptr;
+  const char* cfg_pass = nullptr;
+  MqttTrust cfg_trust = MqttTrust::Plaintext;
+  const char* cfg_pem = nullptr;
+
   if (slot.preset) {
     // Preset-based slot
-    slot.client->setServer(slot.preset->server_url);
+    cfg_uri = slot.preset->server_url;
     if (slot.preset->ca_cert) {
-      slot.client->setCACert(slot.preset->ca_cert);
+      cfg_trust = MqttTrust::PemCert;
+      cfg_pem = slot.preset->ca_cert;
     }
 
     // A JWT slot with no usable token would connect unauthenticated and be rejected.
@@ -2048,7 +2070,9 @@ bool MQTTBridge::setupSlot(int index) {
         slot.last_reconnect_attempt = millis();
         return false;
       }
-      slot.client->setCredentials(_jwt_username, slot.auth_token);
+      cfg_auth = MqttAuth::Jwt;
+      cfg_user = _jwt_username;
+      cfg_pass = slot.auth_token;
     } else if (slot.preset->auth_type == MQTT_AUTH_USERPASS) {
       const char* user = nullptr;
       const char* pass = slot.preset->userpass_password
@@ -2062,7 +2086,9 @@ bool MQTTBridge::setupSlot(int index) {
         user = slot.username;
       }
       if (user && user[0] != '\0' && pass && pass[0] != '\0') {
-        slot.client->setCredentials(user, pass);
+        cfg_auth = MqttAuth::UserPass;
+        cfg_user = user;
+        cfg_pass = pass;
       }
     }
   } else {
@@ -2115,7 +2141,7 @@ bool MQTTBridge::setupSlot(int index) {
       }
       snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s://%s:%d", proto, slot.host, slot.port);
     }
-    slot.client->setServer(slot.broker_uri);
+    cfg_uri = slot.broker_uri;
     MQTT_DEBUG_PRINTLN("MQTT%d custom broker URI: %s (host='%s', port=%u)",
       index + 1, slot.broker_uri, slot.host, (unsigned)slot.port);
 
@@ -2124,8 +2150,7 @@ bool MQTTBridge::setupSlot(int index) {
     // a use-after-free race: connect() launches an async FreeRTOS task, and
     // calling setCACertBundle() again from a later slot would free the global
     // crts array while a prior slot's TLS handshake may still be reading it.
-    bool needs_tls = (strncmp(slot.broker_uri, "mqtts://", 8) == 0 ||
-                      strncmp(slot.broker_uri, "wss://", 6) == 0);
+    const bool needs_tls = mqttTransportIsEncrypted(mqttTransportFromUri(slot.broker_uri));
     if (needs_tls) {
       if (!s_ca_bundle_loaded) {
         size_t bundle_len = 0;
@@ -2138,8 +2163,10 @@ bool MQTTBridge::setupSlot(int index) {
         if (bundle_len > 0) {
           MQTT_DEBUG_PRINTLN("MQTT global CA bundle init: embedded bundle (%u bytes)",
             (unsigned)bundle_len);
-          // Load the bundle into the global s_crt_bundle via the first client.
-          // This is a one-time operation; subsequent clients reuse via attachArduinoCACertBundle.
+          // Load the bundle into the global s_crt_bundle via this client. The
+          // load is global and one-shot (calling it again would free the crts
+          // array while another slot's handshake may still be reading it); the
+          // per-client attach pointer is set uniformly in the apply step below.
           slot.client->setCACertBundle(rootca_crt_bundle_start, bundle_len);
           s_ca_bundle_loaded = true;
         } else {
@@ -2151,6 +2178,7 @@ bool MQTTBridge::setupSlot(int index) {
       }
       MQTT_DEBUG_PRINTLN("MQTT%d TLS verify: CA bundle %s", index + 1,
         s_ca_bundle_loaded ? "active" : "unavailable");
+      if (s_ca_bundle_loaded) cfg_trust = MqttTrust::Bundle;
     } else {
       MQTT_DEBUG_PRINTLN("MQTT%d custom broker uses non-TLS transport", index + 1);
     }
@@ -2163,11 +2191,19 @@ bool MQTTBridge::setupSlot(int index) {
         slot.last_reconnect_attempt = millis();
         return false;
       }
-      slot.client->setCredentials(_jwt_username, slot.auth_token);
+      cfg_auth = MqttAuth::Jwt;
+      cfg_user = _jwt_username;
+      cfg_pass = slot.auth_token;
       MQTT_DEBUG_PRINTLN("MQTT%d custom broker using JWT auth (audience: %s)", index + 1, slot.audience);
-    } else if (strlen(slot.username) > 0) {
-      slot.client->setCredentials(slot.username, slot.password);
+    } else if (slot.username[0] != '\0') {
+      cfg_auth = MqttAuth::UserPass;
+      cfg_user = slot.username;
+      cfg_pass = slot.password;
     }
+    // No else: an anonymous endpoint gets empty credentials written to it, so
+    // whatever the previous configuration left in the SDK is overwritten. This
+    // exact transition (JWT preset -> anonymous custom) was observed sending
+    // the old v1_<pubkey> username to the new broker.
   }
 
   // Activation is now conditional on the client actually starting. A failed
@@ -2176,6 +2212,49 @@ bool MQTTBridge::setupSlot(int index) {
   // positions, the reconnect ladder (which is gated on activation) governed it,
   // and nothing retried the setup. Leaving it unactivated hands it to the
   // existing deferred-setup retry in maintainSlotConnections() instead.
+  // --- one apply, every field ------------------------------------------------
+  MqttEffectiveConfig desired;
+  // Keepalive is recorded as 0: optimizeMqttClientConfig() owns it, it is
+  // rewritten on every apply, and it plays no part in the recreate decision.
+  if (!mqttBuildEffectiveConfig(cfg_uri, cfg_auth, cfg_user, cfg_pass, cfg_trust, cfg_pem,
+                                kMqttClientBufferSize, 0, &desired)) {
+    MQTT_DEBUG_PRINTLN("MQTT%d: unusable broker URI '%s' - not connecting", index + 1,
+                       cfg_uri ? cfg_uri : "(none)");
+    slot.last_reconnect_attempt = millis();
+    return false;
+  }
+
+  // Recreate only where a field cannot be overwritten: a transport (scheme)
+  // change, a trust-policy or CA change, or growth past the allocated buffer
+  // capacity. Everything else — credentials, auth mode, an endpoint move within
+  // one scheme — is reconfigured in place, because a client create/destroy cycle
+  // on the reconnect/renewal path is the documented fragmentation driver.
+  const MqttRecreateDecision decision =
+      mqttConfigRecreateDecision(slot.applied_config, desired, slot.allocated_buffer_size);
+  if (decision.recreate) {
+    MQTT_DEBUG_PRINTLN("MQTT%d recreating client (%s)", index + 1, decision.reason);
+    if (!recreateSlotClient(index)) {
+      slot.last_reconnect_attempt = millis();
+      return false;
+    }
+  }
+
+  // Write every owned field, in one place, whether or not it changed. Absent
+  // credentials are written as "" rather than left alone: NULL means "leave
+  // unchanged" to esp_mqtt_set_config(), while an empty string clears the
+  // stored value and leaves the CONNECT's username flag clear.
+  slot.client->setServer(cfg_uri);
+  if (desired.trust == MqttTrust::PemCert) {
+    slot.client->setCACert(desired.pem);
+    slot.client->attachArduinoCACertBundle(false);
+  } else if (desired.trust == MqttTrust::Bundle) {
+    slot.client->attachArduinoCACertBundle(true);
+  } else {
+    slot.client->attachArduinoCACertBundle(false);
+  }
+  slot.client->setCredentials(mqttFieldOrEmpty(desired.username),
+                              mqttFieldOrEmpty(desired.password));
+
   // Start or reconnect according to what the SDK client actually is, not what
   // the network is doing. esp_mqtt_client_start() fails on an already-started
   // client, so a reconfigure that kept the task (TeardownReason::Reconfigure)
@@ -2188,10 +2267,41 @@ bool MQTTBridge::setupSlot(int index) {
     slot.last_reconnect_attempt = millis();
     return false;
   }
-  slot.client_state = ClientState::Starting;
-  slot.generation++;
+  // reconnectSlotClient() moved the state to Starting and bumped the generation.
+  // Record what the client is now configured with, so the next apply can tell
+  // an in-place change from a structural one.
+  slot.applied_config = desired;
   slot.initial_connect_done = true;
   return true;
+}
+
+// Destroy and re-create this slot's client, for the configuration changes that
+// cannot be applied to a live SDK client (see mqttConfigRecreateDecision).
+//
+// The stop must be PROVEN before the object is freed: a client whose
+// esp_mqtt_client_stop() did not return OK still has a task, and deleting it
+// then is the use-after-free F01 is about. Such a client is quarantined and this
+// returns false — the slot stays unactivated and its resources are retained
+// until the node reboots, rather than being freed under a live task.
+bool MQTTBridge::recreateSlotClient(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
+  MQTTSlot& slot = _slots[index];
+  if (slot.client == nullptr) return ensureSlotClient(index);
+
+  teardownSlot(index, TeardownReason::Disable);   // stop, do not just close the transport
+  if (slot.client_state == ClientState::Quarantined) {
+    MQTT_DEBUG_PRINTLN("MQTT%d cannot recreate: previous stop unproven", index + 1);
+    return false;
+  }
+
+  delete slot.client;
+  slot.client = nullptr;
+  slot.client_state = ClientState::Absent;
+  slot.applied_config = MqttEffectiveConfig();   // nothing is applied to a client that does not exist
+  slot.allocated_buffer_size = 0;
+  // The token buffer survives: the new client is configured from it below, and
+  // its lifetime is the slot's, not the client's (see MQTTSlot::auth_token).
+  return ensureSlotClient(index);
 }
 
 // Disconnect the slot's MQTT client and clear per-connection state, but leave
@@ -4877,7 +4987,7 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
   // The cost is 384 bytes per client on a non-PSRAM board (at most 2 active
   // slots there), against a handshake that needs 16 KB of *contiguous* internal
   // DRAM — noise, and it buys the removal of a recreate case.
-  static const int MQTT_CLIENT_BUFFER_SIZE = 896;
+  static const int MQTT_CLIENT_BUFFER_SIZE = kMqttClientBufferSize;
   (void)needs_large_buffer;   // kept: callers still express the intent
 
   client->setBufferSize(MQTT_CLIENT_BUFFER_SIZE);
