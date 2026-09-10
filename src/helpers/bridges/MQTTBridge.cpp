@@ -25,7 +25,6 @@
 #include <esp_wifi.h>
 #include <esp_tls.h>
 #include <esp_random.h>
-#include <esp_sntp.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -4490,13 +4489,14 @@ void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, 
 // NTP time sync
 // ---------------------------------------------------------------------------
 
+// Periodic refresh. This used to call configTime(), i.e. start lwIP's SNTP and
+// let it set the system clock asynchronously — an acceptance path with NO
+// validation of its own (see the syncTimeWithNTP() note below), running every
+// hour for the life of the node. It now goes through the same validated probe
+// as every other sync, which costs the MQTT task about a second per attempt and
+// touches nothing until a reply passes every check.
 void MQTTBridge::refreshNTP() {
-  // Lightweight periodic refresh: just restart SNTP which runs async in the background.
-  // No blocking DNS, no UDP sockets, no retry loops on the MQTT task loop.
-  // The heavy syncTimeWithNTP() is only used for initial sync and WiFi reconnect recovery.
-  configTime(0, 0, effectiveNtpPrimary(_obs));
-  _last_ntp_sync = millis();
-  MQTT_DEBUG_PRINTLN("NTP refresh triggered (async SNTP)");
+  syncTimeWithNTP(/*force=*/true, /*primary_only=*/false);
 }
 
 // One validated NTP exchange with one named server, on a fresh ephemeral socket.
@@ -4656,48 +4656,27 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     }
   }
 
-  // Fallback: use ESP32 built-in SNTP (configTime) when no server passed validation
-  #ifdef ESP_PLATFORM
-  if (!ntp_ok) {
-    MQTT_DEBUG_PRINTLN("NTP client failed, trying SNTP fallback...");
-    for (int s = 0; s < server_count && !ntp_ok; s++) {
-      const char* server = servers[s];
-      MQTT_DEBUG_PRINTLN("SNTP fallback trying %s...", server);
-      // A plausible clock is not evidence this server answered. The device usually
-      // already holds valid time here — from an earlier sync, or the RTC — so polling
-      // time(nullptr) declared the very first server successful without a packet ever
-      // arriving, stopped the fallback walk there, and refreshed _last_ntp_sync. Worse
-      // on the `set mqtt.ntp` validation path, where a typo is supposed to fail fast.
-      // Wait for SNTP itself to report completion. The status is one-shot — reading
-      // COMPLETED clears it — so drop any result an earlier sync left behind, and do
-      // that *before* starting this one: configTime() returns after sntp_init(), so a
-      // fast reply can complete inside it, and clearing afterwards would erase the
-      // very result being waited for.
-      if (sntp_enabled()) {
-        sntp_stop();
-      }
-      sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
-      configTime(0, 0, server);
-      for (int i = 0; i < 20; i++) {
-        delay(500);
-        if (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) continue;
-        epochTime = (unsigned long)time(nullptr);
-        if (epochTime >= kMinValidEpoch) {
-          ntp_ok = true;
-          ntp_server_used = server;
-          MQTT_DEBUG_PRINTLN("SNTP fallback succeeded on %s: %lu", server, epochTime);
-        } else {
-          MQTT_DEBUG_PRINTLN("SNTP fallback: %s synced an implausible epoch %lu", server, epochTime);
-        }
-        break;
-      }
-    }
-  }
-  #endif
+  // There is deliberately no SNTP fallback here any more.
+  //
+  // It used to call configTime() and accept SNTP_SYNC_STATUS_COMPLETED plus a
+  // plausible epoch. lwIP's SNTP checks its own response only as far as
+  // SNTP_CHECK_RESPONSE allows, and in this build that is **0**: the default in
+  // lwip/src/include/lwip/apps/sntp_opts.h, not overridden in the ESP32
+  // lwipopts.h or any sdkconfig here — and lwIP is shipped precompiled in the
+  // SDK, so a -D from our build cannot change it. At 0 it verifies neither that
+  // the reply came from the server it queried nor that the originate timestamp
+  // matches the request it sent. Those are exactly the two checks that make the
+  // probe above trustworthy, so the fallback was strictly weaker than the path
+  // it backed up — and it ran precisely when the validated path had failed,
+  // which is when interference is most likely.
+  //
+  // Nothing is lost operationally: it queried the same servers over the same
+  // UDP/123 with a weaker parser. The RTC/system-clock fallback below is a
+  // separate decision and stays.
 
-  // No server answered, but the clock itself may still be usable. Requiring a real
-  // SNTP completion above removed something the plausible-clock test was doing by
-  // accident: an RTC-backed device on a network that blocks NTP (UDP/123) while
+  // No server answered, but the clock itself may still be usable. Requiring a
+  // validated reply above removed something the old plausible-clock test was
+  // doing by accident: an RTC-backed device on a network that blocks NTP (UDP/123) while
   // allowing the broker (443) stayed synced and kept minting JWTs. _ntp_synced gates
   // slot setup outright, so losing that strands those deployments with no slots at
   // all. Keep the behaviour, but as its own decision rather than as a claim about a
@@ -4734,13 +4713,14 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     accepted.tv_usec = 0;
     settimeofday(&accepted, nullptr);
 
-    // Only when a server supplied the accepted epoch. The fallback above necessarily
-    // points configTime() at each server before knowing whether it replies; this is
-    // the post-acceptance call, and there is nothing to re-point it at when the epoch
-    // came from a local clock.
-    if (ntp_server_used) {
-      configTime(0, 0, ntp_server_used);
-    }
+    // Keep the process timezone at UTC without starting lwIP's SNTP. This used
+    // to be configTime(0, 0, ntp_server_used), whose timezone side effect is all
+    // that was wanted here — the rest of it starts a background SNTP poller that
+    // would go on setting the clock from replies nothing validates, for the life
+    // of the node (see the note where the SNTP fallback used to be). System time
+    // is UTC; the prefs Timezone is applied separately by the message builders.
+    setenv("TZ", "UTC0", 1);
+    tzset();
 
     if (_rtc) {
       _rtc->setCurrentTime(epochTime);

@@ -285,7 +285,7 @@ private:
   volatile bool _status_publish_pending[RUNTIME_MQTT_SLOTS];
 
   // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
-  // All NTP I/O (_ntp_client, configTime) must run on Core 0; the CLI thread
+  // All NTP I/O must run on Core 0; the CLI thread
   // (Core 1) sets _ntp_force_requested and blocks in requestForcedNtpSync()
   // until the task publishes the outcome via _ntp_force_result/_ntp_force_done.
   // Single-requester assumption: CLI commands are serialized, so at most one
@@ -296,7 +296,7 @@ private:
 
   // CLI-requested NTP connectivity diagnostic, marshalled onto the MQTT task (Core 0)
   // with the same handshake as the forced sync. Probe-only: it queries each server and
-  // records the reported time but never calls configTime()/setCurrentTime(), so the
+  // records the reported time but never sets the system clock or the RTC, so the
   // system clock is left untouched. Results are written by the task and read by the CLI
   // thread once _ntp_diag_done is set.
   volatile bool _ntp_diag_requested;
