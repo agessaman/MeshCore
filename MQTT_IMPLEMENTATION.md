@@ -163,6 +163,7 @@ below documents the current build.
 | `idahomesh` | `wss://mqtt.idahomesh.org:443/mqtt` | JWT | — |
 | `ntxmesh` | `wss://ntxmesh.dhovin.me:8883` | JWT | — |
 | `bsmesh` | `wss://mqtt.bsmesh.de:8885` | JWT | — |
+| `marwoj` | `mqtts://mqtt.marwoj.net:8883` | User/pass (in firmware) | — |
 | `custom` | your own broker | User/pass, or JWT when `mqttN.audience` is set | `set mqttN.server` (see [custom broker setup](#custom-brokers)) |
 | `none` | (slot disabled) | — | — |
 
@@ -370,7 +371,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.audience` - Clear JWT audience (reverts to username/password auth)
 - `set mqttN.filter <all|none|list>` - Select payload types uploaded to this slot
 
-**Note:** Custom server/port settings only apply when the slot's preset is `custom`. Username/password also apply to built-in presets that use per-slot credentials (e.g. `inwmesh`); other userpass presets (`tennmesh`, `nashmesh`, `ctmesh`) ship fixed credentials in firmware.
+**Note:** Custom server/port settings only apply when the slot's preset is `custom`. Username/password also apply to built-in presets that use per-slot credentials (e.g. `inwmesh`); other userpass presets (`tennmesh`, `nashmesh`, `ctmesh`, `marwoj`) ship fixed credentials in firmware.
 
 #### Per-broker packet filters
 
@@ -889,7 +890,7 @@ the radio actually performs in that case.
 ### Authentication
 The auth mode is fixed per preset (see [Broker Presets](#broker-presets)). Three modes are used:
 - **JWT Authentication**: Ed25519-signed tokens for brokers that expect JWT (most WSS presets). For `custom` slots, JWT is used when `audience` is set.
-- **Username/Password**: Some presets ship fixed credentials embedded in firmware (`tennmesh`, `nashmesh`, `ctmesh` — plain MQTT, no TLS); others (`inwmesh`, `custom`) take per-slot credentials via `mqttN.username` / `mqttN.password`.
+- **Username/Password**: Some presets ship fixed credentials embedded in firmware (`tennmesh`, `nashmesh`, `ctmesh` — plain MQTT, no TLS; `marwoj` — MQTT over TLS); others (`inwmesh`, `custom`) take per-slot credentials via `mqttN.username` / `mqttN.password`.
 - **None**: `meshrank` (account token carried in the topic) and `eastidahomesh` connect without broker auth.
 - **Username Format** (JWT): `v1_{UPPERCASE_PUBLIC_KEY}`
 - **Automatic Token Renewal**: Tokens are renewed before expiration
