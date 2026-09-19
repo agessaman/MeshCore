@@ -138,6 +138,8 @@ void setup() {
 }
 
 void loop() {
+  board.maintainOTAUpdate(millis());
+
   // Handle Serial CLI
   int len = strlen(command);
   // `command` must stay NUL-terminated within its bounds. If it ever isn't,

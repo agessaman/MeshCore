@@ -220,39 +220,58 @@ static inline void formatAge(uint32_t age_ms, char* out, size_t out_size) {
   }
 }
 
-static inline void formatWifiDown(char* out, size_t out_size, uint32_t duration_ms,
-                                  uint8_t reason) {
+static inline void formatNetworkDown(char* out, size_t out_size, const char* medium,
+                                     uint32_t duration_ms, uint8_t reason) {
   if (!out || out_size == 0) return;
   char age[16];
   formatAge(duration_ms, age, sizeof(age));
   if (reason != 0) {
-    snprintf(out, out_size, "WiFi down %s (reason %u)", age, (unsigned)reason);
+    snprintf(out, out_size, "%s down %s (reason %u)", medium, age, (unsigned)reason);
   } else {
-    snprintf(out, out_size, "WiFi down %s", age);
+    snprintf(out, out_size, "%s down %s", medium, age);
   }
+}
+
+static inline void formatNetworkRecovered(char* out, size_t out_size,
+                                          const char* medium,
+                                          uint32_t duration_ms) {
+  if (!out || out_size == 0) return;
+  char age[16];
+  formatAge(duration_ms, age, sizeof(age));
+  snprintf(out, out_size, "%s recovered after %s", medium, age);
+}
+
+// Compatibility helpers retained for existing callers and native tests.
+static inline void formatWifiDown(char* out, size_t out_size,
+                                  uint32_t duration_ms, uint8_t reason) {
+  formatNetworkDown(out, out_size, "WiFi", duration_ms, reason);
 }
 
 static inline void formatWifiRecovered(char* out, size_t out_size,
                                        uint32_t duration_ms) {
-  if (!out || out_size == 0) return;
-  char age[16];
-  formatAge(duration_ms, age, sizeof(age));
-  snprintf(out, out_size, "WiFi recovered after %s", age);
+  formatNetworkRecovered(out, out_size, "WiFi", duration_ms);
+}
+
+static inline bool formatNetworkAlert(char* out, size_t out_size,
+                                      const char* medium, const TickResult& r,
+                                      const OutageSnapshot& snap) {
+  const char* label = (medium && *medium) ? medium : "Network";
+  if (r.action == Action::FireDown) {
+    formatNetworkDown(out, out_size, label, r.duration_ms, snap.reason);
+    return true;
+  }
+  if (r.action == Action::FireRecovered) {
+    formatNetworkRecovered(out, out_size, label, r.duration_ms);
+    return true;
+  }
+  return false;
 }
 
 // Production formatting entry: the same (TickResult, OutageSnapshot) pair
 // AlertReporter feeds after tick(). Returns false when there is no message.
 static inline bool formatWifiAlert(char* out, size_t out_size, const TickResult& r,
                                    const OutageSnapshot& snap) {
-  if (r.action == Action::FireDown) {
-    formatWifiDown(out, out_size, r.duration_ms, snap.reason);
-    return true;
-  }
-  if (r.action == Action::FireRecovered) {
-    formatWifiRecovered(out, out_size, r.duration_ms);
-    return true;
-  }
-  return false;
+  return formatNetworkAlert(out, out_size, "WiFi", r, snap);
 }
 
 static inline void formatMqttDown(char* out, size_t out_size, int slot_1based,

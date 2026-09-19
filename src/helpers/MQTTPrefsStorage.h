@@ -126,7 +126,17 @@ struct MQTTPrefs {
   // Rotate the panel 180 degrees from its compiled DISPLAY_ROTATION, for boards
   // mounted the other way up. Runtime only, like display_timeout_secs.
   uint8_t display_flip;
+
+  // Explicitly records completion of first-run network onboarding when a node
+  // is configured over Ethernet and therefore may intentionally have no Wi-Fi
+  // SSID. Existing Wi-Fi installations remain complete by the helper below.
+  uint8_t network_setup_complete;
 };
+
+static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {
+  return prefs != nullptr &&
+         (prefs->network_setup_complete != 0 || prefs->wifi_ssid[0] != '\0');
+}
 
 static const uint16_t DISPLAY_TIMEOUT_DEFAULT_SECS = 60;
 static const uint16_t DISPLAY_TIMEOUT_MAX_SECS = 3600;

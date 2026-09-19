@@ -113,6 +113,7 @@ TEST(MQTTPrefsSerializer, RoundTripsEveryGroupAndNumericSlotKeys) {
   source.snmp_enabled = 1;
   source.radio_watchdog_minutes = 120;
   source.alert_enabled = 1;
+  source.network_setup_complete = 1;
   strcpy(source.alert_psk_hex, "0123456789abcdef0123456789abcdef");
   strcpy(source.alert_hashtag, "#ops");
   strcpy(source.alert_region, "PNW");
@@ -137,6 +138,19 @@ TEST(MQTTPrefsSerializer, RoundTripsEveryGroupAndNumericSlotKeys) {
   EXPECT_EQ(0x8001, loaded.mqtt_slot_packet_filter[5]);
   EXPECT_EQ(MQTT_NEIGHBORS_MAX_INTERVAL_MS, loaded.mqtt_neighbors_interval);
   EXPECT_STREQ("PNW", loaded.alert_region);
+  EXPECT_EQ(1, loaded.network_setup_complete);
+}
+
+TEST(MQTTPrefsSerializer, NetworkOnboardingSupportsWifiAndEthernetOnlyInstalls) {
+  MQTTPrefs prefs = defaults();
+  EXPECT_FALSE(mqttNetworkSetupComplete(&prefs));
+
+  strcpy(prefs.wifi_ssid, "existing-install");
+  EXPECT_TRUE(mqttNetworkSetupComplete(&prefs));
+
+  prefs.wifi_ssid[0] = 0;
+  prefs.network_setup_complete = 1;
+  EXPECT_TRUE(mqttNetworkSetupComplete(&prefs));
 }
 
 TEST(MQTTPrefsSerializer, MissingOptionalKeysKeepDefaults) {
@@ -469,6 +483,20 @@ TEST(MQTTPrefsSerializer, UnknownGroupsAreIgnoredSoAppendedKeysAreDowngradeSafe)
   bool repaired = false;
   ASSERT_TRUE(serializer.apply(&repaired));
   EXPECT_EQ(45, prefs.display_timeout_secs);
+}
+
+TEST(MQTTPrefsSerializer, UnknownKeysInsideAKnownGroupAreDowngradeSafe) {
+  // Firmware that predates wifi.setup_complete sees it as an unknown key in a
+  // known group; the rest of the group must still load.
+  MQTTPrefs prefs = defaults();
+  InputStream input(
+      "{version:1,wifi:{ssid:\"home\",future_key:1,power_save:2}}");
+  MQTTPrefsSerializer serializer(&prefs);
+  ASSERT_TRUE(serializer.loadSerial(input));
+  bool repaired = false;
+  ASSERT_TRUE(serializer.apply(&repaired));
+  EXPECT_STREQ("home", prefs.wifi_ssid);
+  EXPECT_EQ(2, prefs.wifi_power_save);
 }
 
 int main(int argc, char** argv) {
