@@ -4,6 +4,7 @@
 #include <helpers/MQTTObserverValidation.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/MQTTPrefsStorage.h>
+#include <helpers/WifiPowerSavePolicy.h>
 
 #ifdef WITH_MQTT_BRIDGE
 
@@ -50,7 +51,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
   public:
     explicit WifiPrefs(MQTTPrefs* prefs) : _prefs(prefs), _power_save(prefs->wifi_power_save) {}
     bool apply(bool* repaired) {
-      if (_power_save < 0 || _power_save > 2) {
+      if (_power_save < 0 || _power_save > WifiPowerSavePolicy::kMaxStoredValue) {
         _power_save = 1;
         *repaired = true;
       }

@@ -13,8 +13,18 @@ TEST(WifiPowerSavePolicy, StoredValuesMapToOneModeEach) {
   EXPECT_EQ(kModeMaxModem, modeFor(kMax));
 }
 
+// Stored 0 was the default for nodes set up 2026-01-02..03-28, and they have
+// always run with power save off; reading it as `min` would put them to sleep.
+TEST(WifiPowerSavePolicy, LegacyDefaultKeepsPowerSaveOff) {
+  EXPECT_EQ(kModeNone, modeFor(kLegacyDefault));
+  EXPECT_STREQ("none", nameFor(kLegacyDefault));
+  uint8_t parsed = 0xFF;
+  ASSERT_TRUE(parseName("min", &parsed));
+  EXPECT_NE(kLegacyDefault, parsed);
+}
+
 TEST(WifiPowerSavePolicy, NamesRoundTripWithStoredValues) {
-  for (uint8_t stored = 0; stored <= 2; stored++) {
+  for (uint8_t stored = kNone; stored <= kMaxStoredValue; stored++) {
     uint8_t parsed = 0xFF;
     ASSERT_TRUE(parseName(nameFor(stored), &parsed)) << "stored " << (int)stored;
     EXPECT_EQ(stored, parsed);
@@ -25,7 +35,7 @@ TEST(WifiPowerSavePolicy, NamesRoundTripWithStoredValues) {
 // A byte outside the stored range must read as the product default, not as
 // whatever mode happens to sit at that index.
 TEST(WifiPowerSavePolicy, OutOfRangeStoredValueReadsAsDefault) {
-  for (int stored = 3; stored <= 255; stored++) {
+  for (int stored = kMaxStoredValue + 1; stored <= 255; stored++) {
     EXPECT_EQ(kModeNone, modeFor((uint8_t)stored)) << "stored " << stored;
     EXPECT_STREQ("none", nameFor((uint8_t)stored));
   }

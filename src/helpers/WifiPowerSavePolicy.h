@@ -11,15 +11,18 @@
 // to `min` silently ran with power save off after its first reconnect while
 // `get wifi.powersave` still said min.
 //
-// Stored values are fleet state — never renumber them. The product default is
-// `none`, which is a *default* (MQTTDefaults.h), not a reinterpretation of an
-// operator's explicit `min`.
+// Stored values are fleet state — never renumber them. 0 was the shipped
+// default from 2026-01-02 to 2026-03-28, and every association path ran it with
+// power save off, so it keeps meaning `none`; an explicit `min` is stored as 3.
+// Older firmware repairs 3 to `none` when it loads /mqtt.json.
 namespace WifiPowerSavePolicy {
 
 enum StoredValue : uint8_t {
-  kMin  = 0,   // WIFI_PS_MIN_MODEM
-  kNone = 1,   // WIFI_PS_NONE  (default)
-  kMax  = 2,   // WIFI_PS_MAX_MODEM
+  kLegacyDefault = 0,   // WIFI_PS_NONE: the old default, never an operator choice
+  kNone = 1,            // WIFI_PS_NONE  (default)
+  kMax  = 2,            // WIFI_PS_MAX_MODEM
+  kMin  = 3,            // WIFI_PS_MIN_MODEM
+  kMaxStoredValue = kMin,
 };
 
 // Mirrors wifi_ps_type_t. MQTTBridge.cpp static_asserts these against the SDK.
