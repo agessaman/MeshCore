@@ -301,7 +301,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   return true;
 }
 
-bool WebConfigServer::startLanMode(IPAddress ip, bool initial_setup, char reply[]) {
+bool WebConfigServer::startLanMode(bool initial_setup, char reply[]) {
   if (_mode != MODE_OFF || _stopping) {
     strcpy(reply, "Err: webconfig busy");
     return false;
@@ -313,6 +313,8 @@ bool WebConfigServer::startLanMode(IPAddress ip, bool initial_setup, char reply[
   }
   activeNetworkLink().lockSwitching();
   _network_locked = true;
+  // Read the address only once the route is pinned, so it names the locked link.
+  const IPAddress ip = activeNetworkLink().localIP();
   if (!activeNetworkLink().isConnected() || ip == IPAddress()) {
     activeNetworkLink().unlockSwitching();
     _network_locked = false;

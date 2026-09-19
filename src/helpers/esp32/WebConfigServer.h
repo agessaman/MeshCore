@@ -84,7 +84,7 @@ public:
   static bool isRebootPending();
 
   bool startSetupMode(char reply[]);   // open SoftAP + DNS captive portal
-  bool startLanMode(IPAddress ip, bool initial_setup, char reply[]);
+  bool startLanMode(bool initial_setup, char reply[]);  // bind to the selected network
   void requestStop();                  // stop listening and detach this session
   void tick(uint32_t now);             // call every loop iteration
 

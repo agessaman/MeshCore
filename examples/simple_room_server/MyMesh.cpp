@@ -1314,8 +1314,7 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
     }
     _webconfig->startSetupMode(reply);
   } else if (activeNetworkLink().isConnected()) {
-    _webconfig->startLanMode(activeNetworkLink().localIP(),
-                             !mqttNetworkSetupComplete(_cli.getObserverPrefs()), reply);
+    _webconfig->startLanMode(!mqttNetworkSetupComplete(_cli.getObserverPrefs()), reply);
   } else if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
     _webconfig->startSetupMode(reply);
   } else {
