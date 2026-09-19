@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""Compare MQTT built-in preset *names* between two MQTTPresets.h files.
+"""Compare the MQTT broker preset table between two MQTTPresets.h files.
 
-Only the first string field of each ``MQTT_PRESETS`` entry is compared (set
-equality, case-sensitive). URL, auth, CA, keepalive, and credentials are
-ignored so channel branches may diverge on config details without failing CI.
+With ``--exact`` (what CI uses) the two files must be byte-identical. The table
+is fleet state, not just a build detail: a slot's preset is stored in
+/mqtt.json by NAME, and firmware that does not know a name does not merely
+ignore it — MQTTPrefsSerializer repairs it to "none" and the repaired file is
+written back to flash. A node that rolls back from one channel to the other
+therefore loses that slot permanently. Byte equality also catches URL, CA and
+credential drift, which a name-only check passes silently even though the two
+channels are meant to dial the same brokers.
+
+Channel-specific behaviour belongs in MQTTPresetPolicy.h, which is not compared,
+so this file can stay identical while the channels differ elsewhere.
+
+Without ``--exact`` only the first string field of each ``MQTT_PRESETS`` entry
+is compared (set equality, case-sensitive). That is the older, weaker check,
+kept for ad-hoc use.
 
 Usage::
 
-    python3 scripts/check_mqtt_preset_parity.py FILE_A FILE_B \\
+    python3 scripts/check_mqtt_preset_parity.py FILE_A FILE_B --exact \\
         --label-a observer-firmware --label-b observer-firmware-dev
 
     python3 scripts/check_mqtt_preset_parity.py --self-test
@@ -137,6 +149,49 @@ def compare(
     ]
 
 
+def compare_exact(
+    path_a: Path,
+    path_b: Path,
+    *,
+    label_a: str,
+    label_b: str,
+) -> list[str]:
+    """Return error lines if the two files differ byte for byte."""
+
+    data_a = path_a.read_bytes()
+    data_b = path_b.read_bytes()
+    if data_a == data_b:
+        return []
+
+    import difflib
+
+    errors = [f"{label_a} and {label_b} do not match byte for byte."]
+    try:
+        diff = list(
+            difflib.unified_diff(
+                data_a.decode("utf-8").splitlines(),
+                data_b.decode("utf-8").splitlines(),
+                fromfile=label_a,
+                tofile=label_b,
+                lineterm="",
+                n=1,
+            )
+        )
+    except UnicodeDecodeError:
+        errors.append("(binary difference; cannot render a text diff)")
+        return errors
+
+    # Enough to identify the drift without pasting the whole table into a log.
+    errors.extend(diff[:60])
+    if len(diff) > 60:
+        errors.append(f"... {len(diff) - 60} more diff line(s)")
+    errors.append(
+        "Preset rows must be identical on both channels. Behaviour that differs "
+        "per channel belongs in MQTTPresetPolicy.h."
+    )
+    return errors
+
+
 def load_names(path: Path) -> set[str]:
     text = path.read_text(encoding="utf-8")
     names, _ = parse_presets(text, source=str(path))
@@ -237,6 +292,26 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {{
             print("self-test failed: URL scheme was treated as a comment.", file=sys.stderr)
             return 1
 
+        # --exact: identical bytes pass, any drift fails — including a change
+        # that a name-only comparison waves through.
+        if compare_exact(equal_a, equal_a, label_a="a", label_b="a-copy"):
+            print("self-test failed: a file was not equal to itself.", file=sys.stderr)
+            return 1
+        if compare(load_names(equal_a), load_names(equal_b), label_a="a", label_b="b"):
+            print("self-test failed: fixture assumption broken.", file=sys.stderr)
+            return 1
+        exact_errs = compare_exact(equal_a, equal_b, label_a="a", label_b="b")
+        if not exact_errs or "byte for byte" not in exact_errs[0]:
+            print(
+                "self-test failed: --exact accepted files that differ only in "
+                f"config: {exact_errs!r}",
+                file=sys.stderr,
+            )
+            return 1
+        if not any("MQTTPresetPolicy.h" in line for line in exact_errs):
+            print("self-test failed: --exact failure omitted the remedy.", file=sys.stderr)
+            return 1
+
         # Silence unused path in fixture layout.
         dupes.write_text("// unused\n", encoding="utf-8")
 
@@ -250,6 +325,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("file_b", type=Path, nargs="?", help="Second MQTTPresets.h (e.g. dev)")
     parser.add_argument("--label-a", default="file_a", help="Label for file_a in reports")
     parser.add_argument("--label-b", default="file_b", help="Label for file_b in reports")
+    parser.add_argument(
+        "--exact",
+        action="store_true",
+        help="Require the two files to be byte-identical (what CI enforces)",
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
 
@@ -258,6 +338,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.file_a is None or args.file_b is None:
         parser.error("FILE_A and FILE_B are required unless --self-test is set")
+
+    if args.exact:
+        try:
+            errors = compare_exact(
+                args.file_a, args.file_b, label_a=args.label_a, label_b=args.label_b
+            )
+        except OSError as error:
+            print(f"MQTT preset parity check could not run: {error}", file=sys.stderr)
+            return 2
+        if errors:
+            print("MQTT preset parity check failed:", *errors, sep="\n  ", file=sys.stderr)
+            return 1
+        print(
+            f"MQTT preset parity check passed: {args.label_a} and {args.label_b} "
+            "have identical preset tables."
+        )
+        return 0
 
     try:
         names_a = load_names(args.file_a)
