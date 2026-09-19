@@ -2687,7 +2687,6 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           // to avoid internal heap leak/fragmentation from destroy/create cycles
           MQTT_DEBUG_PRINTLN("MQTT%d token renewal: reconnecting with fresh credentials", index + 1);
           MQTT_TRACE_HEAP("renewal:before-bounce", index);
-          esp_err_t bounce_result;
           if (slot.client->isStarted()) {
             // Keep the esp-mqtt task alive across the handshake. disconnect()
             // would stop it, returning its 6 KiB stack into the hole the two
@@ -2699,15 +2698,13 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
                                  index + 1, esp_err_to_name(soft));
             }
             MQTT_TRACE_HEAP("renewal:after-disconnect", index);
-            slot.client->setCredentials(_jwt_username, slot.auth_token);
-            MQTT_TRACE_HEAP("renewal:after-credentials", index);
-            bounce_result = slot.client->reconnect();
-          } else {
-            // Client was stopped (teardown/reconfigure). reconnect() is a no-op
-            // on a stopped client, so this path must start it.
-            slot.client->setCredentials(_jwt_username, slot.auth_token);
-            bounce_result = slot.client->connect();
           }
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
+          MQTT_TRACE_HEAP("renewal:after-credentials", index);
+          // Via the helper: it starts a stopped client, refuses a quarantined one,
+          // and on success records the fresh token as the one in use, which is
+          // what keeps the renewal from coming due again a minute later.
+          const esp_err_t bounce_result = reconnectSlotClient(index);
           if (bounce_result != ESP_OK) {
             // The fresh token is in the buffer but did not reach the
             // connection: the config transaction failed, or the client would
@@ -4784,7 +4781,8 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per
                 MQTT_DEBUG_PRINTLN("MQTT%d soft disconnect did not complete (%s)", i + 1,
                                    esp_err_to_name(soft));
               }
-              const esp_err_t rc = _slots[i].client->reconnect();
+              // Via the helper, so the re-created token is recorded as applied.
+              const esp_err_t rc = reconnectSlotClient(i);
               if (rc != ESP_OK) {
                 MQTT_DEBUG_PRINTLN("MQTT%d corrected-clock reconnect failed (%s)", i + 1,
                                    esp_err_to_name(rc));
@@ -4792,6 +4790,8 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per
             } else {
               MQTT_DEBUG_PRINTLN("MQTT%d token re-created, no bounce (broker does not enforce exp)",
                   i + 1);
+              // As in the renewal path: this broker ignores exp, so the renewal is settled.
+              _slots[i].applied_token_expires_at = _slots[i].token_expires_at;
             }
           }
         }
