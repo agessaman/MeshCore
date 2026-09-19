@@ -943,6 +943,27 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   memset(default_scope.key, 0, sizeof(default_scope.key));
 }
 
+#if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+// Only an automatic link carries a hostname today (see the header note). The
+// value reaches DHCP when the link next starts or reconnects: IDF 4.4 states
+// plainly that a hostname changed after the interface is up "would only be
+// reflected once the interface restarts/reconnects", and Arduino 2.x's
+// WiFi.setHostname() does not even touch a running netif — it writes a static
+// string the netif reads at bring-up. So this cannot rename a live lease, and
+// deliberately does not bounce the link to force one: dropping an observer's
+// route mid-operation costs every MQTT slot a reconnect, which is not a
+// reasonable price for a cosmetic rename.
+void MyMesh::applyNetworkHostname(const char* when) {
+  NetworkLink& link = activeNetworkLink();
+  if (!link.isAutomatic()) return;
+  char network_hostname[NetworkHostname::kBufferSize];
+  NetworkHostname::build(network_hostname, sizeof(network_hostname),
+                         _prefs.node_name, self_id.pub_key, PUB_KEY_SIZE);
+  link.setHostname(network_hostname);
+  Serial.printf("Network: hostname %s%s\n", network_hostname, when);
+}
+#endif
+
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
   _fs = fs;
@@ -952,11 +973,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
   NetworkLink& boot_network = activeNetworkLink();
   if (boot_network.isAutomatic()) {
-    char network_hostname[NetworkHostname::kBufferSize];
-    NetworkHostname::build(network_hostname, sizeof(network_hostname),
-                           _prefs.node_name, self_id.pub_key, PUB_KEY_SIZE);
-    boot_network.setHostname(network_hostname);
-    Serial.printf("Network: hostname %s\n", network_hostname);
+    applyNetworkHostname("");
     MQTTPrefs* obs = _cli.getObserverPrefs();
     Serial.printf("Network: probing Ethernet for up to %lums\n",
                   (unsigned long)NETWORK_ETHERNET_BOOT_WAIT_MS);

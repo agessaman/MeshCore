@@ -274,6 +274,10 @@ struct LegacyObserverTail {
 class CommonCLICallbacks {
 public:
   virtual void savePrefs() = 0;
+  // The node name feeds the DHCP hostname, which is built once when the link
+  // starts. Renaming a running node has to rebuild it or the node keeps
+  // advertising the old name to DHCP until the next reflash.
+  virtual void onNodeNameChanged() {}
 #ifdef WITH_MQTT_BRIDGE
   virtual bool saveObserverPrefs() = 0;
 #else

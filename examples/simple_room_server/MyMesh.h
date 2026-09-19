@@ -281,10 +281,23 @@ protected:
 
   void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
+  // Build the DHCP hostname from the current node name and hand it to the
+  // link. Only automatic links carry one: a plain Wi-Fi observer keeps the
+  // framework default, and changing that for the existing fleet is a separate
+  // decision.
+  void applyNetworkHostname(const char* when);
+
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
 
   void begin(FILESYSTEM* fs);
+
+  // CommonCLICallbacks: `set name` has just rewritten node_name.
+  void onNodeNameChanged() override {
+#if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+    applyNetworkHostname(" (renamed)");
+#endif
+  }
   void addSystemPost(const char* postData);
 
   const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
