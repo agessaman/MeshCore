@@ -464,6 +464,14 @@ void MQTTBridge::applyWifiPowerSave() {
 
 bool MQTTBridge::stopUnprovenLatched() { return s_stop_unproven; }
 
+bool MQTTBridge::stopAcknowledgedLate() const {
+#ifdef ESP_PLATFORM
+  return _lifecycle.isStopUnproven() && _stop_acked.load(std::memory_order_acquire);
+#else
+  return false;
+#endif
+}
+
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
 
@@ -1644,9 +1652,9 @@ void MQTTBridge::mqttTaskLoop() {
     // Periodic configuration check (throttled to avoid spam)
     checkConfigurationMismatch();
 
-    // Periodic NTP refresh (every hour) — lightweight, non-blocking.
-    // Uses async SNTP instead of the heavy syncTimeWithNTP() which blocks Core 0
-    // for up to 20+ seconds with DNS lookups, UDP sockets, and retry loops.
+    // Periodic NTP refresh (every hour): a validated probe, one attempt per
+    // server. Blocks this task for about one probe timeout per server that does
+    // not answer (see refreshNTP()).
     if (WiFi.status() == WL_CONNECTED && now - _last_ntp_sync > 3600000) {
       refreshNTP();
     }
@@ -4493,10 +4501,11 @@ void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, 
 // let it set the system clock asynchronously — an acceptance path with NO
 // validation of its own (see the syncTimeWithNTP() note below), running every
 // hour for the life of the node. It now goes through the same validated probe
-// as every other sync, which costs the MQTT task about a second per attempt and
-// touches nothing until a reply passes every check.
+// as every other sync and touches nothing until a reply passes every check.
+// One attempt per server bounds the blocking walk on a network that drops
+// UDP/123 to about one probe timeout per server, instead of three.
 void MQTTBridge::refreshNTP() {
-  syncTimeWithNTP(/*force=*/true, /*primary_only=*/false);
+  syncTimeWithNTP(/*force=*/true, /*primary_only=*/false, /*attempts_per_server=*/1);
 }
 
 // One validated NTP exchange with one named server, on a fresh ephemeral socket.
@@ -4599,7 +4608,7 @@ bool MQTTBridge::probeNtpServer(const char* server, uint32_t min_epoch,
   return accepted;
 }
 
-bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
+bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per_server) {
   if (!WiFi.isConnected()) {
     MQTT_DEBUG_PRINTLN("Cannot sync time - WiFi not connected");
     return false;
@@ -4634,7 +4643,7 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
   const uint32_t kMinValidEpoch = kNtpMinValidEpoch;
   const char* ntp_server_used = nullptr;
 
-  const int kMaxNtpRetriesPerServer = 2;
+  const int kMaxNtpRetriesPerServer = attempts_per_server > 0 ? attempts_per_server : 1;
   for (int s = 0; s < server_count && !ntp_ok; s++) {
     const char* server = servers[s];
 

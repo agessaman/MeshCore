@@ -1514,6 +1514,15 @@ void MyMesh::loop() {
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing can take time, so we prioritize radio reception
   mesh::Mesh::loop();
+
+#ifdef WITH_MQTT_BRIDGE
+  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it;
+  // once that late ack lands, restart the bridge that was meant to be running.
+  if (_bridge_resume_pending && bridge && bridge->stopAcknowledgedLate()) {
+    Serial.println("MQTT: stop acknowledged late - resuming bridge");
+    setBridgeState(true);
+  }
+#endif
 #ifdef WITH_MQTT_BRIDGE
   // bridge.loop() is now handled by FreeRTOS task on Core 0 - no need to call it here
 #endif

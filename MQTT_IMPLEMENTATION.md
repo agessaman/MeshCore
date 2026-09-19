@@ -883,7 +883,7 @@ the radio actually performs in that case.
 ### NTP Time Synchronization
 - Automatic time synchronization with NTP servers (required for JWT authentication)
 - Default primary: `pool.ntp.org`; built-in fallbacks (tried sequentially on failure): `time.google.com`, `time.cloudflare.com`, `time.aws.com`, `time.nist.gov`
-- Periodic time updates (every hour) on the effective primary only; system time is kept in UTC
+- Periodic time updates (every hour) through the same validated probe, one attempt per server in list order; system time is kept in UTC
 - Replies are validated before they are trusted: the datagram must be a full-length NTPv3/v4 server reply from the queried address and port, from a synchronised server (stratum 1-15, no leap alarm), echoing the random transmit timestamp of the request, with a plausible epoch. Anything else is discarded and the clock, the RTC and JWT issuance are left alone
 - Configure and diagnose with `set mqtt.ntp` / `get mqtt.ntp` / `get mqtt.ntp.diag` — see [MQTT Shared Commands](#mqtt-shared-commands)
 

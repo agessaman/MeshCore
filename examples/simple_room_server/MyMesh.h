@@ -205,6 +205,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* bridge;
+  // begin() was refused after an unproven stop; restart once the task acknowledges.
+  bool _bridge_resume_pending = false;
 #endif
 #ifdef WITH_SNMP
   MeshSNMPAgent _snmp_agent;
@@ -385,6 +387,7 @@ public:
       bridge->begin();
 #ifdef WITH_MQTT_BRIDGE
       _alerter.setBridge(bridge);
+      _bridge_resume_pending = !bridge->isRunning() && bridge->isStopUnproven();
 #endif
     }
     else
@@ -392,6 +395,7 @@ public:
       bridge->end();
 #ifdef WITH_MQTT_BRIDGE
       _alerter.setBridge(nullptr);
+      _bridge_resume_pending = false;
 #endif
     }
   }
@@ -416,6 +420,9 @@ public:
     bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
 #endif
     bridge->begin();
+#ifdef WITH_MQTT_BRIDGE
+    _bridge_resume_pending = !bridge->isRunning() && bridge->isStopUnproven();
+#endif
   }
 
   void restartBridgeSlot(int slot) override {

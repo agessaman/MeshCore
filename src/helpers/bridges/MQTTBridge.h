@@ -743,6 +743,9 @@ public:
   // the bridge is down, nothing was released, and it will not restart until the
   // task acknowledges late (pollLateStopAck) or the node reboots.
   bool isStopUnproven() const { return _lifecycle.isStopUnproven(); }
+  // The unproven stop has since been acknowledged, so begin() will release the
+  // withheld resources and start. Loop task only.
+  bool stopAcknowledgedLate() const;
   // Survives end() clearing the diagnostic singleton, so `get mqtt.status` can
   // still explain why a stopped bridge will not come back without a reboot.
   static bool stopUnprovenLatched();
@@ -787,7 +790,7 @@ public:
    *  mistyped hostname fails fast instead of blocking through the whole fallback list.
    *  Performs blocking NTP I/O and must only be called from the MQTT task (Core 0).
    *  Other tasks (e.g. the CLI on Core 1) must use requestForcedNtpSync() instead. */
-  bool syncTimeWithNTP(bool force = false, bool primary_only = false);
+  bool syncTimeWithNTP(bool force = false, bool primary_only = false, int attempts_per_server = 2);
   /** Request a forced NTP sync from another task (e.g. CLI on Core 1). Marshals the
    *  work onto the MQTT task so all NTP I/O stays on Core 0, then blocks up to
    *  timeout_ms for the result. Returns true if the sync succeeded, false on failure,
