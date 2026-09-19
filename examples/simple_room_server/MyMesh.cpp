@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <climits>
 #include <helpers/RxReservePacketManager.h>
-#include <helpers/NetworkInterface.h>
+#include <helpers/NetworkLink.h>
 #include <helpers/NetworkHostname.h>
 #if defined(ESP_PLATFORM)
 #include <WiFi.h>
@@ -949,7 +949,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
 
-  NetworkInterface& boot_network = activeNetworkInterface();
+#if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+  NetworkLink& boot_network = activeNetworkLink();
   if (boot_network.isAutomatic()) {
     char network_hostname[NetworkHostname::kBufferSize];
     NetworkHostname::build(network_hostname, sizeof(network_hostname),
@@ -966,6 +967,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
                   boot_network.mediumName(), boot_network.statusName(),
                   (unsigned long)(millis() - ethernet_probe_started_at));
   }
+#endif
 
   acl.load(_fs, self_id);
   region_map.load(_fs);
@@ -1306,13 +1308,13 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   if (force_ap) {
     // The setup AP owns WiFi outright; refuse while the bridge holds the STA.
     if (bridge && bridge->isRunning() &&
-        activeNetworkInterface().medium() != NetworkMedium::Ethernet) {
+        activeNetworkLink().medium() != NetworkMedium::Ethernet) {
       strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
       return true;
     }
     _webconfig->startSetupMode(reply);
-  } else if (activeNetworkInterface().isConnected()) {
-    _webconfig->startLanMode(activeNetworkInterface().localIP(),
+  } else if (activeNetworkLink().isConnected()) {
+    _webconfig->startLanMode(activeNetworkLink().localIP(),
                              !mqttNetworkSetupComplete(_cli.getObserverPrefs()), reply);
   } else if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
     _webconfig->startSetupMode(reply);
@@ -1353,7 +1355,7 @@ void MyMesh::onConfigBatchEnd() {
 void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
   char ip[20] = "";
   char wifi_rssi[12] = "null";
-  NetworkInterface& network = activeNetworkInterface();
+  NetworkLink& network = activeNetworkLink();
   const char* network_medium = network.mediumName();
   if (network.isConnected()) {
     strncpy(ip, network.localIP().toString().c_str(), sizeof(ip) - 1);

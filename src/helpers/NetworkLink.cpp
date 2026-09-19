@@ -1,4 +1,4 @@
-#include "NetworkInterface.h"
+#include "NetworkLink.h"
 
 #if defined(ESP_PLATFORM)
 
@@ -21,9 +21,16 @@
 extern void tcpipInit();
 #endif
 
+// Same "MQTT: " prefix as MQTT_DEBUG_PRINTLN so existing log greps keep matching.
+#if defined(MQTT_DEBUG)
+  #define NETWORK_DEBUG_PRINTLN(F, ...) do { if (Serial.availableForWrite() > 0) { Serial.printf("MQTT: " F "\n", ##__VA_ARGS__); } } while (0)
+#else
+  #define NETWORK_DEBUG_PRINTLN(...) do {} while (0)
+#endif
+
 namespace {
 
-class NetworkInterfaceBase : public NetworkInterface {
+class NetworkLinkBase : public NetworkLink {
  protected:
   std::atomic<uint64_t> _outage_bits{AlertFaultPolicy::packOutageSnapshot({false, 0, 0})};
   std::atomic<unsigned long> _connected_at{0};
@@ -75,7 +82,7 @@ class NetworkInterfaceBase : public NetworkInterface {
   }
 };
 
-class WiFiNetworkInterface final : public NetworkInterfaceBase {
+class WiFiNetworkLink final : public NetworkLinkBase {
   bool _event_registered = false;
   char _hostname[32] = {};
   char _ssid[33] = {};
@@ -118,29 +125,36 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
     _hostname[sizeof(_hostname) - 1] = '\0';
   }
 
-  bool begin(const char* wifi_ssid, const char* wifi_password) override {
-    if (!configValid(wifi_ssid)) return false;
-    strncpy(_ssid, wifi_ssid, sizeof(_ssid) - 1);
+  void updateWifiCredentials(const char* wifi_ssid, const char* wifi_password) override {
+    strncpy(_ssid, wifi_ssid ? wifi_ssid : "", sizeof(_ssid) - 1);
     _ssid[sizeof(_ssid) - 1] = '\0';
     strncpy(_password, wifi_password ? wifi_password : "", sizeof(_password) - 1);
     _password[sizeof(_password) - 1] = '\0';
+  }
+
+  bool begin(const char* wifi_ssid, const char* wifi_password) override {
+    if (!configValid(wifi_ssid)) return false;
+    updateWifiCredentials(wifi_ssid, wifi_password);
 
     // Arduino-ESP32 applies this stored value when it creates the STA netif.
     // It must be set before WiFi.mode()/begin() for the first DHCP exchange.
     if (_hostname[0] != '\0') WiFi.setHostname(_hostname);
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
-    WiFi.setAutoConnect(true);
 
     if (!_event_registered) {
       WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
         switch (event) {
           case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            NETWORK_DEBUG_PRINTLN("WiFi connected: %s",
+                IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
             noteConnected(millis());
             _reconnect_backoff_attempt = 0;
             break;
           case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             noteDisconnected(millis(), info.wifi_sta_disconnected.reason);
+            NETWORK_DEBUG_PRINTLN("WiFi disconnected: reason %d",
+                                  info.wifi_sta_disconnected.reason);
             break;
           default:
             break;
@@ -195,7 +209,7 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
     const bool transitioned = _last_connected;
     if (transitioned) {
       _connected_at.store(0, std::memory_order_relaxed);
-    } else if (snapshot.down && MQTTConnectionPolicy::wifiReconnectDue(
+    } else if (snapshot.down && _ssid[0] != '\0' && MQTTConnectionPolicy::wifiReconnectDue(
                    now_ms, snapshot.started_ms, (uint32_t)_last_reconnect_attempt,
                    _reconnect_backoff_attempt)) {
       _last_reconnect_attempt = now_ms;
@@ -224,7 +238,7 @@ class WiFiNetworkInterface final : public NetworkInterfaceBase {
 };
 
 #if defined(NETWORK_PREFER_ETHERNET)
-class EthernetNetworkInterface final : public NetworkInterfaceBase {
+class EthernetNetworkLink final : public NetworkLinkBase {
  public:
   enum class EventState : uint8_t {
     None,
@@ -402,9 +416,9 @@ class EthernetNetworkInterface final : public NetworkInterfaceBase {
   }
 };
 
-class AutomaticNetworkInterface final : public NetworkInterface {
-  EthernetNetworkInterface _ethernet;
-  WiFiNetworkInterface _wifi;
+class AutomaticNetworkLink final : public NetworkLink {
+  EthernetNetworkLink _ethernet;
+  WiFiNetworkLink _wifi;
   std::atomic<NetworkMedium> _selected{NetworkMedium::None};
   std::atomic<bool> _ethernet_started{false};
   std::atomic<bool> _wifi_started{false};
@@ -417,16 +431,23 @@ class AutomaticNetworkInterface final : public NetworkInterface {
   std::atomic<uint32_t> _ethernet_no_ip_since{0};
   std::atomic<uint8_t> _switch_locks{0};
   std::atomic<bool> _switch_in_progress{false};
+  std::atomic<bool> _ethernet_seen{false};  // held a lease at least once this boot
 
-  NetworkInterface& selectedInterface(NetworkMedium selected) {
-    return selected == NetworkMedium::Ethernet
-        ? static_cast<NetworkInterface&>(_ethernet)
-        : static_cast<NetworkInterface&>(_wifi);
+  // Ethernet is the primary for alerts once it has carried traffic, or when it
+  // is the only configured medium; a Wi-Fi-only install keeps Wi-Fi alerts.
+  bool ethernetIsAlertPrimary() const {
+    return _ethernet_seen.load(std::memory_order_acquire) || !wifiConfigured();
   }
-  const NetworkInterface& selectedInterface(NetworkMedium selected) const {
+
+  NetworkLink& selectedInterface(NetworkMedium selected) {
     return selected == NetworkMedium::Ethernet
-        ? static_cast<const NetworkInterface&>(_ethernet)
-        : static_cast<const NetworkInterface&>(_wifi);
+        ? static_cast<NetworkLink&>(_ethernet)
+        : static_cast<NetworkLink&>(_wifi);
+  }
+  const NetworkLink& selectedInterface(NetworkMedium selected) const {
+    return selected == NetworkMedium::Ethernet
+        ? static_cast<const NetworkLink&>(_ethernet)
+        : static_cast<const NetworkLink&>(_wifi);
   }
 
   bool wifiConfigured() const { return _wifi_ssid[0] != '\0'; }
@@ -444,14 +465,14 @@ class AutomaticNetworkInterface final : public NetworkInterface {
                         std::memory_order_release);
   }
 
+  // Lock and mutation each publish one flag then read the other; seq_cst keeps
+  // both sides from missing each other.
   bool beginUnlockedMutation() {
     bool expected = false;
-    if (!_switch_in_progress.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel,
-            std::memory_order_relaxed)) {
+    if (!_switch_in_progress.compare_exchange_strong(expected, true)) {
       return false;
     }
-    if (_switch_locks.load(std::memory_order_acquire) != 0) {
+    if (_switch_locks.load() != 0) {
       _switch_in_progress.store(false, std::memory_order_release);
       return false;
     }
@@ -532,6 +553,11 @@ class AutomaticNetworkInterface final : public NetworkInterface {
   }
   bool isAutomatic() const override { return true; }
 
+  void updateWifiCredentials(const char* wifi_ssid, const char* wifi_password) override {
+    rememberWifi(wifi_ssid, wifi_password);
+    _wifi.updateWifiCredentials(_wifi_ssid, _wifi_password);
+  }
+
   void setHostname(const char* hostname) override {
     // Whichever medium wins now or during a later failover presents the same
     // stable DHCP identity to the LAN.
@@ -589,6 +615,7 @@ class AutomaticNetworkInterface final : public NetworkInterface {
       delay(25);
     }
 
+    if (_ethernet.isConnected()) _ethernet_seen.store(true, std::memory_order_release);
     const NetworkMedium initial = NetworkPolicy::bootSelection(
         _ethernet.isConnected(), wifiConfigured());
     if (initial == NetworkMedium::Ethernet) {
@@ -606,7 +633,7 @@ class AutomaticNetworkInterface final : public NetworkInterface {
         _switch_locks.load(std::memory_order_acquire) != 0;
     const bool ethernet_stopped =
         ethernet_started &&
-        _ethernet.eventState() == EthernetNetworkInterface::EventState::Stopped;
+        _ethernet.eventState() == EthernetNetworkLink::EventState::Stopped;
     if (ethernet_stopped) {
       _ethernet_started.store(false, std::memory_order_release);
       ethernet_started = false;
@@ -615,11 +642,11 @@ class AutomaticNetworkInterface final : public NetworkInterface {
         _last_ethernet_init_attempt.store(now_ms, std::memory_order_relaxed);
       }
     }
-    const EthernetNetworkInterface::EventState ethernet_event =
+    const EthernetNetworkLink::EventState ethernet_event =
         _ethernet.eventState();
     const bool ethernet_link_up =
-        ethernet_event == EthernetNetworkInterface::EventState::LinkUp ||
-        ethernet_event == EthernetNetworkInterface::EventState::GotIp;
+        ethernet_event == EthernetNetworkLink::EventState::LinkUp ||
+        ethernet_event == EthernetNetworkLink::EventState::GotIp;
     if (ethernet_started && ethernet_link_up && !_ethernet.isConnected()) {
       if (_ethernet_no_ip_since.load(std::memory_order_relaxed) == 0) {
         uint32_t started_at = now_ms;
@@ -647,6 +674,7 @@ class AutomaticNetworkInterface final : public NetworkInterface {
 
     const NetworkTransition ethernet_transition =
         _ethernet.maintain(now_ms, wifi_power_save);
+    if (_ethernet.isConnected()) _ethernet_seen.store(true, std::memory_order_release);
     const bool wifi_started = _wifi_started.load(std::memory_order_acquire);
     const NetworkTransition wifi_transition = wifi_started
         ? _wifi.maintain(now_ms, wifi_power_save)
@@ -721,9 +749,8 @@ class AutomaticNetworkInterface final : public NetworkInterface {
   void lockSwitching() override {
     uint8_t value = _switch_locks.load(std::memory_order_relaxed);
     while (value != UINT8_MAX && !_switch_locks.compare_exchange_weak(
-               value, static_cast<uint8_t>(value + 1),
-               std::memory_order_acq_rel, std::memory_order_relaxed)) {}
-    while (_switch_in_progress.load(std::memory_order_acquire)) delay(1);
+               value, static_cast<uint8_t>(value + 1))) {}
+    while (_switch_in_progress.load()) delay(1);
   }
   void unlockSwitching() override {
     uint8_t value = _switch_locks.load(std::memory_order_relaxed);
@@ -819,21 +846,21 @@ class AutomaticNetworkInterface final : public NetworkInterface {
         : selectedInterface(selected).outageSnapshot();
   }
   NetworkMedium alertMedium() const override {
-    return NetworkMedium::Ethernet;
+    return ethernetIsAlertPrimary() ? NetworkMedium::Ethernet : NetworkMedium::WiFi;
   }
   AlertFaultPolicy::OutageSnapshot alertOutageSnapshot() const override {
-    return _ethernet.outageSnapshot();
+    return ethernetIsAlertPrimary() ? _ethernet.outageSnapshot() : _wifi.outageSnapshot();
   }
 };
 #endif
 
 }  // namespace
 
-NetworkInterface& activeNetworkInterface() {
+NetworkLink& activeNetworkLink() {
 #if defined(NETWORK_PREFER_ETHERNET)
-  static AutomaticNetworkInterface network;
+  static AutomaticNetworkLink network;
 #else
-  static WiFiNetworkInterface network;
+  static WiFiNetworkLink network;
 #endif
   return network;
 }

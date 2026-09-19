@@ -101,7 +101,7 @@ void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* ob
 }
 
 static bool isNetworkConfigValid(const MQTTPrefs* obs) {
-  return obs && activeNetworkInterface().configValid(obs->wifi_ssid);
+  return obs && activeNetworkLink().configValid(obs->wifi_ssid);
 }
 
 #ifdef WITH_MQTT_BRIDGE
@@ -221,7 +221,7 @@ static void agentLogHeap(const char* location, const char* message, const char* 
 static MQTTBridge* s_mqtt_bridge_instance = nullptr;
 
 unsigned long MQTTBridge::getWifiConnectedAtMillis() {
-  return activeNetworkInterface().connectedAtMillis();
+  return activeNetworkLink().connectedAtMillis();
 }
 
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -413,10 +413,10 @@ int MQTTBridge::getMaxActiveSlots() {
 }
 
 uint8_t MQTTBridge::getLastWifiDisconnectReason() {
-  return activeNetworkInterface().lastDisconnectReason();
+  return activeNetworkLink().lastDisconnectReason();
 }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() {
-  return activeNetworkInterface().lastDisconnectTime();
+  return activeNetworkLink().lastDisconnectTime();
 }
 
 unsigned long MQTTBridge::getSlotCurrentOutageStartMs(int slot_index) const {
@@ -624,7 +624,7 @@ static inline uint32_t mqttStopTimeoutForSlots(int slots) {
 MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
     : BridgeBase(prefs, mgr, rtc),
       _obs(obs),
-      _network(&activeNetworkInterface()),
+      _network(&activeNetworkLink()),
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
       _ntp_client(_ntp_udp, effectiveNtpPrimary(obs), 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
@@ -2740,6 +2740,7 @@ void MQTTBridge::checkConfigurationMismatch() {
 
 bool MQTTBridge::handleNetworkConnection(unsigned long now) {
   const NetworkMedium previous_medium = _network->medium();
+  _network->updateWifiCredentials(_obs->wifi_ssid, _obs->wifi_password);
   const NetworkTransition transition =
       _network->maintain((uint32_t)now, _obs->wifi_power_save);
   const NetworkMedium selected_medium = _network->medium();

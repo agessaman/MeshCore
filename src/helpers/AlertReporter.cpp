@@ -6,7 +6,7 @@
 #include <stdio.h>
 #ifdef WITH_MQTT_BRIDGE
 #include "AlertFaultPolicy.h"
-#include "NetworkInterface.h"
+#include "NetworkLink.h"
 #endif
 
 // Header layout for PAYLOAD_TYPE_GRP_TXT before encryption:

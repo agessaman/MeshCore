@@ -1,7 +1,7 @@
 #ifdef WITH_SNMP
 
 #include "SNMPAgent.h"
-#include "NetworkInterface.h"
+#include "NetworkLink.h"
 #include <esp_heap_caps.h>
 #include <climits>
 
@@ -79,7 +79,7 @@ void MeshSNMPAgent::loop() {
   _psram_free = 0;
 #endif
 
-  const int signal = activeNetworkInterface().rssi();
+  const int signal = activeNetworkLink().rssi();
   _wifi_rssi = signal == INT_MIN ? -127 : signal;
 
   _snmp.loop();

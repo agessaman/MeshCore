@@ -1,7 +1,7 @@
 #ifdef ESP_PLATFORM
 
 #include "ESP32Board.h"
-#include "NetworkInterface.h"
+#include "NetworkLink.h"
 #include <target.h>
 
 #if defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)   // Repeater or Room Server only
@@ -46,7 +46,7 @@ void otaReleaseTransport() {
   ota_server_running = false;
   ota_started_at = 0;
   if (ota_network_locked) {
-    activeNetworkInterface().unlockSwitching();
+    activeNetworkLink().unlockSwitching();
     ota_network_locked = false;
   }
   HttpPort80Lease::release(HttpPort80Lease::Owner::Ota);
@@ -67,7 +67,7 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   }
 
   inhibit_sleep = true;   // prevent sleep during OTA
-  activeNetworkInterface().lockSwitching();
+  activeNetworkLink().lockSwitching();
   ota_network_locked = true;
 
   // If the device is already on its selected network, serve ElegantOTA on that
@@ -78,8 +78,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   // station IP can't be reached.
   IPAddress ip;
   if (NetworkPolicy::startOtaUsesSelectedNetwork(
-          force_ap, activeNetworkInterface().isConnected())) {
-    ip = activeNetworkInterface().localIP();
+          force_ap, activeNetworkLink().isConnected())) {
+    ip = activeNetworkLink().localIP();
   } else {
     ota_raised_ap = WiFi.softAP("MeshCore-OTA", NULL);
     if (!ota_raised_ap) {
@@ -290,7 +290,7 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
   // dedicated 24 KB-stack task and block here until it finishes. The big stack is
   // freed when the task exits; on a successful update the chip reboots inside it.
-  NetworkInterface& network = activeNetworkInterface();
+  NetworkLink& network = activeNetworkLink();
   network.lockSwitching();
   OtaTaskArgs args = { this, current_ver, dry_run, reply, false, false };
   TaskHandle_t handle = nullptr;
@@ -312,9 +312,9 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   strcpy(reply, "ERR: OTA not configured (build via build.sh)");
   return false;
 #else
-  if (!activeNetworkInterface().isConnected()) {
+  if (!activeNetworkLink().isConnected()) {
     snprintf(reply, 160, "ERR: %s not connected",
-             activeNetworkInterface().mediumName());
+             activeNetworkLink().mediumName());
     return false;
   }
 

@@ -13,7 +13,7 @@
 #include <SHA256.h>
 
 #include <helpers/CommonCLI.h>
-#include <helpers/NetworkInterface.h>
+#include <helpers/NetworkLink.h>
 #include <helpers/MQTTPacketFilter.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
@@ -232,7 +232,7 @@ bool WebConfigServer::getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t
   }
   if (ip && ip_len > 0) {
     const IPAddress address = w->_mode == MODE_LAN
-        ? activeNetworkInterface().localIP() : WiFi.softAPIP();
+        ? activeNetworkLink().localIP() : WiFi.softAPIP();
     snprintf(ip, ip_len, "%s", address.toString().c_str());
   }
   return true;
@@ -291,7 +291,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _mode = MODE_SETUP;
   _initial_setup = !mqttNetworkSetupComplete(_obs);
   createServer();
-  activeNetworkInterface().lockSwitching();
+  activeNetworkLink().lockSwitching();
   _network_locked = true;
   _was_setup_ap = true;
   _last_activity = millis();
@@ -311,10 +311,10 @@ bool WebConfigServer::startLanMode(IPAddress ip, bool initial_setup, char reply[
              HttpPort80Lease::ownerName());
     return false;
   }
-  activeNetworkInterface().lockSwitching();
+  activeNetworkLink().lockSwitching();
   _network_locked = true;
-  if (!activeNetworkInterface().isConnected() || ip == IPAddress()) {
-    activeNetworkInterface().unlockSwitching();
+  if (!activeNetworkLink().isConnected() || ip == IPAddress()) {
+    activeNetworkLink().unlockSwitching();
     _network_locked = false;
     HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
     strcpy(reply, "Err: selected network not connected");
@@ -324,7 +324,7 @@ bool WebConfigServer::startLanMode(IPAddress ip, bool initial_setup, char reply[
   uint8_t session_entropy[sizeof(_session_secret) + 6];
   const size_t entropy_size = sizeof(_session_secret) + (_initial_setup ? 6 : 0);
   if (!fillRandomBytes(session_entropy, entropy_size)) {
-    activeNetworkInterface().unlockSwitching();
+    activeNetworkLink().unlockSwitching();
     _network_locked = false;
     HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
     strcpy(reply, "Err: secure random source unavailable");
@@ -445,7 +445,7 @@ void WebConfigServer::finalizeTeardown() {
   _setup_code[0] = 0;
   _setup_reminder_at = 0;
   if (_network_locked) {
-    activeNetworkInterface().unlockSwitching();
+    activeNetworkLink().unlockSwitching();
     _network_locked = false;
   }
   HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
@@ -474,7 +474,7 @@ void WebConfigServer::tick(uint32_t now) {
   if (_mode == MODE_LAN && _initial_setup && _setup_reminder_at != 0 &&
       (int32_t)(now - _setup_reminder_at) >= 0) {
     Serial.printf("WC: Ethernet setup http://%s/ code %s\n",
-                  activeNetworkInterface().localIP().toString().c_str(),
+                  activeNetworkLink().localIP().toString().c_str(),
                   _setup_code);
     _setup_reminder_at = now + 60000;
     if (_setup_reminder_at == 0) _setup_reminder_at = 1;
@@ -581,8 +581,8 @@ void WebConfigServer::drainBatch(uint32_t now) {
       return;  // more commands next tick
     }
   }
-  if (_initial_setup && _admin_pwd_set && _batch_all_ok &&
-      (_mode == MODE_LAN || _obs->wifi_ssid[0] != '\0')) {
+  // Wi-Fi onboarding is recorded by the stored SSID; only Ethernet LAN setup needs the marker.
+  if (_initial_setup && _admin_pwd_set && _batch_all_ok && _mode == MODE_LAN) {
     if (_cb->onInitialSetupComplete()) {
       _initial_setup = false;
       _setup_code[0] = 0;

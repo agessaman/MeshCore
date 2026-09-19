@@ -485,6 +485,20 @@ TEST(MQTTPrefsSerializer, UnknownGroupsAreIgnoredSoAppendedKeysAreDowngradeSafe)
   EXPECT_EQ(45, prefs.display_timeout_secs);
 }
 
+TEST(MQTTPrefsSerializer, UnknownKeysInsideAKnownGroupAreDowngradeSafe) {
+  // Firmware that predates wifi.setup_complete sees it as an unknown key in a
+  // known group; the rest of the group must still load.
+  MQTTPrefs prefs = defaults();
+  InputStream input(
+      "{version:1,wifi:{ssid:\"home\",future_key:1,power_save:2}}");
+  MQTTPrefsSerializer serializer(&prefs);
+  ASSERT_TRUE(serializer.loadSerial(input));
+  bool repaired = false;
+  ASSERT_TRUE(serializer.apply(&repaired));
+  EXPECT_STREQ("home", prefs.wifi_ssid);
+  EXPECT_EQ(2, prefs.wifi_power_save);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

@@ -20,9 +20,9 @@
  * MQTT shutdown deliberately does not stop this interface because an OTA
  * download runs after the broker clients have been released.
  */
-class NetworkInterface {
+class NetworkLink {
  public:
-  virtual ~NetworkInterface() = default;
+  virtual ~NetworkLink() = default;
 
   virtual const char* mediumName() const = 0;
   virtual NetworkMedium medium() const = 0;
@@ -33,6 +33,11 @@ class NetworkInterface {
   // retain it for any later fallback interface start.
   virtual void setHostname(const char* hostname) = 0;
   virtual bool begin(const char* wifi_ssid, const char* wifi_password) = 0;
+  // Latest stored credentials; the next reconnect attempt uses them without a reboot.
+  virtual void updateWifiCredentials(const char* wifi_ssid, const char* wifi_password) {
+    (void)wifi_ssid;
+    (void)wifi_password;
+  }
   virtual NetworkTransition maintain(uint32_t now_ms, uint8_t wifi_power_save) = 0;
 
   // Automatic selectors are boot-owned so first-run services can use the
@@ -71,6 +76,6 @@ class NetworkInterface {
 };
 
 /** Build-selected singleton. Wi-Fi is the compatibility default. */
-NetworkInterface& activeNetworkInterface();
+NetworkLink& activeNetworkLink();
 
 #endif

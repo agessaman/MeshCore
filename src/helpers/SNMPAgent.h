@@ -14,7 +14,7 @@
 //   .2.x.0  = radio    (packets, RSSI, SNR, noise floor, air time)
 //   .3.x.0  = mqtt     (connected slots, queue depth, skipped publishes)
 //   .4.x.0  = memory   (free heap, max alloc, internal free, PSRAM free)
-//   .5.x.0  = network  (RSSI, or 0 when the selected medium has no RSSI)
+//   .5.x.0  = network  (RSSI, or -127 when disconnected or the medium has no RSSI)
 
 class MeshSNMPAgent {
 public:

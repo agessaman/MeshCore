@@ -15,7 +15,7 @@
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
-#include "NetworkInterface.h"
+#include "NetworkLink.h"
 #include <Utils.h>
 #include <climits>
 #include <new>
@@ -416,9 +416,9 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       // runs on the Arduino loop task, shared with mesh/radio processing and the
       // web config batch, so a synchronous wait of up to 30 s would stall the
       // node. The sync runs in the background; verify with `get mqtt.ntp.diag`.
-      if (!activeNetworkInterface().isConnected()) {
+      if (!activeNetworkLink().isConnected()) {
         snprintf(reply, 160, "OK - saved (%s not connected; NTP sync pending)",
-                 activeNetworkInterface().mediumName());
+                 activeNetworkLink().mediumName());
       } else if (!_callbacks->isMqttBridgeRunning()) {
         strcpy(reply, "OK - saved (MQTT bridge not running)");
       } else if (_callbacks->syncMqttNtp()) {
@@ -460,8 +460,8 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       _mqtt_prefs.wifi_power_save = ps_value;
       if (!persistObserverPrefs(reply)) return true;
 #ifdef ESP_PLATFORM
-      if (strcmp(activeNetworkInterface().mediumName(), "wifi") == 0 &&
-          activeNetworkInterface().isConnected()) {
+      if (strcmp(activeNetworkLink().mediumName(), "wifi") == 0 &&
+          activeNetworkLink().isConnected()) {
         wifi_ps_type_t ps_mode = (ps_value == 1) ? WIFI_PS_NONE :
                                 (ps_value == 2) ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
         esp_err_t ps_result = esp_wifi_set_ps(ps_mode);
@@ -962,9 +962,9 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #ifdef ESP_PLATFORM
     // Connectivity probe across all configured NTP servers; never updates the clock.
     // Serial console (sender_timestamp == 0) gets a detailed table; LoRa gets a compact list.
-    if (!activeNetworkInterface().isConnected()) {
+    if (!activeNetworkLink().isConnected()) {
       snprintf(reply, 160, "Error: %s not connected",
-               activeNetworkInterface().mediumName());
+               activeNetworkLink().mediumName());
     } else if (!_callbacks->isMqttBridgeRunning()) {
       strcpy(reply, "Error: MQTT bridge not running");
     } else if (!_callbacks->runMqttNtpDiag(reply, 160, sender_timestamp == 0)) {
@@ -1039,10 +1039,10 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       strcpy(reply, _mqtt_prefs.wifi_password[0] ? "> ******** (serial only)" : "> (not set)");
     }
   } else if (strcmp(config, "link.diag") == 0) {
-    activeNetworkInterface().formatDiagnostics(reply, 160);
+    activeNetworkLink().formatDiagnostics(reply, 160);
   } else if (memcmp(config, "link.status", 11) == 0 ||
              memcmp(config, "wifi.status", 11) == 0) {
-    NetworkInterface& network = activeNetworkInterface();
+    NetworkLink& network = activeNetworkLink();
     const bool wifi_alias = config[0] == 'w';
     if (wifi_alias && strcmp(network.mediumName(), "wifi") != 0) {
       snprintf(reply, 160, "> n/a (%s selected; use get link.status)",
@@ -1181,9 +1181,9 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
 #ifdef WITH_MQTT_BRIDGE
   if (memcmp(command, "tls.bundletest ", 15) == 0) {
 #ifdef ESP_PLATFORM
-    if (!activeNetworkInterface().isConnected()) {
+    if (!activeNetworkLink().isConnected()) {
       snprintf(reply, 160, "ERR: %s not connected",
-               activeNetworkInterface().mediumName());
+               activeNetworkLink().mediumName());
     } else {
       size_t bundle_len = 0;
       if (rootca_crt_bundle_start != nullptr &&
@@ -1228,9 +1228,9 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     //   ota check  -> report available build, do not flash
     //   ota update -> download and flash, then reboot
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
-    if (!activeNetworkInterface().isConnected()) {
+    if (!activeNetworkLink().isConnected()) {
       snprintf(reply, 160, "ERR: %s not connected",
-               activeNetworkInterface().mediumName());
+               activeNetworkLink().mediumName());
     } else if (memcmp(command, "ota check", 9) == 0) {
       // Check is synchronous so its result lands in this reply, and runs with the
       // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only

@@ -2,7 +2,7 @@
 
 #include "MeshCore.h"
 #include "helpers/bridges/BridgeBase.h"
-#include "helpers/NetworkInterface.h"
+#include "helpers/NetworkLink.h"
 #include <PsychicMqttClient.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -525,7 +525,7 @@ private:
   // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
   MQTTPrefs* _obs = nullptr;
-  NetworkInterface* _network = nullptr;
+  NetworkLink* _network = nullptr;
 
 public:
   MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
