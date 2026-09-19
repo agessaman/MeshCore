@@ -11,6 +11,7 @@
 
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_netif.h>
 #include <lwip/dns.h>
 
 #if defined(NETWORK_PREFER_ETHERNET)
@@ -42,7 +43,9 @@ class NetworkLinkBase : public NetworkLink {
   bool _last_connected = false;
   unsigned long _last_status_check = 0;
   static constexpr int kDnsServers = 2;
-  std::atomic<uint32_t> _dns_snapshot[kDnsServers] = {{0}, {0}};
+  // Only ever touched on the lwIP thread (see snapshotDns()), so no atomics.
+  ip_addr_t _dns_snapshot[kDnsServers] = {};
+  bool _dns_captured = false;
 
   AlertFaultPolicy::OutageSnapshot outage() const {
     return AlertFaultPolicy::unpackOutageSnapshot(
@@ -86,6 +89,7 @@ class NetworkLinkBase : public NetworkLink {
     return outage();
   }
 
+ private:
   // Remember the resolver this link's DHCP lease installed, so switching back
   // to it can put that resolver back.
   //
@@ -98,26 +102,52 @@ class NetworkLinkBase : public NetworkLink {
   // different subnets that server is unreachable from Ethernet, and the node
   // reads as connected while every broker and NTP hostname fails to resolve,
   // until Ethernet's own DHCP renewal happens to fix it hours later.
-  void snapshotDns() {
+  //
+  // Both halves run through esp_netif_tcpip_exec() because lwIP's DNS functions
+  // belong to the TCP/IP thread, and these are called from the Arduino event
+  // task (Ethernet GOT_IP) and the MQTT task (Wi-Fi edge, and select()). That
+  // also serializes the snapshot itself, so it needs no atomics. Neither caller
+  // is the TCP/IP thread, so the call cannot deadlock on itself.
+  //
+  // The whole ip_addr_t is kept, not an IPv4 word: these builds compile lwIP
+  // with IPv6 on, and reinterpreting a v6 server as v4 would install four
+  // meaningless bytes as a resolver. (RDNSS is disabled here, so a v6 server
+  // should never appear — storing the tagged value means it stays correct if
+  // that ever changes.)
+  static esp_err_t snapshotDnsOnTcpipThread(void* ctx) {
+    NetworkLinkBase* self = static_cast<NetworkLinkBase*>(ctx);
+    bool any = false;
     for (int i = 0; i < kDnsServers; i++) {
       const ip_addr_t* server = dns_getserver(i);
-      _dns_snapshot[i].store(
-          (server != nullptr && !ip_addr_isany(server))
-              ? ip4_addr_get_u32(ip_2_ip4(server)) : 0,
-          std::memory_order_relaxed);
+      self->_dns_snapshot[i] = (server != nullptr) ? *server : *IP_ADDR_ANY;
+      if (!ip_addr_isany_val(self->_dns_snapshot[i])) any = true;
     }
+    // A lease that carried no resolver at all (static configuration, or a
+    // server that offered none) must not be remembered as "this medium's DNS is
+    // nothing" — restoring that would wipe a working resolver for no gain.
+    if (any) self->_dns_captured = true;
+    return ESP_OK;
   }
 
-  // Only servers this link actually leased are restored; a medium that has
-  // never held a lease leaves the current resolver alone rather than blanking it.
-  void restoreDns() const {
+  static esp_err_t restoreDnsOnTcpipThread(void* ctx) {
+    NetworkLinkBase* self = static_cast<NetworkLinkBase*>(ctx);
+    if (!self->_dns_captured) return ESP_OK;
+    // Every slot is written, empty ones included: returning to a network with
+    // one server must not leave the other medium's second server behind as a
+    // fallback that only fails slowly.
     for (int i = 0; i < kDnsServers; i++) {
-      const uint32_t addr = _dns_snapshot[i].load(std::memory_order_relaxed);
-      if (addr == 0) continue;
-      const ip_addr_t server = IPADDR4_INIT(addr);
-      dns_setserver(i, &server);
+      dns_setserver(i, &self->_dns_snapshot[i]);
     }
+    return ESP_OK;
   }
+
+ public:
+  void snapshotDns() { esp_netif_tcpip_exec(snapshotDnsOnTcpipThread, this); }
+
+  // A medium that has never held a lease with a resolver leaves the current one
+  // alone rather than blanking it.
+  void restoreDns() { esp_netif_tcpip_exec(restoreDnsOnTcpipThread, this); }
+
 };
 
 class WiFiNetworkLink final : public NetworkLinkBase {
