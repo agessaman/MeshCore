@@ -272,7 +272,7 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
   const char* msgs = (obs && obs->mqtt_status_enabled) ? "on" : "off";
   if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) {
     snprintf(buf, bufsize, "> msgs: %s (bridge %s)", msgs,
-             s_stop_unproven ? "stopped: previous stop unproven, reboot to recover"
+             s_stop_unproven ? "stopped: waiting for the previous stop to finish; reboot if it persists"
                              : "not running");
     return;
   }
@@ -903,7 +903,7 @@ void MQTTBridge::begin() {
   // refuse. Recovery is the task finishing, or a reboot.
   pollLateStopAck();
   if (!_lifecycle.mayRestart()) {
-    MQTT_DEBUG_PRINTLN("MQTT Bridge start refused: previous stop unproven (%s) - reboot to recover",
+    MQTT_DEBUG_PRINTLN("MQTT Bridge start refused: previous stop unproven (%s) - waiting for the task to acknowledge",
                        MQTTLifecycle::stateName(_lifecycle.state()));
     return;
   }
@@ -1230,7 +1230,7 @@ void MQTTBridge::end() {
   s_stop_unproven = _lifecycle.isStopUnproven();
   if (_lifecycle.isStopUnproven()) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge stop UNPROVEN after %lu ms: task did not acknowledge. "
-                       "Nothing released, restart refused, OTA blocked - reboot to recover.",
+                       "Nothing released, OTA blocked; restart waits for its late ack (reboot if it never comes).",
                        (unsigned long)_lifecycle.stopTimeoutMs());
   } else {
     MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (clean)");

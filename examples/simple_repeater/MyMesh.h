@@ -353,6 +353,9 @@ public:
 #endif
       if (!bridge) return;
     }
+#ifdef WITH_MQTT_BRIDGE
+    if (!enable) _bridge_resume_pending = false;   // an explicit stop cancels a pending resume
+#endif
     if (enable == bridge->isRunning()) return;
     if (enable)
     {

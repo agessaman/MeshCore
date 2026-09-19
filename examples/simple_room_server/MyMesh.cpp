@@ -1518,7 +1518,8 @@ void MyMesh::loop() {
 #ifdef WITH_MQTT_BRIDGE
   // A timed-out stop keeps the bridge down until the MQTT task acknowledges it;
   // once that late ack lands, restart the bridge that was meant to be running.
-  if (_bridge_resume_pending && bridge && bridge->stopAcknowledgedLate()) {
+  if (_bridge_resume_pending && _prefs.bridge_enabled && bridge &&
+      bridge->stopAcknowledgedLate()) {
     Serial.println("MQTT: stop acknowledged late - resuming bridge");
     setBridgeState(true);
   }
