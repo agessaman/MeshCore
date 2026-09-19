@@ -20,7 +20,8 @@ PsychicMqttClient::PsychicMqttClient() : _mqtt_cfg()
 
 PsychicMqttClient::~PsychicMqttClient()
 {
-    disconnect();
+    // Owners stop the client before deleting it; stopping it again only logs ESP_FAIL.
+    if (_started) disconnect();
     if (_client != nullptr)
     {
         esp_mqtt_client_destroy(_client);

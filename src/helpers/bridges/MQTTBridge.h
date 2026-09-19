@@ -602,9 +602,6 @@ private:
   void logMemoryStatus();
   void refreshOriginFromPrefs();
   void applyWifiPowerSave();   // one mapping, applied on every association
-  // Honours a stop acknowledgement that arrived after the deadline: releases the
-  // withheld resources and makes the bridge restartable. Loop task only.
-  void pollLateStopAck();
   // begin()/end()-scoped PSRAM buffers. Each allocation is independent so a
   // transient heap shortage degrades to the existing stack fallback instead
   // of making the bridge unusable.
@@ -746,6 +743,9 @@ public:
   // The unproven stop has since been acknowledged, so begin() will release the
   // withheld resources and start. Loop task only.
   bool stopAcknowledgedLate() const;
+  // Honours a stop acknowledgement that arrived after the deadline: releases the
+  // withheld resources and makes the bridge restartable. Loop task only.
+  void pollLateStopAck();
   // Survives end() clearing the diagnostic singleton, so `get mqtt.status` can
   // still explain why a stopped bridge will not come back without a reboot.
   static bool stopUnprovenLatched();
