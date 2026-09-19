@@ -3,6 +3,7 @@
 #if defined(ESP_PLATFORM)
 
 #include "MQTTConnectionPolicy.h"
+#include "WifiPowerSavePolicy.h"
 
 #include <atomic>
 #include <climits>
@@ -90,9 +91,22 @@ class WiFiNetworkLink final : public NetworkLinkBase {
   unsigned long _last_reconnect_attempt = 0;
   uint8_t _reconnect_backoff_attempt = 0;
 
+  // One mapping for startup, reconnect and CLI (see WifiPowerSavePolicy). The
+  // stored default is `none`; `min` means MIN_MODEM here exactly as the CLI
+  // says it does. Mapping the stored value locally is what let a node set to
+  // `min` silently run with power save off after its first reconnect.
   void applyPowerPrefs(uint8_t wifi_power_save) {
-    wifi_ps_type_t ps_mode = wifi_power_save == 2 ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE;
-    esp_wifi_set_ps(ps_mode);
+    static_assert((int)WifiPowerSavePolicy::kModeNone == (int)WIFI_PS_NONE, "wifi_ps_type_t drift");
+    static_assert((int)WifiPowerSavePolicy::kModeMinModem == (int)WIFI_PS_MIN_MODEM, "wifi_ps_type_t drift");
+    static_assert((int)WifiPowerSavePolicy::kModeMaxModem == (int)WIFI_PS_MAX_MODEM, "wifi_ps_type_t drift");
+    esp_wifi_set_ps((wifi_ps_type_t)WifiPowerSavePolicy::modeFor(wifi_power_save));
+    // Read back rather than logging what we asked for: this is the only place
+    // the mode is observable on a running node, and the setting used to change
+    // meaning between the CLI and this path.
+    wifi_ps_type_t applied = WIFI_PS_NONE;
+    esp_wifi_get_ps(&applied);
+    NETWORK_DEBUG_PRINTLN("WiFi power save: %s (mode=%d)",
+                          WifiPowerSavePolicy::nameFor(wifi_power_save), (int)applied);
 #ifdef MQTT_WIFI_TX_POWER
     WiFi.setTxPower(MQTT_WIFI_TX_POWER);
 #else
@@ -182,6 +196,10 @@ class WiFiNetworkLink final : public NetworkLinkBase {
       _status_initialized = true;
       setOutage(AlertFaultPolicy::applyWifiStatus(
           now_ms, connected, outage(), false));
+      // Already associated when the link started (end()/begin() leaves STA up):
+      // there is no connect transition below to carry the setting, so apply it
+      // here or the node keeps running whatever mode was set before.
+      if (connected) applyPowerPrefs(wifi_power_save);
     }
 
     if ((uint32_t)(now_ms - _last_status_check) <= 10000) {

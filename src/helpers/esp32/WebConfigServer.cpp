@@ -17,6 +17,7 @@
 #include <helpers/MQTTPacketFilter.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
+#include <helpers/WifiPowerSavePolicy.h>
 #include <helpers/bridges/MQTTBridge.h>
 
 #include "HttpPort80Lease.h"
@@ -881,8 +882,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     JsonObject wifi = doc.createNestedObject("wifi");
     wifi["ssid"] = (const char*)_obs->wifi_ssid;
     wifi["pwd"] = _obs->wifi_password[0] ? SECRET_SENTINEL : "";
-    wifi["powersave"] = _obs->wifi_power_save == 0 ? "min"
-                        : _obs->wifi_power_save == 2 ? "max" : "none";
+    wifi["powersave"] = WifiPowerSavePolicy::nameFor(_obs->wifi_power_save);
 
     JsonObject mqtt = doc.createNestedObject("mqtt");
     mqtt["origin"] = (const char*)_obs->mqtt_origin;

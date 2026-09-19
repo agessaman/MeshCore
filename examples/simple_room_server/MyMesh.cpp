@@ -1549,6 +1549,19 @@ void MyMesh::loop() {
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing can take time, so we prioritize radio reception
   mesh::Mesh::loop();
+
+#ifdef WITH_MQTT_BRIDGE
+  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
+  // Release the withheld resources whenever that late ack lands, and restart
+  // only a bridge that is still meant to be running.
+  if (bridge && bridge->stopAcknowledgedLate()) {
+    bridge->pollLateStopAck();
+    if (_bridge_resume_pending && _prefs.bridge_enabled) {
+      Serial.println("MQTT: stop acknowledged late - resuming bridge");
+      setBridgeState(true);
+    }
+  }
+#endif
 #ifdef WITH_MQTT_BRIDGE
   // bridge.loop() is now handled by FreeRTOS task on Core 0 - no need to call it here
 #endif
@@ -1644,14 +1657,18 @@ void MyMesh::loop() {
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
 
     bool may_flash = true;
+    if (bridge) bridge->pollLateStopAck();
     if (bridge_was_running) {
       setBridgeState(false);
       // OTA must not write after a forced/timed-out MQTT shutdown: its TLS/heap
       // ownership is uncertain until a subsequent clean start/stop cycle.
       may_flash = bridge && bridge->canFlashAfterStop();
-      if (!may_flash) {
-        Serial.println("OTA: aborted, MQTT stop did not complete cleanly");
-      }
+    } else if (bridge && bridge->isStopUnproven()) {
+      // Reads as stopped, but an unacknowledged MQTT task may still own TLS/client state.
+      may_flash = false;
+    }
+    if (!may_flash) {
+      Serial.println("OTA: aborted, MQTT stop did not complete cleanly");
     }
 
     char ota_reply[160];

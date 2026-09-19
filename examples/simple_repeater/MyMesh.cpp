@@ -1734,6 +1734,19 @@ void MyMesh::loop() {
   // MQTT processing runs in a separate FreeRTOS task on Core 0, so we don't call bridge.loop() here
   mesh::Mesh::loop();
 
+#ifdef WITH_MQTT_BRIDGE
+  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
+  // Release the withheld resources whenever that late ack lands, and restart
+  // only a bridge that is still meant to be running.
+  if (bridge && bridge->stopAcknowledgedLate()) {
+    bridge->pollLateStopAck();
+    if (_bridge_resume_pending && _prefs.bridge_enabled) {
+      Serial.println("MQTT: stop acknowledged late - resuming bridge");
+      setBridgeState(true);
+    }
+  }
+#endif
+
 #ifdef WITH_BRIDGE
   // bridge.loop() is now handled by FreeRTOS task on Core 0 - no need to call it here
 #endif
@@ -1787,8 +1800,9 @@ void MyMesh::loop() {
     // resume the bridge instead of flashing under uncertain ownership.
     if (bridge && !bridge->canFlashAfterStop()) {
       Serial.println("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge");
-      otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
       setBridgeState(true);
+      otaAlert(bridge->isRunning() ? "OTA aborted: MQTT stop unclean, bridge resumed"
+                                   : "OTA aborted: MQTT stop unproven, bridge resumes when it completes");
     } else if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
       Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
       char ota_alert_msg[160];

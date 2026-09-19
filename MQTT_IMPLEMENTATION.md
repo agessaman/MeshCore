@@ -528,14 +528,14 @@ These settings apply across all MQTT slots:
 - `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; neighbors-enabled builds)
 - `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (neighbors-enabled builds)
 - `get mqtt.ntp` - Get effective NTP server hostname
-- `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, LoRa shows a compact `<server> ok|fail` list)
+- `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, or why a probe was rejected — `DNS failed`, `unsolicited reply`, `server unsynced`, ... — and LoRa shows a compact `<server> ok|fail` list)
 - `get mqtt.owner` - Get owner public key (serial console only)
 - `get mqtt.email` - Get owner email address (serial console only)
 
 #### Set Commands
 - `set mqtt.origin <name>` - Set device origin name
 - `set mqtt.iata <code>` - Set IATA code (auto-uppercased)
-- `set mqtt.status on|off` - Enable/disable status messages
+- `set mqtt.status on|off` - Enable/disable status messages (periodic *and* the one sent on each broker connect)
 - `set mqtt.packets on|off` - Enable/disable packet messages
 - `set mqtt.raw on|off` - Enable/disable raw messages
 - `set mqtt.rx on|off` - Enable/disable RX (received) packet uplinking
@@ -875,9 +875,11 @@ the radio actually performs in that case.
 - CH390 startup initializes Arduino's shared network event runtime without associating WiFi;
   this keeps the framework's DNS and TLS hostname paths safe when Ethernet wins directly.
 - Ethernet/WiFi transitions are logged. A lost or changed route closes every live MQTT
-  transport with a bounded disconnect that keeps the client task. When the same link returns,
-  each slot gets one immediate attempt at its current backoff rung (a tripped circuit breaker
-  gets one immediate probe); a switch to the other medium also clears backoff and breakers
+  transport with a bounded disconnect that keeps the client task; a slot that was still
+  connecting is stopped instead, so its attempt cannot complete against the old route and
+  report a connection that no longer exists. When the same link returns, each slot gets one
+  immediate attempt at its current backoff rung (a tripped circuit breaker gets one immediate
+  probe); a switch to the other medium also clears backoff and breakers
 - WiFi credentials changed at runtime (`set wifi.ssid` / `set wifi.pwd`) are used on the next
   reconnect attempt without a reboot
 - Packets are queued while a slot is disconnected and flushed when it recovers
@@ -900,7 +902,8 @@ the radio actually performs in that case.
 ### NTP Time Synchronization
 - Automatic time synchronization with NTP servers (required for JWT authentication)
 - Default primary: `pool.ntp.org`; built-in fallbacks (tried sequentially on failure): `time.google.com`, `time.cloudflare.com`, `time.aws.com`, `time.nist.gov`
-- Periodic time updates (every hour) on the effective primary only; system time is kept in UTC
+- Periodic time updates (every hour) through the same validated probe, one attempt per server in list order; system time is kept in UTC
+- Replies are validated before they are trusted: the datagram must be a full-length NTPv3/v4 server reply from the queried address and port, from a synchronised server (stratum 1-15, no leap alarm), echoing the random transmit timestamp of the request, with a plausible epoch. Anything else is discarded and the clock, the RTC and JWT issuance are left alone
 - Configure and diagnose with `set mqtt.ntp` / `get mqtt.ntp` / `get mqtt.ntp.diag` — see [MQTT Shared Commands](#mqtt-shared-commands)
 
 ### Authentication
