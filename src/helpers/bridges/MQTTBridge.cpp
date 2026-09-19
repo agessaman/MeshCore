@@ -2736,6 +2736,8 @@ void MQTTBridge::checkConfigurationMismatch() {
   }
 }
 
+static constexpr unsigned long kNetworkTransitionDisconnectMs = 2000;
+
 bool MQTTBridge::handleNetworkConnection(unsigned long now) {
   const NetworkMedium previous_medium = _network->medium();
   _network->updateWifiCredentials(_obs->wifi_ssid, _obs->wifi_password);
@@ -2762,10 +2764,12 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
     // Close each live transport now instead of waiting for socket timeouts, but
     // keep the esp-mqtt task: softDisconnect() is bounded where a full stop can
     // wait forever, and reconnectSlotClient() then reconnects on the new route.
+    // The old route is gone, so a short wait suffices; a client whose event is
+    // late is aborted by keepalive and picked up by the normal backoff retry.
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       if (_slots[i].client && _slots[i].client->isStarted()) {
         MQTT_DEBUG_PRINTLN("MQTT%d disconnecting for network transition", i + 1);
-        _slots[i].client->softDisconnect();
+        _slots[i].client->softDisconnect(kNetworkTransitionDisconnectMs);
       }
       _slots[i].connected = false;
       _slots[i].connected_at_ms = 0;
