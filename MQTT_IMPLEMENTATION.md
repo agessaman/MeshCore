@@ -874,8 +874,8 @@ the radio actually performs in that case.
   selection log includes the measured probe duration.
 - CH390 startup initializes Arduino's shared network event runtime without associating WiFi;
   this keeps the framework's DNS and TLS hostname paths safe when Ethernet wins directly.
-- Ethernet/WiFi transitions are logged. A lost or changed route stops every started MQTT
-  client, including one whose disconnect callback arrived first. When the same link returns,
+- Ethernet/WiFi transitions are logged. A lost or changed route closes every live MQTT
+  transport with a bounded disconnect that keeps the client task. When the same link returns,
   each slot gets one immediate attempt at its current backoff rung (a tripped circuit breaker
   gets one immediate probe); a switch to the other medium also clears backoff and breakers
 - WiFi credentials changed at runtime (`set wifi.ssid` / `set wifi.pwd`) are used on the next

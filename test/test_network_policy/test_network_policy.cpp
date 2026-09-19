@@ -4,28 +4,28 @@
 
 TEST(NetworkPolicy, MqttDownDisconnectsSlotsWithoutRequestingImmediateRetry) {
   const auto actions = NetworkPolicy::mqttActions(NetworkTransition::Down);
-  EXPECT_TRUE(actions.stop_started_slots);
+  EXPECT_TRUE(actions.disconnect_started_slots);
   EXPECT_FALSE(actions.retry_disconnected_slots_now);
   EXPECT_FALSE(actions.reset_reconnect_backoff);
 }
 
 TEST(NetworkPolicy, MqttUpRetriesWithoutClearingBrokerCircuitBreaker) {
   const auto actions = NetworkPolicy::mqttActions(NetworkTransition::Up);
-  EXPECT_FALSE(actions.stop_started_slots);
+  EXPECT_FALSE(actions.disconnect_started_slots);
   EXPECT_TRUE(actions.retry_disconnected_slots_now);
   EXPECT_FALSE(actions.reset_reconnect_backoff);
 }
 
 TEST(NetworkPolicy, NoTransitionHasNoMqttSideEffects) {
   const auto actions = NetworkPolicy::mqttActions(NetworkTransition::None);
-  EXPECT_FALSE(actions.stop_started_slots);
+  EXPECT_FALSE(actions.disconnect_started_slots);
   EXPECT_FALSE(actions.retry_disconnected_slots_now);
   EXPECT_FALSE(actions.reset_reconnect_backoff);
 }
 
 TEST(NetworkPolicy, LinkSwitchReconnectsMqttSlotsImmediately) {
   const auto actions = NetworkPolicy::mqttActions(NetworkTransition::Switched);
-  EXPECT_TRUE(actions.stop_started_slots);
+  EXPECT_TRUE(actions.disconnect_started_slots);
   EXPECT_TRUE(actions.retry_disconnected_slots_now);
   EXPECT_TRUE(actions.reset_reconnect_backoff);
 }

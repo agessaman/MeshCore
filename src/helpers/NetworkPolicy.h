@@ -29,7 +29,7 @@ enum class NetworkDiagnosticReason : uint8_t {
 namespace NetworkPolicy {
 
 struct MQTTTransitionActions {
-  bool stop_started_slots;
+  bool disconnect_started_slots;
   bool retry_disconnected_slots_now;
   bool reset_reconnect_backoff;
 };

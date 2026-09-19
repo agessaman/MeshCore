@@ -1986,10 +1986,8 @@ void MQTTBridge::teardownSlot(int index, bool force) {
 
 // A stopped client needs connect(): reconnect() is a documented no-op on one, so reaching
 // it here would strand the slot. The producer is a failed esp_mqtt_client_start(), which
-// leaves _started false while initial_connect_done stays set. Not the WiFi-drop teardown,
-// which only stops slots still marked connected: a publishing slot's socket fails first, so
-// the guard skips it — measured across a 62 s deauth, five slots, zero stops. An idle slot
-// with no traffic to fail on is the one case that could still reach here that way.
+// leaves _started false while initial_connect_done stays set. Not a network transition,
+// which only softDisconnect()s and keeps the client task.
 void MQTTBridge::reconnectSlotClient(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
@@ -2760,16 +2758,14 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
 
   const NetworkPolicy::MQTTTransitionActions actions =
       NetworkPolicy::mqttActions(transition);
-  if (actions.stop_started_slots) {
-    // Broker ownership stays in the bridge. The physical adapter reports the
-    // edge; the bridge explicitly stops every started slot instead of waiting
-    // for eventual socket timeouts. Do not gate this on slot.connected: the
-    // ESP-MQTT disconnect callback can clear that flag before the network edge
-    // reaches this task, but its client task and transport can still be alive.
+  if (actions.disconnect_started_slots) {
+    // Close each live transport now instead of waiting for socket timeouts, but
+    // keep the esp-mqtt task: softDisconnect() is bounded where a full stop can
+    // wait forever, and reconnectSlotClient() then reconnects on the new route.
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       if (_slots[i].client && _slots[i].client->isStarted()) {
-        MQTT_DEBUG_PRINTLN("MQTT%d stopping for network transition", i + 1);
-        _slots[i].client->disconnect();
+        MQTT_DEBUG_PRINTLN("MQTT%d disconnecting for network transition", i + 1);
+        _slots[i].client->softDisconnect();
       }
       _slots[i].connected = false;
       _slots[i].connected_at_ms = 0;

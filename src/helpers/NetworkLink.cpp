@@ -573,8 +573,10 @@ class AutomaticNetworkLink final : public NetworkLink {
           _ethernet_retry_attempt.load(std::memory_order_relaxed);
       if (NetworkPolicy::ethernetInitRetryDue(
               attempt, now_ms,
-              _last_ethernet_init_attempt.load(std::memory_order_relaxed))) {
+              _last_ethernet_init_attempt.load(std::memory_order_relaxed)) &&
+          beginUnlockedMutation()) {
         startOrRetryEthernet(now_ms, attempt != 0);
+        endUnlockedMutation();
       }
     }
     // bootstrap() owns the initial choice. MQTT begin() is intentionally
@@ -656,19 +658,25 @@ class AutomaticNetworkLink final : public NetworkLink {
     } else {
       _ethernet_no_ip_since.store(0, std::memory_order_relaxed);
     }
+    // Restarts rebuild the CH390 netif, so they take the same mutation gate as
+    // a route switch: an OTA/WebConfig lock taken after the sample above wins.
     if (!switching_locked && NetworkPolicy::ethernetNoIpRecoveryDue(
             ethernet_started, ethernet_link_up, _ethernet.isConnected(),
-            now_ms, _ethernet_no_ip_since.load(std::memory_order_relaxed))) {
+            now_ms, _ethernet_no_ip_since.load(std::memory_order_relaxed)) &&
+        beginUnlockedMutation()) {
       ethernet_started = startOrRetryEthernet(now_ms, true);
       _ethernet_no_ip_since.store(0, std::memory_order_relaxed);
+      endUnlockedMutation();
     }
     if (!ethernet_started && !switching_locked) {
       const uint8_t attempt =
           _ethernet_retry_attempt.load(std::memory_order_relaxed);
       if (NetworkPolicy::ethernetInitRetryDue(
               attempt, now_ms,
-              _last_ethernet_init_attempt.load(std::memory_order_relaxed))) {
+              _last_ethernet_init_attempt.load(std::memory_order_relaxed)) &&
+          beginUnlockedMutation()) {
         ethernet_started = startOrRetryEthernet(now_ms, true);
+        endUnlockedMutation();
       }
     }
 
