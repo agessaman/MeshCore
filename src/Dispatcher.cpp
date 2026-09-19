@@ -29,6 +29,9 @@ void Dispatcher::begin() {
 
   _radio->begin();
   prev_isrecv_mode = _radio->isInRecvMode();
+#ifdef WITH_MQTT_BRIDGE
+  radio_watchdog.reset((uint32_t)_ms->getMillis());
+#endif
 }
 
 float Dispatcher::getAirtimeBudgetFactor() const {
@@ -94,23 +97,20 @@ void Dispatcher::loop() {
   // MQTTPrefs radio_watchdog_minutes setting.
 #ifdef WITH_MQTT_BRIDGE
   {
-    const uint32_t watchdog_ms = getRadioWatchdogMillis();
-    if (watchdog_ms > 0) {
-      unsigned long last_recv = _radio->getLastRecvMillis();
-      unsigned long last_irq  = _radio->getLastRadioInterruptMillis();
-      unsigned long last_active = (last_recv > last_irq ? last_recv : last_irq);
-      if (last_radio_active_ms > last_active) last_active = last_radio_active_ms;
-      if (is_recv && last_active > 0) {
-        unsigned long silent_ms = _ms->getMillis() - last_active;
-        unsigned long since_recovery = _ms->getMillis() - last_watchdog_recovery;
-        if (silent_ms > watchdog_ms && since_recovery > watchdog_ms) {
-          _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
-          MESH_DEBUG_PRINTLN("Radio watchdog: silent %lu ms, state=%d, recovering", silent_ms, _radio->getRadioState());
-          _radio->idle();
-          _radio->startRecv();
-          last_watchdog_recovery = _ms->getMillis();
-        }
-      }
+    // Selecting the most recent event by age rather than by largest timestamp is
+    // what keeps this correct across the millis() wrap — see RadioWatchdog.
+    RadioWatchdogDecision wd = radio_watchdog.update(
+        (uint32_t)_ms->getMillis(), is_recv, getRadioWatchdogMillis(),
+        (uint32_t)_radio->getLastRecvMillis(),
+        (uint32_t)_radio->getLastRadioInterruptMillis(),
+        (uint32_t)last_radio_active_ms);
+    if (wd.recover) {
+      _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
+      MESH_DEBUG_PRINTLN("Radio watchdog: silent %lu ms, state=%d, recovering",
+                         (unsigned long)wd.silent_ms, _radio->getRadioState());
+      _radio->idle();
+      _radio->startRecv();
+      radio_watchdog.noteRecovery();
     }
   }
 #endif // WITH_MQTT_BRIDGE (radio watchdog)
