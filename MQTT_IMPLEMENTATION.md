@@ -225,11 +225,14 @@ pio run -e ThinkNode_M7_repeater_observer_mqtt
 pio run -e ThinkNode_M7_room_server_observer_mqtt
 ```
 
-**ThinkNode M7 — WiFi only:** the M7 has an onboard CH390 Ethernet controller, and
-`ThinkNode_M7_companion_radio_ethernet` uses it, but the MQTT bridge's link
-management is bound to the WiFi station API, so the observer envs uplink over WiFi.
-See `UPSTREAM_BUGS.md` for the Ethernet gap. The board has PSRAM, so these builds
-get neighbors publication (`WITH_MQTT_NEIGHBORS`) automatically.
+**ThinkNode M7 — Ethernet preferred, WiFi fallback:** the observer envs use the onboard
+CH390 Ethernet when it has a DHCP lease at boot, otherwise the stored WiFi network, and
+switch between the two at runtime (`get link.status`, `get link.diag`). Nodes without a
+cable behave like WiFi observers after a brief (about 1 s) Ethernet probe at boot. The DHCP hostname is
+`meshcore-<node name>` on either medium. A first boot on Ethernet with no WiFi configured
+opens WebConfig on the LAN with a one-time login code printed on serial (and shown on
+the display), and requires replacing the admin password. The board has PSRAM, so these
+builds get neighbors publication (`WITH_MQTT_NEIGHBORS`) automatically.
 
 **TLora naming:** The env prefix `LilyGo_TLora_V2_1_1_6` is LilyGo’s **T-LoRa V2.1–1.6** board (SX1276); PlatformIO selects **`ttgo-lora32-v1`** (TTGO LoRa32 V1.0). **MQTT observer** envs extend a slim base **without** `sensor_base` so the image fits `min_spiffs`; **all other** `LilyGo_TLora_V2_1_1_6_*` targets still use optional I2C environmental sensors as before. The **`lilygo_tlora_c6`** variant is separate hardware (ESP32-C6).
 
