@@ -76,26 +76,31 @@ TEST(MqttClientState, StopIsAcknowledgedOnlyWhenEveryClientIsProvenStopped) {
 }
 
 // A link transition closes each slot's transport because the route under it
-// changed. The two predicates above are what decide how, and getting the
-// Starting case wrong is not cosmetic: softDisconnect() returns immediately on
-// a client that is not yet connected, so that attempt would run to completion
-// against the OLD route and deliver a CONNECTED event the new attempt cannot be
-// told apart from.
-TEST(MqttClientState, LinkTransitionStopsOnlyClientsWithAnAttemptInFlight) {
+// changed. These two predicates are what decide which clients it may touch.
+//
+// The distinction from a reconfigure matters: a reconfigure must cancel an
+// in-flight attempt, because that attempt would report the OLD endpoint under
+// the new configuration. A transition changes no configuration, so the attempt
+// is left to resolve — cancelling it would mean an unbounded
+// esp_mqtt_client_stop() on the sole MQTT worker during a routine link flap.
+TEST(MqttClientState, LinkTransitionOnlyDisconnectsClientsWithNoAttemptInFlight) {
   for (MqttClientState s : kAllStates) {
-    const bool touched = mqttClientStateIsLive(s);
-    const bool needs_stop = touched && mqttClientStateHasAttemptInFlight(s);
+    const bool live = mqttClientStateIsLive(s);
+    const bool disconnected_here = live && !mqttClientStateHasAttemptInFlight(s);
 
     // Quarantined is never touched: its SDK task was not joined, so it stays
     // out of service for the rest of the boot.
-    if (s == MqttClientState::Quarantined) EXPECT_FALSE(touched) << mqttClientStateName(s);
+    if (s == MqttClientState::Quarantined) EXPECT_FALSE(live) << mqttClientStateName(s);
     // Nothing that is already proven stopped is worth a disconnect.
-    if (mqttClientStateIsProvenStopped(s)) EXPECT_FALSE(touched) << mqttClientStateName(s);
+    if (mqttClientStateIsProvenStopped(s)) EXPECT_FALSE(live) << mqttClientStateName(s);
 
-    EXPECT_EQ(s == MqttClientState::Starting, needs_stop) << mqttClientStateName(s);
-    // The cheap bounded path, which keeps the esp-mqtt task alive.
     EXPECT_EQ(s == MqttClientState::Connected || s == MqttClientState::Disconnected,
-              touched && !needs_stop) << mqttClientStateName(s);
+              disconnected_here) << mqttClientStateName(s);
+    // Starting is live, and still must not be disconnected here.
+    if (s == MqttClientState::Starting) {
+      EXPECT_TRUE(live);
+      EXPECT_FALSE(disconnected_here);
+    }
   }
 }
 

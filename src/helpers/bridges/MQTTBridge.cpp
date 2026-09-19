@@ -2335,31 +2335,38 @@ static constexpr unsigned long kNetworkTransitionDisconnectMs = 2000;
 
 // Close a slot's transport because the route under it changed.
 //
-// Same shape as closeLiveClientForReconfigure(), and for the same F04 reason: a
-// client that is still Starting has an attempt aimed at the OLD route, and
-// softDisconnect() returns immediately on one that is not yet connected, so the
-// attempt would run to completion and deliver a CONNECTED event that is
-// indistinguishable from the new route's. On a medium switch the old route can
-// still be briefly usable, so that event is not hypothetical. Cancelling it
-// needs a real stop; reconnectSlotClient() starts a stopped client again.
+// Deliberately NOT the reconfigure path, even though both close a live client.
+// A reconfigure gives the slot a new endpoint and new credentials, so an
+// in-flight attempt that completes afterwards reports a connection to the OLD
+// broker under the new configuration, and cancelling it is worth a real stop
+// (F04). A link transition changes neither: the attempt is aimed at the same
+// broker with the same credentials, so if it completes it is credited to the
+// endpoint it actually reached. It is stale only in that its socket sits on a
+// route that is going away, and the ordinary DISCONNECTED path handles that.
 //
-// A connected client takes the cheap path instead — bounded, and the esp-mqtt
-// task stays, which is what keeps a Wi-Fi flap from recreating every slot's
-// task and refragmenting internal heap. The wait is short because the old route
-// is already gone; a client whose event is late is aborted by keepalive and
-// picked up by the normal backoff retry.
+// So an attempt in flight is left alone here. Stopping it would mean calling
+// esp_mqtt_client_stop(), which waits on the SDK's API mutex and its task's
+// stopped event with no bound (see stopSlotClient()) — the client task notices
+// only when it returns from whatever transport call it is in, up to
+// network_timeout_ms for a TLS connect. During teardown that is contained by
+// the bridge's StopUnproven timeout; during a transition nothing contains it,
+// so paying it serially for up to five slots would freeze the sole MQTT worker
+// far past the bound this path advertises, and would block the bridge's own
+// stop handshake behind it. A routine Wi-Fi flap must not cost that.
 //
-// Nothing here touches a client that is not live, so a Quarantined one (its SDK
-// task was never joined) is left alone, as it must be for the rest of the boot.
+// A connected client takes the cheap bounded path, and the esp-mqtt task stays,
+// which is what keeps a flap from recreating every slot's task and
+// refragmenting internal heap. Nothing here touches a client that is not live,
+// so a Quarantined one (its SDK task was never joined) is left alone, as it
+// must be for the rest of the boot.
 void MQTTBridge::closeLiveClientForLinkTransition(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
   if (slot.client == nullptr || !clientStateIsLive(slot.client_state)) return;
 
   if (mqttClientStateHasAttemptInFlight(slot.client_state)) {
-    MQTT_DEBUG_PRINTLN("MQTT%d link transition during connect - stopping to cancel the attempt",
+    MQTT_DEBUG_PRINTLN("MQTT%d link transition during connect - leaving the attempt to resolve",
                        index + 1);
-    stopSlotClient(index);
     return;
   }
 

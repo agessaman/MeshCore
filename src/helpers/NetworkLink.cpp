@@ -11,6 +11,7 @@
 
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <lwip/dns.h>
 
 #if defined(NETWORK_PREFER_ETHERNET)
 #include "ethernet/ch390/CH390Config.h"
@@ -40,6 +41,8 @@ class NetworkLinkBase : public NetworkLink {
   bool _status_initialized = false;
   bool _last_connected = false;
   unsigned long _last_status_check = 0;
+  static constexpr int kDnsServers = 2;
+  std::atomic<uint32_t> _dns_snapshot[kDnsServers] = {{0}, {0}};
 
   AlertFaultPolicy::OutageSnapshot outage() const {
     return AlertFaultPolicy::unpackOutageSnapshot(
@@ -65,6 +68,7 @@ class NetworkLinkBase : public NetworkLink {
         (uint32_t)now_ms, reason, outage()));
   }
 
+
  public:
   unsigned long connectedAtMillis() const override {
     return _connected_at.load(std::memory_order_relaxed);
@@ -80,6 +84,39 @@ class NetworkLinkBase : public NetworkLink {
 
   AlertFaultPolicy::OutageSnapshot outageSnapshot() const override {
     return outage();
+  }
+
+  // Remember the resolver this link's DHCP lease installed, so switching back
+  // to it can put that resolver back.
+  //
+  // lwIP keeps ONE global server list, not one per interface: a DHCP lease on
+  // any medium calls dns_setserver() and overwrites whatever the other medium
+  // had. IDF 4.4 has no per-interface retention either — esp_netif_get_dns_info()
+  // reads the same globals — so the medium that leased last owns DNS for every
+  // socket. Without this, an Ethernet node that falls back to Wi-Fi and then
+  // fails back keeps asking the Wi-Fi network's DNS server. When the two are on
+  // different subnets that server is unreachable from Ethernet, and the node
+  // reads as connected while every broker and NTP hostname fails to resolve,
+  // until Ethernet's own DHCP renewal happens to fix it hours later.
+  void snapshotDns() {
+    for (int i = 0; i < kDnsServers; i++) {
+      const ip_addr_t* server = dns_getserver(i);
+      _dns_snapshot[i].store(
+          (server != nullptr && !ip_addr_isany(server))
+              ? ip4_addr_get_u32(ip_2_ip4(server)) : 0,
+          std::memory_order_relaxed);
+    }
+  }
+
+  // Only servers this link actually leased are restored; a medium that has
+  // never held a lease leaves the current resolver alone rather than blanking it.
+  void restoreDns() const {
+    for (int i = 0; i < kDnsServers; i++) {
+      const uint32_t addr = _dns_snapshot[i].load(std::memory_order_relaxed);
+      if (addr == 0) continue;
+      const ip_addr_t server = IPADDR4_INIT(addr);
+      dns_setserver(i, &server);
+    }
   }
 };
 
@@ -199,7 +236,10 @@ class WiFiNetworkLink final : public NetworkLinkBase {
       // Already associated when the link started (end()/begin() leaves STA up):
       // there is no connect transition below to carry the setting, so apply it
       // here or the node keeps running whatever mode was set before.
-      if (connected) applyPowerPrefs(wifi_power_save);
+      if (connected) {
+        applyPowerPrefs(wifi_power_save);
+        snapshotDns();
+      }
     }
 
     if ((uint32_t)(now_ms - _last_status_check) <= 10000) {
@@ -216,6 +256,7 @@ class WiFiNetworkLink final : public NetworkLinkBase {
         _connected_at.store(now_ms, std::memory_order_relaxed);
         _reconnect_backoff_attempt = 0;
         applyPowerPrefs(wifi_power_save);
+        snapshotDns();
       }
       _last_connected = true;
       return transitioned ? NetworkTransition::Up : NetworkTransition::None;
@@ -308,6 +349,10 @@ class EthernetNetworkLink final : public NetworkLinkBase {
             _event_state.store(static_cast<uint8_t>(EventState::GotIp),
                                std::memory_order_relaxed);
             noteConnected(millis());
+            // Taken here rather than at the maintain() edge: this is the moment
+            // the lease installed the resolver, before a Wi-Fi fallback lease
+            // can overwrite it.
+            snapshotDns();
             break;
           case ARDUINO_EVENT_ETH_DISCONNECTED:
             _event_state.store(static_cast<uint8_t>(EventState::LinkDown),
@@ -350,7 +395,10 @@ class EthernetNetworkLink final : public NetworkLinkBase {
       _status_initialized = true;
       setOutage(AlertFaultPolicy::applyWifiStatus(
           now_ms, connected, outage(), false));
-      if (connected) noteConnected(now_ms);
+      if (connected) {
+        noteConnected(now_ms);
+        snapshotDns();
+      }
       return NetworkTransition::None;
     }
 
@@ -364,6 +412,7 @@ class EthernetNetworkLink final : public NetworkLinkBase {
       _connected_at.store(now_ms, std::memory_order_relaxed);
       setOutage(AlertFaultPolicy::applyWifiStatus(
           now_ms, true, outage(), true));
+      snapshotDns();
       return NetworkTransition::Up;
     }
 
@@ -525,6 +574,13 @@ class AutomaticNetworkLink final : public NetworkLink {
     }
     _selected_down_since.store(0, std::memory_order_relaxed);
     _selected.store(medium, std::memory_order_release);
+    // Put back the resolver this medium leased. lwIP's server list is global,
+    // so whichever medium leased last still owns it here (see snapshotDns()).
+    if (medium == NetworkMedium::Ethernet) {
+      _ethernet.restoreDns();
+    } else if (medium == NetworkMedium::WiFi) {
+      _wifi.restoreDns();
+    }
   }
 
   bool startOrRetryEthernet(uint32_t now_ms, bool restart) {

@@ -880,6 +880,9 @@ the radio actually performs in that case.
   report a connection that no longer exists. When the same link returns, each slot gets one
   immediate attempt at its current backoff rung (a tripped circuit breaker gets one immediate
   probe); a switch to the other medium also clears backoff and breakers
+- Each medium's DHCP DNS servers are remembered when it gets its lease and restored when it is
+  selected again. lwIP keeps one global resolver list, so without this a node that fell back to
+  WiFi and then failed back to Ethernet would keep asking the WiFi network's DNS server
 - WiFi credentials changed at runtime (`set wifi.ssid` / `set wifi.pwd`) are used on the next
   reconnect attempt without a reboot
 - Packets are queued while a slot is disconnected and flushed when it recovers
