@@ -158,6 +158,9 @@ public:
   }
 
   bool startOTAUpdate(const char* id, char reply[], bool force_ap = false) override;
+  bool stopOTAUpdate(char* reply) override;
+  bool isOTAUpdateInProgress() const override;
+  void maintainOTAUpdate(uint32_t now_ms) override;
   bool otaFromManifest(const char* current_ver, bool dry_run, char reply[]) override;
   // Heavy body (TLS + JSON / HTTPUpdate). Runs in a dedicated large-stack task
   // spawned by otaFromManifest() — public only so that task entry point can call

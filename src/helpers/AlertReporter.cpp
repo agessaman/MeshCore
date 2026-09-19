@@ -6,6 +6,7 @@
 #include <stdio.h>
 #ifdef WITH_MQTT_BRIDGE
 #include "AlertFaultPolicy.h"
+#include "NetworkLink.h"
 #endif
 
 // Header layout for PAYLOAD_TYPE_GRP_TXT before encryption:
@@ -207,23 +208,29 @@ void AlertReporter::onLoop(unsigned long now_ms) {
   const uint32_t min_interval_ms =
       AlertFaultPolicy::minIntervalMs(_obs->alert_min_interval_min);
 
-  // -------- WiFi fault --------
+  // -------- Primary network fault --------
   if (_obs->alert_wifi_minutes > 0) {
     if (_bridge != nullptr) {
-      const AlertFaultPolicy::OutageSnapshot snap = _bridge->getWifiOutageSnapshot();
+      const AlertFaultPolicy::OutageSnapshot snap =
+          _bridge->getNetworkOutageSnapshot();
+      const NetworkMedium alert_medium = _bridge->getNetworkAlertMedium();
+      const char* alert_label = alert_medium == NetworkMedium::Ethernet
+          ? "Ethernet" : "WiFi";
       AlertFaultPolicy::TickResult r = AlertFaultPolicy::tick(
           _wifi, now, snap,
           AlertFaultPolicy::thresholdMs(_obs->alert_wifi_minutes),
           min_interval_ms);
       if (r.action == AlertFaultPolicy::Action::FireDown) {
         char text[80];
-        AlertFaultPolicy::formatWifiAlert(text, sizeof(text), r, snap);
+        AlertFaultPolicy::formatNetworkAlert(
+            text, sizeof(text), alert_label, r, snap);
         if (sendChannel(text)) {
           AlertFaultPolicy::commitDown(_wifi, now, snap.started_ms);
         }
       } else if (r.action == AlertFaultPolicy::Action::FireRecovered) {
         char text[80];
-        AlertFaultPolicy::formatWifiAlert(text, sizeof(text), r, snap);
+        AlertFaultPolicy::formatNetworkAlert(
+            text, sizeof(text), alert_label, r, snap);
         sendChannel(text);
         AlertFaultPolicy::commitRecovered(_wifi);
       }

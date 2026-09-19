@@ -476,7 +476,7 @@ body.tab-cli{padding-bottom:0}
         </div></div>
       <div class="f"><label>Password</label><input type="password" data-k="wifi.pwd" maxlength="63" autocomplete="off"></div>
       <div class="f"><label>Power save</label>
-        <select data-k="wifi.powersave"><option value="min">Minimum (default)</option><option value="none">None (lowest latency)</option><option value="max">Maximum (battery)</option></select></div>
+        <select data-k="wifi.powersave"><option value="none">None (default, lowest latency)</option><option value="min">Minimum</option><option value="max">Maximum (battery)</option></select></div>
     </div>
     <div class="card">
       <h2>Maintenance</h2>
@@ -1156,7 +1156,9 @@ function pollStats(){
       tile("Direct RX/TX",s.recv_direct+" / "+s.sent_direct)+
       tile("TX queue",s.tx_queue)+
       tile("MQTT queue",s.mqtt_queue)+
-      tile("WiFi RSSI",s.wifi_rssi,"dBm")+
+      (s.wifi_rssi==null
+        ? tile("Network",s.network_medium||"—","RSSI unavailable")
+        : tile("WiFi RSSI",s.wifi_rssi,"dBm"))+
       tile("IP",s.ip||"—");
     push(st.hist.heap,kb);push(st.hist.noise,s.noise);
     spark($("#spark-heap"),st.hist.heap);spark($("#spark-noise"),st.hist.noise);
@@ -1546,6 +1548,8 @@ var CLI_KEYS=[
   ["wifi.ssid","WiFi network name",0],
   ["wifi.pwd","WiFi password",0],
   ["wifi.powersave","WiFi power-save mode",0,"none|min|max"],
+  ["link.status","Selected network, IP, signal and uptime",1],
+  ["link.diag","Ethernet selection and fallback diagnostics",1],
   ["wifi.status","WiFi connection, IP, RSSI and uptime",1],
   ["mqtt.origin","Observer name in published messages",0],
   ["mqtt.iata","IATA region code used in topic paths",0],

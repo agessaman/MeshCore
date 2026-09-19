@@ -114,6 +114,8 @@ void setup() {
 }
 
 void loop() {
+  board.maintainOTAUpdate(millis());
+
   int len = strlen(command);
   // `command` must stay NUL-terminated within its bounds. If it ever isn't,
   // strlen() above can return >= sizeof(command) and the loop below would then

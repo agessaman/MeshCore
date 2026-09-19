@@ -1,6 +1,12 @@
 #include "MyMesh.h"
 #include <algorithm>
+#include <climits>
 #include <helpers/RxReservePacketManager.h>
+#include <helpers/NetworkLink.h>
+#include <helpers/NetworkHostname.h>
+#if defined(ESP_PLATFORM)
+#include <WiFi.h>
+#endif
 #if defined(WITH_MQTT_NEIGHBORS)
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
 #endif
@@ -943,6 +949,26 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
 
+#if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+  NetworkLink& boot_network = activeNetworkLink();
+  if (boot_network.isAutomatic()) {
+    char network_hostname[NetworkHostname::kBufferSize];
+    NetworkHostname::build(network_hostname, sizeof(network_hostname),
+                           _prefs.node_name, self_id.pub_key, PUB_KEY_SIZE);
+    boot_network.setHostname(network_hostname);
+    Serial.printf("Network: hostname %s\n", network_hostname);
+    MQTTPrefs* obs = _cli.getObserverPrefs();
+    Serial.printf("Network: probing Ethernet for up to %lums\n",
+                  (unsigned long)NETWORK_ETHERNET_BOOT_WAIT_MS);
+    const uint32_t ethernet_probe_started_at = millis();
+    boot_network.bootstrap(obs->wifi_ssid, obs->wifi_password,
+                           NETWORK_ETHERNET_BOOT_WAIT_MS);
+    Serial.printf("Network: selected %s (%s) after %lums\n",
+                  boot_network.mediumName(), boot_network.statusName(),
+                  (unsigned long)(millis() - ethernet_probe_started_at));
+  }
+#endif
+
   acl.load(_fs, self_id);
   region_map.load(_fs);
 
@@ -1018,9 +1044,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
 
 #if defined(WITH_WEBCONFIG) && !defined(WEBCONFIG_NO_AUTO_AP)
-  // First-boot setup portal: raised only when no WiFi has ever been configured,
-  // so an OTA onto a deployed (configured) node can never open an AP.
-  if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+  // Existing Wi-Fi installs are complete by virtue of their stored SSID. An
+  // Ethernet-only install uses the explicit completion marker instead.
+  if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
     char wc_reply[160];
     startWebConfig(false, wc_reply);
     Serial.println(wc_reply);
@@ -1281,15 +1307,18 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   }
   if (force_ap) {
     // The setup AP owns WiFi outright; refuse while the bridge holds the STA.
-    if (bridge && bridge->isRunning()) {
+    if (bridge && bridge->isRunning() &&
+        activeNetworkLink().medium() != NetworkMedium::Ethernet) {
       strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
       return true;
     }
     _webconfig->startSetupMode(reply);
-  } else if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
-    _webconfig->startSetupMode(reply);   // unconfigured: same portal as first boot
+  } else if (activeNetworkLink().isConnected()) {
+    _webconfig->startLanMode(!mqttNetworkSetupComplete(_cli.getObserverPrefs()), reply);
+  } else if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
+    _webconfig->startSetupMode(reply);
   } else {
-    _webconfig->startLanMode(reply);     // reports "WiFi not connected" if down
+    strcpy(reply, "Err: selected network not connected");
   }
   return true;
 }
@@ -1324,12 +1353,17 @@ void MyMesh::onConfigBatchEnd() {
 // same sources as the stats CLI replies and `get mqtt.stats`.
 void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
   char ip[20] = "";
-  int wifi_rssi = 0;
-  if (WiFi.status() == WL_CONNECTED) {
-    strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
-    wifi_rssi = WiFi.RSSI();
-  } else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
+  char wifi_rssi[12] = "null";
+  NetworkLink& network = activeNetworkLink();
+  const char* network_medium = network.mediumName();
+  if (network.isConnected()) {
+    strncpy(ip, network.localIP().toString().c_str(), sizeof(ip) - 1);
+    const int signal = network.rssi();
+    if (signal != INT_MIN) snprintf(wifi_rssi, sizeof(wifi_rssi), "%d", signal);
+  }
+  else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
     strncpy(ip, WiFi.softAPIP().toString().c_str(), sizeof(ip) - 1);
+    network_medium = "wifi-ap";
   }
   int pos = snprintf(buf, buf_size,
       "{\"uptime_s\":%lu,\"batt_mv\":%u,"
@@ -1338,7 +1372,8 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
       "\"airtime_s\":%lu,\"rx_airtime_s\":%lu,"
       "\"recv\":%lu,\"sent\":%lu,\"rx_err\":%lu,"
       "\"sent_flood\":%lu,\"sent_direct\":%lu,\"recv_flood\":%lu,\"recv_direct\":%lu,"
-      "\"tx_queue\":%d,\"wifi_rssi\":%d,\"ip\":\"%s\",\"mqtt_queue\":%d,\"slots\":[",
+      "\"tx_queue\":%d,\"wifi_rssi\":%s,\"network_medium\":\"%s\","
+      "\"ip\":\"%s\",\"mqtt_queue\":%d,\"slots\":[",
       (unsigned long)(uptime_millis / 1000), (unsigned)board.getBattMilliVolts(),
       (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
       (unsigned long)ESP.getMaxAllocHeap(),
@@ -1349,7 +1384,7 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
       (unsigned long)radio_driver.getPacketsRecvErrors(),
       (unsigned long)getNumSentFlood(), (unsigned long)getNumSentDirect(),
       (unsigned long)getNumRecvFlood(), (unsigned long)getNumRecvDirect(),
-      (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, ip,
+      (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, network_medium, ip,
       bridge ? bridge->getQueueSize() : 0);
   if (pos < 0 || pos >= (int)buf_size - 3) return;  // truncated; snprintf terminated it
   bool first = true;

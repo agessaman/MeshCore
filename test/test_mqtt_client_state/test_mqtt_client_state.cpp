@@ -75,6 +75,35 @@ TEST(MqttClientState, StopIsAcknowledgedOnlyWhenEveryClientIsProvenStopped) {
   EXPECT_FALSE(mqttStopMayBeAcknowledged(nullptr, 3));
 }
 
+// A link transition closes each slot's transport because the route under it
+// changed. These two predicates are what decide which clients it may touch.
+//
+// The distinction from a reconfigure matters: a reconfigure must cancel an
+// in-flight attempt, because that attempt would report the OLD endpoint under
+// the new configuration. A transition changes no configuration, so the attempt
+// is left to resolve — cancelling it would mean an unbounded
+// esp_mqtt_client_stop() on the sole MQTT worker during a routine link flap.
+TEST(MqttClientState, LinkTransitionOnlyDisconnectsClientsWithNoAttemptInFlight) {
+  for (MqttClientState s : kAllStates) {
+    const bool live = mqttClientStateIsLive(s);
+    const bool disconnected_here = live && !mqttClientStateHasAttemptInFlight(s);
+
+    // Quarantined is never touched: its SDK task was not joined, so it stays
+    // out of service for the rest of the boot.
+    if (s == MqttClientState::Quarantined) EXPECT_FALSE(live) << mqttClientStateName(s);
+    // Nothing that is already proven stopped is worth a disconnect.
+    if (mqttClientStateIsProvenStopped(s)) EXPECT_FALSE(live) << mqttClientStateName(s);
+
+    EXPECT_EQ(s == MqttClientState::Connected || s == MqttClientState::Disconnected,
+              disconnected_here) << mqttClientStateName(s);
+    // Starting is live, and still must not be disconnected here.
+    if (s == MqttClientState::Starting) {
+      EXPECT_TRUE(live);
+      EXPECT_FALSE(disconnected_here);
+    }
+  }
+}
+
 TEST(MqttClientState, EveryStateHasAName) {
   for (MqttClientState s : kAllStates) {
     ASSERT_NE(nullptr, mqttClientStateName(s));

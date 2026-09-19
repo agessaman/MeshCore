@@ -80,7 +80,8 @@ reboot
 **9. Verify configuration**
 ```bash
 get wifi.ssid
-get wifi.status
+get link.status
+get link.diag
 get bridge.enabled
 get mqtt.rx
 get mqtt.tx
@@ -224,11 +225,14 @@ pio run -e ThinkNode_M7_repeater_observer_mqtt
 pio run -e ThinkNode_M7_room_server_observer_mqtt
 ```
 
-**ThinkNode M7 — WiFi only:** the M7 has an onboard CH390 Ethernet controller, and
-`ThinkNode_M7_companion_radio_ethernet` uses it, but the MQTT bridge's link
-management is bound to the WiFi station API, so the observer envs uplink over WiFi.
-See `UPSTREAM_BUGS.md` for the Ethernet gap. The board has PSRAM, so these builds
-get neighbors publication (`WITH_MQTT_NEIGHBORS`) automatically.
+**ThinkNode M7 — Ethernet preferred, WiFi fallback:** the observer envs use the onboard
+CH390 Ethernet when it has a DHCP lease at boot, otherwise the stored WiFi network, and
+switch between the two at runtime (`get link.status`, `get link.diag`). Nodes without a
+cable behave like WiFi observers after a brief (about 1 s) Ethernet probe at boot. The DHCP hostname is
+`meshcore-<node name>` on either medium. A first boot on Ethernet with no WiFi configured
+opens WebConfig on the LAN with a one-time login code printed on serial (and shown on
+the display), and requires replacing the admin password. The board has PSRAM, so these
+builds get neighbors publication (`WITH_MQTT_NEIGHBORS`) automatically.
 
 **TLora naming:** The env prefix `LilyGo_TLora_V2_1_1_6` is LilyGo’s **T-LoRa V2.1–1.6** board (SX1276); PlatformIO selects **`ttgo-lora32-v1`** (TTGO LoRa32 V1.0). **MQTT observer** envs extend a slim base **without** `sensor_base` so the image fits `min_spiffs`; **all other** `LilyGo_TLora_V2_1_1_6_*` targets still use optional I2C environmental sensors as before. The **`lilygo_tlora_c6`** variant is separate hardware (ESP32-C6).
 
@@ -546,12 +550,14 @@ These settings apply across all MQTT slots:
 - `set mqtt.owner <64-hex-char-public-key>` - Set owner public key
 - `set mqtt.email <email>` - Set owner email address
 
-### WiFi Commands
+### Network and WiFi Commands
 
 #### Get Commands
 - `get wifi.ssid` - Get WiFi SSID
 - `get wifi.pwd` - Get WiFi password
-- `get wifi.status` - Get WiFi connection status, IP, RSSI, and uptime
+- `get link.status` - Get the selected network medium, connection status, IP, signal when available, and uptime
+- `get link.diag` - Explain automatic Ethernet selection using controller initialization, link event, IP, WiFi fallback, route-lock, and reason state
+- `get wifi.status` - WiFi-only compatibility alias; reports n/a when another medium is selected
 - `get wifi.powersave` - Get WiFi power save mode (none/min/max)
 
 #### Set Commands
@@ -863,6 +869,22 @@ the radio actually performs in that case.
 ### Connection Handling
 - Automatic reconnection with exponential backoff per slot; a slot that stays down through
   the full backoff ladder is retried on a slow periodic probe instead of hammering the broker
+- Ethernet-preferred builds wait the full configured boot probe window for an Ethernet IP;
+  delayed or unavailable PHY carrier reporting does not shorten the DHCP deadline. The boot
+  selection log includes the measured probe duration.
+- CH390 startup initializes Arduino's shared network event runtime without associating WiFi;
+  this keeps the framework's DNS and TLS hostname paths safe when Ethernet wins directly.
+- Ethernet/WiFi transitions are logged. A lost or changed route closes every live MQTT
+  transport with a bounded disconnect that keeps the client task; a slot that was still
+  connecting is stopped instead, so its attempt cannot complete against the old route and
+  report a connection that no longer exists. When the same link returns, each slot gets one
+  immediate attempt at its current backoff rung (a tripped circuit breaker gets one immediate
+  probe); a switch to the other medium also clears backoff and breakers
+- Each medium's DHCP DNS servers are remembered when it gets its lease and restored when it is
+  selected again. lwIP keeps one global resolver list, so without this a node that fell back to
+  WiFi and then failed back to Ethernet would keep asking the WiFi network's DNS server
+- WiFi credentials changed at runtime (`set wifi.ssid` / `set wifi.pwd`) are used on the next
+  reconnect attempt without a reboot
 - Packets are queued while a slot is disconnected and flushed when it recovers
 
 ### Raw Radio Data Capture

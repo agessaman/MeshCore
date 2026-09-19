@@ -507,6 +507,15 @@ public:
     _wc_slot_restart_mask = 0;
   }
   void onConfigBatchEnd() override;
+  bool onInitialSetupComplete() override {
+    // The password command does not report its save; make it durable first.
+    if (!_cli.savePrefs(_fs)) return false;
+    MQTTPrefs* obs = _cli.getObserverPrefs();
+    obs->network_setup_complete = 1;
+    if (_cli.saveObserverPrefs(_fs)) return true;
+    obs->network_setup_complete = 0;
+    return false;
+  }
   void buildStatsJson(char* buf, size_t buf_size) override;
 #endif
 };
