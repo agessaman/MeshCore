@@ -10,6 +10,7 @@
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPresets.h"
+#include "helpers/MQTTPresetPolicy.h"
 #include "helpers/MQTTLifecycle.h"
 #include "helpers/AlertFaultPolicy.h"
 #include "helpers/MQTTEffectiveConfig.h"
