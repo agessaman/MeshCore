@@ -19,7 +19,8 @@
 static const char* const WC_ALLOWED_SET_KEYS[] = {
   // NodePrefs (radio / node)
   "name", "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
-  "cad", "radio.rxgain", "repeat", "advert.interval", "flood.advert.interval",
+  "cad", "radio.rxgain", "radio.fem.rxgain", "radio.fem.txgain",
+  "repeat", "advert.interval", "flood.advert.interval",
   "flood.max", "flood.max.advert", "flood.max.unscoped", "loop.detect",
   // MQTTPrefs (WiFi / MQTT / misc observer)
   "wifi.ssid", "wifi.pwd", "wifi.powersave",

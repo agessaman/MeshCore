@@ -387,6 +387,10 @@ body.tab-cli{padding-bottom:0}
         <span class="tgl"><input type="checkbox" data-k="cad"><u></u></span></div>
       <div class="sw"><span><b>RX boosted gain</b><i>SX126x receivers only</i></span>
         <span class="tgl"><input type="checkbox" data-k="radio.rxgain"><u></u></span></div>
+      <div class="sw hide" id="sw-fem-rx"><span><b>FEM RX gain</b><i>External front-end module LNA</i></span>
+        <span class="tgl"><input type="checkbox" data-k="radio.fem.rxgain"><u></u></span></div>
+      <div class="sw hide" id="sw-fem-tx"><span><b>FEM TX gain</b><i>Front-end PA level. Station G3 needs the PA PL1 jumper removed.</i></span>
+        <span class="tgl"><input type="checkbox" data-k="radio.fem.txgain"><u></u></span></div>
       <div class="sw"><span><b>Repeat</b><i>Forward mesh traffic. Off = listen-only (still observes and publishes).</i></span>
         <span class="tgl"><input type="checkbox" data-k="repeat"><u></u></span></div>
       <div class="row" style="margin-top:6px">
@@ -576,7 +580,7 @@ body.tab-cli{padding-bottom:0}
 <script>
 "use strict";
 var SENTINEL="********";
-var st={mode:"",authed:false,cfg:null,orig:{},dirty:{},presets:[],nslots:6,statsTimer:0,statsOn:false,statsInflight:false,hist:{heap:[],noise:[]},scanTarget:"",scanTimer:0};
+var st={mode:"",authed:false,cfg:null,orig:{},dirty:{},presets:[],nslots:6,boardCmds:[],statsTimer:0,statsOn:false,statsInflight:false,hist:{heap:[],noise:[]},scanTarget:"",scanTimer:0};
 
 function $(s){return document.querySelector(s)}
 function $$(s){return Array.prototype.slice.call(document.querySelectorAll(s))}
@@ -642,6 +646,10 @@ function boot(){
     st.mode=s.mode;st.authed=s.auth;st.needsSetup=!!s.needs_setup;st.nslots=s.active_slots||s.runtime_slots||6;
     if(s.max_cmds>0)CLI_MAX=s.max_cmds;
     st.fw=s.fw||"";st.build=s.build_date||"";st.role=s.role||"";st.board=s.board||"";
+    // Board-specific CLI commands this node answered for at startup. Controls
+    // for anything absent stay hidden: on this board they are not commands.
+    st.boardCmds=(s.board_cmds||"").split(",").filter(Boolean);
+    applyBoardCmds();
     $("#h-name").textContent=s.name||"MeshCore";
     $("#h-sub").textContent=s.role+" · "+shortVer()+" · "+s.board;
     var b=$("#h-badge");b.classList.remove("hide");
@@ -689,6 +697,8 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"tx":return String(r.tx);case"af":return String(r.af);
     case"rxdelay":return String(r.rxdelay);case"txdelay":return String(r.txdelay);
     case"cad":return r.cad?"on":"off";case"radio.rxgain":return r.rxgain?"on":"off";
+    case"radio.fem.rxgain":return r.fem_rxgain?"on":"off";
+    case"radio.fem.txgain":return r.fem_txgain?"on":"off";
     case"repeat":return r.repeat?"on":"off";
     case"flood.max":return String(r.flood_max);
     case"flood.max.advert":return String(r.flood_max_advert);
@@ -1525,7 +1535,6 @@ var CLI_KEYS=[
   ["dutycycle","Duty cycle percent (writes airtime factor)",0],
   ["cad","Listen before transmit",0,"on|off"],
   ["radio.rxgain","SX126x RX boosted gain",0,"on|off"],
-  ["radio.fem.rxgain","Front-end module RX gain",0],
   ["radio.watchdog","Restart the radio if silent this long {0-120 min}",0],
   ["int.thresh","Interference threshold",0],
   ["agc.reset.interval","AGC reset interval in seconds",0],
@@ -1586,6 +1595,27 @@ var CLI_KEYS=[
   ["bridge.channel","Bridge channel",0],
   ["bridge.secret","Bridge shared secret",0]
 ];
+/* Keys that come from Board::handleCommand(), not CommonCLI, so they exist only
+   on some boards. The node probes its own board at startup and names the ones it
+   answers in /api/status (board_cmds); the rest are never offered, because on
+   this board they are not commands at all. `gate` is the probed name — fan.lo
+   and fan.hi have no getter of their own and ride on `fan`.
+   [gate, key, description, mode, values] */
+var CLI_BOARD_KEYS=[
+  ["radio.fem.rxgain","radio.fem.rxgain","Front-end module RX gain",0,"on|off"],
+  ["radio.fem.txgain","radio.fem.txgain","Front-end module TX gain",0,"on|off"],
+  ["fan","fan","Fan mode, temperature and cooldown",0,"on|off|auto"],
+  ["fan","fan.lo","Fan-off temperature in C {0-100, below fan.hi}",2],
+  ["fan","fan.hi","Fan-on temperature in C {above fan.lo, max 120}",2]
+];
+function boardHas(gate){return st.boardCmds.indexOf(gate)>=0}
+// Board-specific rows in the settings form. Hidden unless the node answered for
+// the command at startup, so the form never shows a control that cannot apply.
+function applyBoardCmds(){
+  $("#sw-fem-rx").classList.toggle("hide",!boardHas("radio.fem.rxgain"));
+  $("#sw-fem-tx").classList.toggle("hide",!boardHas("radio.fem.txgain"));
+}
+
 // Per-slot keys, expanded across the slots this board actually runs.
 // [field, description, values]
 var CLI_SLOT=[
@@ -1603,15 +1633,20 @@ var CLI_TYPES="req,response,txt_msg,ack,advert,grp_txt,grp_data,anon_req,path,tr
 
 var cli={built:0,tbl:[],hist:[],hix:-1,draft:"",sug:[],sel:-1,busy:false,shown:false,pwd:false};
 
-// Rebuilt when the slot count changes: `active_slots` decides how many
-// mqttN.* keys actually exist on this board.
+// Rebuilt when the board's surface changes: `active_slots` decides how many
+// mqttN.* keys exist, and board_cmds which of the board-specific keys do.
 function cliTable(){
-  if(cli.built===st.nslots)return cli.tbl;
+  var built=st.nslots+"/"+st.boardCmds.join(",");
+  if(cli.built===built)return cli.tbl;
   var t=CLI_VERBS.slice();
-  CLI_KEYS.forEach(function(k){
-    var vals=k[3]?" {"+k[3]+"}":"";
-    if(k[2]!==2)t.push(["get "+k[0],k[1]]);
-    if(k[2]!==1)t.push(["set "+k[0]+" ",k[1]+vals]);
+  function addKey(key,desc,mode,vals){
+    vals=vals?" {"+vals+"}":"";
+    if(mode!==2)t.push(["get "+key,desc]);
+    if(mode!==1)t.push(["set "+key+" ",desc+vals]);
+  }
+  CLI_KEYS.forEach(function(k){addKey(k[0],k[1],k[2],k[3])});
+  CLI_BOARD_KEYS.forEach(function(k){
+    if(boardHas(k[0]))addKey(k[1],k[2],k[3],k[4]);
   });
   for(var n=1;n<=st.nslots;n++){
     CLI_SLOT.forEach(function(f){
@@ -1619,7 +1654,7 @@ function cliTable(){
       t.push(["set mqtt"+n+"."+f[0]+" ","Slot "+n+" "+f[1]]);
     });
   }
-  cli.tbl=t;cli.built=st.nslots;
+  cli.tbl=t;cli.built=built;
   return t;
 }
 // Value completions for `set <key> `. Returns null when the key has no enum,
@@ -1633,6 +1668,10 @@ function cliEnum(key){
   }
   for(var i=0;i<CLI_KEYS.length;i++){
     if(CLI_KEYS[i][0]===key)return CLI_KEYS[i][3]?CLI_KEYS[i][3].split("|"):null;
+  }
+  for(var j=0;j<CLI_BOARD_KEYS.length;j++){
+    var b=CLI_BOARD_KEYS[j];
+    if(b[1]===key&&boardHas(b[0]))return b[4]?b[4].split("|"):null;
   }
   return null;
 }

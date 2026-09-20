@@ -93,6 +93,21 @@ static inline bool wcIsDeferredReboot(const char* cmd) {
   return strncmp(cmd, "reboot", 6) == 0;
 }
 
+// Commands answered by Board::handleCommand(), which CommonCLI dispatches ahead
+// of its own table. Whether a node answers them is a property of the BOARD, not
+// of the build, so the page cannot know from the firmware version alone. Rather
+// than mirror a per-board list here — which would have to be edited every time a
+// variant grows a command — ask the board itself: probeBoardCommands() runs each
+// getter once and keeps the ones that answer.
+static const char* const WC_BOARD_CMDS[] = {
+  "radio.fem.rxgain",   // front-end module LNA (Heltec V4/V4 R8/Tracker V2, Station G3)
+  "radio.fem.txgain",   // front-end module PA level (Station G3)
+  "fan",                // thermal fan, and with it fan.lo / fan.hi (T-Beam 1W)
+};
+static const size_t WC_BOARD_CMD_COUNT = sizeof(WC_BOARD_CMDS) / sizeof(WC_BOARD_CMDS[0]);
+static_assert(sizeof(WC_BOARD_CMDS) / sizeof(WC_BOARD_CMDS[0]) <= 8,
+              "_board_cmds is a uint8_t bitmask");
+
 // Commands the CLI reaches but the portal cannot honestly serve. Rejected at
 // POST so nothing in the sequence runs, rather than failing halfway with a
 // reply that does not explain itself. Returns the reason, or NULL if fine.
@@ -455,6 +470,26 @@ void WebConfigServer::finalizeTeardown() {
   if (_cb) _cb->onWebConfigStopped();
 }
 
+// Ask the board which of WC_BOARD_CMDS it answers, once per start. The getters
+// are pure reads, and the reply says everything needed: CommonCLI answers a real
+// getter "> value", while every no-answer path — the "??:" fallthrough a board
+// with no hook reaches, and the "Error: unsupported" a board with the hook but
+// not the hardware returns — starts with something else.
+//
+// Loop task only: execCommand() reaches the CLI, which the async task must not.
+void WebConfigServer::probeBoardCommands() {
+  char cmd[48], reply[160];
+  uint8_t mask = 0;
+  for (size_t i = 0; i < WC_BOARD_CMD_COUNT; i++) {
+    snprintf(cmd, sizeof(cmd), "get %s", WC_BOARD_CMDS[i]);
+    reply[0] = 0;
+    _cb->execCommand(cmd, reply);
+    if (reply[0] == '>') mask |= (uint8_t)(1 << i);
+  }
+  _board_cmds = mask;
+  _board_cmds_probed = true;
+}
+
 void WebConfigServer::tick(uint32_t now) {
   if (_stopping) {
     uint32_t refs = handlerRefCount();
@@ -473,6 +508,8 @@ void WebConfigServer::tick(uint32_t now) {
     return;
   }
   if (_mode == MODE_OFF) return;
+
+  if (!_board_cmds_probed) probeBoardCommands();
 
   if (_mode == MODE_LAN && _initial_setup && _setup_reminder_at != 0 &&
       (int32_t)(now - _setup_reminder_at) >= 0) {
@@ -743,7 +780,7 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   bool authed = checkAuth(req);
 
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(640);
   doc["mode"] = (_mode == MODE_SETUP) ? "setup" : "lan";
   doc["auth"] = authed;
   doc["needs_setup"] = !mqttNetworkSetupComplete(_obs);
@@ -757,6 +794,19 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   doc["build_date"] = _build_date;
   doc["role"] = _role;
   doc["board"] = _board_name;
+  // Board-specific CLI commands this board answers; the page hides the controls
+  // for everything absent here rather than offering one that cannot work.
+  char board_cmds[80];
+  size_t n = 0;
+  board_cmds[0] = 0;   // the nothing-supported case
+  for (size_t i = 0; i < WC_BOARD_CMD_COUNT && n < sizeof(board_cmds) - 1; i++) {
+    if (!(_board_cmds & (1 << i))) continue;
+    int w = snprintf(&board_cmds[n], sizeof(board_cmds) - n, "%s%s",
+                     n ? "," : "", WC_BOARD_CMDS[i]);
+    if (w < 0) break;
+    n += (size_t)w;    // snprintf NUL-terminates; a truncating w stops the loop
+  }
+  doc["board_cmds"] = board_cmds;
   doc["uptime_s"] = millis() / 1000;
   doc["runtime_slots"] = RUNTIME_MQTT_SLOTS;
   doc["max_slots"] = MAX_MQTT_SLOTS;
@@ -867,6 +917,10 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     radio["txdelay"] = _prefs->tx_delay_factor;
     radio["cad"] = (bool)_prefs->cad_enabled;
     radio["rxgain"] = (bool)_prefs->rx_boosted_gain;
+    // FEM gain is driven by Board::handleCommand(), not CommonCLI, so these are
+    // the stored intent; a board with no front-end module rejects the `set`.
+    radio["fem_rxgain"] = (bool)_prefs->radio_fem_rxgain;
+    radio["fem_txgain"] = (bool)_prefs->radio_fem_txgain;
     radio["repeat"] = !(bool)_prefs->disable_fwd;   // CLI `repeat on` == disable_fwd 0
     radio["flood_max"] = _prefs->flood_max;
     radio["flood_max_advert"] = _prefs->flood_max_advert;
