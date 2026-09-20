@@ -322,6 +322,27 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 
 ---
 
+#### View the fan state, or change how it is driven, on supported boards
+**Usage:**
+- `get fan`
+- `set fan <mode>`
+- `set fan.lo <celsius>`
+- `set fan.hi <celsius>`
+
+**Parameters:**
+- `mode`: `on`|`off`|`auto`
+- `celsius`: `fan.lo` is 0-100 and must be below `fan.hi`; `fan.hi` is at most 120 and must be above `fan.lo`
+
+**Default:** `auto`, with `fan.lo` 45 and `fan.hi` 60
+
+**Notes:**
+- Currently the T-Beam 1W, the only board with a fan under software control.
+- `get fan` reports the mode, the measured temperature, whether the fan is running, and the remaining cooldown, e.g. `auto 52.4C fan=on cd=18s`. The temperature reads `n/a` when the NTC value is implausible.
+- In `auto` the fan starts at `fan.hi` and stops at `fan.lo`; the gap between them is what keeps it from chattering around one threshold.
+- `fan.lo` and `fan.hi` are set-only: `get fan` reports the mode and current state, not the thresholds.
+
+---
+
 ### System
 
 #### View or change this node's name

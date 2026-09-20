@@ -200,6 +200,13 @@ private:
   uint32_t _stats_built_at = 0;
   char _stats_json[1024] = {0};
 
+  // Which Board::handleCommand() commands this board actually answers, as a
+  // bitmask over WC_BOARD_CMDS. Written once by the loop task in
+  // probeBoardCommands() and read by the async status handler, both under _mux:
+  // the routes are serving before the first tick, so the two really do race.
+  uint8_t _board_cmds = 0;
+  bool _board_cmds_probed = false;
+
   void createServer();
   void registerRoutes();
   typedef void (WebConfigServer::*RequestHandler)(AsyncWebServerRequest*);
@@ -208,6 +215,7 @@ private:
   void detachRoutes();
   uint32_t handlerRefCount() const;
   void drainBatch(uint32_t now);
+  void probeBoardCommands();
   void finalizeTeardown();
   bool checkAuth(AsyncWebServerRequest* req);
   static void collectBody(AsyncWebServerRequest* req, uint8_t* data, size_t len,
