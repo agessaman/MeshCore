@@ -155,6 +155,7 @@ class State:
         # Board::handleCommand() commands this "board" answers. Empty by default:
         # the mock is a Heltec V3, which implements no such hook at all.
         self.board_cmds = [c for c in args.board_cmds.split(",") if c]
+        self.probe_delay = args.probe_delay
         self.cfg = default_config(args.setup)
         # latched at AP start, like WebConfigServer::_initial_setup
         self.initial_setup = args.setup and self.cfg["wifi"]["ssid"] == ""
@@ -186,7 +187,7 @@ class State:
         return c
 
     def status_json(self, authed):
-        return {
+        out = {
             "mode": "setup" if self.setup_mode else "lan",
             "auth": authed,
             "needs_setup": self.cfg["wifi"]["ssid"] == "",
@@ -198,9 +199,14 @@ class State:
             "role": "Repeater", "board": "Heltec V3 (mock)",
             "uptime_s": int(time.time() - self.start),
             "runtime_slots": 6, "max_slots": 6, "active_slots": self.active_slots,
-            "board_cmds": ",".join(self.board_cmds),
             "max_cmds": CLI_MAX_CMDS,
         }
+        # ABSENT, not empty, until the board has been probed: the node's routes
+        # go live a tick before probeBoardCommands() runs, and the page has to
+        # retry rather than latch "this board has no board commands".
+        if time.time() - self.start >= self.probe_delay:
+            out["board_cmds"] = ",".join(self.board_cmds)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -1119,6 +1125,9 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--setup", action="store_true", help="first-boot setup wizard mode")
     ap.add_argument("--active-slots", type=int, default=5, help="server slots to expose (2 or 5)")
+    ap.add_argument("--probe-delay", type=float, default=0.0,
+                    help="seconds to withhold board_cmds from /api/status, simulating "
+                         "the gap before the node has probed its board")
     ap.add_argument("--board-cmds", default="",
                     help="comma list of Board::handleCommand() commands to answer, e.g. "
                          "radio.fem.rxgain,radio.fem.txgain,fan (default: none, like a Heltec V3)")

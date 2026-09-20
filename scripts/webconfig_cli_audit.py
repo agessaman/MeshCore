@@ -12,6 +12,13 @@ that come back an error, so the two stay honest about each other.
     python3 scripts/webconfig_mock_server.py --port 8137 &
     python3 scripts/webconfig_cli_audit.py
 
+Board-specific commands (Board::handleCommand) are offered only when the node
+says it answers them, so one run exercises one shape of board. The mock claims
+none by default, like a Heltec V3; drive the other shapes with --board-cmds:
+
+    python3 scripts/webconfig_mock_server.py --port 8137 \
+        --board-cmds radio.fem.rxgain,radio.fem.txgain,fan &
+
 Exits non-zero if anything fails that is not in EXPECTED_FAILURES. Stdlib only.
 """
 
@@ -169,6 +176,21 @@ BOARD_ROUND_TRIPS = {
     "fan": [("set fan on", "get fan", "on 41.0C fan=on cd=0s")],
 }
 
+# Board commands with no getter to read back, so a round-trip cannot reach them.
+# Run in order, and drive the rejection path too: a set-only key that silently
+# accepted anything would look identical to one that works.
+# [(command, should_succeed, expected substring of the reply)]
+BOARD_SET_PROBES = {
+    "fan": [
+        ("set fan.lo 40", True, "OK"),
+        ("set fan.hi 70", True, "OK"),
+        ("set fan.lo 200", False, "0..100"),          # out of range
+        ("set fan.lo 90", False, "< fan.hi"),         # crosses the upper bound
+        ("set fan.hi 10", False, "> fan.lo"),         # crosses the lower bound
+        ("set fan.hi 130", False, "<= 120"),          # out of range
+    ],
+}
+
 
 class Client:
     def __init__(self, base):
@@ -179,8 +201,17 @@ class Client:
         # rather than hardcoding a number that drifts when the slot is resized.
         status = json.load(self._open("/api/status"))
         self.max_cmds = status.get("max_cmds", 24)
-        # Board::handleCommand() commands this node probed for at startup.
-        self.board_cmds = [c for c in status.get("board_cmds", "").split(",") if c]
+        # Board::handleCommand() commands this node probed for at startup. The
+        # field is absent until the probe has run, which is NOT the same as an
+        # empty list, so wait for it rather than audit a board half-known.
+        for _ in range(20):
+            if "board_cmds" in status:
+                break
+            time.sleep(0.25)
+            status = json.load(self._open("/api/status"))
+        else:
+            sys.exit("node never reported board_cmds; it has not probed its board")
+        self.board_cmds = [c for c in status["board_cmds"].split(",") if c]
 
     def _open(self, path, data=None):
         headers = {"Content-Type": "application/json"}
@@ -294,6 +325,16 @@ def main():
         print("   FAIL  %-30s got %r, wanted %r (set: %s)"
               % (getc, got, want, setr["reply"]))
         failures.append((getc, got))
+
+    # Set-only board commands, which no round-trip can reach.
+    probes = [p for gate in cli.board_cmds for p in BOARD_SET_PROBES.get(gate, [])]
+    if probes:
+        print("\nset-only board commands          : %d" % len(probes))
+        for (cmd, want_ok, want), (_, res) in zip(probes, cli.run([p[0] for p in probes])):
+            if res["ok"] == want_ok and want in res["reply"]:
+                continue
+            print("   FAIL  %-30s %s" % (cmd, res["reply"]))
+            failures.append((cmd, res["reply"]))
 
     # Commands the portal refuses must be refused clearly, not run and fudged.
     print("\nrefused with a reason              : ", end="")

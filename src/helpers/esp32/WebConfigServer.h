@@ -201,8 +201,9 @@ private:
   char _stats_json[1024] = {0};
 
   // Which Board::handleCommand() commands this board actually answers, as a
-  // bitmask over WC_BOARD_CMDS. Probed once per start on the loop task and then
-  // only read, so the async status handler needs no lock for it.
+  // bitmask over WC_BOARD_CMDS. Written once by the loop task in
+  // probeBoardCommands() and read by the async status handler, both under _mux:
+  // the routes are serving before the first tick, so the two really do race.
   uint8_t _board_cmds = 0;
   bool _board_cmds_probed = false;
 

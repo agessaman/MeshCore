@@ -477,6 +477,10 @@ void WebConfigServer::finalizeTeardown() {
 // not the hardware returns — starts with something else.
 //
 // Loop task only: execCommand() reaches the CLI, which the async task must not.
+// The routes are already live by the time this first runs — createServer()
+// happens in startLanMode()/startSetupMode(), one tick earlier — so the result
+// is published under _mux and read the same way, and /api/status leaves the
+// field out entirely until then rather than reporting a premature "nothing".
 void WebConfigServer::probeBoardCommands() {
   char cmd[48], reply[160];
   uint8_t mask = 0;
@@ -486,6 +490,7 @@ void WebConfigServer::probeBoardCommands() {
     _cb->execCommand(cmd, reply);
     if (reply[0] == '>') mask |= (uint8_t)(1 << i);
   }
+  WCLock lock(_mux);
   _board_cmds = mask;
   _board_cmds_probed = true;
 }
@@ -796,17 +801,29 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   doc["board"] = _board_name;
   // Board-specific CLI commands this board answers; the page hides the controls
   // for everything absent here rather than offering one that cannot work.
-  char board_cmds[80];
-  size_t n = 0;
-  board_cmds[0] = 0;   // the nothing-supported case
-  for (size_t i = 0; i < WC_BOARD_CMD_COUNT && n < sizeof(board_cmds) - 1; i++) {
-    if (!(_board_cmds & (1 << i))) continue;
-    int w = snprintf(&board_cmds[n], sizeof(board_cmds) - n, "%s%s",
-                     n ? "," : "", WC_BOARD_CMDS[i]);
-    if (w < 0) break;
-    n += (size_t)w;    // snprintf NUL-terminates; a truncating w stops the loop
+  // ABSENT until the probe has run, which is not the same as an empty list: the
+  // page must not latch "this board has none" from a status served in the gap
+  // between the routes going live and the first tick.
+  bool probed;
+  uint8_t board_mask;
+  {
+    WCLock lock(_mux);
+    probed = _board_cmds_probed;
+    board_mask = _board_cmds;
   }
-  doc["board_cmds"] = board_cmds;
+  if (probed) {
+    char board_cmds[80];
+    size_t n = 0;
+    board_cmds[0] = 0;   // the nothing-supported case
+    for (size_t i = 0; i < WC_BOARD_CMD_COUNT && n < sizeof(board_cmds) - 1; i++) {
+      if (!(board_mask & (1 << i))) continue;
+      int w = snprintf(&board_cmds[n], sizeof(board_cmds) - n, "%s%s",
+                       n ? "," : "", WC_BOARD_CMDS[i]);
+      if (w < 0) break;
+      n += (size_t)w;    // snprintf NUL-terminates; a truncating w stops the loop
+    }
+    doc["board_cmds"] = board_cmds;
+  }
   doc["uptime_s"] = millis() / 1000;
   doc["runtime_slots"] = RUNTIME_MQTT_SLOTS;
   doc["max_slots"] = MAX_MQTT_SLOTS;

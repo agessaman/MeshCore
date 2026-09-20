@@ -648,8 +648,9 @@ function boot(){
     st.fw=s.fw||"";st.build=s.build_date||"";st.role=s.role||"";st.board=s.board||"";
     // Board-specific CLI commands this node answered for at startup. Controls
     // for anything absent stay hidden: on this board they are not commands.
-    st.boardCmds=(s.board_cmds||"").split(",").filter(Boolean);
-    applyBoardCmds();
+    // The field is ABSENT, not empty, until the node has finished probing, and
+    // this page reads status once — so latch it only when it is really there.
+    setBoardCmds(s.board_cmds);
     $("#h-name").textContent=s.name||"MeshCore";
     $("#h-sub").textContent=s.role+" · "+shortVer()+" · "+s.board;
     var b=$("#h-badge");b.classList.remove("hide");
@@ -1609,6 +1610,25 @@ var CLI_BOARD_KEYS=[
   ["fan","fan.hi","Fan-on temperature in C {above fan.lo, max 120}",2]
 ];
 function boardHas(gate){return st.boardCmds.indexOf(gate)>=0}
+// An absent board_cmds means the node has not finished probing its board, which
+// it does on the first tick after the routes go live — so in practice the very
+// first retry finds it. Retry rather than read absent as "no board commands",
+// which would hide working controls for the whole session. Backs off to ~15s
+// total: generous against a one-tick gap, and bounded, since a node that never
+// answers is one where hiding the controls is the right outcome anyway.
+function setBoardCmds(v,tries){
+  if(v===undefined||v===null){
+    tries=tries||0;
+    if(tries<10)setTimeout(function(){
+      api("/api/status").then(function(s){setBoardCmds(s.board_cmds,tries+1)})
+                        .catch(function(){});
+    },Math.min(300*(tries+1),2000));
+    return;
+  }
+  st.boardCmds=v.split(",").filter(Boolean);
+  cli.built=0;            // the command table is keyed on this; force a rebuild
+  applyBoardCmds();
+}
 // Board-specific rows in the settings form. Hidden unless the node answered for
 // the command at startup, so the form never shows a control that cannot apply.
 function applyBoardCmds(){
