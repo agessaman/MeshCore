@@ -1583,6 +1583,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (isValidName(&config[5])) {
       StrHelper::strncpy(_prefs->node_name, &config[5], sizeof(_prefs->node_name));
       savePrefs();
+      _callbacks->onNodeNameChanged();
       strcpy(reply, "OK");
     } else {
       strcpy(reply, "Error, bad chars");
