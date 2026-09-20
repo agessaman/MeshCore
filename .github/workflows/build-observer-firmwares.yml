@@ -48,6 +48,12 @@ env:
   # repo). Baked into the slim OTA manifests' file URLs; must stay consistent
   # with config.json's staticPath.
   STATIC_PATH: https://observer-fw.gessaman.com
+  # Where the firmware fetches <OTA_VARIANT>.json from — this URL *is* the release
+  # channel. Stated explicitly (it equals build.sh's default) rather than left
+  # unset, so "Verify production channel is baked in" below can assert against the
+  # same value the build was handed instead of a second hardcoded copy. Must match
+  # build.sh's OTA_MANIFEST_BASE_URL default and the Pages path serving flasher/v.
+  OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/v
 
 jobs:
 
@@ -136,6 +142,23 @@ jobs:
           # Stamp the per-base build number into the embedded version (v1.16.0.N).
           FIRMWARE_BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
         run: /usr/bin/env bash build.sh build-firmware ${{ matrix.shard.envs }}
+
+      - name: Verify production channel is baked in
+        shell: bash
+        run: |
+          # Mirror of the beta workflow's guard, which production lacked. Fail fast
+          # rather than publish firmware that would OTA itself onto the wrong
+          # channel: the manifest base is a compile-time -D, so a build that lost
+          # it (or picked up beta's) is invisible until a node tries `ota check`.
+          BIN=$(find .pio/build -name firmware.elf | head -1)
+          if [ -z "$BIN" ]; then echo "no ELF found to verify" >&2; exit 1; fi
+          if ! strings "$BIN" | grep -qF "$OTA_MANIFEST_BASE_URL"; then
+            echo "ERROR: production manifest base missing from $BIN" >&2; exit 1
+          fi
+          if strings "$BIN" | grep -qF 'https://observer.gessaman.com/beta/v'; then
+            echo "ERROR: beta manifest base present in a production build" >&2; exit 1
+          fi
+          echo "OK: $BIN carries $OTA_MANIFEST_BASE_URL"
 
       - name: Upload Shard Artifact
         uses: actions/upload-artifact@v4
@@ -253,8 +276,15 @@ jobs:
           # in out/ — the assets actually uploaded to the release — stamping this
           # build's number. Then persist the counter so the next run increments
           # from here.
+          # --prune deletes manifests for envs this build no longer produces, so
+          # a retired env cannot leave behind a manifest pointing at a release
+          # asset that later gets pruned (which is a 404 for `ota update` on any
+          # node still running it). The generator caps the prune (--prune-limit,
+          # default 4) and fails the run rather than pruning when a build looks
+          # like it silently lost envs.
           python3 flasher/scripts/gen-slim-manifests.py \
             --bin-dir out \
+            --prune \
             --static-path "$STATIC_PATH" \
             --out-dir flasher/v \
             --base-version "$FIRMWARE_VERSION" \

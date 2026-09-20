@@ -312,8 +312,16 @@ jobs:
           # Slim manifests come from the build output in out/ (the assets
           # actually uploaded to the release), not from config-beta.json — see
           # gen-slim-manifests.py's --bin-dir mode (flasher repo PR #1).
+          # --prune deletes manifests for envs this build no longer produces.
+          # Without it the dir only ever grew: the retired
+          # LilyGo_TLora_V2_1_1_6_*_observer_mqtt_ manifests sat here for two
+          # months pointing at release assets that had since been pruned, so any
+          # node still on that build got a 404 from `ota update`. The generator
+          # caps the prune (--prune-limit, default 4) and fails the run instead
+          # of pruning when a build looks like it silently lost envs.
           python3 flasher/scripts/gen-slim-manifests.py \
             --bin-dir out \
+            --prune \
             --static-path "$STATIC_PATH" \
             --out-dir "flasher/$MANIFEST_DIR" \
             --base-version "$FIRMWARE_VERSION" \
