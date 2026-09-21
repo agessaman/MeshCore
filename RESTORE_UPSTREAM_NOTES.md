@@ -69,9 +69,11 @@ observer's purpose. Mitigated on observer builds by `RxReservePacketManager`
 reserve (own responses/ACKs stay queueable) plus 30 s expiry of stale queued
 outbound. See MQTT_INTERNALS.md "Capture vs. duty-cycle throttling".
 
-## Phase 2 — CAD and FEM RX gain (NOT done; needs care + device testing)
+## Historical Phase 2 — CAD and FEM RX gain
 
-Still missing at HEAD, also dropped by `22eb9b87`, still present upstream:
+**Current-source correction (2026-09-20):** the missing-feature list below describes the old restoration checkpoint. Current `CommonCLI.h`, `CommonRadioPrefs`, role `getCADEnabled()` hooks, and radio wrappers contain CAD/FEM settings and integration. Per-board hardware behavior still requires validation. Do not use this historical list as instructions to restore those fields again.
+
+At the historical checkpoint these were missing, also dropped by `22eb9b87`, still present upstream:
 
 - **`cad_enabled`** — hardware Channel Activity Detection (listen-before-talk) before TX.
   The `Dispatcher`/`Radio` interface (`setCADEnabled`/`getCADEnabled`) is restored by

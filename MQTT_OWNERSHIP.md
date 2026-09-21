@@ -1,185 +1,66 @@
-# MQTT Bridge Cross-Core Ownership Model
+# Observer task ownership
 
-This document is the Phase 4 deliverable from `STABILITY_TESTABILITY_HANDOFF.md`:
-it records **one owner for each mutable runtime domain**, maps every place a
-non-owner reads owned state across cores today, and states the target primitive
-for each. It is paired with the fork-owned lifecycle test seam
-(`src/helpers/MQTTLifecycle.h`, `test/test_mqtt_lifecycle/`).
+Current implementation: `feat/observer-reliability`, based on `5c0da89117cdddcafbe1c9c5803fa92082ba7e2f`, September 2026. The framework remains Arduino-ESP32 2.0.17 / ESP-IDF 4.4.7 on PlatformIO espressif32 6.11.0.
 
-**Status:** ownership model documented and the lifecycle/teardown test seam
-landed (Phase 4). **Phase 5 (branch `phase5/cooperative-mqtt-shutdown`) has now
-implemented the cooperative shutdown and the OTA barrier — hazard §4 below.**
-Still **deferred** (carried to Phase 5b / Phase 6): publishing a plain-data
-snapshot and repointing the §1/§2 consumers, and replacing the §3 `volatile`
-handshakes with a command channel. This document is the plan; §1–§3 still
-describe current behavior, while §4 is now resolved (see its note). Line
-references are against the tree at the time of writing and should be re-verified
-before editing.
+## Owners and publication boundaries
 
-## Execution contexts
+| Domain | Owner | Handoff |
+|---|---|---|
+| SDK handles, slot transitions, config application, MQTT publication and NTP probes | MQTT bridge worker | SDK callbacks enqueue copied `MqttSlotEvent` records; the worker applies them |
+| SDK connection/stop acknowledgment flags | SDK MQTT task and wrapper caller | `std::atomic<bool>`; lifecycle effects never run inside a callback |
+| Durable preferences, CLI, portal batch execution, lifecycle coordinator | Arduino loop task | Candidate edit, verified save, then durable RAM commit; revisioned config mailbox to worker |
+| RF packet staging and score, radio/board telemetry | Arduino loop task | Value-copy FreeRTOS packet queue; one-second telemetry snapshot |
+| Diagnostic slot state and counters | MQTT bridge worker | Pointer-free runtime snapshot; readers copy under a short lock, then format |
+| Portal configuration responses | AsyncTCP task | Reads a portal-owned view published by `tick()` between loop commands; mutex also protects batch state |
+| SNMP OID storage | MQTT bridge worker | Mesh task publishes one radio/name/version record; worker copies it before servicing a request |
+| Network event observations | Wi-Fi event task | Atomic outage/status publication; credentials remain with network owner |
+| OTA manifest check | Dedicated task | Cached asynchronous result with request ID and completion time |
 
-- **MQTT task — Core 0** (`"MQTTBridge"`, `xTaskCreatePinnedToCore(..., MQTT_TASK_CORE=0)`,
-  entry `mqttTask` → `mqttTaskLoop`, `MQTTBridge.cpp:923`, `:991`). Owns all
-  WiFi / MQTT / NTP I/O and every mutation of `_slots[]`, connection state, and
-  NTP state.
-- **Loop task — Core 1** (`MyMesh::loop()`). Runs the CLI, WebConfig `tick()`,
-  and `AlertReporter::onLoop()`. `examples/simple_repeater/MyMesh.cpp:1529`
-  notes the bridge loop is *not* called here — it lives on Core 0.
-- **Producer / radio context.** Stages raw radio bytes before queue handoff
-  (`storeRawRadioData` → `_staged_*`, consumed by `queuePacket`; both Core 1, in
-  guaranteed sequence, `MQTTBridge.h:232-239`).
-- **Async TCP context.** WebConfig request parsing and immutable response
-  handoff only.
+Core affinity is not ownership: the SDK MQTT task and bridge worker may both run on Core 0 and still require synchronization. The queue and snapshot publishers above run in task context, not from an ISR.
 
-## Ownership model (one owner per mutable domain)
+`ObserverMailbox`, `ObserverConfigMailbox` and `ObserverAsyncJob` use bounded copy critical sections on ESP32 and a mutex in host tests. No allocation, formatting, flash write, SDK call or network operation runs under their lock. `MQTTPrefs` is 2,880 bytes in the current layout; the bridge retains two copies (pending and applied). The portal retains another copy while its object exists. These costs need to be included in non-PSRAM heap measurements.
 
-| Domain | Owner | Notes |
-|--------|-------|-------|
-| MQTT clients, slot connection state, publish counters, packet drain, NTP I/O | **MQTT task (Core 0)** | `_slots[]`, `PsychicMqttClient`s, `_ntp_client`, `_last_raw_*` |
-| CLI execution, preference persistence, WebConfig batch draining, bridge lifecycle requests | **Loop task (Core 1)** | issues start/stop/reconfigure, drains the WebConfig batch |
-| Packet staging before queue handoff | **Producer / radio (Core 1)** | `_staged_*`, no lock needed (sequential) |
-| Request parse + immutable response | **Async TCP** | must not touch mutable bridge state |
+## Event and configuration ordering
 
-The rule that follows: **loop/WebConfig/CLI/AlertReporter code must not directly
-inspect mutable MQTT slot objects or client counters.** The MQTT task must
-publish a plain-data snapshot they can read instead.
+Callbacks capture an incarnation when a client is allocated and copy their error fields before the SDK event expires. They never mutate slots or retain SDK event pointers. Retired-incarnation and stopped/quarantined-client events are ignored. A start attempt enters `Starting` before calling the driver. A failed call restores the prior state without claiming the credential was applied.
 
-## Current cross-core hazards (to resolve in Phase 5)
+The event channel holds 32 records. Overflow records a count and affected-slot mask. The worker clears the affected slot's connected state and stops its client before another publication cycle. A proven stop can be retried normally; an unproven stop retains its resources. Queue loss never means an assumed connected session.
 
-All of the following run on **Core 1** and read state mutated by **Core 0**
-without a lock or a published snapshot.
+Configuration and the accumulated slot-reconfigure mask travel together. The worker consumes one complete revision at a safe point. Other runtime settings and radio metadata are sampled between loop commands, at most every 100 ms. Failed and indeterminate saves never publish a candidate to the running worker; indeterminate flash outcomes still require reboot/recovery to determine which image is durable on storage.
 
-### 1. Diagnostic reads of live `_slots[]` via the singleton
+`get mqtt.runtime` reports runtime sample sequence/age, desired/applied configuration revisions and event-overflow count. Revision equality means the worker consumed the configuration, not that a broker accepted it. The whole report is a sampled value: if the worker is blocked in the SDK, its age grows and a newly queued revision may not yet appear.
 
-Four `static` accessors reach the live object through the file-scope
-`s_mqtt_bridge_instance` (`MQTTBridge.cpp:201`, set at `begin()` end `:849`,
-nulled first in `end()` `:858` — a plain, non-atomic pointer):
+The packet capture task reads loop-owned durable settings and published slot admission state. It never reads a worker-owned client or mutable slot. QoS0 publish acceptance retains its existing meaning; no delivery guarantee or public broker schema has changed.
 
-- `getSlotStatusSnapshot` (`:299`) — despite its name, built on demand from
-  live `_slots[slot_index]`. **Refined premise:** the returned `name`/`state`
-  `const char*`s point at static rodata (string literals / `MQTT_PRESETS[]`),
-  so they are *not* dangling. The real hazards are (a) reading the
-  `slot.preset` **pointer value**, which Core 0 can null/reassign mid-read
-  (`applySlotPreset`, `teardownSlot`), and (b) `slot.client->getPublishOk()`,
-  a live client pointer Core 0 can `delete` during teardown (UAF window).
-- `formatMqttStatusReply` (`:207`), `formatMqttStatsReply` (`:263`),
-  `formatSlotDiagReply` (`:397`) — same singleton + live `_slots[]` reads.
+## Stop and restart
 
-Consumers: CLI (`CommonCLI_Observer.cpp:726, :728, :791`) and the app-layer
-stats JSON (`examples/simple_repeater/MyMesh.cpp:1423`, mirrored in
-`examples/simple_room_server/MyMesh.cpp:1050`). **Refined premise:**
-`WebConfigServer.cpp` itself reads only a compile-time constant
-(`getMaxActiveSlots`, `:479`); the live-bridge web reads are in `buildStatsJson`
-in the `MyMesh.cpp` app layer.
+The loop task requests stop through `MQTTLifecycle::Coordinator`. The worker tears down clients and acknowledges only after their stops are proven. The task trampoline publishes its final acknowledgment immediately before self-deletion. Resource cleanup follows that acknowledgment.
 
-### 2. Instance reads that survive `end()`
+A timeout enters `StopUnproven`. There is **no forced worker deletion** and no freeing of reachable clients, tokens, packet buffers or task state. OTA flashing is withheld. A late acknowledgment permits cleanup and a later restart; an unexpected failed SDK stop quarantines the client for the boot. Do not turn a timeout into permission to free resources.
 
-`AlertReporter` (Core 1, `onLoop`, `AlertReporter.cpp:208`) reads live `_slots[]`
-via instance methods it reaches through its own `_bridge` pointer
-(`AlertReporter.cpp:281` `isSlotEnabledAndAttempted`, `:285`
-`getSlotCurrentOutageStartMs`, `:296`/`:311` `getSlotPresetName`). The stats
-JSON also calls `bridge->getQueueSize()` (`MyMesh.cpp:1419`).
+Client handles can be reused across compatible configuration changes, but TLS session buffers are allocated and released as connections open and close. Retaining a wrapper does not guarantee persistent mbedTLS session allocations. The existing OTA settle delay is retained; native/build results do not establish idle-task reclamation or device heap behavior.
 
-**Refined premise (teardown hazard):** `end()` nulls only
-`s_mqtt_bridge_instance`. The app's `bridge` pointer and `AlertReporter::_bridge`
-are **not** cleared by `end()`, so these instance reads can touch a torn-down
-bridge. (`getConnectedBrokers()` at `MQTTBridge.cpp:3676` is defined but has
-zero consumers.)
+## Diagnostics
 
-### 3. `volatile` cross-core handshakes
+`get mqtt.ntp.diag` queues a probe and returns immediately. Repeat it to retrieve the completed result, identified by request ID and age. Results are cached for 30 seconds; after expiry, the next call starts a new probe. The probe never sets the clock. Forced primary NTP synchronization also returns immediately, and shares the completion-based retry scheduler with ordinary synchronization.
 
-Plain `volatile` flags (no atomics/barriers), Core 1 sets the request, Core 0
-clears/processes and writes a "done" flag last, Core 1 spins:
+`ota check` follows the same request/result pattern, caching results for 60 seconds. A queued or running check cannot authorize flashing. If `ota update` starts a check, repeat the command after completion to request the update. Actual flashing still uses the existing deferred stop/barrier path and re-fetches the manifest with certificate verification. The check remains advisory.
 
-- `_slot_reconfigure_pending[]` — set `MQTTBridge.cpp:2057` (Core 1), read/clear
-  `:1118` (Core 0).
-- `_ntp_force_{requested,done,result}` — request `:3298`, process `:1063-1068`,
-  spin-wait `:3308-3315`.
-- `_ntp_diag_{requested,done}` (+ non-volatile `_ntp_diag_results[]`) — request
-  `:3344`, process `:1073-1076`, spin-wait `:3347`.
+The portal terminal uses the same commands and replies; repeat a queued diagnostic command to poll its job. A completed portal command batch means its CLI commands returned, not that an asynchronous probe finished.
 
-The two blocking waiters (`requestForcedNtpSync` `:3298`, `ntpDiag` `:3344`) spin
-on Core 1 while `end()` could tear down the singleton/task concurrently.
+## Validation and release gate
 
-### 4. Abrupt teardown, no start guard — RESOLVED in Phase 5
+Host tests exercise the production snapshot/config/event/job helpers, transition effects, checked client initialization, NTP scheduling, and existing persistence/lifecycle policies. ASan/UBSan run in `native_sanitized`; those sanitizers do not detect all data races or validate the precompiled SDK. Concurrent host tests check coherent copies and ordering, while firmware builds check the FreeRTOS adapter and framework integration.
 
-Original hazard (retained for context): `end()` used
-`vTaskDelete(_mqtt_task_handle)` to kill the task wherever it was (possibly
-mid-`_slots[]` mutation or inside mbedTLS), then ran slot/client cleanup *after*
-deletion on the caller's context — the OTA teardown heap-panic path. `begin()`
-had no double-call guard, and lifecycle state was a single `_initialized` bool.
+Observer PR smoke coverage includes repeater, room server, Ethernet, PSRAM and a non-observer target. Both observer release workflows require the reusable host verification workflow and preset parity before publication. Parity compares the candidate SHA with the sibling channel. These local workflow checks are not evidence of a live GitHub run.
 
-**Phase 5 resolution** (branch `phase5/cooperative-mqtt-shutdown`):
+Before fleet deployment, bench-test portal polling during reconfiguration, fast callbacks, broken brokers/DNS/NTP, queue saturation, stop during connect/probe, repeated start/stop, and OTA abort/resume on non-PSRAM, PSRAM and Ethernet boards. Record loop gaps, heap/largest block, stack high-water marks and task/client counts. Run power-cut migration tests separately.
 
-- `end()` now requests a cooperative stop through `MQTTLifecycle::Coordinator`.
-  The MQTT task (Core 0) tears down its own clients where the mbedTLS contexts
-  live, acknowledges via `_stop_acked`, and self-terminates; `end()` waits for
-  the ack before freeing the queue/buffers. The blind `vTaskDelete` survives
-  only as the bounded-timeout fallback, which sets a dirty latch that withholds
-  OTA flashing (`canFlashAfterStop()`).
-- `begin()` has an idempotent double-call guard and drives the Coordinator to
-  `Running`; the lifecycle state now lives in the tested state machine, not a
-  bare bool.
-- The OTA barrier gates `simple_repeater`'s deferred flash on a clean stop.
+## History and upstream seams
 
-Not hardware-validated yet (Phase 7); `MQTT_STOP_TIMEOUT_MS` is a Phase-0
-placeholder. Note the residual §1/§2 instance-pointer reads remain deferred, so
-consumers can still (as before) touch a torn-down bridge — that is unchanged by
-Phase 5 and tracked above.
+- [Earlier ownership phase plan](docs/observer-ownership-history.md): historical hazards and proposed phases.
+- [Stability/testability handoff](STABILITY_TESTABILITY_HANDOFF.md): historical device evidence; use its recorded board/date/revision, not as proof of this branch.
+- [Observer implementation](MQTT_IMPLEMENTATION.md): operating/configuration behavior.
+- [Upstream restoration history](RESTORE_UPSTREAM_NOTES.md): earlier restoration notes, with current-source correction.
 
-## Target primitives (Phase 5)
-
-- **Task notifications or a command queue** for one-way lifecycle / reconfigure
-  / NTP requests — replacing every `volatile` flag in §3.
-- **Immutable published snapshots** for WebConfig, CLI diagnostics, and alerting
-  — the MQTT task publishes a plain-data `SlotStatusSnapshot` (owned char
-  buffers + scalars, no live pointers) that §1/§2 consumers read. This also
-  removes the "instance pointer survives `end()`" hazard because consumers stop
-  dereferencing the live bridge.
-- **Atomics** only for truly independent scalar state.
-- **A mutex** only where ownership transfer or snapshot publication cannot
-  express the operation cleanly.
-
-## Lifecycle contract (the test seam)
-
-`src/helpers/MQTTLifecycle.h` encodes the cooperative lifecycle Phase 5 must
-implement, as a pure state machine plus a narrow injected `Ops` seam
-(clock / task control / resource owner / OTA barrier). The invariants proven by
-`test/test_mqtt_lifecycle/` — and that Phase 5's production wiring must preserve:
-
-- `Stopped → Starting → Running → StopRequested → Stopping → Stopped`.
-- Idempotent start and stop; safe restart only from `Stopped` (`mayRestart`).
-- New connects/publishes/retries/reconfigurations cease once a stop is requested
-  (`acceptsNewWork`).
-- Resources are released **only** after a stop acknowledgment (or the reviewed
-  timeout fallback) — never mid-run.
-- A late/stale callback consults `mayTouchOwnedState()` and is a no-op once the
-  owner has released resources.
-- Bounded stop timeout → reviewed fallback (models replacing the abrupt
-  `vTaskDelete`).
-- **OTA barrier:** `mayBeginFlash()` is true only after a **clean** stop
-  acknowledgment; a timed-out stop leaves flashing blocked so OTA aborts rather
-  than writing under uncertain ownership.
-
-### Phase 0 / hardware-pending items
-
-Per the "derive from code + flag" discipline, these are **not** encoded as
-constants and must be characterized on hardware before Phase 5 ships:
-
-- The concrete stop timeout (injected as `Coordinator`'s `stop_timeout_ms`;
-  must be measured against mbedTLS teardown over `wss` with a down broker).
-- Exact callback timing/ordering under a real TLS disconnect.
-- Heap / largest-block / task-stack high-water and task/client counts across
-  start/stop/restart (Phase 7 gates).
-
-## Deferred to Phase 5 (not done here)
-
-- Publishing the plain-data snapshot and repointing the §1/§2 consumers at it.
-- Replacing the §3 `volatile` handshakes with a command queue / task
-  notifications.
-- The cooperative shutdown state machine in `MQTTBridge` (`end()` rewrite, the
-  `begin()` double-call guard) and the OTA teardown barrier.
-
-`MQTTBridge.cpp` was intentionally left untouched in Phase 4 to keep the
-merge-sensitive file (≈3.7k lines) free of churn until the Phase 5 change lands
-as a single reviewable unit.
+Keep observer preference layouts and shared helpers outside upstream `NodePrefs`. CommonCLI's serializer/candidate hooks remain narrow; application integration retains role-specific mesh behavior. Do not replace the framework, remove stop guards, or expand the private WebSocket ABI shim without revalidating the pinned SDK.
