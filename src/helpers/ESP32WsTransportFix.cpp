@@ -62,7 +62,12 @@
 
 #if ESP_IDF_VERSION_MAJOR == 4
 
+#if ESP_IDF_VERSION_MINOR != 4 || ESP_IDF_VERSION_PATCH != 7
+#error "Revalidate the private WebSocket layout before using another IDF 4 SDK"
+#endif
+
 #include <stdlib.h>
+#include "RequiredTransportBuffer.h"
 #include "sdkconfig.h"
 #include "esp_transport.h"
 #include "esp_transport_ws.h"
@@ -97,22 +102,15 @@ extern "C" {
 esp_transport_handle_t __real_esp_transport_ws_init(esp_transport_handle_t parent_handle);
 
 esp_transport_handle_t __wrap_esp_transport_ws_init(esp_transport_handle_t parent_handle) {
-  esp_transport_handle_t t = __real_esp_transport_ws_init(parent_handle);
-  if (t != nullptr) {
-    transport_ws_t* ws = (transport_ws_t*)esp_transport_get_context_data(t);
-    if (ws != nullptr && ws->buffer != nullptr) {
-      // The buffer is untouched at this point (allocated moments ago inside
-      // __real_esp_transport_ws_init), so a swap is safe.
-      char* padded = (char*)malloc(CONFIG_WS_BUFFER_SIZE + 1);
-      if (padded != nullptr) {
+  return initWithRequiredTransportBuffer<esp_transport_handle_t>(
+      CONFIG_WS_BUFFER_SIZE + 1, malloc,
+      [&]() { return __real_esp_transport_ws_init(parent_handle); },
+      [](esp_transport_handle_t transport, void* buffer) {
+        // Successful init in the pinned SDK guarantees this context and buffer.
+        transport_ws_t* ws = (transport_ws_t*)esp_transport_get_context_data(transport);
         free(ws->buffer);
-        ws->buffer = padded;
-      }
-      // On alloc failure keep the original buffer: same behavior as before
-      // this fix, which is still strictly better than failing init here.
-    }
-  }
-  return t;
+        ws->buffer = static_cast<char*>(buffer);
+      }, free);
 }
 
 }  // extern "C"

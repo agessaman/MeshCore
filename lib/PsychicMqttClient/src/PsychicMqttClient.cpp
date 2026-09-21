@@ -1,3 +1,4 @@
+#include "MqttClientInit.h"
 #include "PsychicMqttClient.h"
 
 #include <string.h>
@@ -386,17 +387,17 @@ esp_err_t PsychicMqttClient::applyConfig()
 
     if (_client == nullptr)
     {
-        // esp_mqtt_client_init() takes the whole configuration, including the
-        // buffer sizes it allocates once and never resizes.
-        _client = esp_mqtt_client_init(&_mqtt_cfg);
-        if (_client == nullptr)
-        {
-            ESP_LOGE(TAG, "esp_mqtt_client_init failed");
-            return ESP_ERR_NO_MEM;
+        const esp_err_t result = initializeMqttClient(_client,
+            [&]() { return esp_mqtt_client_init(&_mqtt_cfg); },
+            [&](esp_mqtt_client_handle_t client) {
+                return esp_mqtt_client_register_event(client, MQTT_EVENT_ANY, _onMqttEventStatic, this);
+            },
+            [](esp_mqtt_client_handle_t client) { esp_mqtt_client_destroy(client); },
+            ESP_ERR_NO_MEM);
+        if (result != ESP_OK) {
+            ESP_LOGE(TAG, "MQTT initialization failed: %s", esp_err_to_name(result));
+            return result;
         }
-        // Register event handler only once when client is first created
-        // to avoid memory leak from repeated registrations
-        esp_mqtt_client_register_event(_client, MQTT_EVENT_ANY, _onMqttEventStatic, this);
         _config_dirty = false;
         return ESP_OK;
     }
