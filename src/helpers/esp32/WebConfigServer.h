@@ -28,6 +28,7 @@
 #define WITH_WEBCONFIG 1
 
 #include <Arduino.h>
+#include "../CommonCLI.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <helpers/WebConfigBatch.h>
@@ -125,6 +126,33 @@ private:
     char reply[160];  // CLI reply budget, same 160 bytes the serial console gets
   };
 
+  struct PrefsSnapshot {
+    decltype(NodePrefs::advert_interval) advert_interval{};
+    decltype(NodePrefs::airtime_factor) airtime_factor{};
+    decltype(NodePrefs::bw) bw{};
+    decltype(NodePrefs::cad_enabled) cad_enabled{};
+    decltype(NodePrefs::cr) cr{};
+    decltype(NodePrefs::disable_fwd) disable_fwd{};
+    decltype(NodePrefs::flood_advert_interval) flood_advert_interval{};
+    decltype(NodePrefs::flood_max) flood_max{};
+    decltype(NodePrefs::flood_max_advert) flood_max_advert{};
+    decltype(NodePrefs::flood_max_unscoped) flood_max_unscoped{};
+    decltype(NodePrefs::freq) freq{};
+    decltype(NodePrefs::loop_detect) loop_detect{};
+    decltype(NodePrefs::node_lat) node_lat{};
+    decltype(NodePrefs::node_lon) node_lon{};
+    decltype(NodePrefs::node_name) node_name{};
+    decltype(NodePrefs::password) password{};
+    decltype(NodePrefs::radio_fem_rxgain) radio_fem_rxgain{};
+    decltype(NodePrefs::radio_fem_txgain) radio_fem_txgain{};
+    decltype(NodePrefs::rx_boosted_gain) rx_boosted_gain{};
+    decltype(NodePrefs::rx_delay_base) rx_delay_base{};
+    decltype(NodePrefs::sf) sf{};
+    decltype(NodePrefs::tx_delay_factor) tx_delay_factor{};
+    decltype(NodePrefs::tx_power_dbm) tx_power_dbm{};
+  } _view_prefs;
+  MQTTPrefs _view_obs{};
+  void publishPrefs();  // loop task, between commands
   NodePrefs* _prefs;
   MQTTPrefs* _obs;
   Callbacks* _cb;
