@@ -156,7 +156,7 @@ class WiFiNetworkLink final : public NetworkLinkBase {
   char _ssid[33] = {};
   char _password[65] = {};
   unsigned long _last_reconnect_attempt = 0;
-  uint8_t _reconnect_backoff_attempt = 0;
+  std::atomic<uint8_t> _reconnect_backoff_attempt{0};
 
   // One mapping for startup, reconnect and CLI (see WifiPowerSavePolicy). The
   // stored default is `none`; `min` means MIN_MODEM here exactly as the CLI
@@ -520,6 +520,7 @@ class AutomaticNetworkLink final : public NetworkLink {
   std::atomic<bool> _ethernet_started{false};
   std::atomic<bool> _wifi_started{false};
   char _wifi_ssid[33] = {};
+  std::atomic<bool> _wifi_configured{false};
   char _wifi_password[65] = {};
   std::atomic<uint32_t> _ethernet_stable_since{0};
   std::atomic<uint32_t> _selected_down_since{0};
@@ -547,13 +548,14 @@ class AutomaticNetworkLink final : public NetworkLink {
         : static_cast<const NetworkLink&>(_wifi);
   }
 
-  bool wifiConfigured() const { return _wifi_ssid[0] != '\0'; }
+  bool wifiConfigured() const { return _wifi_configured.load(std::memory_order_acquire); }
 
   void rememberWifi(const char* ssid, const char* password) {
     strncpy(_wifi_ssid, ssid ? ssid : "", sizeof(_wifi_ssid) - 1);
     _wifi_ssid[sizeof(_wifi_ssid) - 1] = '\0';
     strncpy(_wifi_password, password ? password : "", sizeof(_wifi_password) - 1);
     _wifi_password[sizeof(_wifi_password) - 1] = '\0';
+    _wifi_configured.store(_wifi_ssid[0] != '\0', std::memory_order_release);
   }
 
   void startWifiFallback() {
