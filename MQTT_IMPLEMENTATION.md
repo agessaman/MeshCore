@@ -529,7 +529,8 @@ These settings apply across all MQTT slots:
 - `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; neighbors-enabled builds)
 - `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (neighbors-enabled builds)
 - `get mqtt.ntp` - Get effective NTP server hostname
-- `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, or why a probe was rejected — `DNS failed`, `unsolicited reply`, `server unsynced`, ... — and LoRa shows a compact `<server> ok|fail` list)
+- `get mqtt.runtime` - Read worker sample age, configuration revisions, and SDK event overflow count.
+- `get mqtt.ntp.diag` - Queue a probe and return immediately; repeat for its ID/age/result (cached for 30 seconds). Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, or why a probe was rejected — `DNS failed`, `unsolicited reply`, `server unsynced`, ... — and LoRa shows a compact `<server> ok|fail` list)
 - `get mqtt.owner` - Get owner public key (serial console only)
 - `get mqtt.email` - Get owner email address (serial console only)
 

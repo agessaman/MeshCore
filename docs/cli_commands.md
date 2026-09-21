@@ -1279,12 +1279,14 @@ region save
 **Usage:**
 - `get mqtt.ntp.diag`
 
-**Description:** Probes every configured NTP server (the custom primary, if set, plus the built-in fallbacks) and reports whether each responds. This is a pure connectivity diagnostic — it does **not** change the system clock.
+**Description:** Queues a probe of every configured NTP server and returns immediately. Repeat the command to poll. Completed results include the request ID and age and are cached for 30 seconds; a later call queues a new probe. This diagnostic does **not** change the system clock.
 
 - **Serial console:** prints a detailed table with each server's reported UTC time (or `FAIL`).
 - **Over LoRa:** returns a compact `<server> ok|fail` list, one per line.
 
-Requires WiFi connected and the MQTT bridge running.
+Requires a connected network and the MQTT bridge running.
+
+`get mqtt.runtime` reports the worker sample sequence and age, desired/applied configuration revisions, and lost SDK event count. Applied configuration does not imply a successful broker connection.
 
 ---
 
@@ -1374,3 +1376,7 @@ Ethernet support is available on RAK4631 boards with a RAK13800 (W5100S) Etherne
 - Connect with any TCP client (e.g. `nc`, PuTTY) to access the same CLI available over serial.
 
 ---
+
+### Observer OTA checks
+
+`ota check` queues a manifest check and returns immediately. Repeat it for the result, which is cached for 60 seconds and includes an ID and age. If `ota update` returns a queued/running check, repeat `ota update` after the check finishes to request flashing. A pending check never starts an update. Actual updates retain the deferred bridge-stop barrier and revalidate the manifest before flashing.
