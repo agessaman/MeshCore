@@ -12,12 +12,26 @@ separately; see "Local testing without hardware" in `MQTT_IMPLEMENTATION.md`.
 ```sh
 pio test -e native                      # all suites
 pio test -e native -f test_webconfig_keys   # a single suite
+pio test -e native -e native_sanitized -e native_kiss_modem  # CI verification
 ```
 
 A green `[PASSED]` per suite means GoogleTest returned 0 (all assertions
-passed). PlatformIO's "0 test cases" line is just its Unity-style counter and
-does not reflect the GoogleTest count — run the built binary directly
-(`.pio/build/native/program`) to see the per-assertion breakdown.
+passed). The environments use PlatformIO's GoogleTest runner, which reports
+individual test cases. `native_sanitized` adds AddressSanitizer and UBSan;
+it does not validate ESP32 task scheduling or the precompiled SDK.
+
+The observer reliability suites call helpers used by the firmware:
+
+- `test_observer_handoffs`: concurrent snapshot/configuration copies, coalesced
+  reconfigure requests, callback ordering and overflow, retired clients,
+  asynchronous job cancellation, durable preference commits, and stats JSON.
+- `test_observer_init`: failed client allocation/event registration and required
+  transport-buffer allocation cleanup.
+- `test_ntp_schedule`: completion-based refresh/retry deadlines, forced requests,
+  clock holdover, and millisecond rollover.
+
+These cover the extracted production operations, not the complete bridge or
+AsyncTCP routes. Device validation remains required; see `MQTT_OWNERSHIP.md`.
 
 ## Suites
 

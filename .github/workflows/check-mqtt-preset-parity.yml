@@ -12,6 +12,7 @@ permissions:
 
 on:
   workflow_dispatch:
+  workflow_call:
   pull_request:
     branches:
       - observer-firmware
@@ -47,6 +48,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          CANDIDATE_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           PRESET_PATH=src/helpers/MQTTPresets.h
@@ -72,9 +75,22 @@ jobs:
                 ;;
             esac
           else
-            # push / workflow_dispatch: compare current channel tips.
-            git show "origin/observer-firmware:${PRESET_PATH}" > /tmp/preset-parity/prod.h
-            git show "origin/observer-firmware-dev:${PRESET_PATH}" > /tmp/preset-parity/dev.h
+            # Pin the channel being verified to this run's candidate. Its
+            # branch may have advanced while the release waited in the queue.
+            case "$CANDIDATE_BRANCH" in
+              observer-firmware)
+                git show "${CANDIDATE_SHA}:${PRESET_PATH}" > /tmp/preset-parity/prod.h
+                git show "origin/observer-firmware-dev:${PRESET_PATH}" > /tmp/preset-parity/dev.h
+                ;;
+              observer-firmware-dev)
+                git show "origin/observer-firmware:${PRESET_PATH}" > /tmp/preset-parity/prod.h
+                git show "${CANDIDATE_SHA}:${PRESET_PATH}" > /tmp/preset-parity/dev.h
+                ;;
+              *)
+                echo "::error::preset parity requires an observer channel branch" >&2
+                exit 1
+                ;;
+            esac
           fi
 
           echo "=== production (observer-firmware) head preview ==="

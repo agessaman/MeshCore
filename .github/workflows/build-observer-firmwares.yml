@@ -57,6 +57,12 @@ env:
 
 jobs:
 
+  verify:
+    uses: ./.github/workflows/run-unit-tests.yml
+
+  preset-parity:
+    uses: ./.github/workflows/check-mqtt-preset-parity.yml
+
   # Discover the *_observer_mqtt envs and split them into SHARDS groups so the
   # build fans out across runners (pio builds envs sequentially within a job).
   enumerate:
@@ -170,7 +176,7 @@ jobs:
   # Collect all shard outputs, publish the rolling release, then point the
   # flasher at the new build by bumping the hash + notes in its config.json.
   release:
-    needs: [enumerate, build]
+    needs: [enumerate, build, verify, preset-parity]
     runs-on: ubuntu-latest
     steps:
       - name: Clone Repo

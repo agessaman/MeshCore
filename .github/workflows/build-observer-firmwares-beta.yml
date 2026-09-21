@@ -93,6 +93,12 @@ env:
 
 jobs:
 
+  verify:
+    uses: ./.github/workflows/run-unit-tests.yml
+
+  preset-parity:
+    uses: ./.github/workflows/check-mqtt-preset-parity.yml
+
   enumerate:
     runs-on: ubuntu-latest
     outputs:
@@ -191,7 +197,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [enumerate, build]
+    needs: [enumerate, build, verify, preset-parity]
     runs-on: ubuntu-latest
     steps:
       - name: Clone Repo

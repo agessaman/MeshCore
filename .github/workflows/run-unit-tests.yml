@@ -7,6 +7,7 @@ on:
       - master
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   test:
@@ -24,8 +25,14 @@ jobs:
           python3 -B scripts/check_arduinojson_pin.py --self-test
           python3 -B scripts/check_arduinojson_pin.py
 
+      - name: Verify observer tooling
+        run: |
+          python3 -m pip install PyYAML==6.0.2
+          python3 -B scripts/check_mqtt_preset_parity.py --self-test
+          python3 -B scripts/check_observer_ci.py
+
       - name: Run Unit Tests
-        run: pio test -e native -e native_kiss_modem -vv
+        run: pio test -e native -e native_kiss_modem -e native_sanitized -vv
 
       - name: Upload Test Results
         # Upload test results even if the test step failed.
@@ -33,4 +40,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: .pio/build/native/
+          path: |
+            .pio/build/native/
+            .pio/build/native_kiss_modem/
+            .pio/build/native_sanitized/
