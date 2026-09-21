@@ -1403,27 +1403,7 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
       (unsigned long)getNumRecvFlood(), (unsigned long)getNumRecvDirect(),
       (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, network_medium, ip,
       bridge ? bridge->getQueueSize() : 0);
-  if (pos < 0 || pos >= (int)buf_size - 3) return;  // truncated; snprintf terminated it
-  bool first = true;
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    MQTTBridge::SlotStatusSnapshot s;
-    if (!MQTTBridge::getSlotStatusSnapshot(i, &s)) continue;
-    // "filt" is omitted for the all-types default, so the portal only has to
-    // render the exception and the JSON stays inside the stats buffer.
-    char filt[24];
-    filt[0] = '\0';
-    if (s.filter_mask != MQTTPacketFilter::kAllPacketTypes) {
-      snprintf(filt, sizeof(filt), ",\"filt\":%u", (unsigned)s.filter_mask);
-    }
-    int n = snprintf(buf + pos, buf_size - pos,
-                     "%s{\"n\":%d,\"name\":\"%s\",\"state\":\"%s\",\"ok\":%lu,\"err\":%lu%s}",
-                     first ? "" : ",", i + 1, s.name, s.state, s.publish_ok, s.publish_err,
-                     filt);
-    if (n < 0 || n >= (int)(buf_size - pos)) break;
-    pos += n;
-    first = false;
-  }
-  snprintf(buf + pos, buf_size - pos, "]}");
+  MQTTBridge::appendSlotStatsJson(buf, buf_size, pos);
 }
 #endif
 
@@ -1568,6 +1548,7 @@ void MyMesh::loop() {
   mesh::Mesh::loop();
 
 #ifdef WITH_MQTT_BRIDGE
+  if (bridge) bridge->loop();
   // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
   // Release the withheld resources whenever that late ack lands, and restart
   // only a bridge that is still meant to be running.
