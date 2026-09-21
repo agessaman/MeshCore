@@ -1,4 +1,6 @@
 #include "MQTTBridge.h"
+#include "helpers/MQTTSlotEvents.h"
+#include "helpers/ObserverSlotStatsJson.h"
 #include "MQTTErrorLabels.h"
 #include "../WifiPowerSavePolicy.h"
 #include "../MQTTConnectionPolicy.h"
@@ -34,10 +36,10 @@
 #endif
 
 // Effective MQTT origin: empty mqtt_origin follows node_name; otherwise mqtt_origin override (quotes stripped).
-static void applyEffectiveOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* dest, size_t dest_size) {
-  if (!np || !obs || !dest || dest_size == 0) return;
+static void applyEffectiveOrigin(const char* node_name, const MQTTPrefs* obs, char* dest, size_t dest_size) {
+  if (!node_name || !obs || !dest || dest_size == 0) return;
   if (obs->mqtt_origin[0] == '\0') {
-    strncpy(dest, np->node_name, dest_size - 1);
+    strncpy(dest, node_name, dest_size - 1);
   } else {
     strncpy(dest, obs->mqtt_origin, dest_size - 1);
   }
@@ -94,8 +96,7 @@ const char* MQTTBridge::effectiveNtpPrimary(const MQTTPrefs* obs) {
 }
 
 void MQTTBridge::refreshOriginFromPrefs() {
-  if (!_prefs) return;
-  applyEffectiveOrigin(_prefs, _obs, _origin, sizeof(_origin));
+  applyEffectiveOrigin(_radio_metadata.node_name, _obs, _origin, sizeof(_origin));
 }
 
 void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* buf, size_t buf_size) {
@@ -104,7 +105,7 @@ void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* ob
     buf[0] = '\0';
     return;
   }
-  applyEffectiveOrigin(np, obs, buf, buf_size);
+  applyEffectiveOrigin(np->node_name, obs, buf, buf_size);
 }
 
 static bool isNetworkConfigValid(const MQTTPrefs* obs) {
@@ -209,10 +210,7 @@ void* MQTTBridge::JsonScratchAllocator::reallocate(void* ptr, size_t new_size) {
   return psram_realloc(ptr, new_size);
 }
 
-// Latched by end() when a stop passes its deadline unacknowledged. end() clears
-// the diagnostic singleton, so without this `get mqtt.status` could only say
-// "not running" and an operator would have no way to learn that the bridge is
-// down for the rest of the boot and why.
+// Loop-task latch explaining why a stopped bridge cannot yet restart.
 static bool s_stop_unproven = false;
 
 #ifdef MQTT_MEMORY_DEBUG
@@ -230,8 +228,59 @@ static void agentLogHeap(const char* location, const char* message, const char* 
 // #endregion
 #endif
 
-// Singleton for formatMqttStatusReply (set in begin(), cleared in end())
-static MQTTBridge* s_mqtt_bridge_instance = nullptr;
+ObserverMailbox<MQTTBridge::RuntimeSnapshot> MQTTBridge::_published;
+
+void MQTTBridge::publishRuntimeSnapshot() {
+  RuntimeSnapshot snapshot;
+  snapshot.sampled_ms = millis();
+  snapshot.sequence = ++_snapshot_sequence;
+  snapshot.desired_revision = _configuration.revision();
+  snapshot.applied_revision = _applied_revision;
+  snapshot.running = !_stop_requested.load(std::memory_order_acquire);
+  snapshot.queue = getQueueSize();
+  snapshot.skipped = _skipped_publishes;
+  snapshot.filtered = _filtered_packets.load(std::memory_order_relaxed);
+  snapshot.event_overflows = _slot_events.overflows();
+  snapshot.free_heap = ESP.getFreeHeap();
+  snapshot.max_heap = ESP.getMaxAllocHeap();
+#if defined(WITH_MQTT_NEIGHBORS)
+  snapshot.neighbors_phase = _neighbors_phase.load(std::memory_order_relaxed);
+  snapshot.neighbors_result = _neighbors_last_result.load(std::memory_order_relaxed);
+  snapshot.neighbors_seconds = _neighbors_secs_until_next.load(std::memory_order_relaxed);
+#endif
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+    const MQTTSlot& slot = _slots[i];
+    SlotRuntimeSnapshot& out = snapshot.slots[i];
+    out.configured = slot.enabled || slot.preset;
+    out.enabled = slot.enabled;
+    out.client = slot.client != nullptr;
+    out.connected = slot.connected;
+    out.attempted = slot.initial_connect_done;
+    out.ready = isSlotReady(i);
+    out.circuit_breaker_tripped = slot.circuit_breaker_tripped;
+    out.client_state = slot.client_state;
+    snprintf(out.name, sizeof(out.name), "%s", slot.preset ? slot.preset->name : slot.enabled ? "custom" : "none");
+    snprintf(out.state, sizeof(out.state), "%s", !slot.enabled ? "inactive" : !out.ready ? "wait" :
+             slot.connected ? "ok" : slot.circuit_breaker_tripped ? "fail" : "disc");
+    out.filter_mask = _obs->mqtt_slot_packet_filter[i];
+    out.disconnect_count = slot.disconnect_count;
+    out.first_disconnect_time = slot.first_disconnect_time;
+    out.current_outage_started_ms = slot.current_outage_started_ms;
+    out.last_error_time = slot.last_error_time;
+    out.last_tls_err = slot.last_tls_err;
+    out.last_tls_stack_err = slot.last_tls_stack_err;
+    out.last_sock_errno = slot.last_sock_errno;
+    out.last_connack_code = slot.last_connack_code;
+    if (slot.enabled && slot.connected) ++snapshot.connected;
+    if (slot.client && slot.client_state != ClientState::Quarantined) {
+      out.publish_ok = slot.client->getPublishOk();
+      out.publish_err = slot.client->getPublishErr();
+      snapshot.outbox += slot.client->getOutboxSize();
+      snapshot.outbox_drops += slot.client->getOutboxDrops();
+    }
+  }
+  _published.publish(snapshot);
+}
 
 unsigned long MQTTBridge::getWifiConnectedAtMillis() {
   return activeNetworkLink().connectedAtMillis();
@@ -256,52 +305,25 @@ static void formatDuration(char* buf, size_t len, uint32_t secs) {
 void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs) {
   if (buf == nullptr || bufsize == 0) return;
   const char* msgs = (obs && obs->mqtt_status_enabled) ? "on" : "off";
-  if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) {
+  const RuntimeSnapshot snapshot = _published.read();
+  if (!snapshot.running) {
     snprintf(buf, bufsize, "> msgs: %s (bridge %s)", msgs,
              s_stop_unproven ? "stopped: waiting for the previous stop to finish; reboot if it persists"
                              : "not running");
     return;
   }
-  MQTTBridge* b = s_mqtt_bridge_instance;
 
-  // Build per-slot status strings (compact format to fit 160-byte reply buffer)
-  // Only show configured slots, skip "none" slots
-  int q = 0;
-#ifdef ESP_PLATFORM
-  if (b->_packet_queue_handle != nullptr) {
-    q = (int)uxQueueMessagesWaiting(b->_packet_queue_handle);
-  }
-#else
-  q = b->_queue_count;
-#endif
+  const int q = snapshot.queue;
 
   // replyAppendf clamps pos into the buffer on every call, so no per-append
   // guard or trailing clamp is needed (see MQTTReplyFormat.h / A1).
   int pos = 0;
   replyAppendf(buf, bufsize, &pos, "> msgs: %s", msgs);
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    const MQTTSlot& slot = b->_slots[i];
-    const char* name = nullptr;
-    const char* state = nullptr;
-
-    if (!slot.enabled && slot.preset) {
-      name = slot.preset->name;
-      state = "inactive";
-    } else if (!slot.enabled) {
-      continue;  // Skip unconfigured slots
-    } else if (!b->isSlotReady(i)) {
-      name = slot.preset ? slot.preset->name : "custom";
-      state = "wait";
-    } else if (slot.connected) {
-      name = slot.preset ? slot.preset->name : "custom";
-      state = "ok";
-    } else if (slot.circuit_breaker_tripped) {
-      name = slot.preset ? slot.preset->name : "custom";
-      state = "fail";
-    } else {
-      name = slot.preset ? slot.preset->name : "custom";
-      state = "disc";
-    }
+    const SlotRuntimeSnapshot& slot = snapshot.slots[i];
+    if (!slot.configured) continue;
+    const char* name = slot.name;
+    const char* state = slot.state;
     replyAppendf(buf, bufsize, &pos, ", %d: %s (%s)", i + 1, name, state);
   }
   replyAppendf(buf, bufsize, &pos, ", q:%d", q);
@@ -310,16 +332,16 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
   // Periodic neighbors: time to next publish + how the last one went.
   if (obs && obs->mqtt_neighbors_enabled) {
     char when[16];
-    switch (b->_neighbors_phase.load(std::memory_order_relaxed)) {
+    switch (snapshot.neighbors_phase) {
       case NBR_ACTIVE: strcpy(when, "active"); break;
       case NBR_DUE:    strcpy(when, "due"); break;
       default:
         formatDuration(when, sizeof(when),
-                       b->_neighbors_secs_until_next.load(std::memory_order_relaxed));
+                       snapshot.neighbors_seconds);
         break;
     }
     const char* last;
-    switch (b->_neighbors_last_result.load(std::memory_order_relaxed)) {
+    switch (snapshot.neighbors_result) {
       case NBR_RESULT_OK:   last = "ok"; break;
       case NBR_RESULT_FAIL: last = "failed"; break;
       default:              last = "none"; break;
@@ -337,48 +359,33 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
 // broker whose uplink is dropping writes.
 void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
   if (buf == nullptr || bufsize == 0) return;
-  if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) {
+  const RuntimeSnapshot snapshot = _published.read();
+  if (!snapshot.running) {
     snprintf(buf, bufsize, "> (bridge not running)");
     return;
   }
-  MQTTBridge* b = s_mqtt_bridge_instance;
 
-  int q = 0;
-#ifdef ESP_PLATFORM
-  if (b->_packet_queue_handle != nullptr) {
-    q = (int)uxQueueMessagesWaiting(b->_packet_queue_handle);
-  }
-#else
-  q = b->_queue_count;
-#endif
-
-  size_t outbox_total = 0;
-  unsigned long outbox_drops = 0;
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (b->_slots[i].client) {
-      outbox_total += b->_slots[i].client->getOutboxSize();
-      outbox_drops += b->_slots[i].client->getOutboxDrops();
-    }
-  }
-
+  const int q = snapshot.queue;
+  const unsigned long outbox_total = snapshot.outbox;
+  const unsigned long outbox_drops = snapshot.outbox_drops;
   // drops=<outbox>/<skipped>: outbox-cap drops vs. memory-pressure skips.
   int pos = 0;
   replyAppendf(buf, bufsize, &pos, "> Free=%d Max=%d q:%d/%d Outbox=%u drops=%lu/%d",
-               (int)ESP.getFreeHeap(), (int)ESP.getMaxAllocHeap(),
+               (int)snapshot.free_heap, (int)snapshot.max_heap,
                q, MAX_QUEUE_SIZE, (unsigned)outbox_total,
-               outbox_drops, b->_skipped_publishes);
+               outbox_drops, snapshot.skipped);
   // filt=<n>: packets the per-slot type filters rejected before the queue.
   // Omitted while zero so an unfiltered node's reply keeps its former length —
   // the per-slot list below is what usually gets clamped away first.
-  if (b->_filtered_packets > 0) {
-    replyAppendf(buf, bufsize, &pos, " filt=%lu", b->_filtered_packets);
+  if (snapshot.filtered > 0) {
+    replyAppendf(buf, bufsize, &pos, " filt=%lu", snapshot.filtered);
   }
   replyAppendf(buf, bufsize, &pos, " |");
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (!b->_slots[i].enabled || !b->_slots[i].client) continue;
+    if (!snapshot.slots[i].enabled || !snapshot.slots[i].client) continue;
     replyAppendf(buf, bufsize, &pos, " s%d=%lu/%lu", i + 1,
-                 b->_slots[i].client->getPublishOk(),
-                 b->_slots[i].client->getPublishErr());
+                 snapshot.slots[i].publish_ok,
+                 snapshot.slots[i].publish_err);
   }
 }
 
@@ -387,33 +394,20 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
 // unconfigured, or bridge-not-running slots.
 bool MQTTBridge::getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out) {
   if (out == nullptr || slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return false;
-  if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) return false;
-  MQTTBridge* b = s_mqtt_bridge_instance;
-  const MQTTSlot& slot = b->_slots[slot_index];
-
-  if (!slot.enabled && slot.preset) {
-    out->name = slot.preset->name;
-    out->state = "inactive";
-  } else if (!slot.enabled) {
-    return false;  // unconfigured slot
-  } else {
-    out->name = slot.preset ? slot.preset->name : "custom";
-    if (!b->isSlotReady(slot_index)) {
-      out->state = "wait";
-    } else if (slot.connected) {
-      out->state = "ok";
-    } else if (slot.circuit_breaker_tripped) {
-      out->state = "fail";
-    } else {
-      out->state = "disc";
-    }
-  }
-  out->publish_ok = slot.client ? slot.client->getPublishOk() : 0;
-  out->publish_err = slot.client ? slot.client->getPublishErr() : 0;
-  // Lets the portal show why a healthy slot is quiet.
-  out->filter_mask = b->_obs ? b->_obs->mqtt_slot_packet_filter[slot_index]
-                             : MQTTPacketFilter::kAllPacketTypes;
+  const RuntimeSnapshot snapshot = _published.read();
+  const SlotRuntimeSnapshot& slot = snapshot.slots[slot_index];
+  if (!snapshot.running || !slot.configured) return false;
+  memcpy(out->name, slot.name, sizeof(out->name));
+  memcpy(out->state, slot.state, sizeof(out->state));
+  out->publish_ok = slot.publish_ok;
+  out->publish_err = slot.publish_err;
+  out->filter_mask = slot.filter_mask;
   return true;
+}
+
+void MQTTBridge::appendSlotStatsJson(char* buf, size_t size, int pos) {
+  const RuntimeSnapshot snapshot = _published.read();
+  appendObserverSlotStatsJson(buf, size, pos, snapshot.slots, snapshot.running ? RUNTIME_MQTT_SLOTS : 0);
 }
 
 int MQTTBridge::getMaxActiveSlots() {
@@ -444,21 +438,43 @@ unsigned long MQTTBridge::getLastWifiDisconnectTime() {
   return activeNetworkLink().lastDisconnectTime();
 }
 
+MQTTBridge::SlotOutageSnapshot MQTTBridge::getSlotOutageSnapshot(int slot_index) const {
+  SlotOutageSnapshot out;
+  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return out;
+  const RuntimeSnapshot snapshot = _published.read();
+  const SlotRuntimeSnapshot& slot = snapshot.slots[slot_index];
+  out.monitored = snapshot.running && slot.enabled && slot.attempted;
+  out.started_ms = slot.current_outage_started_ms;
+  memcpy(out.name, slot.name, sizeof(out.name));
+  return out;
+}
+
+void MQTTBridge::formatRuntimeReply(char* buf, size_t bufsize) {
+  if (!buf || !bufsize) return;
+  const RuntimeSnapshot s = _published.read();
+  snprintf(buf, bufsize, "> %s seq:%lu age:%lums cfg:%lu/%lu events_lost:%lu",
+           s.running ? "running" : s_stop_unproven ? "stop unproven" : "stopped",
+           (unsigned long)s.sequence, (unsigned long)((uint32_t)(millis() - s.sampled_ms)),
+           (unsigned long)s.desired_revision, (unsigned long)s.applied_revision,
+           (unsigned long)s.event_overflows);
+}
+
 unsigned long MQTTBridge::getSlotCurrentOutageStartMs(int slot_index) const {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return 0;
-  return _slots[slot_index].current_outage_started_ms;
+  return _published.read().slots[slot_index].current_outage_started_ms;
 }
 
 bool MQTTBridge::isSlotEnabledAndAttempted(int slot_index) const {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return false;
-  const MQTTSlot& s = _slots[slot_index];
-  return s.enabled && s.initial_connect_done;
+  const SlotRuntimeSnapshot s = _published.read().slots[slot_index];
+  return s.enabled && s.attempted;
 }
 
 const char* MQTTBridge::getSlotPresetName(int slot_index) const {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return "?";
-  const MQTTSlot& s = _slots[slot_index];
-  if (s.preset && s.preset->name) return s.preset->name;
+  const SlotRuntimeSnapshot s = _published.read().slots[slot_index];
+  const MQTTPresetDef* preset = findMQTTPreset(s.name);
+  if (preset) return preset->name;
   if (!s.enabled) return MQTT_PRESET_NONE;
   return MQTT_PRESET_CUSTOM;
 }
@@ -513,7 +529,8 @@ const char* MQTTBridge::tlsErrorStr(int32_t err) {
 
 void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) {
   if (!buf || bufsize == 0) return;
-  if (!s_mqtt_bridge_instance || !s_mqtt_bridge_instance->_initialized) {
+  const RuntimeSnapshot snapshot = _published.read();
+  if (!snapshot.running) {
     snprintf(buf, bufsize, "> mqtt%d: bridge not running", slot_index + 1);
     return;
   }
@@ -522,17 +539,16 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
     return;
   }
 
-  MQTTBridge* b = s_mqtt_bridge_instance;
-  const MQTTSlot& slot = b->_slots[slot_index];
+  const SlotRuntimeSnapshot& slot = snapshot.slots[slot_index];
 
   // Determine state string
   const char* state;
-  if (!slot.enabled && !slot.preset && slot.host[0] == '\0') {
+  if (!slot.configured) {
     snprintf(buf, bufsize, "> mqtt%d: not configured", slot_index + 1);
     return;
   } else if (!slot.enabled) {
     state = "inactive";
-  } else if (!b->isSlotReady(slot_index)) {
+  } else if (!slot.ready) {
     // Same classification as `get mqtt.status` and getSlotStatusSnapshot(): the slot
     // is configured but missing a token/IATA/credential, so it was never set up and
     // has no client yet. Previously reported "disc", which read as a network fault.
@@ -560,8 +576,7 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
   // the 160-byte reply, and an error tail (TLS + mbedTLS + errno + age) can
   // already reach ~117 chars, so putting the filter first would push the
   // operator's diagnostic detail off the end of a failing slot's line.
-  const uint16_t filter_mask = b->_obs ? b->_obs->mqtt_slot_packet_filter[slot_index]
-                                       : MQTTPacketFilter::kAllPacketTypes;
+  const uint16_t filter_mask = slot.filter_mask;
   char filter_text[MQTTPacketFilter::kFilterTextSize];
   const bool show_filter = filter_mask != MQTTPacketFilter::kAllPacketTypes &&
       MQTTPacketFilter::format(filter_mask, filter_text, sizeof(filter_text));
@@ -674,13 +689,11 @@ static inline uint32_t mqttStopTimeoutForSlots(int slots) {
 // ---------------------------------------------------------------------------
 MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
     : BridgeBase(prefs, mgr, rtc),
-      _obs(obs),
+      _source_obs(obs),
       _network(&activeNetworkLink()),
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
-      _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
-      _ntp_force_requested(false), _ntp_force_done(false), _ntp_force_result(false),
-      _ntp_diag_requested(false), _ntp_diag_done(false), _ntp_diag_count(0),
+      _ntp_synced(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
       // Default to UTC; setRules() will be called from syncTimeWithNTP when a
       // non-UTC timezone string is configured. Timezone has no default ctor,
       // so we must pass rules here.
@@ -749,20 +762,14 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].generation = 0;
     _slots[i].applied_config = MqttEffectiveConfig();
     _slots[i].allocated_buffer_size = 0;
-    _slot_reconfigure_pending[i] = false;
     _slot_force_jwt_mint[i] = false;
     _status_publish_pending[i] = false;
   }
 
   // Reset CLI-requested forced NTP sync handshake (bridge object is reused across restarts)
   _ntp_force_requested = false;
-  _ntp_force_done = false;
-  _ntp_force_result = false;
 
   // Reset CLI-requested NTP diagnostic handshake
-  _ntp_diag_requested = false;
-  _ntp_diag_done = false;
-  _ntp_diag_count = 0;
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Neighbors publish handoff (buffer allocated in begin() after PSRAM probe).
@@ -876,6 +883,10 @@ void MQTTBridge::begin() {
     return;
   }
 
+  _ntp_schedule = NtpSchedule();
+  _slots_setup_done = false;
+  _ntp_force_requested.store(false);
+
   // PSRAM diagnostic - helps debug memory fragmentation on boards with external RAM
   #ifdef BOARD_HAS_PSRAM
   {
@@ -913,6 +924,10 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
   // Ethernet needs no credentials; Wi-Fi preserves the existing SSID gate.
+  publishConfiguration();
+  uint32_t initial_reconfigure = 0;
+  _applied_revision = 0;
+  _configuration.consume(_runtime_prefs, _radio_metadata, _applied_revision, initial_reconfigure);
   if (!isNetworkConfigValid(_obs)) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - %s is not configured",
                        _network->mediumName());
@@ -1076,6 +1091,7 @@ void MQTTBridge::begin() {
   _stop_requested.store(false, std::memory_order_relaxed);
   _stop_acked.store(false, std::memory_order_relaxed);
   _teardown_complete.store(false, std::memory_order_relaxed);
+  publishRuntimeSnapshot();
   BaseType_t create_result = xTaskCreatePinnedToCore(
     mqttTask,
     "MQTTBridge",
@@ -1088,6 +1104,7 @@ void MQTTBridge::begin() {
   if (create_result != pdPASS) _mqtt_task_handle = nullptr;
   if (_mqtt_task_handle == nullptr) {
     MQTT_DEBUG_PRINTLN("Failed to create MQTT task!");
+    _published.publish(RuntimeSnapshot{});
     vQueueDelete(_packet_queue_handle);
     _packet_queue_handle = nullptr;
     #if defined(BOARD_HAS_PSRAM)
@@ -1108,9 +1125,8 @@ void MQTTBridge::begin() {
 
   // MQTT client objects are NOT allocated here. setupSlot() creates one on a slot's
   // first setup, so unconfigured and capped-off slots never cost their ~1.3 KB of
-  // internal DRAM. Once created a client lives for the bridge's lifetime, so the
-  // reconfigure/reconnect paths still reuse the same mbedTLS context instead of
-  // churning ~40 KB of internal heap per cycle.
+  // internal DRAM. Reconnects reuse the wrapper and SDK task where possible;
+  // closing a TLS transport still releases its session buffers.
 
   // Sync the lifecycle Coordinator to Running now that all resources exist and
   // the task is created. Driven only on the success path: the failure rollbacks
@@ -1121,7 +1137,6 @@ void MQTTBridge::begin() {
   _lifecycle.onTaskStarted();   // Starting -> Running
 
   _initialized = true;
-  s_mqtt_bridge_instance = this;
   MQTT_DEBUG_PRINTLN("MQTT Bridge initialized");
 }
 
@@ -1130,6 +1145,7 @@ void MQTTBridge::begin() {
 // ---------------------------------------------------------------------------
 void MQTTBridge::end() {
   MQTT_DEBUG_PRINTLN("Stopping MQTT Bridge...");
+  _ntp_diag_job.cancel(millis());
 
   // Idempotent stop: nothing to tear down if we never started (or already stopped).
   if (!_initialized) {
@@ -1137,8 +1153,10 @@ void MQTTBridge::end() {
     return;
   }
 
-  // Stop new diagnostic reads through the singleton before teardown begins.
-  s_mqtt_bridge_instance = nullptr;
+  // Readers see a stopped snapshot while teardown proceeds.
+  RuntimeSnapshot stopped = _published.read();
+  stopped.running = false;
+  _published.publish(stopped);
 
   // Size the stop timeout to the work about to happen: each enabled slot's
   // mbedTLS/wss client takes ~5-6 s to disconnect + destroy, sequentially (Phase
@@ -1192,7 +1210,10 @@ void MQTTBridge::end() {
   // above). begin() refuses until the task acknowledges, so _initialized == false
   // cannot be turned into a second task over the same state.
   _initialized = false;
-  _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
+  RuntimeSnapshot stopped_snapshot = _published.read();
+  stopped_snapshot.running = false;
+  stopped_snapshot.connected = 0;
+  _published.publish(stopped_snapshot);
   s_stop_unproven = _lifecycle.isStopUnproven();
   if (_lifecycle.isStopUnproven()) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge stop UNPROVEN after %lu ms: task did not acknowledge. "
@@ -1322,8 +1343,7 @@ void MQTTBridge::initializeNetworkInTask() {
   // not race the first DNS lookup after a bridge restart.
   if (!_network->begin(_obs->wifi_ssid, _obs->wifi_password)) {
     MQTT_DEBUG_PRINTLN("%s network initialization failed", _network->mediumName());
-  } else if (_network->isConnected() && !_ntp_synced && !_ntp_sync_pending) {
-    _ntp_sync_pending = true;
+  } else if (_network->isConnected() && !_ntp_synced) {
   }
 
   // NOTE: Slot setup is deferred until after NTP sync in mqttTaskLoop().
@@ -1346,8 +1366,6 @@ void MQTTBridge::mqttTaskLoop() {
   // Treat the first post-settle sample as an edge. A fast Wi-Fi association
   // may complete during the delay above, before the task has sampled state;
   // initializing from the live value would then defer NTP until its retry.
-  bool network_was_connected = false;
-  unsigned long last_ntp_attempt = 0;
 
   // Main task loop
   #ifdef MQTT_MEMORY_DEBUG
@@ -1366,6 +1384,7 @@ void MQTTBridge::mqttTaskLoop() {
         teardownSlot(i);
       }
       destroySlotClients();
+      publishRuntimeSnapshot();
 
       // The acknowledgement means "every client is destroyed, nothing I own is
       // still running". One client whose esp_mqtt_client_stop() never completed
@@ -1428,48 +1447,18 @@ void MQTTBridge::mqttTaskLoop() {
     }
     #endif
 
+    processSlotEvents();
+    applyConfiguration();
     handleNetworkConnection(now);
 
-    // Schedule once per link-up edge. Failed syncs are owned by the 30-second
-    // retry below; re-arming here on every loop would make a blocked NTP path
-    // run the multi-second sync sequence back-to-back forever.
-    const bool network_connected = _network->isConnected();
-    _ntp_sync_pending = NetworkPolicy::ntpPendingAfterConnectivitySample(
-        _ntp_synced, _ntp_sync_pending, network_was_connected,
-        network_connected);
-    network_was_connected = network_connected;
-    if (_ntp_sync_pending && network_connected) {
-      _ntp_sync_pending = false;
-      last_ntp_attempt = now;
-      syncTimeWithNTP();
+    const bool ntp_due = _ntp_schedule.due((uint32_t)millis());
+    if (_ntp_force_requested.exchange(false, std::memory_order_acq_rel)) {
+      syncTimeWithNTP(true, /*primary_only=*/true);
+    } else if (ntp_due && _network->isConnected()) {
+      syncTimeWithNTP(false, false, _ntp_synced ? 1 : 2);
     }
-
-    // Retry NTP every 30s if initial sync failed (slots can't start without valid time)
-    if (NetworkPolicy::ntpRetryDue(
-            _ntp_synced, network_connected, (uint32_t)now,
-            (uint32_t)last_ntp_attempt)) {
-      last_ntp_attempt = now;
-      syncTimeWithNTP();
-    }
-
-    // Process a CLI-requested forced NTP sync (queued from Core 1). Running it here
-    // keeps all NTP I/O on Core 0; requestForcedNtpSync() blocks the CLI thread until
-    // we publish the outcome below.
-    if (_ntp_force_requested) {
-      _ntp_force_requested = false;
-      // primary_only: validate just the server that was set, so a typo fails fast.
-      bool ok = syncTimeWithNTP(true, /*primary_only=*/true);
-      _ntp_force_result = ok;
-      _ntp_force_done = true;  // set last so the waiter sees a consistent result
-    }
-
-    // Process a CLI-requested NTP connectivity diagnostic (queued from Core 1).
-    // Probe-only — never touches the system clock.
-    if (_ntp_diag_requested) {
-      _ntp_diag_requested = false;
-      runNtpDiagProbe();
-      _ntp_diag_done = true;  // set last so the waiter sees populated results
-    }
+    const uint32_t ntp_probe = _ntp_diag_job.begin();
+    if (ntp_probe) runNtpDiagProbe(ntp_probe);
 
     // Deferred slot setup: wait until NTP is synced so JWT tokens get valid timestamps.
     // This avoids wasted TLS handshakes that get rejected due to bad token times.
@@ -1509,14 +1498,7 @@ void MQTTBridge::mqttTaskLoop() {
       }
     }
 
-    // Process pending slot reconfigures (queued from CLI on Core 1)
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slot_reconfigure_pending[i]) {
-        _slot_reconfigure_pending[i] = false;
-        MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)", i + 1, _obs->mqtt_slot_preset[i]);
-        applySlotPreset(i, _obs->mqtt_slot_preset[i]);
-      }
-    }
+    processSlotEvents();
 
     // Publish on-connect status for slots whose onConnect callback fired since
     // the last loop. Raised on the esp-mqtt event task, consumed here on the
@@ -1577,13 +1559,6 @@ void MQTTBridge::mqttTaskLoop() {
 
     // Periodic configuration check (throttled to avoid spam)
     checkConfigurationMismatch();
-
-    // Periodic NTP refresh (every hour): a validated probe, one attempt per
-    // server. Blocks this task for about one probe timeout per server that does
-    // not answer (see refreshNTP()).
-    if (_network->isConnected() && now - _last_ntp_sync > 3600000) {
-      refreshNTP();
-    }
 
     // Publish status updates (handle millis() overflow correctly).
     // Read the toggle live from prefs (like mqtt.packets/rx/tx below) so a
@@ -1650,6 +1625,8 @@ void MQTTBridge::mqttTaskLoop() {
       last_slot_status_update = now;
     }
 
+    publishRuntimeSnapshot();
+
     // Adaptive delay: 5 ms when packets are queued, 50 ms when idle.
     // The previous "status approaching" check (widening to 5 ms for 10 s before each status
     // publish) caused 2 000 unnecessary wakeups per interval; the 50 ms idle tick catches
@@ -1670,11 +1647,8 @@ void MQTTBridge::mqttTaskLoop() {
 // at all until setupSlot() runs (the reconnect ladder is gated on
 // initial_connect_done), so slots that are unconfigured or capped off never get one.
 //
-// Once created the object lives until destroySlotClients(): reconfiguring a slot
-// (preset change, JWT renewal, reconnect) reuses it, so the mbedTLS context and its
-// ~40 KB of internal-heap buffers are allocated once instead of every reconfigure.
-// That context is created by connect(), not by this constructor, so deferring the
-// allocation to first use costs nothing beyond the object itself.
+// Compatible reconnects reuse the wrapper. Transport/trust changes can recreate
+// it after a proven stop. TLS session buffers still follow connection lifetime.
 bool MQTTBridge::ensureSlotClient(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
@@ -1696,96 +1670,61 @@ bool MQTTBridge::ensureSlotClient(int index) {
   slot.allocated_buffer_size = kMqttClientBufferSize;
   slot.client->setAutoReconnect(false);  // we handle reconnect with our own backoff
 
-  slot.client->onConnect([this, index](bool sessionPresent) {
-    // A CONNECT started before this slot was disabled or reconfigured can still
-    // complete afterwards. Accepting it marked a slot connected that the
-    // operator had switched off, scheduled its status publish, and published
-    // through the old session (F04). The bridge task owns client_state, so it
-    // is the authority on whether this event was asked for.
-    const ClientState st = _slots[index].client_state;
-    if (!_slots[index].enabled || !(st == ClientState::Starting || st == ClientState::Disconnected)) {
-      MQTT_DEBUG_PRINTLN("MQTT%d ignoring late CONNECTED (state=%s, gen=%lu, enabled=%d)",
-                         index + 1, clientStateName(st),
-                         (unsigned long)_slots[index].generation, (int)_slots[index].enabled);
-      return;
-    }
-    MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
-    _slots[index].client_state = ClientState::Connected;
-    _slots[index].connected = true;
-    _slot_force_jwt_mint[index] = false;
-    // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
-    // A CONNACK alone doesn't prove the link is healthy — a broker that
-    // accepts and then drops within seconds would reset the ladder every
-    // cycle and retry at the 10 s rung forever, and each retry is a full
-    // TLS session alloc/free (~40 KB of internal-heap churn, a known
-    // fragmentation driver). The ladder is instead cleared by
-    // maintainSlotConnection() once the connection has stayed up for
-    // BACKOFF_STABLE_RESET_MS, so flapping endpoints keep their earned
-    // backoff level. The breaker itself does clear now: while connected
-    // the diag/status must not claim the slot gave up, and the next
-    // disconnect should be governed by the (still-elevated) ladder.
-    _slots[index].connected_at_ms = millis();
-    _slots[index].circuit_breaker_tripped = false;
-    _slots[index].last_tls_err = 0;
-    _slots[index].last_tls_stack_err = 0;
-    _slots[index].last_sock_errno = 0;
-    _slots[index].last_connack_code = 0;
-    _slots[index].last_error_time = 0;
-    _slots[index].current_outage_started_ms = 0;  // clear current-outage timer for AlertReporter
-    updateCachedConnectionStatus();  // bool store — safe from this (esp-mqtt) task
-    // This callback runs on the client's esp-mqtt event task, not the bridge
-    // task. Do NOT build/publish status here: publishStatusToSlot() writes the
-    // shared _json_scratch_doc/_json_scratch_buffer/_origin that the periodic
-    // publishStatus() uses on the bridge task, and two slots' callbacks could
-    // race each other over them. Marshal the publish onto the bridge task via a
-    // per-slot flag (see mqttTaskLoop consumer / A2).
-    _status_publish_pending[index] = true;
+  const uint32_t incarnation = ++slot.incarnation;
+  slot.client->onConnect([this, index, incarnation](bool) {
+    MqttSlotEvent event;
+    event.kind = MqttSlotEvent::Kind::Connected;
+    event.slot = index;
+    event.incarnation = incarnation;
+    event.at_ms = millis();
+    _slot_events.push(event);
   });
-  slot.client->onDisconnect([this, index](bool sessionPresent) {
-    MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
-    // Only a live client's disconnect is news. One arriving for a client we
-    // already stopped (or quarantined) must not resurrect its state.
-    if (clientStateIsLive(_slots[index].client_state)) {
-      _slots[index].client_state = ClientState::Disconnected;
-    }
-    _slots[index].disconnect_count++;
-    if (_slots[index].first_disconnect_time == 0) {
-      _slots[index].first_disconnect_time = millis();
-    }
-    if (_slots[index].current_outage_started_ms == 0) {
-      _slots[index].current_outage_started_ms = millis();
-    }
-    _slots[index].connected = false;
-    _slots[index].connected_at_ms = 0;  // stability clock only runs while connected
-    updateCachedConnectionStatus();
+  slot.client->onDisconnect([this, index, incarnation](bool) {
+    MqttSlotEvent event;
+    event.kind = MqttSlotEvent::Kind::Disconnected;
+    event.slot = index;
+    event.incarnation = incarnation;
+    event.at_ms = millis();
+    _slot_events.push(event);
   });
-  slot.client->onError([this, index](esp_mqtt_error_codes error) {
-    _slots[index].last_tls_err = error.esp_tls_last_esp_err;
-    _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
-    _slots[index].last_sock_errno = error.esp_transport_sock_errno;
-    _slots[index].last_error_time = millis();
-    // Cleared on any other error type so the diag describes the latest failure
-    // rather than pairing a fresh transport error with an old refusal.
-    _slots[index].last_connack_code =
-        (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED)
-            ? (uint8_t)error.connect_return_code : 0;
-    if (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
-      _slot_force_jwt_mint[index] = true;
-      // Broker rejected the MQTT CONNECT itself — not a transport failure.
-      // return code: 1=protocol, 2=client-id rejected, 3=server unavailable,
-      // 4=bad username/password, 5=not authorized. Codes 3/4/5 point at a
-      // server-side lockout or auth problem rather than the network.
-      MQTT_DEBUG_PRINTLN("MQTT%d connection refused by broker (return code=%d)",
-        index + 1, (int)error.connect_return_code);
-    } else if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
-      MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
-        index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
-        error.esp_transport_sock_errno, error.error_type);
-    } else {
-      MQTT_DEBUG_PRINTLN("MQTT%d error: type=%d", index + 1, error.error_type);
-    }
+  slot.client->onError([this, index, incarnation](esp_mqtt_error_codes error) {
+    MqttSlotEvent event;
+    event.kind = MqttSlotEvent::Kind::Error;
+    event.slot = index;
+    event.incarnation = incarnation;
+    event.at_ms = millis();
+    event.tls = error.esp_tls_last_esp_err;
+    event.tls_stack = error.esp_tls_stack_err;
+    event.socket = error.esp_transport_sock_errno;
+    event.connack = error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED
+        ? static_cast<uint8_t>(error.connect_return_code) : 0;
+    _slot_events.push(event);
   });
   return true;
+}
+
+void MQTTBridge::processSlotEvents() {
+  const uint32_t overflow = _slot_events.takeOverflowSlots();
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+    if (!(overflow & (uint32_t(1) << i))) continue;
+    // Losing lifecycle events makes connectivity unproven. Stop before allowing
+    // another publish, then let ordinary maintenance restart the joined client.
+    _slots[i].connected = false;
+    _status_publish_pending[i] = false;
+    if (_slots[i].client && clientStateIsLive(_slots[i].client_state)) stopSlotClient(i);
+    _slot_events.discardSlot(i);
+  }
+  MqttSlotEvent event;
+  for (unsigned n = 0; n < 32 && _slot_events.pop(event); ++n) {
+    const int index = event.slot;
+    if (index >= RUNTIME_MQTT_SLOTS) continue;
+    if (applyMqttSlotEvent(_slots[index], event, _slot_force_jwt_mint[index], _status_publish_pending[index])) {
+      MQTT_DEBUG_PRINTLN("MQTT%d event=%u state=%s incarnation=%lu connack=%u tls=%ld sock=%ld",
+          index + 1, (unsigned)event.kind, clientStateName(_slots[index].client_state),
+          (unsigned long)event.incarnation, (unsigned)event.connack, (long)event.tls, (long)event.socket);
+    }
+  }
+  updateCachedConnectionStatus();
 }
 
 // Allocate this slot's JWT token buffer. Called only from createSlotAuthToken(), the
@@ -2292,10 +2231,6 @@ bool MQTTBridge::recreateSlotClient(int index) {
   return ensureSlotClient(index);
 }
 
-// Disconnect the slot's MQTT client and clear per-connection state, but leave
-// the client object alive so a subsequent setupSlot() can reuse its mbedTLS
-// context. This is called both on reconfigure (preset change) and at shutdown;
-// destruction of the underlying client happens once in destroySlotClients().
 // Close a live client for a reconfigure: cheap where that is safe, a real stop
 // where it is not.
 //
@@ -2326,7 +2261,13 @@ void MQTTBridge::closeLiveClientForReconfigure(int index) {
     MQTT_DEBUG_PRINTLN("MQTT%d reconfigure: transport did not close cleanly (%s)",
                        index + 1, esp_err_to_name(r));
   }
+  if (r != ESP_OK) {
+    stopSlotClient(index);
+    return;
+  }
+  _slot_events.discardSlot(index);
   slot.client_state = ClientState::Disconnected;
+  slot.connected = false;
 }
 
 // The old route is already gone, so a link transition waits far less for the
@@ -2413,6 +2354,8 @@ void MQTTBridge::stopSlotClient(int index) {
       MQTT_DEBUG_PRINTLN("MQTT%d stop: client was not started (nothing to join)", index + 1);
     }
     slot.client_state = ClientState::Stopped;
+    slot.connected = false;
+    _slot_events.discardSlot(index);
     return;
   }
   MQTT_DEBUG_PRINTLN("MQTT%d stop returned %s - client quarantined for this boot",
@@ -2479,21 +2422,9 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
     return ESP_ERR_INVALID_STATE;
   }
 
-  esp_err_t r;
-  if (!slot.client->isStarted()) {
-    MQTT_DEBUG_PRINTLN("MQTT%d start (client was stopped)", index + 1);
-    r = slot.client->connect();
-  } else {
-    r = slot.client->reconnect();
-  }
-  if (r == ESP_OK) {
-    slot.client_state = ClientState::Starting;
-    slot.generation++;
-    // The attempt carries whatever credential is configured right now, so this
-    // is the point at which a freshly minted token becomes the one in use.
-    slot.applied_token_expires_at = slot.token_expires_at;
-  }
-  return r;
+  return startMqttSlotAttempt(slot, [&]() {
+    return slot.client->isStarted() ? slot.client->reconnect() : slot.client->connect();
+  });
 }
 
 
@@ -2703,8 +2634,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           MQTT_DEBUG_PRINTLN("MQTT%d int_heap=%d at token renewal reconnect", index + 1,
               (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
           MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
-              _radio ? _radio->getRadioState() : -1,
-              (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
+              _radio_stats.read().state,
+              _radio_stats.read().last_rx_age_ms);
         } else {
           // Token renewed but old one still valid — just update credentials for next reconnect
           slot.client->setCredentials(_jwt_username, slot.auth_token);
@@ -2720,11 +2651,6 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       return; // Token renewal handled connect; skip backoff logic below
     }
   }
-
-  // Phase 4 (MQTT memory-defrag): the MIN_TLS_HEAP preflight was a workaround
-  // for the fragmentation caused by per-reconnect mbedTLS allocations. With
-  // persistent clients (Phase 1), the mbedTLS context is allocated once at
-  // startup and the preflight is no longer necessary.
 
   const auto prepareJwtReconnect = [&](bool force_mint, int backoff_level) {
     const bool has_token = slot.auth_token && slot.auth_token[0] != '\0';
@@ -2800,8 +2726,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms, int_heap=%d)", index + 1, probe_elapsed,
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
-          _radio ? _radio->getRadioState() : -1,
-          (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
+          _radio_stats.read().state,
+          _radio_stats.read().last_rx_age_ms);
       if (slot_uses_jwt) {
         prepareJwtReconnect(true, -1);
       }
@@ -2835,8 +2761,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d, int_heap=%d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures,
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
-          _radio ? _radio->getRadioState() : -1,
-          (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
+          _radio_stats.read().state,
+          _radio_stats.read().last_rx_age_ms);
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
       if (slot_uses_jwt) {
@@ -3092,7 +3018,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
   MQTTMessageBuilder::formatIsoTimestampForMqtt(now_tv.tv_sec, now_tv.tv_usec, _timezone, timestamp, sizeof(timestamp));
 
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
-           _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
+           _radio_metadata.freq, _radio_metadata.bw, _radio_metadata.sf, _radio_metadata.cr);
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
   origin_id[sizeof(origin_id) - 1] = '\0';
@@ -3100,30 +3026,16 @@ void MQTTBridge::publishStatusToSlot(int index) {
   char client_version[64];
   getClientVersion(client_version, sizeof(client_version));
 
-  // Collect stats on-demand if sources are available
-  int battery_mv = -1;
-  int uptime_secs = -1;
-  int errors = -1;
-  int noise_floor = -999;
-  int tx_air_secs = -1;
-  int rx_air_secs = -1;
-  int recv_errors = -1;
-  int packets_sent = -1;
-  int packets_received = -1;
-
-  if (_board) battery_mv = _board->getBattMilliVolts();
-  if (_ms) uptime_secs = _ms->getMillis() / 1000;
-  if (_dispatcher) {
-    errors = _dispatcher->getErrFlags();
-    tx_air_secs = _dispatcher->getTotalAirTime() / 1000;
-    rx_air_secs = _dispatcher->getReceiveAirTime() / 1000;
-    packets_sent = (int)(_dispatcher->getNumSentFlood() + _dispatcher->getNumSentDirect());
-    packets_received = (int)(_dispatcher->getNumRecvFlood() + _dispatcher->getNumRecvDirect());
-  }
-  if (_radio) {
-    noise_floor = (int16_t)_radio->getNoiseFloor();
-    recv_errors = (int)_radio->getPacketsRecvErrors();
-  }
+  const RadioStatsSnapshot stats = _radio_stats.read();
+  const int battery_mv = stats.battery_mv;
+  const int uptime_secs = stats.uptime_secs;
+  const int errors = stats.errors;
+  const int noise_floor = stats.noise_floor;
+  const int tx_air_secs = stats.tx_air_secs;
+  const int rx_air_secs = stats.rx_air_secs;
+  const int recv_errors = stats.recv_errors;
+  const int packets_sent = stats.packets_sent;
+  const int packets_received = stats.packets_received;
 
   // Internal heap free (for diagnosing repeater hangs from internal heap exhaustion)
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -3135,7 +3047,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    _prefs->disable_fwd ? "off" : "on"
+    _radio_metadata.disable_fwd ? "off" : "on"
   );
 
   if (len > 0) {
@@ -3171,21 +3083,55 @@ bool MQTTBridge::isAnySlotConnected() {
   return false;
 }
 
+void MQTTBridge::publishRadioStats() {
+  RadioStatsSnapshot s;
+  if (_board) s.battery_mv = _board->getBattMilliVolts();
+  if (_ms) s.uptime_secs = _ms->getMillis() / 1000;
+  if (_dispatcher) {
+    s.errors = _dispatcher->getErrFlags();
+    s.tx_air_secs = _dispatcher->getTotalAirTime() / 1000;
+    s.rx_air_secs = _dispatcher->getReceiveAirTime() / 1000;
+    s.packets_sent = _dispatcher->getNumSentFlood() + _dispatcher->getNumSentDirect();
+    s.packets_received = _dispatcher->getNumRecvFlood() + _dispatcher->getNumRecvDirect();
+  }
+  if (_radio) {
+    s.noise_floor = _radio->getNoiseFloor();
+    s.recv_errors = _radio->getPacketsRecvErrors();
+    s.state = _radio->getRadioState();
+    if (_ms && _radio->getLastRecvMillis()) s.last_rx_age_ms = _ms->getMillis() - _radio->getLastRecvMillis();
+  }
+  _radio_stats.publish(s);
+}
+
+void MQTTBridge::publishConfiguration(uint32_t reconfigure) {
+  RadioMetadata metadata{};
+  memcpy(metadata.node_name, _prefs->node_name, sizeof(metadata.node_name));
+  metadata.freq = _prefs->freq;
+  metadata.bw = _prefs->bw;
+  metadata.sf = _prefs->sf;
+  metadata.cr = _prefs->cr;
+  metadata.disable_fwd = _prefs->disable_fwd;
+  _configuration.publish(*_source_obs, metadata, reconfigure);
+}
+
+void MQTTBridge::applyConfiguration() {
+  uint32_t reconfigure = 0;
+  if (!_configuration.consume(_runtime_prefs, _radio_metadata, _applied_revision, reconfigure)) return;
+  refreshOriginFromPrefs();
+  snprintf(_iata, sizeof(_iata), "%s", _obs->mqtt_iata);
+  _status_interval = _obs->mqtt_status_interval >= 1000 && _obs->mqtt_status_interval <= 3600000
+      ? _obs->mqtt_status_interval : 300000;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+    if (reconfigure & (uint32_t(1) << i)) applySlotPreset(i, _obs->mqtt_slot_preset[i]);
+  }
+}
+
 void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
-
-  // On ESP32, teardown/setup involves TLS and must run on the MQTT task (Core 0).
-  // Set a flag so the MQTT task picks it up on its next loop iteration.
-  #ifdef ESP_PLATFORM
-  if (_mqtt_task_handle != nullptr) {
-    _slot_reconfigure_pending[slot_index] = true;
-    MQTT_DEBUG_PRINTLN("MQTT%d reconfigure queued (preset: %s)", slot_index + 1, preset_name);
-    return;
-  }
-  #endif
-
-  // Non-ESP32 or bridge not yet started: apply directly
-  applySlotPreset(slot_index, preset_name);
+  // The durable image already contains preset_name. Publish it and the request
+  // together so the worker cannot apply the request to another revision.
+  (void)preset_name;
+  publishConfiguration(uint32_t(1) << slot_index);
 }
 
 void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
@@ -3224,7 +3170,7 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
     strncpy(slot.audience, _obs->mqtt_slot_audience[slot_index], sizeof(slot.audience) - 1);
     slot.audience[sizeof(slot.audience) - 1] = '\0';
     slot.enabled = (slot.host[0] != '\0');
-    if (_initialized && slot.enabled && customEndpointComplete(slot.host, slot.port)) {
+    if (!_stop_requested.load() && slot.enabled && customEndpointComplete(slot.host, slot.port)) {
       // Same cap startup applies. teardownSlot() above already released this slot's own
       // position, so reconfiguring a live slot still passes.
       if (!canActivateSlot(slot_index)) {
@@ -3247,7 +3193,7 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
       strncpy(slot.password, _obs->mqtt_slot_password[slot_index], sizeof(slot.password) - 1);
       slot.password[sizeof(slot.password) - 1] = '\0';
     }
-    if (_initialized) {
+    if (!_stop_requested.load()) {
       char reason[80];
       if (!isSlotReady(slot_index, reason, sizeof(reason))) {
         MQTT_DEBUG_PRINTLN("MQTT%d (%s) not ready - run '%s' to connect", slot_index + 1, preset_name, reason);
@@ -3265,8 +3211,15 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
   }
 }
 
+bool MQTTBridge::mayEditStartupMetadata() {
+  if (_initialized) return false;
+  pollLateStopAck();
+  return !_lifecycle.isStopUnproven();
+}
+
 void MQTTBridge::setSlotCustomBroker(int slot_index, const char* host, uint16_t port,
                                       const char* username, const char* password) {
+  if (!mayEditStartupMetadata()) return;
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[slot_index];
 
@@ -3349,7 +3302,7 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
 }
 
 bool MQTTBridge::isReady() const {
-  return _initialized && isNetworkConfigValid(_obs);
+  return _initialized && isNetworkConfigValid(_source_obs);
 }
 
 bool MQTTBridge::isIATAValid() const {
@@ -3405,16 +3358,22 @@ void MQTTBridge::loop() {
   if (!_initialized) return;
 
   #ifdef ESP_PLATFORM
-  // On ESP32, loop() is a no-op - all processing happens in the FreeRTOS task
+  // Publish only between loop-owned commands, after save/rollback has finished.
+  const uint32_t now = millis();
+  if ((uint32_t)(now - _last_radio_sample_ms) >= 1000) {
+    _last_radio_sample_ms = now;
+    publishRadioStats();
+  }
+  if ((uint32_t)(now - _last_config_sample_ms) >= 100) {
+    _last_config_sample_ms = now;
+    publishConfiguration();
+  }
   return;
   #else
   unsigned long now = millis();
-  if (handleNetworkConnection(now) && !_ntp_synced) {
-    syncTimeWithNTP();
-  }
-  if (_ntp_sync_pending && _network->isConnected()) {
-    _ntp_sync_pending = false;
-    syncTimeWithNTP();
+  handleNetworkConnection(now);
+  if (_ntp_schedule.due((uint32_t)millis()) && _network->isConnected()) {
+    syncTimeWithNTP(false, false, _ntp_synced ? 1 : 2);
   }
 
   // Deferred slot setup after NTP sync (non-ESP32 path)
@@ -3434,13 +3393,8 @@ void MQTTBridge::loop() {
     }
   }
 
-  // Process pending slot reconfigures
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slot_reconfigure_pending[i]) {
-      _slot_reconfigure_pending[i] = false;
-      applySlotPreset(i, _obs->mqtt_slot_preset[i]);
-    }
-  }
+  applyConfiguration();
+  processSlotEvents();
 
   // Maintain slot connections (token renewal, reconnect with backoff)
   maintainSlotConnections();
@@ -3450,11 +3404,6 @@ void MQTTBridge::loop() {
 
   // Periodic configuration check (throttled to avoid spam)
   checkConfigurationMismatch();
-
-  // Periodic NTP refresh (every hour) — lightweight, non-blocking.
-  if (_network->isConnected() && millis() - _last_ntp_sync > 3600000) {
-    refreshNTP();
-  }
 
   // Publish status updates (handle millis() overflow correctly).
   // Read the toggle live from prefs so a CLI/web `set mqtt.status` change
@@ -3523,7 +3472,7 @@ void MQTTBridge::loop() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
-  if (!_initialized || !_obs->mqtt_packets_enabled || !_obs->mqtt_rx_enabled) return;
+  if (!_initialized || !_source_obs->mqtt_packets_enabled || !_source_obs->mqtt_rx_enabled) return;
 
   // Drop before the queue copy when no configured slot allows this payload
   // type. A QueuedPacket carries the packet plus up to 256 bytes of raw radio
@@ -3541,8 +3490,8 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
-  uint8_t tx_mode = _obs->mqtt_tx_enabled;  // Read live from prefs (no restart needed)
-  if (!_initialized || !_obs->mqtt_packets_enabled || tx_mode == 0) return;
+  uint8_t tx_mode = _source_obs->mqtt_tx_enabled;  // Read live from prefs (no restart needed)
+  if (!_initialized || !_source_obs->mqtt_packets_enabled || tx_mode == 0) return;
 
   // Advert mode: only queue self-originated advert packets
   if (tx_mode == 2) {
@@ -3648,6 +3597,7 @@ void MQTTBridge::processPacketQueue() {
       _last_snr           = queued.snr;
       _last_rssi          = queued.rssi;
       _last_raw_timestamp = millis();
+      _last_packet_score = queued.score;
     }
 
     bool packet_eligible = false;
@@ -3655,7 +3605,7 @@ void MQTTBridge::processPacketQueue() {
                                           packet_eligible,
                                           queued.has_raw_data ? queued.raw_data : nullptr,
                                           queued.has_raw_data ? queued.raw_len  : 0,
-                                          queued.snr, queued.rssi);
+                                          queued.snr, queued.rssi, queued.score);
     taskYIELD();  // allow higher-priority tasks to run between packet publishes
 
     // Publish raw if enabled (live from prefs so `set mqtt.raw` applies without
@@ -3783,6 +3733,7 @@ void MQTTBridge::processPacketQueue() {
       _last_snr           = queued.snr;
       _last_rssi          = queued.rssi;
       _last_raw_timestamp = millis();
+      _last_packet_score = queued.score;
     }
 
     bool packet_eligible = false;
@@ -3790,7 +3741,7 @@ void MQTTBridge::processPacketQueue() {
                                           packet_eligible,
                                           queued.has_raw_data ? queued.raw_data : nullptr,
                                           queued.has_raw_data ? queued.raw_len  : 0,
-                                          queued.snr, queued.rssi);
+                                          queued.snr, queued.rssi, queued.score);
     // No taskYIELD() on non-ESP32 platforms (non-FreeRTOS, cooperative scheduling not needed)
 
     // Live from prefs so `set mqtt.raw` applies without a bridge restart.
@@ -3900,17 +3851,18 @@ uint8_t MQTTBridge::eligiblePacketSlots(uint8_t packet_type, MQTTMessageType typ
 // from "no broker configured at all" (the pre-existing silent drop).
 bool MQTTBridge::shouldQueuePacketType(uint8_t packet_type, bool& filtered) {
   filtered = false;
-  if (!_obs) return false;
+  if (!_source_obs) return false;
 
+  const RuntimeSnapshot snapshot = _published.read();
   uint16_t masks[RUNTIME_MQTT_SLOTS];
   bool enabled[RUNTIME_MQTT_SLOTS];
   bool any_enabled = false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
-    masks[i] = _obs->mqtt_slot_packet_filter[i];
+    masks[i] = _source_obs->mqtt_slot_packet_filter[i];
     // Configured, not allocated — see eligiblePacketSlots(). Gating on the client
     // here would silently drop every packet received before the post-NTP-sync slot
     // setup, which is exactly the window the queue exists to cover.
-    enabled[i] = _slots[i].enabled;
+    enabled[i] = snapshot.slots[i].enabled;
     any_enabled = any_enabled || enabled[i];
   }
   if (!any_enabled) return false;
@@ -3950,7 +3902,7 @@ bool MQTTBridge::publishStatus() {
   MQTTMessageBuilder::formatIsoTimestampForMqtt(now_tv.tv_sec, now_tv.tv_usec, _timezone, timestamp, sizeof(timestamp));
 
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
-           _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
+           _radio_metadata.freq, _radio_metadata.bw, _radio_metadata.sf, _radio_metadata.cr);
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
   origin_id[sizeof(origin_id) - 1] = '\0';
@@ -3958,30 +3910,16 @@ bool MQTTBridge::publishStatus() {
   char client_version[64];
   getClientVersion(client_version, sizeof(client_version));
 
-  // Collect stats on-demand if sources are available
-  int battery_mv = -1;
-  int uptime_secs = -1;
-  int errors = -1;
-  int noise_floor = -999;
-  int tx_air_secs = -1;
-  int rx_air_secs = -1;
-  int recv_errors = -1;
-  int packets_sent = -1;
-  int packets_received = -1;
-
-  if (_board) battery_mv = _board->getBattMilliVolts();
-  if (_ms) uptime_secs = _ms->getMillis() / 1000;
-  if (_dispatcher) {
-    errors = _dispatcher->getErrFlags();
-    tx_air_secs = _dispatcher->getTotalAirTime() / 1000;
-    rx_air_secs = _dispatcher->getReceiveAirTime() / 1000;
-    packets_sent = (int)(_dispatcher->getNumSentFlood() + _dispatcher->getNumSentDirect());
-    packets_received = (int)(_dispatcher->getNumRecvFlood() + _dispatcher->getNumRecvDirect());
-  }
-  if (_radio) {
-    noise_floor = (int16_t)_radio->getNoiseFloor();
-    recv_errors = (int)_radio->getPacketsRecvErrors();
-  }
+  const RadioStatsSnapshot stats = _radio_stats.read();
+  const int battery_mv = stats.battery_mv;
+  const int uptime_secs = stats.uptime_secs;
+  const int errors = stats.errors;
+  const int noise_floor = stats.noise_floor;
+  const int tx_air_secs = stats.tx_air_secs;
+  const int rx_air_secs = stats.rx_air_secs;
+  const int recv_errors = stats.recv_errors;
+  const int packets_sent = stats.packets_sent;
+  const int packets_received = stats.packets_received;
 
   // Internal heap free (for diagnosing repeater hangs from internal heap exhaustion)
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -3993,7 +3931,7 @@ bool MQTTBridge::publishStatus() {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    _prefs->disable_fwd ? "off" : "on"
+    _radio_metadata.disable_fwd ? "off" : "on"
   );
 
   if (len > 0) {
@@ -4025,7 +3963,7 @@ bool MQTTBridge::publishStatus() {
 bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 bool& has_eligible_target,
                                 const uint8_t* raw_data, int raw_len,
-                                float snr, float rssi) {
+                                float snr, float rssi, float captured_score) {
   has_eligible_target = false;
   if (!packet) return false;
 
@@ -4040,11 +3978,9 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
 
   // Memory pressure check: Skip publishes when there's not enough contiguous
   // heap for the publish itself (JSON buffer + esp-mqtt outbox frame + WiFi TX
-  // path). Headroom only — NOT an mbedTLS preflight: persistent clients keep
-  // their TLS contexts allocated for the bridge lifetime, so the old ~52 KB
-  // "reserve space for reconnect" guard is obsolete post Phase 1. Publish
-  // payload is capped at PUBLISH_JSON_BUFFER_SIZE (2 KB); 8 KB is a safe
-  // ceiling including esp-mqtt frame overhead and transient TCP buffers.
+  // path). This is publish headroom, not a guarantee that a later TLS handshake
+  // can allocate its record buffers. Payload is capped at 2 KB; the remaining
+  // headroom covers MQTT frame overhead and transient TCP buffers.
   #ifdef ESP32
   #if defined(BOARD_HAS_PSRAM)
   static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 16000;
@@ -4096,21 +4032,21 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   origin_id[sizeof(origin_id) - 1] = '\0';
 
   // Firmware rebroadcast "score" for this packet — only meaningful for RX packets
-  // (depends on receive SNR). Recomputed here exactly as Dispatcher::checkRecv() does,
-  // via the radio's packetScore(snr, len); NaN signals "omit" (tx, or no radio).
+  // (depends on receive SNR). Captured on the mesh task using packetScore(snr, len);
+  // NaN signals "omit" (tx, or no radio).
   // buildPacketMessage scales it x1000 to match the integer in the serial RX log.
 
   // Build packet message using raw radio data if provided
   int len;
   if (raw_data && raw_len > 0) {
-    float score = (_radio && !is_tx) ? _radio->packetScore(snr, raw_len) : NAN;
+    float score = captured_score;
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
       _json_scratch_doc,
       raw_data, raw_len, packet, is_tx, _origin, origin_id,
       snr, rssi, score, _timezone, active_buffer, active_buffer_size
     );
   } else if (!is_tx && _last_raw_data && _last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
-    float score = _radio ? _radio->packetScore(_last_snr, _last_raw_len) : NAN;
+    float score = _last_packet_score;
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
       _json_scratch_doc,
       _last_raw_data, _last_raw_len, packet, is_tx, _origin, origin_id,
@@ -4127,7 +4063,7 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
       rlen = packet->writeTo(reconstructed);
     }
     if (rlen > 0) {
-      float score = (_radio && !is_tx) ? _radio->packetScore(snr, rlen) : NAN;
+      float score = captured_score;
       len = MQTTMessageBuilder::buildPacketJSONFromRaw(
         _json_scratch_doc,
         reconstructed, rlen, packet, is_tx, _origin, origin_id,
@@ -4326,6 +4262,15 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
     }
   }
 
+  queued.score = NAN;
+  if (_radio && !is_tx) {
+    int score_len = queued.has_raw_data ? queued.raw_len : 0;
+    if (!score_len && MQTTMessageBuilder::canSerializePacket(packet, sizeof(queued.raw_data))) {
+      score_len = packet->writeTo(queued.raw_data);
+    }
+    if (score_len > 0) queued.score = _radio->packetScore(queued.snr, score_len);
+  }
+
   // Try to send to queue (non-blocking)
   if (xQueueSend(_packet_queue_handle, &queued, 0) != pdTRUE) {
     const MQTTPacketQueuePolicy::EnqueueAction action =
@@ -4350,8 +4295,7 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
     }
   }
 
-  UBaseType_t queue_messages = uxQueueMessagesWaiting(_packet_queue_handle);
-  _queue_count = queue_messages;
+  // Queue depth is sampled by the worker; the capture task does not write its cache.
   #else
   // Non-ESP32: Use circular buffer
   const MQTTPacketQueuePolicy::EnqueueAction action =
@@ -4389,6 +4333,15 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
       queued.raw_len = tx_len;
       queued.has_raw_data = true;
     }
+  }
+
+  queued.score = NAN;
+  if (_radio && !is_tx) {
+    int score_len = queued.has_raw_data ? queued.raw_len : 0;
+    if (!score_len && MQTTMessageBuilder::canSerializePacket(packet, sizeof(queued.raw_data))) {
+      score_len = packet->writeTo(queued.raw_data);
+    }
+    if (score_len > 0) queued.score = _radio->packetScore(queued.snr, score_len);
   }
 
   _queue_tail = (_queue_tail + 1) % MAX_QUEUE_SIZE;
@@ -4440,10 +4393,6 @@ void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, 
 // as every other sync and touches nothing until a reply passes every check.
 // One attempt per server bounds the blocking walk on a network that drops
 // UDP/123 to about one probe timeout per server, instead of three.
-void MQTTBridge::refreshNTP() {
-  syncTimeWithNTP(/*force=*/true, /*primary_only=*/false, /*attempts_per_server=*/1);
-}
-
 // One validated NTP exchange with one named server, on a fresh ephemeral socket.
 //
 // Replaces NTPClient, which accepted any datagram that arrived on its fixed
@@ -4551,16 +4500,7 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per
     return false;
   }
 
-  unsigned long now = millis();
-  if (!force && _ntp_synced && (now - _last_ntp_sync) < 5000) {
-    return false;
-  }
-
-  static bool sync_in_progress = false;
-  if (sync_in_progress) {
-    return false;
-  }
-  sync_in_progress = true;
+  if (!_ntp_schedule.begin((uint32_t)millis(), force)) return false;
 
   MQTT_DEBUG_PRINTLN("Syncing time with NTP...");
 
@@ -4674,8 +4614,8 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per
 
     bool was_ntp_synced = _ntp_synced;
     _ntp_synced = true;
-    _last_ntp_sync = millis();
-    sync_in_progress = false;
+    _ntp_schedule.complete((uint32_t)millis(), ntp_server_used
+        ? NtpSchedule::Result::NetworkTime : NtpSchedule::Result::Holdover);
 
     MQTT_DEBUG_PRINTLN("Time synced: %lu (via %s)", epochTime,
         ntp_server_used ? ntp_server_used : "existing clock");
@@ -4758,41 +4698,23 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per
   }
 
   MQTT_DEBUG_PRINTLN("NTP sync failed");
-  sync_in_progress = false;
+  _ntp_schedule.complete((uint32_t)millis(), NtpSchedule::Result::Failed);
   return false;
 }
 
 bool MQTTBridge::requestForcedNtpSync(uint32_t timeout_ms) {
+  (void)timeout_ms;  // Retained for source compatibility; requests never block.
   if (!isRunning()) return false;
-
-  // Publish the request to the MQTT task. Clear the completion flags before
-  // raising _ntp_force_requested so the task can't observe a stale result.
-  _ntp_force_done = false;
-  _ntp_force_result = false;
-  _ntp_force_requested = true;
-
-  // Fire-and-forget: callers on the Arduino loop task (web config batch, and
-  // the CLI which shares that task) must not block up to 30 s polling the MQTT
-  // task — that stalls mesh/radio forwarding, portal DNS, and reboot timers.
-  // The task still performs the sync; the result is observable via
-  // `get mqtt.ntp.diag`. Blocking callers pass a non-zero timeout.
-  if (timeout_ms == 0) return true;
-
-  unsigned long start = millis();
-  while (!_ntp_force_done) {
-    if (millis() - start >= timeout_ms) {
-      MQTT_DEBUG_PRINTLN("Forced NTP sync timed out waiting for MQTT task");
-      return false;  // task still running; result is ignored when it eventually completes
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
-  return _ntp_force_result;
+  publishConfiguration();
+  _ntp_force_requested.store(true, std::memory_order_release);
+  return true;
 }
 
 // Runs on the MQTT task (Core 0). Probes every configured NTP server for connectivity
 // and records the time each reports. Deliberately does NOT call configTime() or update
 // the RTC — this is a read-only diagnostic and must leave the system clock untouched.
-void MQTTBridge::runNtpDiagProbe() {
+void MQTTBridge::runNtpDiagProbe(uint32_t request_id) {
+  NtpDiagReport report;
   const char* servers[kMaxNtpServers];
   int count = 0;
   fillNtpServerList(_obs, servers, count);
@@ -4803,43 +4725,46 @@ void MQTTBridge::runNtpDiagProbe() {
     uint32_t epoch = 0;
     const char* why = nullptr;
     bool ok = probeNtpServer(servers[i], kNtpMinValidEpoch, &epoch, &why);
-    NtpDiagResult& r = _ntp_diag_results[i];
+    if (_stop_requested.load(std::memory_order_acquire)) {
+      _ntp_diag_job.cancel(millis());
+      return;
+    }
+    NtpDiagResult& r = report.servers[i];
     strncpy(r.server, servers[i], sizeof(r.server) - 1);
     r.server[sizeof(r.server) - 1] = '\0';
     r.ok = ok;
     r.epoch = ok ? epoch : 0;
-    r.why = why;   // static literal from NtpValidation/probeNtpServer
+    snprintf(r.why, sizeof(r.why), "%s", why ? why : "no reply");
   }
-  _ntp_diag_count = count;
+  report.count = count;
+  _ntp_diag_job.complete(request_id, millis(), report);
 }
 
 bool MQTTBridge::ntpDiag(char* reply, size_t reply_size, bool verbose) {
   if (!isRunning() || reply == nullptr || reply_size == 0) return false;
 
-  // Marshal the probe onto the MQTT task (Core 0); clear the completion flag first.
-  _ntp_diag_done = false;
-  _ntp_diag_requested = true;
-
-  unsigned long start = millis();
-  while (!_ntp_diag_done) {
-    if (millis() - start >= 30000) {
-      snprintf(reply, reply_size, "Error: NTP diag timed out");
-      return true;
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
+  using Job = ObserverAsyncJob<NtpDiagReport>;
+  auto snapshot = _ntp_diag_job.read();
+  if (snapshot.state != Job::State::Complete || (uint32_t)(millis() - snapshot.finished_ms) >= 30000) {
+    publishConfiguration();
+    _ntp_diag_job.request(millis());
+    snapshot = _ntp_diag_job.read();
+    snprintf(reply, reply_size, "> NTP probe #%lu %s; repeat get mqtt.ntp.diag for result",
+             (unsigned long)snapshot.id, snapshot.state == Job::State::Running ? "running" : "queued");
+    return true;
   }
-
+  const NtpDiagReport& report = snapshot.result;
   int ok_count = 0;
-  for (int i = 0; i < _ntp_diag_count; i++) {
-    if (_ntp_diag_results[i].ok) ok_count++;
+  for (int i = 0; i < report.count; i++) {
+    if (report.servers[i].ok) ok_count++;
   }
 
   if (verbose) {
     // Detailed table to the serial console; reply carries a short summary (the operator
     // sees the table above the "-> <reply>" line). Mirrors the dumpLogFile() convention.
-    Serial.printf("NTP diag - %d server(s):\r\n", _ntp_diag_count);
-    for (int i = 0; i < _ntp_diag_count; i++) {
-      const NtpDiagResult& r = _ntp_diag_results[i];
+    Serial.printf("NTP diag - %d server(s):\r\n", report.count);
+    for (int i = 0; i < report.count; i++) {
+      const NtpDiagResult& r = report.servers[i];
       if (r.ok) {
         time_t t = (time_t)r.epoch;
         struct tm tmv;
@@ -4848,16 +4773,20 @@ bool MQTTBridge::ntpDiag(char* reply, size_t reply_size, bool verbose) {
                       r.server, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
                       tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
       } else {
-        Serial.printf("  %-20s FAIL  %s\r\n", r.server, r.why ? r.why : "no reply");
+        Serial.printf("  %-20s FAIL  %s\r\n", r.server, r.why);
       }
     }
-    snprintf(reply, reply_size, "> NTP diag: %d/%d OK (see console)", ok_count, _ntp_diag_count);
+    snprintf(reply, reply_size, "> NTP #%lu age:%lus %d/%d OK (see console)",
+             (unsigned long)snapshot.id, (unsigned long)((uint32_t)(millis() - snapshot.finished_ms) / 1000),
+             ok_count, report.count);
   } else {
     // Compact "<server> ok|fail" list for LoRa, bounded to reply_size.
-    size_t used = 0;
-    reply[0] = '\0';
-    for (int i = 0; i < _ntp_diag_count; i++) {
-      const NtpDiagResult& r = _ntp_diag_results[i];
+    int header = 0;
+    replyAppendf(reply, reply_size, &header, "> NTP #%lu age:%lus\n",
+                 (unsigned long)snapshot.id, (unsigned long)((uint32_t)(millis() - snapshot.finished_ms) / 1000));
+    size_t used = header;
+    for (int i = 0; i < report.count; i++) {
+      const NtpDiagResult& r = report.servers[i];
       int n = snprintf(reply + used, reply_size - used, "%s%s %s",
                        used ? "\n" : "", r.server, r.ok ? "ok" : "fail");
       if (n < 0 || (size_t)n >= reply_size - used) {
@@ -5120,11 +5049,13 @@ void MQTTBridge::logMemoryStatus() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::setOrigin(const char* origin) {
+  if (!mayEditStartupMetadata()) return;
   strncpy(_origin, origin, sizeof(_origin) - 1);
   _origin[sizeof(_origin) - 1] = '\0';
 }
 
 void MQTTBridge::setIATA(const char* iata) {
+  if (!mayEditStartupMetadata()) return;
   strncpy(_iata, iata, sizeof(_iata) - 1);
   _iata[sizeof(_iata) - 1] = '\0';
   for (int i = 0; _iata[i]; i++) {
@@ -5133,40 +5064,39 @@ void MQTTBridge::setIATA(const char* iata) {
 }
 
 void MQTTBridge::setDeviceID(const char* device_id) {
+  if (!mayEditStartupMetadata()) return;
   strncpy(_device_id, device_id, sizeof(_device_id) - 1);
   _device_id[sizeof(_device_id) - 1] = '\0';
   MQTT_DEBUG_PRINTLN("Device ID set to: %s", _device_id);
 }
 
 void MQTTBridge::setFirmwareVersion(const char* firmware_version) {
+  if (!mayEditStartupMetadata()) return;
   strncpy(_firmware_version, firmware_version, sizeof(_firmware_version) - 1);
   _firmware_version[sizeof(_firmware_version) - 1] = '\0';
 }
 
 void MQTTBridge::setBoardModel(const char* board_model) {
+  if (!mayEditStartupMetadata()) return;
   strncpy(_board_model, board_model, sizeof(_board_model) - 1);
   _board_model[sizeof(_board_model) - 1] = '\0';
 }
 
 void MQTTBridge::setBuildDate(const char* build_date) {
+  if (!mayEditStartupMetadata()) return;
   strncpy(_build_date, build_date, sizeof(_build_date) - 1);
   _build_date[sizeof(_build_date) - 1] = '\0';
 }
 
 void MQTTBridge::setMessageTypes(bool status, bool packets, bool raw) {
+  if (!mayEditStartupMetadata()) return;
   _status_enabled = status;
   _packets_enabled = packets;
   _raw_enabled = raw;
 }
 
 int MQTTBridge::getConnectedBrokers() const {
-  int count = 0;
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slots[i].enabled && _slots[i].connected) {
-      count++;
-    }
-  }
-  return count;
+  return _published.read().connected;
 }
 
 int MQTTBridge::getQueueSize() const {
@@ -5182,10 +5112,12 @@ int MQTTBridge::getQueueSize() const {
 
 void MQTTBridge::setStatsSources(mesh::Dispatcher* dispatcher, mesh::Radio* radio,
                                   mesh::MainBoard* board, mesh::MillisecondClock* ms) {
+  if (!mayEditStartupMetadata()) return;
   _dispatcher = dispatcher;
   _radio = radio;
   _board = board;
   _ms = ms;
+  publishRadioStats();
 }
 
 #endif

@@ -15,6 +15,10 @@
 #include "helpers/AlertFaultPolicy.h"
 #include "helpers/MQTTEffectiveConfig.h"
 #include "helpers/MQTTClientState.h"
+#include "helpers/NtpSchedule.h"
+#include "helpers/MQTTEventChannel.h"
+#include "helpers/ObserverConfigMailbox.h"
+#include "helpers/ObserverAsyncJob.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -129,9 +133,10 @@ private:
     // accept/reject decision for a late callback is made on client_state, which
     // the bridge task owns.
     uint32_t generation;
+    uint32_t incarnation;
     const MQTTPresetDef* preset;    // Points to MQTT_PRESETS[] entry, nullptr for custom/none
     bool enabled;                   // true when preset is not "none"
-    bool connected;                 // Updated in callbacks
+    bool connected;                 // Updated by the worker from event records
     bool initial_connect_done;      // True after first connect() call
 
     // JWT auth state (used by preset JWT slots and custom slots with audience set).
@@ -192,9 +197,56 @@ private:
   };
 
   MQTTSlot _slots[RUNTIME_MQTT_SLOTS];
+  MqttEventChannel<32> _slot_events;
+  void processSlotEvents();
+  struct SlotRuntimeSnapshot {
+    char name[32]{};
+    char state[16]{};
+    bool configured = false;
+    bool enabled = false;
+    bool client = false;
+    bool connected = false;
+    bool attempted = false;
+    bool ready = false;
+    bool circuit_breaker_tripped = false;
+    ClientState client_state = ClientState::Absent;
+    uint16_t filter_mask = 0;
+    unsigned long publish_ok = 0, publish_err = 0;
+    uint32_t disconnect_count = 0;
+    unsigned long first_disconnect_time = 0, current_outage_started_ms = 0;
+    unsigned long last_error_time = 0;
+    int32_t last_tls_err = 0, last_tls_stack_err = 0;
+    int last_sock_errno = 0;
+    uint8_t last_connack_code = 0;
+  };
+  struct RuntimeSnapshot {
+    uint32_t sampled_ms = 0, sequence = 0;
+    uint32_t desired_revision = 0, applied_revision = 0;
+    bool running = false;
+    int queue = 0, connected = 0, skipped = 0;
+    uint32_t free_heap = 0, max_heap = 0, event_overflows = 0;
+    unsigned long outbox = 0, outbox_drops = 0, filtered = 0;
+    uint8_t neighbors_phase = 0, neighbors_result = 0;
+    uint32_t neighbors_seconds = 0;
+    SlotRuntimeSnapshot slots[RUNTIME_MQTT_SLOTS];
+  };
+  static ObserverMailbox<RuntimeSnapshot> _published;
+  uint32_t _snapshot_sequence = 0;
+  void publishRuntimeSnapshot();
+  bool mayEditStartupMetadata();
 
   // JWT username shared across all JWT-auth slots (same device identity)
   char _jwt_username[70];  // Format: v1_{UPPERCASE_PUBLIC_KEY}
+
+  struct RadioStatsSnapshot {
+    int battery_mv = -1, uptime_secs = -1, errors = -1, noise_floor = -999;
+    int tx_air_secs = -1, rx_air_secs = -1, recv_errors = -1;
+    int packets_sent = -1, packets_received = -1, state = -1;
+    uint32_t last_rx_age_ms = 0;
+  };
+  ObserverMailbox<RadioStatsSnapshot> _radio_stats;
+  uint32_t _last_radio_sample_ms = 0;
+  void publishRadioStats();  // loop task
 
   // Message configuration
   char _origin[32];
@@ -223,6 +275,7 @@ private:
     bool is_tx;
     float snr;
     float rssi;
+    float score;
     // Raw radio bytes embedded at enqueue time (Core 1), never shared across cores.
     // On non-PSRAM boards the queue is smaller (6 items) to offset the per-item cost.
     uint8_t raw_data[256];
@@ -260,55 +313,27 @@ private:
   // NTP time sync. The socket is opened per probe and closed again (see
   // probeNtpServer); nothing listens between syncs.
   WiFiUDP _ntp_udp;
-  unsigned long _last_ntp_sync;
+  NtpSchedule _ntp_schedule;
   bool _ntp_synced;
-  bool _ntp_sync_pending;  // Flag to trigger NTP sync from loop() instead of event handler
   bool _slots_setup_done;  // Deferred: slots set up after NTP sync
   int _max_active_slots;   // Runtime limit: 5 with PSRAM, 2 without
 
-  // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
-  volatile bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS];
+  // Worker-owned effects requested by applied SDK event records.
+  bool _slot_force_jwt_mint[RUNTIME_MQTT_SLOTS];
+  bool _status_publish_pending[RUNTIME_MQTT_SLOTS];
 
-  // A broker refusal can invalidate an otherwise clock-valid JWT. The esp-mqtt
-  // callback sets this and the bridge loop consumes it; byte access is atomic.
-  volatile bool _slot_force_jwt_mint[RUNTIME_MQTT_SLOTS];
-
-  // Pending on-connect status publish: set from the onConnect callback (which
-  // runs on the esp-mqtt event task, NOT this bridge task), consumed by the MQTT
-  // task (Core 0). publishStatusToSlot() touches the shared status doc/buffer/
-  // origin that publishStatus() also uses, so it must run only on the bridge
-  // task — the callback just raises this flag. Same idiom as
-  // _slot_reconfigure_pending; a single-byte volatile store/load is atomic.
-  volatile bool _status_publish_pending[RUNTIME_MQTT_SLOTS];
-
-  // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
-  // All NTP I/O must run on Core 0; the CLI thread
-  // (Core 1) sets _ntp_force_requested and blocks in requestForcedNtpSync()
-  // until the task publishes the outcome via _ntp_force_result/_ntp_force_done.
-  // Single-requester assumption: CLI commands are serialized, so at most one
-  // forced sync is outstanding at a time.
-  volatile bool _ntp_force_requested;
-  volatile bool _ntp_force_done;
-  volatile bool _ntp_force_result;
-
-  // CLI-requested NTP connectivity diagnostic, marshalled onto the MQTT task (Core 0)
-  // with the same handshake as the forced sync. Probe-only: it queries each server and
-  // records the reported time but never sets the system clock or the RTC, so the
-  // system clock is left untouched. Results are written by the task and read by the CLI
-  // thread once _ntp_diag_done is set.
-  volatile bool _ntp_diag_requested;
-  volatile bool _ntp_diag_done;
+  std::atomic<bool> _ntp_force_requested{false};
   struct NtpDiagResult {
-    char     server[64];
-    bool     ok;
-    uint32_t epoch;  // server-reported UTC epoch when ok
-    // Why a probe failed, as a static literal ("DNS failed", "unsolicited
-    // reply", ...). Previously every failure looked alike, and a name that never
-    // resolved could be credited with another server's reply.
-    const char* why;
+    char server[64]{};
+    bool ok = false;
+    uint32_t epoch = 0;
+    char why[48]{};
   };
-  NtpDiagResult _ntp_diag_results[kMaxNtpServers];
-  int _ntp_diag_count;
+  struct NtpDiagReport {
+    NtpDiagResult servers[kMaxNtpServers];
+    int count = 0;
+  };
+  ObserverAsyncJob<NtpDiagReport> _ntp_diag_job;
 
   // Cooperative-shutdown handshake. The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
@@ -341,6 +366,7 @@ private:
   uint8_t _staged_raw[LAST_RAW_DATA_SIZE];
   int     _staged_raw_len   = 0;
   float   _staged_snr       = 0.0f;
+  float _last_packet_score = NAN;
   float   _staged_rssi      = 0.0f;
   bool    _staged_raw_valid = false;
 
@@ -424,10 +450,8 @@ private:
   unsigned long _last_memory_check;
   bool _memory_pressure = false;  // Cached max-alloc verdict; re-sampled at most once per interval in publishPacket() so the heap walk isn't paid per-packet under pressure
   int _skipped_publishes;  // Exposed via SNMP; count of publishes skipped when max_alloc is too low
-  // Packets rejected by the per-slot filters before reaching the queue. Written
-  // on Core 1 (radio callbacks), read on Core 0 for `mqtt.stats`; a torn read of
-  // a diagnostic counter is harmless, so no atomic is warranted.
-  unsigned long _filtered_packets = 0;
+  // Capture task increments; worker samples for diagnostics.
+  std::atomic<unsigned long> _filtered_packets{0};
 
   // Status publish retry tracking
   unsigned long _last_status_retry;  // Track last retry attempt (separate from successful publish)
@@ -436,8 +460,8 @@ private:
   // Device identity for JWT token creation
   mesh::LocalIdentity *_identity;
 
-  // Cached connection status (updated in callbacks to avoid redundant checks)
-  bool _cached_has_connected_slots;
+  // Worker publishes a cheap connection hint to the capture task.
+  std::atomic<bool> _cached_has_connected_slots;
 
   // Queue staleness tracking
   unsigned long _queue_disconnected_since;  // 0 = has connected slots
@@ -480,10 +504,8 @@ private:
   // - destroySlotClients() disconnects and deletes each client. Runs once in end().
   // - setupSlot() ensures the client exists, then configures it (server,
   //   credentials, CA) and calls connect(). Safe to call again to reconfigure.
-  // - teardownSlot() only disconnects — it never deletes the client. Leaves
-  //   the mbedTLS/transport state ready for a subsequent setupSlot().
-  // This avoids delete/new cycles that shed ~40 KB of mbedTLS buffers per
-  // reconfigure and fragment the internal heap on non-PSRAM boards.
+  // - teardownSlot() disconnects without deleting the wrapper. TLS session
+  //   buffers follow the transport connection lifetime, not wrapper lifetime.
   bool ensureSlotClient(int index);    // Allocate this slot's persistent client + callbacks on first use
   // Stop, destroy and re-allocate this slot's client. Only for configuration
   // changes that cannot be applied to a live client, and only after the stop is
@@ -555,8 +577,8 @@ private:
   void initializeNetworkInTask();  // Selected-link initialization moved to task
   #endif
   bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
-                     const uint8_t* raw_data = nullptr, int raw_len = 0,
-                     float snr = 0.0f, float rssi = 0.0f);
+                     const uint8_t* raw_data, int raw_len,
+                     float snr, float rssi, float captured_score);
   bool publishRaw(mesh::Packet* packet, bool& has_eligible_target);
 #if defined(WITH_MQTT_NEIGHBORS)
   // Publishes the pending _neighbors_json_buffer to every connected slot's
@@ -566,8 +588,7 @@ private:
   void queuePacket(mesh::Packet* packet, bool is_tx);
   void dequeuePacket();
   bool isAnySlotConnected();
-  void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
-  void runNtpDiagProbe();  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  void runNtpDiagProbe(uint32_t request_id);  // Probe every server for connectivity; never sets the clock. Core 0 only.
   // One validated NTP exchange with one server on a fresh ephemeral socket.
   // Core 0 only; never touches the clock. *why receives a static reason literal.
   bool probeNtpServer(const char* server, uint32_t min_epoch,
@@ -613,7 +634,20 @@ private:
 
   // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
-  MQTTPrefs* _obs = nullptr;
+  struct RadioMetadata {
+    char node_name[32]{};
+    float freq = 0, bw = 0;
+    uint8_t sf = 0, cr = 0, disable_fwd = 0;
+  };
+  MQTTPrefs _runtime_prefs{};
+  RadioMetadata _radio_metadata{};
+  ObserverConfigMailbox<MQTTPrefs, RadioMetadata> _configuration;
+  uint32_t _applied_revision = 0;
+  uint32_t _last_config_sample_ms = 0;
+  const MQTTPrefs* _source_obs = nullptr;  // loop-task owned
+  MQTTPrefs* _obs = &_runtime_prefs;       // worker owned
+  void publishConfiguration(uint32_t reconfigure = 0);  // loop task
+  void applyConfiguration();                           // worker
   NetworkLink* _network = nullptr;
 
 public:
@@ -729,8 +763,7 @@ public:
   // Honours a stop acknowledgement that arrived after the deadline: releases the
   // withheld resources and makes the bridge restartable. Loop task only.
   void pollLateStopAck();
-  // Survives end() clearing the diagnostic singleton, so `get mqtt.status` can
-  // still explain why a stopped bridge will not come back without a reboot.
+  // Retains the reason for a stopped bridge until late acknowledgment or restart.
   static bool stopUnprovenLatched();
 
   static unsigned long getWifiConnectedAtMillis();
@@ -767,6 +800,12 @@ public:
   unsigned long getSlotCurrentOutageStartMs(int slot_index) const;
   bool isSlotEnabledAndAttempted(int slot_index) const;
   const char* getSlotPresetName(int slot_index) const;
+  struct SlotOutageSnapshot {
+    bool monitored = false;
+    uint32_t started_ms = 0;
+    char name[32]{};
+  };
+  SlotOutageSnapshot getSlotOutageSnapshot(int slot_index) const;
   static int getRuntimeSlotCount() { return RUNTIME_MQTT_SLOTS; }
   /** Max slots that can be connected at once: 5 with PSRAM, 2 without (each
    *  WSS/TLS connection needs ~40KB for mbedTLS buffers). This is the number of
@@ -776,35 +815,26 @@ public:
   /** Resolved origin for MQTT JSON: node_name when mqtt_origin is empty, else mqtt_origin (with quote stripping). */
   static void getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* buf, size_t buf_size);
   static const char* effectiveNtpPrimary(const MQTTPrefs* obs);
-  /** Sync system clock via NTP. force=true bypasses the 5s post-sync rate limit.
-   *  primary_only=true tests just the effective primary server (no fallback walk) so a
-   *  mistyped hostname fails fast instead of blocking through the whole fallback list.
-   *  Performs blocking NTP I/O and must only be called from the MQTT task (Core 0).
-   *  Other tasks (e.g. the CLI on Core 1) must use requestForcedNtpSync() instead. */
+  // Worker only: blocking validated NTP I/O; force bypasses the retry deadline.
   bool syncTimeWithNTP(bool force = false, bool primary_only = false, int attempts_per_server = 2);
-  /** Request a forced NTP sync from another task (e.g. CLI on Core 1). Marshals the
-   *  work onto the MQTT task so all NTP I/O stays on Core 0, then blocks up to
-   *  timeout_ms for the result. Returns true if the sync succeeded, false on failure,
-   *  timeout, or if the bridge is not running. */
-  bool requestForcedNtpSync(uint32_t timeout_ms = 30000);
-  /** Probe every configured NTP server (custom primary + built-in fallbacks) for
-   *  connectivity and report each server's reported time WITHOUT touching the system
-   *  clock. Marshals the probe onto the MQTT task (Core 0), then formats on the caller's
-   *  thread. verbose=true prints a detailed table to the serial console and leaves a short
-   *  summary in reply; verbose=false fills reply with a compact "<server> ok|fail" list
-   *  (for LoRa). Returns false if the bridge is not running. */
+  // Loop task: queues a primary-server sync and returns immediately. The legacy
+  // timeout argument is ignored; no production caller may block the mesh loop.
+  bool requestForcedNtpSync(uint32_t timeout_ms = 0);
+  // First call queues a probe; repeat to read its ID/age/results. Completed
+  // results are cached for 30 seconds. Probing never changes the clock.
   bool ntpDiag(char* reply, size_t reply_size, bool verbose);
   static void formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs);
   /** On-demand publish-health + heap snapshot for `get mqtt.stats` (per-slot ok/err,
    *  outbox size, free/max heap, queue depth). */
   static void formatMqttStatsReply(char* buf, size_t bufsize);
+  static void formatRuntimeReply(char* buf, size_t bufsize);
   /** Structured per-slot snapshot for the webconfig stats endpoint. Same state
-   *  logic as formatMqttStatusReply, same cross-task read semantics. Returns
+   *  logic as formatMqttStatusReply, copied from the published worker snapshot. Returns
    *  false when the bridge is not running, the index is out of range, or the
    *  slot is unconfigured (skip it). */
   struct SlotStatusSnapshot {
-    const char* name;    // preset name or "custom"
-    const char* state;   // "inactive" | "wait" | "ok" | "fail" | "disc"
+    char name[32];       // preset name or "custom"
+    char state[16];      // "inactive" | "wait" | "ok" | "fail" | "disc"
     unsigned long publish_ok;
     unsigned long publish_err;
     // Raw packet-type allowlist. Kept as the mask rather than canonical text so
@@ -812,6 +842,7 @@ public:
     uint16_t filter_mask;
   };
   static bool getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out);
+  static void appendSlotStatsJson(char* buf, size_t size, int pos);
   /** True when the selected network is configured and at least one MQTT slot can run. */
   static bool isConfigValid(const MQTTPrefs* obs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
@@ -824,7 +855,7 @@ public:
                        mesh::MainBoard* board, mesh::MillisecondClock* ms);
 
 #ifdef WITH_SNMP
-  void setSNMPAgent(MeshSNMPAgent* agent) { _snmp_agent = agent; }
+  void setSNMPAgent(MeshSNMPAgent* agent) { if (mayEditStartupMetadata()) _snmp_agent = agent; }
 #endif
 };
 
