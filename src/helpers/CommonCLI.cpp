@@ -1117,7 +1117,7 @@ bool CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
     return false;
   }
   setMQTTPrefsDefaults(repair_defaults);
-  MQTTPrefsSerializer serializer(&_mqtt_prefs, repair_defaults);
+  MQTTPrefsSerializer serializer(_observer_candidate ? _observer_candidate : &_mqtt_prefs, repair_defaults);
   // The serializer hierarchy copies the default values it needs. Release this
   // large temporary before file I/O and the independent verification scratch.
   delete repair_defaults;
@@ -1678,32 +1678,32 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     }
   } else if (memcmp(config, "bridge.source ", 14) == 0) {
 #ifdef WITH_MQTT_BRIDGE
-    MQTTPrefs* observer_rollback = new (std::nothrow) MQTTPrefs;
-    if (observer_rollback == nullptr) {
+    MQTTPrefs* observer_candidate = new (std::nothrow) MQTTPrefs;
+    if (observer_candidate == nullptr) {
       strcpy(reply, "Error: insufficient memory to update observer setting");
       return;
     }
-    memcpy(observer_rollback, &_mqtt_prefs, sizeof(*observer_rollback));
+    memcpy(observer_candidate, &_mqtt_prefs, sizeof(*observer_candidate));
     const uint8_t old_bridge_pkt_src = _prefs->bridge_pkt_src;
 #endif
     _prefs->bridge_pkt_src = memcmp(&config[14], "rx", 2) == 0;
 #ifdef WITH_MQTT_BRIDGE
     if (_prefs->bridge_pkt_src == 1) {
-      _mqtt_prefs.mqtt_rx_enabled = 1;
-      _mqtt_prefs.mqtt_tx_enabled = 0;
+      observer_candidate->mqtt_rx_enabled = 1;
+      observer_candidate->mqtt_tx_enabled = 0;
     } else {
-      _mqtt_prefs.mqtt_rx_enabled = 0;
-      _mqtt_prefs.mqtt_tx_enabled = 1;
+      observer_candidate->mqtt_rx_enabled = 0;
+      observer_candidate->mqtt_tx_enabled = 1;
     }
-    _observer_prefs_rollback = observer_rollback;
+    _observer_candidate = observer_candidate;
     if (!persistObserverPrefs(reply)) {
       _prefs->bridge_pkt_src = old_bridge_pkt_src;
-      _observer_prefs_rollback = nullptr;
-      delete observer_rollback;
+      _observer_candidate = nullptr;
+      delete observer_candidate;
       return;
     }
-    _observer_prefs_rollback = nullptr;
-    delete observer_rollback;
+    _observer_candidate = nullptr;
+    delete observer_candidate;
 #endif
     savePrefs();
     strcpy(reply, "OK");

@@ -416,9 +416,8 @@ class CommonCLI {
   char tmp[PRV_KEY_SIZE*2 + 4];
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
-  // Points at a per-command snapshot only while an observer setter is running.
-  // persistObserverPrefs() uses it to undo RAM mutations when flash commit fails.
-  const MQTTPrefs* _observer_prefs_rollback = nullptr;
+  // Per-command candidate; durable RAM is replaced only after a verified save.
+  MQTTPrefs* _observer_candidate = nullptr;
   LegacyObserverTail _legacy_tail;
   // /mqtt.json is newer, corrupt, or temporarily unreadable. The in-memory prefs
   // run on defaults and saveMQTTPrefs() must not overwrite the source file.
