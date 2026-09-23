@@ -1203,10 +1203,9 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       snprintf(reply, 160, "ERR: %s not connected",
                activeNetworkLink().mediumName());
     } else if (memcmp(command, "ota check", 9) == 0) {
-      // Check is synchronous so its result lands in this reply, and runs with the
-      // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only
-      // costs a single TLS handshake (no large JSON doc) — which fits alongside
-      // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
+      // Queues a Core-0 HTTP fetch and returns immediately. Repeat the command
+      // for the cached result. The MQTT bridge stays up: the slim per-variant
+      // manifest is tiny enough to fetch alongside live sessions.
       _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply);
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
@@ -1243,6 +1242,18 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
           }
         } else {
           strcpy(reply, "ERR: online OTA not available");
+        }
+      } else if (_board->otaCheckInProgress()) {
+        // reply holds "OTA check #N queued|running; repeat ...". Keep the ID and
+        // let the app loop pick the result up instead of asking the operator to.
+        char head[48];
+        const char* tail = strchr(reply, ';');
+        const size_t len = tail ? (size_t)(tail - reply) : strlen(reply);
+        snprintf(head, sizeof(head), "%.*s", (int)(len < sizeof(head) - 1 ? len : sizeof(head) - 1), reply);
+        if (_callbacks->beginDeferredOtaUpdateAfterCheck()) {
+          snprintf(reply, 160, "%s; update starts automatically if a newer build applies", head);
+        } else {
+          snprintf(reply, 160, "%s; repeat 'ota update' for result", head);
         }
       }
     }

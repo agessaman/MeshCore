@@ -1379,4 +1379,4 @@ Ethernet support is available on RAK4631 boards with a RAK13800 (W5100S) Etherne
 
 ### Observer OTA checks
 
-`ota check` queues a manifest check and returns immediately. Repeat it for the result, which is cached for 60 seconds and includes an ID and age. If `ota update` returns a queued/running check, repeat `ota update` after the check finishes to request flashing. A pending check never starts an update. Actual updates retain the deferred bridge-stop barrier and revalidate the manifest before flashing.
+`ota check` queues a manifest check and returns immediately. Repeat it for the result, which is cached for 60 seconds and includes an ID and age. `ota update` with no fresh check queues one and replies `OTA check #N queued; update starts automatically if a newer build applies`: the node waits for that check (up to two minutes) and then schedules the flash itself, or reports `OTA not started: <reason>` on the serial console and the alert channel. A pending check never starts an update. Actual updates retain the deferred bridge-stop barrier and revalidate the manifest before flashing.

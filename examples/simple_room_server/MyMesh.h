@@ -34,6 +34,7 @@
 #include "helpers/bridges/MQTTBridge.h"
 #define WITH_BRIDGE
 #include "helpers/esp32/WebConfigServer.h"   // defines WITH_WEBCONFIG on ESP32
+#include "helpers/OtaUpdateFollowUp.h"
 #endif
 
 #ifdef WITH_SNMP
@@ -143,6 +144,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   TransportKey default_scope;
   unsigned long set_radio_at, revert_radio_at;
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
+#ifdef WITH_MQTT_BRIDGE
+  OtaUpdateFollowUp _ota_follow_up;  // `ota update` waiting on a queued manifest check
+#endif
   float pending_freq;
   float pending_bw;
   uint8_t pending_sf;
@@ -478,6 +482,46 @@ public:
     if (_ota_update_at == 0) _ota_update_at = 1;  // 0 means "none"
     return true;
   }
+
+#if defined(WITH_MQTT_BRIDGE)
+  bool beginDeferredOtaUpdateAfterCheck() override {
+    _ota_follow_up.arm(millis());
+    return true;
+  }
+
+  // Poll the queued manifest check that an `ota update` is waiting on. Runs on
+  // the loop task; the board's check task owns the HTTP work.
+  void pollDeferredOtaCheck() {
+    if (!_ota_follow_up.armed()) return;
+    char ota_reply[160] = "";
+    mesh::MainBoard* board = _cli.getBoard();
+    const OtaUpdateFollowUp::Action action = _ota_follow_up.poll(millis(), board->otaCheckInProgress(), [&] {
+      if (board->otaFromManifest(getFirmwareVer(), true, ota_reply)) return OtaUpdateFollowUp::Check::Applicable;
+      return board->otaCheckInProgress() ? OtaUpdateFollowUp::Check::Requeued
+                                         : OtaUpdateFollowUp::Check::NotApplicable;
+    });
+    char msg[160];
+    switch (action) {
+      case OtaUpdateFollowUp::Action::Start:
+        Serial.print("OTA: check complete - "); Serial.println(ota_reply);
+        beginDeferredOtaUpdate();
+        break;
+      case OtaUpdateFollowUp::Action::Refuse:
+        Serial.print("OTA: not started - "); Serial.println(ota_reply);
+        snprintf(msg, sizeof(msg), "OTA not started: %s", ota_reply);
+        if (_cli.getObserverPrefs() && _cli.getObserverPrefs()->alert_enabled) _alerter.sendText(msg);
+        break;
+      case OtaUpdateFollowUp::Action::Timeout:
+        Serial.println("OTA: manifest check did not complete; update cancelled");
+        if (_cli.getObserverPrefs() && _cli.getObserverPrefs()->alert_enabled) {
+          _alerter.sendText("OTA not started: manifest check did not complete");
+        }
+        break;
+      default:
+        break;
+    }
+  }
+#endif
 
   int getQueueSize() override {
     return bridge ? bridge->getQueueSize() : 0;

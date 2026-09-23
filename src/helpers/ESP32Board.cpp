@@ -306,6 +306,12 @@ static void ota_task_entry(void* param) {
   vTaskDelete(nullptr);
 }
 
+bool ESP32Board::otaCheckInProgress() const {
+  using Check = ObserverAsyncJob<OtaCheckResult>;
+  const auto check = s_ota_check.read();
+  return check.state == Check::State::Queued || check.state == Check::State::Running;
+}
+
 bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[]) {
   using Check = ObserverAsyncJob<OtaCheckResult>;
   const auto check = s_ota_check.read();
@@ -587,6 +593,7 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   strcpy(reply, "ERR: not supported");
   return false;
 }
+bool ESP32Board::otaCheckInProgress() const { return false; }
 #endif  // WITH_MQTT_BRIDGE
 
 void ESP32Board::powerOff() {

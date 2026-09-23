@@ -232,6 +232,11 @@ private:
   };
   static ObserverMailbox<RuntimeSnapshot> _published;
   uint32_t _snapshot_sequence = 0;
+  // Snapshots publish every worker pass; the heap walk behind getMaxAllocHeap()
+  // is sampled at most once per second and reused between samples.
+  uint32_t _heap_sample_ms = 0;
+  uint32_t _heap_sample_free = 0, _heap_sample_max = 0;
+  bool _heap_sampled = false;
   void publishRuntimeSnapshot();
   bool mayEditStartupMetadata();
 

@@ -8,6 +8,7 @@
 #include "helpers/MQTTSlotEvents.h"
 #include "helpers/ObserverPreferenceCommit.h"
 #include "helpers/ObserverSlotStatsJson.h"
+#include "helpers/OtaUpdateFollowUp.h"
 
 
 struct Image { uint32_t sequence = 0; uint32_t fields[64]{}; };
@@ -318,6 +319,40 @@ TEST(ObserverHandoffs, StatsReserveClosingBracketsAtEveryBufferBoundary) {
     EXPECT_STREQ("{\"slots\":[]}", buf);
     EXPECT_EQ('x', buf[size]);
   }
+}
+
+TEST(ObserverHandoffs, UpdateFollowUpWaitsForTheCheckThenStartsOnce) {
+  using F = OtaUpdateFollowUp;
+  F follow;
+  int dry_runs = 0;
+  auto applicable = [&] { ++dry_runs; return F::Check::Applicable; };
+  EXPECT_EQ(F::Action::None, follow.poll(0, false, applicable));  // never armed
+  follow.arm(1000);
+  EXPECT_EQ(F::Action::None, follow.poll(1500, true, applicable));   // still checking
+  EXPECT_EQ(0, dry_runs);
+  EXPECT_EQ(F::Action::Start, follow.poll(2000, false, applicable));
+  EXPECT_EQ(1, dry_runs);
+  EXPECT_FALSE(follow.armed());
+  EXPECT_EQ(F::Action::None, follow.poll(2001, false, applicable));  // consumed
+  EXPECT_EQ(1, dry_runs);
+}
+
+TEST(ObserverHandoffs, UpdateFollowUpRefusesRequeuesAndTimesOut) {
+  using F = OtaUpdateFollowUp;
+  F follow;
+  follow.arm(0);
+  EXPECT_EQ(F::Action::Refuse, follow.poll(10, false, [] { return F::Check::NotApplicable; }));
+  EXPECT_FALSE(follow.armed());
+
+  follow.arm(0);
+  EXPECT_EQ(F::Action::None, follow.poll(10, false, [] { return F::Check::Requeued; }));
+  EXPECT_TRUE(follow.armed());  // the cache had expired; wait for the new check
+  EXPECT_EQ(F::Action::Start, follow.poll(20, false, [] { return F::Check::Applicable; }));
+
+  follow.arm(0xffffff00);  // deadline wraps past zero
+  EXPECT_EQ(F::Action::None, follow.poll(0xffffff10, true, [] { return F::Check::Applicable; }));
+  EXPECT_EQ(F::Action::Timeout, follow.poll(0xffffff00 + F::kTimeoutMs, true, [] { return F::Check::Applicable; }));
+  EXPECT_FALSE(follow.armed());
 }
 
 int main(int argc, char** argv) {

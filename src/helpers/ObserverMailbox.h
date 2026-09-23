@@ -3,31 +3,44 @@
 #include <type_traits>
 #ifdef ESP_PLATFORM
 #include <freertos/FreeRTOS.h>
-#include <freertos/portmacro.h>
+#include <freertos/semphr.h>
 #else
 #include <mutex>
 #endif
 
-// Only bounded value copies belong under this lock, never allocation or I/O.
+// Task-context lock for bounded value copies. Every holder is a FreeRTOS task
+// (loop, bridge worker, SDK event task, AsyncTCP), never an ISR, so a mutex is
+// the right primitive: a critical section would disable interrupts on the radio
+// core for the whole copy, and some of these records are kilobytes. Priority
+// inheritance covers a preempted holder. Never hold this across allocation,
+// I/O, flash writes or SDK calls.
 class ObserverLock {
  public:
+  ObserverLock() {
+#ifdef ESP_PLATFORM
+    _mux = xSemaphoreCreateMutexStatic(&_storage);
+#endif
+  }
+  ObserverLock(const ObserverLock&) = delete;
+  ObserverLock& operator=(const ObserverLock&) = delete;
   void lock() {
 #ifdef ESP_PLATFORM
-    portENTER_CRITICAL(&_mux);
+    xSemaphoreTake(_mux, portMAX_DELAY);
 #else
     _mux.lock();
 #endif
   }
   void unlock() {
 #ifdef ESP_PLATFORM
-    portEXIT_CRITICAL(&_mux);
+    xSemaphoreGive(_mux);
 #else
     _mux.unlock();
 #endif
   }
  private:
 #ifdef ESP_PLATFORM
-  portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+  StaticSemaphore_t _storage;
+  SemaphoreHandle_t _mux;
 #else
   std::mutex _mux;
 #endif

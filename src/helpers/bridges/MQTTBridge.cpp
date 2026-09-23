@@ -241,8 +241,14 @@ void MQTTBridge::publishRuntimeSnapshot() {
   snapshot.skipped = _skipped_publishes;
   snapshot.filtered = _filtered_packets.load(std::memory_order_relaxed);
   snapshot.event_overflows = _slot_events.overflows();
-  snapshot.free_heap = ESP.getFreeHeap();
-  snapshot.max_heap = ESP.getMaxAllocHeap();
+  if (!_heap_sampled || (uint32_t)(snapshot.sampled_ms - _heap_sample_ms) >= 1000) {
+    _heap_sampled = true;
+    _heap_sample_ms = snapshot.sampled_ms;
+    _heap_sample_free = ESP.getFreeHeap();
+    _heap_sample_max = ESP.getMaxAllocHeap();
+  }
+  snapshot.free_heap = _heap_sample_free;
+  snapshot.max_heap = _heap_sample_max;
 #if defined(WITH_MQTT_NEIGHBORS)
   snapshot.neighbors_phase = _neighbors_phase.load(std::memory_order_relaxed);
   snapshot.neighbors_result = _neighbors_last_result.load(std::memory_order_relaxed);
@@ -884,6 +890,7 @@ void MQTTBridge::begin() {
   }
 
   _ntp_schedule = NtpSchedule();
+  _heap_sampled = false;
   _slots_setup_done = false;
   _ntp_force_requested.store(false);
 

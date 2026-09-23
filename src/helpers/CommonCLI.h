@@ -340,6 +340,13 @@ public:
     return false;
   };
 
+  // `ota update` arrived while the manifest check was still queued. The app loop
+  // waits for that check and then arms beginDeferredOtaUpdate() itself if a
+  // newer build applies. Returns true if the follow-up was armed.
+  virtual bool beginDeferredOtaUpdateAfterCheck() {
+    return false;
+  };
+
   virtual int getQueueSize() {
     return 0; // no op by default
   };

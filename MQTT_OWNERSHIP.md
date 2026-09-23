@@ -18,7 +18,7 @@ Current implementation: `feat/observer-reliability`, based on `5c0da89117cdddcaf
 
 Core affinity is not ownership: the SDK MQTT task and bridge worker may both run on Core 0 and still require synchronization. The queue and snapshot publishers above run in task context, not from an ISR.
 
-`ObserverMailbox`, `ObserverConfigMailbox` and `ObserverAsyncJob` use bounded copy critical sections on ESP32 and a mutex in host tests. No allocation, formatting, flash write, SDK call or network operation runs under their lock. `MQTTPrefs` is 2,880 bytes in the current layout; the bridge retains two copies (pending and applied). The portal retains another copy while its object exists. These costs need to be included in non-PSRAM heap measurements.
+`ObserverMailbox`, `ObserverConfigMailbox`, `MqttEventChannel` and `ObserverAsyncJob` share `ObserverLock`: a statically allocated FreeRTOS mutex on ESP32 and `std::mutex` in host tests. Every holder is a task, never an ISR, so the lock does not disable interrupts; priority inheritance covers a preempted holder. No allocation, formatting, flash write, SDK call or network operation runs under it. The worker's runtime snapshot publishes every pass, but its heap fields come from a once-per-second sample so the heap walk is not paid per iteration. `MQTTPrefs` is 2,880 bytes in the current layout; the bridge retains two copies (pending and applied). The portal retains another copy while its object exists. These costs need to be included in non-PSRAM heap measurements.
 
 ## Event and configuration ordering
 
@@ -44,7 +44,7 @@ Client handles can be reused across compatible configuration changes, but TLS se
 
 `get mqtt.ntp.diag` queues a probe and returns immediately. Repeat it to retrieve the completed result, identified by request ID and age. Results are cached for 30 seconds; after expiry, the next call starts a new probe. The probe never sets the clock. Forced primary NTP synchronization also returns immediately, and shares the completion-based retry scheduler with ordinary synchronization.
 
-`ota check` follows the same request/result pattern, caching results for 60 seconds. A queued or running check cannot authorize flashing. If `ota update` starts a check, repeat the command after completion to request the update. Actual flashing still uses the existing deferred stop/barrier path and re-fetches the manifest with certificate verification. The check remains advisory.
+`ota check` follows the same request/result pattern, caching results for 60 seconds. A queued or running check cannot authorize flashing. If `ota update` has to start a check, the app loop arms `OtaUpdateFollowUp`, polls `MainBoard::otaCheckInProgress()`, and schedules the ordinary deferred flash itself once the cached dry run reports an applicable build; a refusal or a check that does not settle within two minutes is reported on the console and alert channel instead. Actual flashing still uses the existing deferred stop/barrier path and re-fetches the manifest with certificate verification. The check remains advisory.
 
 The portal terminal uses the same commands and replies; repeat a queued diagnostic command to poll its job. A completed portal command batch means its CLI commands returned, not that an asynchronous probe finished.
 
