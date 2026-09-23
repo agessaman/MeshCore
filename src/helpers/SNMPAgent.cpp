@@ -69,6 +69,22 @@ void MeshSNMPAgent::begin(const char* community) {
 void MeshSNMPAgent::loop() {
   if (!_running) return;
 
+  const RadioSnapshot snapshot = _radio_snapshot.read();
+  _packets_recv = snapshot.packets_recv;
+  _packets_sent = snapshot.packets_sent;
+  _recv_errors = snapshot.recv_errors;
+  _noise_floor = snapshot.noise_floor;
+  _last_rssi = snapshot.last_rssi;
+  _last_snr = snapshot.last_snr;
+  _sent_flood = snapshot.sent_flood;
+  _sent_direct = snapshot.sent_direct;
+  _recv_flood = snapshot.recv_flood;
+  _recv_direct = snapshot.recv_direct;
+  _total_air_time_secs = snapshot.total_air_time_secs;
+  _uptime_secs = snapshot.uptime_secs;
+  memcpy(_node_name, snapshot.node_name, sizeof(_node_name));
+  memcpy(_firmware_version, snapshot.firmware_version, sizeof(_firmware_version));
+
   // Update memory and selected-network stats locally on Core 0.
   _free_heap = (int)ESP.getFreeHeap();
   _max_alloc = (int)ESP.getMaxAllocHeap();
@@ -91,18 +107,19 @@ void MeshSNMPAgent::updateRadioStats(
     uint32_t sent_flood, uint32_t sent_direct,
     uint32_t recv_flood, uint32_t recv_direct,
     uint32_t total_air_time_secs, uint32_t uptime_secs) {
-  _packets_recv = (int)packets_recv;
-  _packets_sent = (int)packets_sent;
-  _recv_errors = (int)recv_errors;
-  _noise_floor = (int)noise_floor;
-  _last_rssi = (int)last_rssi;
-  _last_snr = (int)last_snr;
-  _sent_flood = (int)sent_flood;
-  _sent_direct = (int)sent_direct;
-  _recv_flood = (int)recv_flood;
-  _recv_direct = (int)recv_direct;
-  _total_air_time_secs = (int)total_air_time_secs;
-  _uptime_secs = (int)uptime_secs;
+  _radio_pending.packets_recv = (int)packets_recv;
+  _radio_pending.packets_sent = (int)packets_sent;
+  _radio_pending.recv_errors = (int)recv_errors;
+  _radio_pending.noise_floor = (int)noise_floor;
+  _radio_pending.last_rssi = (int)last_rssi;
+  _radio_pending.last_snr = (int)last_snr;
+  _radio_pending.sent_flood = (int)sent_flood;
+  _radio_pending.sent_direct = (int)sent_direct;
+  _radio_pending.recv_flood = (int)recv_flood;
+  _radio_pending.recv_direct = (int)recv_direct;
+  _radio_pending.total_air_time_secs = (int)total_air_time_secs;
+  _radio_pending.uptime_secs = (int)uptime_secs;
+  _radio_snapshot.publish(_radio_pending);
 }
 
 void MeshSNMPAgent::updateMQTTStats(int connected_slots, int queue_depth, int skipped_publishes) {
@@ -112,13 +129,15 @@ void MeshSNMPAgent::updateMQTTStats(int connected_slots, int queue_depth, int sk
 }
 
 void MeshSNMPAgent::setNodeName(const char* name) {
-  strncpy(_node_name, name, sizeof(_node_name) - 1);
-  _node_name[sizeof(_node_name) - 1] = '\0';
+  strncpy(_radio_pending.node_name, name, sizeof(_radio_pending.node_name) - 1);
+  _radio_pending.node_name[sizeof(_radio_pending.node_name) - 1] = '\0';
+  _radio_snapshot.publish(_radio_pending);
 }
 
 void MeshSNMPAgent::setFirmwareVersion(const char* version) {
-  strncpy(_firmware_version, version, sizeof(_firmware_version) - 1);
-  _firmware_version[sizeof(_firmware_version) - 1] = '\0';
+  strncpy(_radio_pending.firmware_version, version, sizeof(_radio_pending.firmware_version) - 1);
+  _radio_pending.firmware_version[sizeof(_radio_pending.firmware_version) - 1] = '\0';
+  _radio_snapshot.publish(_radio_pending);
 }
 
 #endif // WITH_SNMP

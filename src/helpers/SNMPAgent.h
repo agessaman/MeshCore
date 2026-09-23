@@ -3,6 +3,7 @@
 #ifdef WITH_SNMP
 
 #include <WiFiUdp.h>
+#include "ObserverMailbox.h"
 #include <SNMP_Agent.h>
 
 // Temporary private enterprise OID base — replace with registered PEN when available.
@@ -22,8 +23,7 @@ public:
   void begin(const char* community);
   void loop();
 
-  // Called from the mesh task (Core 1) to push fresh stats into SNMP-visible variables.
-  // Copies are atomic for 32-bit aligned ints on ESP32, so no mutex needed.
+  // Loop-task producers publish a coherent record; the SNMP worker owns OID storage.
   void updateRadioStats(uint32_t packets_recv, uint32_t packets_sent, uint32_t recv_errors,
                         int16_t noise_floor, int16_t last_rssi, int16_t last_snr,
                         uint32_t sent_flood, uint32_t sent_direct,
@@ -38,6 +38,23 @@ public:
   bool isRunning() const { return _running; }
 
 private:
+  struct RadioSnapshot {
+    int packets_recv = 0;
+    int packets_sent = 0;
+    int recv_errors = 0;
+    int noise_floor = 0;
+    int last_rssi = 0;
+    int last_snr = 0;
+    int sent_flood = 0;
+    int sent_direct = 0;
+    int recv_flood = 0;
+    int recv_direct = 0;
+    int total_air_time_secs = 0;
+    int uptime_secs = 0;
+    char node_name[32]{};
+    char firmware_version[32]{};
+  } _radio_pending;
+  ObserverMailbox<RadioSnapshot> _radio_snapshot;
   WiFiUDP _udp;
   SNMPAgent _snmp;
   bool _running;

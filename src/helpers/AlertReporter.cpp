@@ -247,11 +247,12 @@ void AlertReporter::onLoop(unsigned long now_ms) {
 
     for (int i = 0; i < n; i++) {
       AlertFaultPolicy::Fault& f = _mqtt[i];
-      if (!_bridge->isSlotEnabledAndAttempted(i)) {
+      const MQTTBridge::SlotOutageSnapshot slot = _bridge->getSlotOutageSnapshot(i);
+      if (!slot.monitored) {
         AlertFaultPolicy::rearmIfDisabled(f);
         continue;
       }
-      const uint32_t outage_start = (uint32_t)_bridge->getSlotCurrentOutageStartMs(i);
+      const uint32_t outage_start = slot.started_ms;
       const AlertFaultPolicy::OutageSnapshot snap =
           AlertFaultPolicy::fromStartMs(outage_start);
       AlertFaultPolicy::TickResult r = AlertFaultPolicy::tick(
@@ -259,7 +260,7 @@ void AlertReporter::onLoop(unsigned long now_ms) {
       if (r.action == AlertFaultPolicy::Action::FireDown) {
         char text[100];
         AlertFaultPolicy::formatMqttDown(text, sizeof(text), i + 1,
-                                         _bridge->getSlotPresetName(i),
+                                         slot.name,
                                          r.duration_ms);
         if (sendChannel(text)) {
           AlertFaultPolicy::commitDown(f, now, outage_start);
@@ -267,7 +268,7 @@ void AlertReporter::onLoop(unsigned long now_ms) {
       } else if (r.action == AlertFaultPolicy::Action::FireRecovered) {
         char text[100];
         AlertFaultPolicy::formatMqttRecovered(text, sizeof(text), i + 1,
-                                              _bridge->getSlotPresetName(i),
+                                              slot.name,
                                               r.duration_ms);
         sendChannel(text);
         AlertFaultPolicy::commitRecovered(f);

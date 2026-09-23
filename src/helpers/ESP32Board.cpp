@@ -266,25 +266,79 @@ static void ota_partitionSignature(char* out, size_t out_sz) {
   }
 }
 
-// Parameters handed to the worker task; lives on otaFromManifest()'s stack,
+#include "ObserverAsyncJob.h"
+#include <atomic>
+
+struct OtaCheckResult {
+  bool applicable = false;
+  char reply[160]{};
+};
+static ObserverAsyncJob<OtaCheckResult> s_ota_check;
+static ESP32Board* s_ota_check_board = nullptr;
+static char s_ota_check_version[64]{};
+
+static void ota_check_entry(void*) {
+  const uint32_t id = s_ota_check.begin();
+  OtaCheckResult result;
+  NetworkLink& network = activeNetworkLink();
+  network.lockSwitching();
+  result.applicable = s_ota_check_board->otaFromManifestImpl(s_ota_check_version, true, result.reply);
+  network.unlockSwitching();
+  s_ota_check.complete(id, millis(), result);
+  vTaskDelete(nullptr);
+}
+
+// Parameters handed to the flash task; lives on otaFromManifest()'s stack,
 // which stays valid because that function blocks until the worker signals done.
 struct OtaTaskArgs {
   ESP32Board* self;
   const char* current_ver;
   bool dry_run;
   char* reply;
-  volatile bool result;
-  volatile bool done;
+  bool result;
+  std::atomic<bool> done{false};
 };
 
 static void ota_task_entry(void* param) {
   OtaTaskArgs* a = static_cast<OtaTaskArgs*>(param);
   a->result = a->self->otaFromManifestImpl(a->current_ver, a->dry_run, a->reply);
-  a->done = true;        // on a successful `ota update` we reboot before reaching here
+  a->done.store(true, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 
+bool ESP32Board::otaCheckInProgress() const {
+  using Check = ObserverAsyncJob<OtaCheckResult>;
+  const auto check = s_ota_check.read();
+  return check.state == Check::State::Queued || check.state == Check::State::Running;
+}
+
 bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[]) {
+  using Check = ObserverAsyncJob<OtaCheckResult>;
+  const auto check = s_ota_check.read();
+  if (check.state == Check::State::Queued || check.state == Check::State::Running) {
+    snprintf(reply, 160, "OTA check #%lu running; repeat the command for result", (unsigned long)check.id);
+    return false;
+  }
+  if (dry_run) {
+    if (check.state == Check::State::Complete &&
+        (uint32_t)(millis() - check.finished_ms) < 60000 &&
+        strcmp(s_ota_check_version, current_ver) == 0) {
+      // Preserve the manifest reply prefix used by the deferred update parser.
+      snprintf(reply, 160, "%s [check #%lu age:%lus]", check.result.reply,
+               (unsigned long)check.id, (unsigned long)((uint32_t)(millis() - check.finished_ms) / 1000));
+      return check.result.applicable;
+    }
+    s_ota_check_board = this;
+    snprintf(s_ota_check_version, sizeof(s_ota_check_version), "%s", current_ver);
+    s_ota_check.request(millis());
+    if (xTaskCreatePinnedToCore(ota_check_entry, "ota-check", 24576, nullptr, 1, nullptr, 0) != pdPASS) {
+      s_ota_check.cancel(millis());
+      strcpy(reply, "ERR: OTA check task spawn failed");
+      return false;
+    }
+    snprintf(reply, 160, "OTA check #%lu queued; repeat the command for result", (unsigned long)s_ota_check.read().id);
+    return false;
+  }
   // The TLS handshake (cert-bundle verify) + JSON parse / HTTPUpdate use far more
   // stack than the ~8 KB loop task offers — especially when reached via the deep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
@@ -292,7 +346,12 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   // freed when the task exits; on a successful update the chip reboots inside it.
   NetworkLink& network = activeNetworkLink();
   network.lockSwitching();
-  OtaTaskArgs args = { this, current_ver, dry_run, reply, false, false };
+  OtaTaskArgs args;
+  args.self = this;
+  args.current_ver = current_ver;
+  args.dry_run = dry_run;
+  args.reply = reply;
+  args.result = false;
   TaskHandle_t handle = nullptr;
   BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
   if (ok != pdPASS) {
@@ -300,7 +359,7 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
     strcpy(reply, "ERR: OTA task spawn failed");
     return false;
   }
-  while (!args.done) {
+  while (!args.done.load(std::memory_order_acquire)) {
     delay(50);  // Arduino delay() yields to other tasks
   }
   network.unlockSwitching();
@@ -534,6 +593,7 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   strcpy(reply, "ERR: not supported");
   return false;
 }
+bool ESP32Board::otaCheckInProgress() const { return false; }
 #endif  // WITH_MQTT_BRIDGE
 
 void ESP32Board::powerOff() {

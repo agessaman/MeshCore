@@ -76,6 +76,9 @@ public:
   // current_ver is the running firmware version string (used to skip if already up to date); when
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.
   virtual bool otaFromManifest(const char* current_ver, bool dry_run, char reply[]) { return false; }
+  // True while a queued or running manifest check owns the dry-run result, so a
+  // caller that wants the outcome knows to poll rather than treat "false" as "no update".
+  virtual bool otaCheckInProgress() const { return false; }
 
   // Power management interface (boards with power management override these)
   virtual bool isPwrMgtInitialised() const { return false; }

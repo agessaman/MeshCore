@@ -2,7 +2,7 @@ name: PR Build Check
 
 on:
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, observer-firmware, observer-firmware-dev]
     paths:
       - 'src/**'
       - 'include/**'
@@ -14,10 +14,12 @@ on:
       - 'scripts/**'
       - 'ssl_certs/**'
       - 'webui/**'
+      - 'test/**'
       - 'default_8MB.csv'
       - 'platformio.ini'
       - '.github/actions/setup-build-environment/**'
       - '.github/workflows/pr-build-check.yml'
+      - '.github/workflows/run-unit-tests.yml'
   push:
     branches: [main, dev]
     paths:
@@ -49,6 +51,8 @@ jobs:
           - Heltec_v3_room_server
           # MQTT observer smoke builds: internal RAM and PSRAM coverage.
           - Heltec_v3_repeater_observer_mqtt
+          - Heltec_v3_room_server_observer_mqtt
+          - ThinkNode_M7_repeater_observer_mqtt
           - T_Beam_S3_Supreme_SX1262_repeater_observer_mqtt
           # nRF52
           - RAK_4631_companion_radio_ble

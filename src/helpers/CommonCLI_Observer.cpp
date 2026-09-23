@@ -12,6 +12,7 @@
 
 #include <Arduino.h>
 #include "CommonCLI.h"
+#include "ObserverPreferenceCommit.h"
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
@@ -123,35 +124,18 @@ static bool isObserverPrefsSetCommand(const char* config) {
       strncmp(config, "display.", 8) == 0;
 }
 
-// Keep observer setters atomic from the caller's perspective. The live object
-// is restored if its JSON transaction fails, and the snapshot pointer is valid
-// only for this synchronous command dispatch.
-class ObserverPrefsRollbackScope {
+// Stage observer edits away from the loop-owned durable image. The serializer
+// sees the candidate; consumers see it only after a verified commit.
+class ObserverPrefsCandidateScope {
 public:
-  ObserverPrefsRollbackScope(const MQTTPrefs** active_snapshot,
-                             const MQTTPrefs& live,
-                             bool capture)
-      : _active_snapshot(active_snapshot) {
-    *_active_snapshot = nullptr;
-    if (capture) {
-      _snapshot = new (std::nothrow) MQTTPrefs;
-      if (_snapshot != nullptr) {
-        memcpy(_snapshot, &live, sizeof(*_snapshot));
-        *_active_snapshot = _snapshot;
-      }
-    }
+  ObserverPrefsCandidateScope(MQTTPrefs** active, const MQTTPrefs& durable, bool capture)
+      : _active(active) {
+    *_active = capture ? new (std::nothrow) MQTTPrefs(durable) : nullptr;
   }
-
-  ~ObserverPrefsRollbackScope() {
-    *_active_snapshot = nullptr;
-    delete _snapshot;
-  }
-
-  bool available() const { return _snapshot != nullptr; }
-
+  ~ObserverPrefsCandidateScope() { delete *_active; *_active = nullptr; }
+  bool available() const { return *_active != nullptr; }
 private:
-  const MQTTPrefs** _active_snapshot;
-  MQTTPrefs* _snapshot = nullptr;
+  MQTTPrefs** _active;
 };
 
 static const char* getMQTTPresetNameByIndex(int index) {
@@ -208,10 +192,8 @@ static void formatMQTTPresetListReply(char* reply, size_t reply_size, int start)
 
 bool CommonCLI::persistObserverPrefs(char* reply) {
 #ifdef WITH_MQTT_BRIDGE
-  if (_callbacks->saveObserverPrefs()) return true;
-  if (_observer_prefs_rollback != nullptr) {
-    memcpy(&_mqtt_prefs, _observer_prefs_rollback, sizeof(_mqtt_prefs));
-  }
+  if (commitObserverPreferenceCandidate(_mqtt_prefs, _observer_candidate,
+          [&]() { return _callbacks->saveObserverPrefs(); })) return true;
   // The running node is back on the old value either way, but only claim the
   // change is gone when the write really was undone on flash.
   if (_observer_save_indeterminate) {
@@ -229,12 +211,13 @@ bool CommonCLI::persistObserverPrefs(char* reply) {
 bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   const bool needs_snapshot = isObserverPrefsSetCommand(config);
-  ObserverPrefsRollbackScope rollback_scope(
-      &_observer_prefs_rollback, _mqtt_prefs, needs_snapshot);
-  if (needs_snapshot && !rollback_scope.available()) {
+  ObserverPrefsCandidateScope candidate_scope(
+      &_observer_candidate, this->_mqtt_prefs, needs_snapshot);
+  if (needs_snapshot && !candidate_scope.available()) {
     strcpy(reply, "Error: insufficient memory to update observer setting");
     return true;
   }
+  MQTTPrefs& _mqtt_prefs = _observer_candidate ? *_observer_candidate : this->_mqtt_prefs;
   bool handled = true;
   if (memcmp(config, "snmp.community ", 15) == 0) {
     if (valueTooLong(&config[15], sizeof(_mqtt_prefs.snmp_community), reply, "snmp.community")) return true;
@@ -946,6 +929,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
              memcmp(config, "mqtt.neighbors", 14) == 0) {
     strcpy(reply, "Err - neighbors not enabled in this build");
 #endif
+  } else if (strcmp(config, "mqtt.runtime") == 0) {
+    MQTTBridge::formatRuntimeReply(reply, 160);
   } else if (memcmp(config, "mqtt.ntp.diag", 13) == 0 && (config[13] == '\0' || config[13] == ' ')) {
 #ifdef ESP_PLATFORM
     // Connectivity probe across all configured NTP servers; never updates the clock.
@@ -1218,10 +1203,9 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       snprintf(reply, 160, "ERR: %s not connected",
                activeNetworkLink().mediumName());
     } else if (memcmp(command, "ota check", 9) == 0) {
-      // Check is synchronous so its result lands in this reply, and runs with the
-      // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only
-      // costs a single TLS handshake (no large JSON doc) — which fits alongside
-      // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
+      // Queues a Core-0 HTTP fetch and returns immediately. Repeat the command
+      // for the cached result. The MQTT bridge stays up: the slim per-variant
+      // manifest is tiny enough to fetch alongside live sessions.
       _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply);
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
@@ -1258,6 +1242,18 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
           }
         } else {
           strcpy(reply, "ERR: online OTA not available");
+        }
+      } else if (_board->otaCheckInProgress()) {
+        // reply holds "OTA check #N queued|running; repeat ...". Keep the ID and
+        // let the app loop pick the result up instead of asking the operator to.
+        char head[48];
+        const char* tail = strchr(reply, ';');
+        const size_t len = tail ? (size_t)(tail - reply) : strlen(reply);
+        snprintf(head, sizeof(head), "%.*s", (int)(len < sizeof(head) - 1 ? len : sizeof(head) - 1), reply);
+        if (_callbacks->beginDeferredOtaUpdateAfterCheck()) {
+          snprintf(reply, 160, "%s; update starts automatically if a newer build applies", head);
+        } else {
+          snprintf(reply, 160, "%s; repeat 'ota update' for result", head);
         }
       }
     }

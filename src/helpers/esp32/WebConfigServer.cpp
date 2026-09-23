@@ -221,6 +221,35 @@ WebConfigServer::WebConfigServer(NodePrefs* prefs, MQTTPrefs* obs, Callbacks* ca
     : _prefs(prefs), _obs(obs), _cb(callbacks), _pub_key(pub_key),
       _fw_ver(fw_ver), _build_date(build_date), _role(role), _board_name(board_name) {
   _mux = xSemaphoreCreateMutex();
+  if (_mux) publishPrefs();
+}
+
+void WebConfigServer::publishPrefs() {
+  WCLock lock(_mux);
+  memcpy(&_view_prefs.advert_interval, &_prefs->advert_interval, sizeof(_view_prefs.advert_interval));
+  memcpy(&_view_prefs.airtime_factor, &_prefs->airtime_factor, sizeof(_view_prefs.airtime_factor));
+  memcpy(&_view_prefs.bw, &_prefs->bw, sizeof(_view_prefs.bw));
+  memcpy(&_view_prefs.cad_enabled, &_prefs->cad_enabled, sizeof(_view_prefs.cad_enabled));
+  memcpy(&_view_prefs.cr, &_prefs->cr, sizeof(_view_prefs.cr));
+  memcpy(&_view_prefs.disable_fwd, &_prefs->disable_fwd, sizeof(_view_prefs.disable_fwd));
+  memcpy(&_view_prefs.flood_advert_interval, &_prefs->flood_advert_interval, sizeof(_view_prefs.flood_advert_interval));
+  memcpy(&_view_prefs.flood_max, &_prefs->flood_max, sizeof(_view_prefs.flood_max));
+  memcpy(&_view_prefs.flood_max_advert, &_prefs->flood_max_advert, sizeof(_view_prefs.flood_max_advert));
+  memcpy(&_view_prefs.flood_max_unscoped, &_prefs->flood_max_unscoped, sizeof(_view_prefs.flood_max_unscoped));
+  memcpy(&_view_prefs.freq, &_prefs->freq, sizeof(_view_prefs.freq));
+  memcpy(&_view_prefs.loop_detect, &_prefs->loop_detect, sizeof(_view_prefs.loop_detect));
+  memcpy(&_view_prefs.node_lat, &_prefs->node_lat, sizeof(_view_prefs.node_lat));
+  memcpy(&_view_prefs.node_lon, &_prefs->node_lon, sizeof(_view_prefs.node_lon));
+  memcpy(&_view_prefs.node_name, &_prefs->node_name, sizeof(_view_prefs.node_name));
+  memcpy(&_view_prefs.password, &_prefs->password, sizeof(_view_prefs.password));
+  memcpy(&_view_prefs.radio_fem_rxgain, &_prefs->radio_fem_rxgain, sizeof(_view_prefs.radio_fem_rxgain));
+  memcpy(&_view_prefs.radio_fem_txgain, &_prefs->radio_fem_txgain, sizeof(_view_prefs.radio_fem_txgain));
+  memcpy(&_view_prefs.rx_boosted_gain, &_prefs->rx_boosted_gain, sizeof(_view_prefs.rx_boosted_gain));
+  memcpy(&_view_prefs.rx_delay_base, &_prefs->rx_delay_base, sizeof(_view_prefs.rx_delay_base));
+  memcpy(&_view_prefs.sf, &_prefs->sf, sizeof(_view_prefs.sf));
+  memcpy(&_view_prefs.tx_delay_factor, &_prefs->tx_delay_factor, sizeof(_view_prefs.tx_delay_factor));
+  memcpy(&_view_prefs.tx_power_dbm, &_prefs->tx_power_dbm, sizeof(_view_prefs.tx_power_dbm));
+  _view_obs = *_obs;
 }
 
 WebConfigServer::~WebConfigServer() {
@@ -264,10 +293,15 @@ bool WebConfigServer::isLanSetup() {
 // ---------------------------------------------------------------------------
 
 bool WebConfigServer::startSetupMode(char reply[]) {
+  if (_mux == nullptr) {
+    strcpy(reply, "Err: webconfig mutex unavailable");
+    return false;
+  }
   if (_mode != MODE_OFF || _stopping) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
+  publishPrefs();
   if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
     snprintf(reply, 160, "Err: port 80 is in use by %s",
              HttpPort80Lease::ownerName());
@@ -318,10 +352,15 @@ bool WebConfigServer::startSetupMode(char reply[]) {
 }
 
 bool WebConfigServer::startLanMode(bool initial_setup, char reply[]) {
+  if (_mux == nullptr) {
+    strcpy(reply, "Err: webconfig mutex unavailable");
+    return false;
+  }
   if (_mode != MODE_OFF || _stopping) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
+  publishPrefs();
   if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
     snprintf(reply, 160, "Err: port 80 is in use by %s",
              HttpPort80Lease::ownerName());
@@ -514,6 +553,7 @@ void WebConfigServer::tick(uint32_t now) {
   }
   if (_mode == MODE_OFF) return;
 
+  publishPrefs();
   if (!_board_cmds_probed) probeBoardCommands();
 
   if (_mode == MODE_LAN && _initial_setup && _setup_reminder_at != 0 &&
@@ -788,8 +828,11 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   DynamicJsonDocument doc(640);
   doc["mode"] = (_mode == MODE_SETUP) ? "setup" : "lan";
   doc["auth"] = authed;
-  doc["needs_setup"] = !mqttNetworkSetupComplete(_obs);
-  doc["name"] = (const char*)_prefs->node_name;
+  {
+    WCLock lock(_mux);
+    doc["needs_setup"] = !mqttNetworkSetupComplete(&_view_obs);
+    doc["name"] = _view_prefs.node_name;
+  }
   char node_id[17];
   for (int i = 0; i < 8; i++) sprintf(&node_id[i * 2], "%02x", _pub_key[i]);
   doc["node_id"] = node_id;
@@ -859,9 +902,14 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
     return;
   }
   const char* pwd = doc["password"] | "";
-  const char* expected = _initial_setup ? _setup_code : _prefs->password;
+  char password[sizeof(_view_prefs.password)];
+  {
+    WCLock lock(_mux);
+    memcpy(password, _view_prefs.password, sizeof(password));
+  }
+  const char* expected = _initial_setup ? _setup_code : password;
   const size_t expected_size = _initial_setup ? sizeof(_setup_code)
-                                               : sizeof(_prefs->password);
+                                               : sizeof(password);
   if (!fixedTimeEquals(pwd, expected, expected_size)) {
     if (++_login_fails >= 5) {
       _login_lock_until = now + 30000;
@@ -924,70 +972,70 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     JsonObject radio = doc.createNestedObject("radio");
     // round via double so float error doesn't leak into the JSON
     // (910.525f would otherwise serialize as 910.5250244)
-    radio["freq"] = (double)roundf(_prefs->freq * 1000.0f) / 1000.0;
-    radio["bw"] = (double)roundf(_prefs->bw * 100.0f) / 100.0;
-    radio["sf"] = _prefs->sf;
-    radio["cr"] = _prefs->cr;
-    radio["tx"] = _prefs->tx_power_dbm;
-    radio["af"] = _prefs->airtime_factor;
-    radio["rxdelay"] = _prefs->rx_delay_base;
-    radio["txdelay"] = _prefs->tx_delay_factor;
-    radio["cad"] = (bool)_prefs->cad_enabled;
-    radio["rxgain"] = (bool)_prefs->rx_boosted_gain;
+    radio["freq"] = (double)roundf(_view_prefs.freq * 1000.0f) / 1000.0;
+    radio["bw"] = (double)roundf(_view_prefs.bw * 100.0f) / 100.0;
+    radio["sf"] = _view_prefs.sf;
+    radio["cr"] = _view_prefs.cr;
+    radio["tx"] = _view_prefs.tx_power_dbm;
+    radio["af"] = _view_prefs.airtime_factor;
+    radio["rxdelay"] = _view_prefs.rx_delay_base;
+    radio["txdelay"] = _view_prefs.tx_delay_factor;
+    radio["cad"] = (bool)_view_prefs.cad_enabled;
+    radio["rxgain"] = (bool)_view_prefs.rx_boosted_gain;
     // FEM gain is driven by Board::handleCommand(), not CommonCLI, so these are
     // the stored intent; a board with no front-end module rejects the `set`.
-    radio["fem_rxgain"] = (bool)_prefs->radio_fem_rxgain;
-    radio["fem_txgain"] = (bool)_prefs->radio_fem_txgain;
-    radio["repeat"] = !(bool)_prefs->disable_fwd;   // CLI `repeat on` == disable_fwd 0
-    radio["flood_max"] = _prefs->flood_max;
-    radio["flood_max_advert"] = _prefs->flood_max_advert;
-    radio["flood_max_unscoped"] = _prefs->flood_max_unscoped;
+    radio["fem_rxgain"] = (bool)_view_prefs.radio_fem_rxgain;
+    radio["fem_txgain"] = (bool)_view_prefs.radio_fem_txgain;
+    radio["repeat"] = !(bool)_view_prefs.disable_fwd;   // CLI `repeat on` == disable_fwd 0
+    radio["flood_max"] = _view_prefs.flood_max;
+    radio["flood_max_advert"] = _view_prefs.flood_max_advert;
+    radio["flood_max_unscoped"] = _view_prefs.flood_max_unscoped;
     static const char* const LOOP_MODES[] = { "off", "minimal", "moderate", "strict" };
-    radio["loop_detect"] = LOOP_MODES[_prefs->loop_detect <= LOOP_DETECT_STRICT ? _prefs->loop_detect : 0];
-    radio["name"] = (const char*)_prefs->node_name;
-    radio["lat"] = _prefs->node_lat;
-    radio["lon"] = _prefs->node_lon;
-    radio["advert_interval"] = _prefs->advert_interval * 2;      // stored as mins/2
-    radio["flood_advert_interval"] = _prefs->flood_advert_interval;  // hours
+    radio["loop_detect"] = LOOP_MODES[_view_prefs.loop_detect <= LOOP_DETECT_STRICT ? _view_prefs.loop_detect : 0];
+    radio["name"] = _view_prefs.node_name;
+    radio["lat"] = _view_prefs.node_lat;
+    radio["lon"] = _view_prefs.node_lon;
+    radio["advert_interval"] = _view_prefs.advert_interval * 2;      // stored as mins/2
+    radio["flood_advert_interval"] = _view_prefs.flood_advert_interval;  // hours
 
     JsonObject wifi = doc.createNestedObject("wifi");
-    wifi["ssid"] = (const char*)_obs->wifi_ssid;
-    wifi["pwd"] = _obs->wifi_password[0] ? SECRET_SENTINEL : "";
-    wifi["powersave"] = WifiPowerSavePolicy::nameFor(_obs->wifi_power_save);
+    wifi["ssid"] = _view_obs.wifi_ssid;
+    wifi["pwd"] = _view_obs.wifi_password[0] ? SECRET_SENTINEL : "";
+    wifi["powersave"] = WifiPowerSavePolicy::nameFor(_view_obs.wifi_power_save);
 
     JsonObject mqtt = doc.createNestedObject("mqtt");
-    mqtt["origin"] = (const char*)_obs->mqtt_origin;
-    mqtt["iata"] = (const char*)_obs->mqtt_iata;
-    mqtt["status"] = (bool)_obs->mqtt_status_enabled;
-    mqtt["packets"] = (bool)_obs->mqtt_packets_enabled;
-    mqtt["raw"] = (bool)_obs->mqtt_raw_enabled;
-    mqtt["tx"] = _obs->mqtt_tx_enabled == 2 ? "advert"
-                 : _obs->mqtt_tx_enabled == 1 ? "on" : "off";
-    mqtt["rx"] = (bool)_obs->mqtt_rx_enabled;
-    mqtt["interval"] = _obs->mqtt_status_interval / 60000;  // CLI takes minutes
-    mqtt["neighbors"] = (bool)_obs->mqtt_neighbors_enabled;
-    mqtt["neighbors_interval"] = _obs->mqtt_neighbors_interval / 3600000UL;  // CLI takes hours
-    mqtt["timezone"] = (const char*)_obs->timezone_string;
-    mqtt["timezone_offset"] = _obs->timezone_offset;
-    mqtt["ntp"] = (const char*)_obs->mqtt_ntp_server;
-    mqtt["owner"] = (const char*)_obs->mqtt_owner_public_key;
-    mqtt["email"] = (const char*)_obs->mqtt_email;
-    mqtt["snmp"] = (bool)_obs->snmp_enabled;
-    mqtt["snmp_community"] = (const char*)_obs->snmp_community;
+    mqtt["origin"] = _view_obs.mqtt_origin;
+    mqtt["iata"] = _view_obs.mqtt_iata;
+    mqtt["status"] = (bool)_view_obs.mqtt_status_enabled;
+    mqtt["packets"] = (bool)_view_obs.mqtt_packets_enabled;
+    mqtt["raw"] = (bool)_view_obs.mqtt_raw_enabled;
+    mqtt["tx"] = _view_obs.mqtt_tx_enabled == 2 ? "advert"
+                 : _view_obs.mqtt_tx_enabled == 1 ? "on" : "off";
+    mqtt["rx"] = (bool)_view_obs.mqtt_rx_enabled;
+    mqtt["interval"] = _view_obs.mqtt_status_interval / 60000;  // CLI takes minutes
+    mqtt["neighbors"] = (bool)_view_obs.mqtt_neighbors_enabled;
+    mqtt["neighbors_interval"] = _view_obs.mqtt_neighbors_interval / 3600000UL;  // CLI takes hours
+    mqtt["timezone"] = _view_obs.timezone_string;
+    mqtt["timezone_offset"] = _view_obs.timezone_offset;
+    mqtt["ntp"] = _view_obs.mqtt_ntp_server;
+    mqtt["owner"] = _view_obs.mqtt_owner_public_key;
+    mqtt["email"] = _view_obs.mqtt_email;
+    mqtt["snmp"] = (bool)_view_obs.snmp_enabled;
+    mqtt["snmp_community"] = _view_obs.snmp_community;
 
     JsonArray slots = mqtt.createNestedArray("slots");
     for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
       JsonObject s = slots.createNestedObject();
-      s["preset"] = (const char*)_obs->mqtt_slot_preset[i];
-      s["server"] = (const char*)_obs->mqtt_slot_host[i];
-      s["port"] = _obs->mqtt_slot_port[i];
-      s["username"] = (const char*)_obs->mqtt_slot_username[i];
-      s["password"] = _obs->mqtt_slot_password[i][0] ? SECRET_SENTINEL : "";
-      s["token"] = _obs->mqtt_slot_token[i][0] ? SECRET_SENTINEL : "";
-      s["topic"] = (const char*)_obs->mqtt_slot_topic[i];
-      s["audience"] = (const char*)_obs->mqtt_slot_audience[i];
+      s["preset"] = _view_obs.mqtt_slot_preset[i];
+      s["server"] = _view_obs.mqtt_slot_host[i];
+      s["port"] = _view_obs.mqtt_slot_port[i];
+      s["username"] = _view_obs.mqtt_slot_username[i];
+      s["password"] = _view_obs.mqtt_slot_password[i][0] ? SECRET_SENTINEL : "";
+      s["token"] = _view_obs.mqtt_slot_token[i][0] ? SECRET_SENTINEL : "";
+      s["topic"] = _view_obs.mqtt_slot_topic[i];
+      s["audience"] = _view_obs.mqtt_slot_audience[i];
       char filter_text[MQTTPacketFilter::kFilterTextSize];
-      if (MQTTPacketFilter::format(_obs->mqtt_slot_packet_filter[i],
+      if (MQTTPacketFilter::format(_view_obs.mqtt_slot_packet_filter[i],
                                    filter_text, sizeof(filter_text))) {
         // Mutable char input is copied into the ArduinoJson document; the
         // stack buffer is reused on the next slot.
