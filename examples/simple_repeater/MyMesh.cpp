@@ -1741,7 +1741,7 @@ void MyMesh::loop() {
       Serial.println("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge");
       otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
       setBridgeState(true);
-    } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_prefs.ota_channel), getFirmwareVer(), false, ota_reply)) {
+    } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
       Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
       char ota_alert_msg[160];
       snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);

@@ -76,3 +76,57 @@ static inline bool ota_parse_channel(const char* arg, uint8_t* out) {
   if (strcmp(arg, "default") == 0)                            { *out = OTA_CH_NATIVE; return true; }
   return false;
 }
+
+// Compatibility tag, read from a downloaded image before a channel switch boots it.
+// A switch can land on an older build, which would boot without state it cannot read
+// or without a transport this node depends on. Bump OTA_STATE_GEN when a build starts
+// storing state that older builds cannot read.
+//   1: /prefs.json + /mqtt_prefs
+#ifndef OTA_STATE_GEN
+#define OTA_STATE_GEN 1
+#endif
+#define OTA_CAP_ETH 0x01  // carries MQTT over Ethernet
+#if defined(NETWORK_PREFER_ETHERNET)
+#define OTA_CAPS_STR "+eth"
+#else
+#define OTA_CAPS_STR ""
+#endif
+#define OTA_STR_(x) #x
+#define OTA_STR(x) OTA_STR_(x)
+#define OTA_COMPAT_TAG "ota-compat:"
+static const char ota_compat_tag[] = OTA_COMPAT_TAG OTA_STR(OTA_STATE_GEN) OTA_CAPS_STR;
+
+struct OtaCompat {
+  int gen;
+  uint8_t caps;
+};
+
+// Parse the tag value "<gen>[+cap...]"; unknown caps are ignored.
+static inline bool ota_compat_parse(const char* s, OtaCompat* out) {
+  if (*s < '0' || *s > '9') return false;
+  out->gen = 0;
+  out->caps = 0;
+  while (*s >= '0' && *s <= '9') out->gen = out->gen * 10 + (*s++ - '0');
+  while (*s == '+') {
+    const char* cap = ++s;
+    while (*s && *s != '+') s++;
+    if ((size_t)(s - cap) == 3 && memcmp(cap, "eth", 3) == 0) out->caps |= OTA_CAP_ETH;
+  }
+  return *s == 0;
+}
+
+// Find the tag in an image chunk; returns the NUL-terminated value text, or nullptr when
+// the chunk holds no complete tag.
+static inline const char* ota_compat_find(const uint8_t* buf, size_t len) {
+  const size_t tag_len = sizeof(OTA_COMPAT_TAG) - 1;
+  for (size_t i = 0; i + tag_len < len; i++) {
+    if (memcmp(buf + i, OTA_COMPAT_TAG, tag_len) != 0) continue;
+    if (memchr(buf + i + tag_len, 0, len - i - tag_len)) return (const char*)buf + i + tag_len;
+  }
+  return nullptr;
+}
+
+// A target must read this node's state and keep every transport this node has.
+static inline bool ota_compat_ok(const OtaCompat& own, const OtaCompat& target) {
+  return target.gen >= own.gen && (target.caps & own.caps) == own.caps;
+}

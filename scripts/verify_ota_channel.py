@@ -2,7 +2,8 @@
 """Verify every built observer binary is baked for the expected OTA channel.
 
 Observer builds carry three manifest bases (src/helpers/OtaChannel.h), each stored
-behind a tag so it can be read back from the binary:
+behind a tag so it can be read back from the binary (plus an ota-compat tag, which a
+channel switch reads from the downloaded image before booting it):
 
   ota-base-native:<url>   the channel the build OTAs from by default
   ota-base-stable:<url>   production, the target of `ota branch prod`
@@ -26,6 +27,7 @@ import re
 import sys
 
 TAG_RE = re.compile(rb"ota-base-(native|stable|dev):([\x21-\x7e]*)\x00")
+COMPAT_RE = re.compile(rb"ota-compat:([0-9]+(?:\+[a-z]+)*)\x00")
 
 
 def read_tags(data):
@@ -49,6 +51,10 @@ def check(data, expect, native_url, stable_url, dev_url):
         found = sorted(tags[name])
         if found != [want]:
             problems.append("ota-base-%s: expected [%s], found %s" % (name, want, found or "nothing"))
+    # Without its compat tag a build cannot be the target of a channel switch.
+    compat = sorted({m.group(1).decode() for m in COMPAT_RE.finditer(data)})
+    if len(compat) != 1:
+        problems.append("ota-compat: expected one value, found %s" % (compat or "nothing"))
     return problems
 
 
@@ -62,7 +68,7 @@ def self_test():
     P, B = "https://h/v", "https://h/beta/v"
 
     def blob(native, stable=P, dev=B):
-        return b"\x00junk\x00ota-base-native:%s\x00ota-base-stable:%s\x00ota-base-dev:%s\x00" % (
+        return b"\x00junk\x00ota-base-native:%s\x00ota-base-stable:%s\x00ota-base-dev:%s\x00ota-compat:1\x00" % (
             native.encode(), stable.encode(), dev.encode())
 
     cases = [
@@ -74,6 +80,8 @@ def self_test():
         ("wrong dev URL fails", blob(P, dev="https://other/v"), "prod", P, False),
         ("conflicting native tags fail", blob(P) + blob(B), "prod", P, False),
         ("workflow URL off-channel fails", blob(P), "prod", B, False),
+        ("missing compat tag fails", blob(P).replace(b"ota-compat:1", b"ota-compat:"), "prod", P, False),
+        ("conflicting compat tags fail", blob(P) + b"ota-compat:2+eth\x00", "prod", P, False),
     ]
     failed = 0
     for name, data, expect, native, ok in cases:

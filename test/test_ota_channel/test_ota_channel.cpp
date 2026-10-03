@@ -40,6 +40,39 @@ TEST(OtaChannel, NativeChannelNameMatchesBase) {
   EXPECT_STREQ(ota_native_channel_name(), "prod");
 }
 
+TEST(OtaCompat, OwnTagParses) {
+  OtaCompat own;
+  ASSERT_TRUE(ota_compat_parse(ota_compat_tag + sizeof(OTA_COMPAT_TAG) - 1, &own));
+  EXPECT_EQ(own.gen, OTA_STATE_GEN);
+  EXPECT_EQ(own.caps, 0);
+}
+TEST(OtaCompat, ParsesCapsAndRejectsJunk) {
+  OtaCompat c;
+  ASSERT_TRUE(ota_compat_parse("12+eth+future", &c));
+  EXPECT_EQ(c.gen, 12);
+  EXPECT_EQ(c.caps, OTA_CAP_ETH);
+  EXPECT_FALSE(ota_compat_parse("", &c));
+  EXPECT_FALSE(ota_compat_parse("x1", &c));
+  EXPECT_FALSE(ota_compat_parse("2eth", &c));
+}
+TEST(OtaCompat, FindsCompleteTagOnly) {
+  const char img[] = "\xe9junk\0ota-compat:2+eth\0tail";
+  const char* v = ota_compat_find((const uint8_t*)img, sizeof(img));
+  ASSERT_NE(v, nullptr);
+  EXPECT_STREQ(v, "2+eth");
+  const char cut[] = "junk ota-compat:2+e";  // value runs past the chunk end
+  EXPECT_EQ(ota_compat_find((const uint8_t*)cut, sizeof(cut) - 1), nullptr);
+  const char none[] = "ota-compat";
+  EXPECT_EQ(ota_compat_find((const uint8_t*)none, sizeof(none)), nullptr);
+}
+TEST(OtaCompat, TargetMustKeepStateAndTransports) {
+  EXPECT_TRUE(ota_compat_ok({2, 0}, {2, 0}));
+  EXPECT_TRUE(ota_compat_ok({1, 0}, {2, OTA_CAP_ETH}));
+  EXPECT_FALSE(ota_compat_ok({2, 0}, {1, 0}));                       // cannot read /mqtt.json
+  EXPECT_FALSE(ota_compat_ok({2, OTA_CAP_ETH}, {2, 0}));             // drops Ethernet
+  EXPECT_TRUE(ota_compat_ok({2, OTA_CAP_ETH}, {3, OTA_CAP_ETH}));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
