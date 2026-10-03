@@ -88,6 +88,12 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 - `start ota` — serves the ElegantOTA web upload page on the station IP if joined to a Wi-Fi network, otherwise raises the `MeshCore-OTA` Wi-Fi hotspot.
 - `start ota ap` — always raises the `MeshCore-OTA` Wi-Fi hotspot, even when joined to a network. Use this when the network applies client isolation and the station IP isn't reachable.
 
+### Switch the OTA release channel (observer builds)
+
+- `ota branch` — shows the selected channel, the channel this build was made for, and the manifest base `ota check`/`ota update` will use.
+- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`) — pull future `ota update`s from that channel. The selection is saved; run `ota update` to switch.
+- `ota branch default` — follow the channel this build was made for.
+
 ---
 
 ### Erase/Factory Reset

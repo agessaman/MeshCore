@@ -67,6 +67,10 @@ env:
   # The channel itself. Firmware fetches <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json,
   # so this URL is what keeps beta nodes on beta.
   OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/beta/v
+  # Both channel bases are baked into every build so `ota branch prod|beta` can
+  # move a node between channels. Identical in both observer workflows.
+  OTA_MANIFEST_BASE_STABLE_URL: https://observer.gessaman.com/v
+  OTA_MANIFEST_BASE_DEV_URL: https://observer.gessaman.com/beta/v
   # Marks the embedded version, e.g. v1.16.0.3-observer-beta-dev-abc1234, so `ver`
   # (and the MQTT firmware_version / SNMP) identify BOTH the channel and its
   # provenance: this channel is built from the upstream-dev-merged line, so "dev"
@@ -168,20 +172,9 @@ jobs:
         run: /usr/bin/env bash build.sh build-firmware ${{ matrix.shard.envs }}
 
       - name: Verify beta channel is baked in
-        shell: bash
-        run: |
-          # Fail fast rather than publish firmware that would OTA itself onto the
-          # production channel. Checks one built binary actually carries the beta
-          # manifest URL and does NOT carry the production one.
-          BIN=$(find .pio/build -name firmware.elf | head -1)
-          if [ -z "$BIN" ]; then echo "no ELF found to verify" >&2; exit 1; fi
-          if ! strings "$BIN" | grep -qF "$OTA_MANIFEST_BASE_URL"; then
-            echo "ERROR: beta manifest base missing from $BIN" >&2; exit 1
-          fi
-          if strings "$BIN" | grep -qE 'https://observer\.gessaman\.com/v"?$'; then
-            echo "ERROR: production manifest base present in a beta build" >&2; exit 1
-          fi
-          echo "OK: $BIN carries $OTA_MANIFEST_BASE_URL"
+        # Fail fast rather than publish firmware that would OTA itself onto the
+        # production channel: checks every .bin the shard publishes.
+        run: python3 scripts/verify_ota_channel.py --expect beta
 
       - name: Upload Shard Artifact
         uses: actions/upload-artifact@v4

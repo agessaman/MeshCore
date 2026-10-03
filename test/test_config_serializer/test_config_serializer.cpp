@@ -214,6 +214,35 @@ TEST(NodePrefs, FemGainSettingsRoundTrip) {
     EXPECT_EQ(1, loaded.radio_fem_txgain);
 }
 
+TEST(NodePrefs, OtaChannelDefaultsToNative) {
+    NodePrefs prefs;
+    EXPECT_EQ(0, prefs.ota_channel);  // 0 == native
+}
+
+TEST(NodePrefs, OtaChannelRoundTrip) {
+    NodePrefs saved;
+    saved.ota_channel = 2;  // dev
+
+    MockPrintStream output;
+    ASSERT_TRUE(saved.saveSerial(output));
+    std::string serialised(reinterpret_cast<const char*>(output.getBytes()), output.getLength());
+    EXPECT_NE(std::string::npos, serialised.find("ota_ch:2"));
+
+    MockInputStream input(serialised.c_str());
+    NodePrefs loaded;
+    loaded.ota_channel = 1;  // start different
+    ASSERT_TRUE(loaded.loadSerial(input)) << serialised;
+    EXPECT_EQ(2, loaded.ota_channel);
+}
+
+TEST(NodePrefs, OtaChannelMissingKeyKeepsDefault) {
+    // A /prefs.json written before this field existed has no ota_ch key.
+    MockInputStream input("{name:\"n\"}");
+    NodePrefs loaded;               // ota_channel default 0 (native)
+    ASSERT_TRUE(loaded.loadSerial(input));
+    EXPECT_EQ(0, loaded.ota_channel);
+}
+
 
 // ── main ───────────────────────────────────────────────────────
 

@@ -12,6 +12,7 @@
 
 #include <Arduino.h>
 #include "CommonCLI.h"
+#include "OtaChannel.h"
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
@@ -1088,7 +1089,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only
       // costs a single TLS handshake (no large JSON doc) — which fits alongside
       // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
-      _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply);
+      _board->otaFromManifest(ota_resolve_base(_prefs->ota_channel), _callbacks->getFirmwareVer(), true, reply);
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
       // schedule the real update — which tears the bridge down, flashes, and
@@ -1096,7 +1097,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // returns true iff so; otherwise it leaves the explanation (up to date /
       // cable flash / error) in reply, which we send without disturbing the
       // bridge or misleading the user with a "Beginning update..." that no-ops.
-      if (_board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply)) {
+      if (_board->otaFromManifest(ota_resolve_base(_prefs->ota_channel), _callbacks->getFirmwareVer(), true, reply)) {
         // reply now holds "update available: <cur> -> <target> (N behind|new base)",
         // where <target> is "vX.Y.Z.B (hash)". Pull <target> out for a friendlier
         // start message. The "-> " ... trailing " (" framing is produced by
@@ -1125,6 +1126,34 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
         } else {
           strcpy(reply, "ERR: online OTA not available");
         }
+      }
+    }
+#else
+    strcpy(reply, "ERR: online OTA not supported on this build");
+#endif
+    return true;
+  } else if (memcmp(command, "ota branch", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+    // Switch (or report) the OTA release channel this device pulls from. The
+    // selection is persisted (NodePrefs::ota_channel) and resolved to a baked-in
+    // base URL by ota_resolve_base(); it changes only WHERE updates are fetched,
+    // never the running image's reported version. Reachable from any admin path,
+    // same as `ota update`.
+#if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
+    const char* arg = command + 10;
+    while (*arg == ' ') arg++;
+    if (*arg == 0) {
+      snprintf(reply, 160, "channel: %s (build: %s), base %s",
+               ota_channel_name(_prefs->ota_channel), ota_native_channel_name(),
+               ota_resolve_base(_prefs->ota_channel));
+    } else {
+      uint8_t ch;
+      if (!ota_parse_channel(arg, &ch)) {
+        strcpy(reply, "ERR: usage ota branch [prod|beta|default] (aliases: stable, dev)");
+      } else {
+        _prefs->ota_channel = ch;
+        savePrefs();
+        snprintf(reply, 160, "channel set to %s, base %s; run ota update to switch",
+                 ota_channel_name(ch), ota_resolve_base(ch));
       }
     }
 #else
