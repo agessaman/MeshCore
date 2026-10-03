@@ -62,6 +62,10 @@ TEST(OtaCompat, FindsCompleteTagOnly) {
   EXPECT_STREQ(v, "2+eth");
   const char cut[] = "junk ota-compat:2+e";  // value runs past the chunk end
   EXPECT_EQ(ota_compat_find((const uint8_t*)cut, sizeof(cut) - 1), nullptr);
+  const char literal_first[] = "ota-compat:\0code\0ota-compat:1\0";  // search literal precedes the tag
+  v = ota_compat_find((const uint8_t*)literal_first, sizeof(literal_first));
+  ASSERT_NE(v, nullptr);
+  EXPECT_STREQ(v, "1");
   const char none[] = "ota-compat";
   EXPECT_EQ(ota_compat_find((const uint8_t*)none, sizeof(none)), nullptr);
 }

@@ -116,11 +116,13 @@ static inline bool ota_compat_parse(const char* s, OtaCompat* out) {
 }
 
 // Find the tag in an image chunk; returns the NUL-terminated value text, or nullptr when
-// the chunk holds no complete tag.
+// the chunk holds no complete tag. Skips the bare OTA_COMPAT_TAG search literal, which
+// every image also contains.
 static inline const char* ota_compat_find(const uint8_t* buf, size_t len) {
   const size_t tag_len = sizeof(OTA_COMPAT_TAG) - 1;
   for (size_t i = 0; i + tag_len < len; i++) {
     if (memcmp(buf + i, OTA_COMPAT_TAG, tag_len) != 0) continue;
+    if (buf[i + tag_len] < '0' || buf[i + tag_len] > '9') continue;
     if (memchr(buf + i + tag_len, 0, len - i - tag_len)) return (const char*)buf + i + tag_len;
   }
   return nullptr;
