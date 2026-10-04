@@ -123,6 +123,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   CayenneLPP telemetry;
   unsigned long set_radio_at, revert_radio_at;
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
+  uint8_t _ota_update_channel = 0;   // channel `ota update` checked; a later `ota branch` cannot retarget it
   float pending_freq;
   float pending_bw;
   uint8_t pending_sf;
@@ -441,6 +442,7 @@ public:
   bool beginDeferredOtaUpdate() override {
     _ota_update_at = millis() + 2500;
     if (_ota_update_at == 0) _ota_update_at = 1;  // 0 means "none"
+    _ota_update_channel = _prefs.ota_channel;
 #if defined(WITH_MQTT_BRIDGE)
     // Broadcast START now, while the loop still runs (the 2.5 s reply window):
     // the deferred flash blocks the loop and, on success, reboots — so a start

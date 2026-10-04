@@ -1,6 +1,7 @@
 #include "MyMesh.h"
 #include <algorithm>
 #include <helpers/RxReservePacketManager.h>
+#include <helpers/OtaChannel.h>
 #if defined(WITH_MQTT_NEIGHBORS)
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
 #endif
@@ -1616,7 +1617,7 @@ void MyMesh::loop() {
     }
 
     char ota_reply[160];
-    if (may_flash && !_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+    if (may_flash && !_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
       Serial.print("OTA: aborted - "); Serial.println(ota_reply);
       may_flash = false;
     }

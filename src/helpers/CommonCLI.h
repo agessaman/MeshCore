@@ -70,6 +70,7 @@ public:
   uint8_t path_hash_mode = 0;   // which path mode to use when sending
   uint8_t loop_detect = 0;
   uint8_t cad_enabled = 0;      // hardware Channel Activity Detection before TX (boolean)
+  uint8_t ota_channel = 0;      // OTA release channel selector: 0=native, 1=stable, 2=dev
   uint8_t extra_sf[4];
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) are not in NodePrefs.
@@ -182,6 +183,7 @@ protected:
     def("lat", node_lat);
     def("lon", node_lon);
     def("disc_mod", discovery_mod_timestamp);  // gates 'since'-filtered DISCOVER replies
+    def("ota_ch", ota_channel);   // OTA release channel: 0=native, 1=stable, 2=dev
     def("radio", radio);
     def("bridge", bridge);
     def("gps", gps);
