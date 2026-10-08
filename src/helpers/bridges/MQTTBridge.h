@@ -449,6 +449,7 @@ private:
   // on Core 1 (radio callbacks), read on Core 0 for `mqtt.stats`; a torn read of
   // a diagnostic counter is harmless, so no atomic is warranted.
   unsigned long _filtered_packets = 0;
+  unsigned long _bad_sig_adverts = 0;  // RX adverts dropped by mqtt.advert.verify
 
   // Status publish retry tracking
   unsigned long _last_status_retry;  // Track last retry attempt (separate from successful publish)

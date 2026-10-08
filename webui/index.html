@@ -438,6 +438,8 @@ body.tab-cli{padding-bottom:0}
         <span class="tgl"><input type="checkbox" data-k="mqtt.raw"><u></u></span></div>
       <div class="sw"><span><b>Received packets</b><i>Report packets heard over the air</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.rx"><u></u></span></div>
+      <div class="sw"><span><b>Drop bad advert signatures</b><i>Skip received adverts that fail verification. Off keeps RF corruption visible to collectors</i></span>
+        <span class="tgl"><input type="checkbox" data-k="mqtt.advert.verify"><u></u></span></div>
       <div class="sw"><span><b>Publish neighbors</b><i>Periodic neighbor table + scopes (PSRAM boards only)</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.neighbors"><u></u></span></div>
       <div class="row" style="margin-top:6px">
@@ -712,6 +714,7 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"mqtt.origin":return q.origin;case"mqtt.iata":return q.iata;
     case"mqtt.status":return q.status?"on":"off";case"mqtt.packets":return q.packets?"on":"off";
     case"mqtt.raw":return q.raw?"on":"off";case"mqtt.tx":return q.tx;case"mqtt.rx":return q.rx?"on":"off";
+    case"mqtt.advert.verify":return q.advert_verify?"on":"off";
     case"mqtt.interval":return String(q.interval);
     case"mqtt.neighbors":return q.neighbors?"on":"off";case"mqtt.neighbors.interval":return String(q.neighbors_interval);
     case"mqtt.ntp":return q.ntp;
@@ -1573,6 +1576,7 @@ var CLI_KEYS=[
   ["mqtt.packets","Publish packet messages",0,"on|off"],
   ["mqtt.raw","Also publish full raw frames",0,"on|off"],
   ["mqtt.rx","Publish packets heard over the air",0,"on|off"],
+  ["mqtt.advert.verify","Drop received adverts with bad signatures",0,"on|off"],
   ["mqtt.tx","Publish packets this node sends",0,"off|on|advert"],
   ["mqtt.interval","Status publish interval {1-60 min}",0],
   ["mqtt.neighbors","Publish the neighbour table (PSRAM boards)",0,"on|off"],

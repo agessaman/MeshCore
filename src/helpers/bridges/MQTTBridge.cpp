@@ -8,6 +8,7 @@
 #include "../MQTTReplyFormat.h"
 #include "../MQTTRuntimeBufferLifecycle.h"
 #include "../MQTTTopicRouter.h"
+#include "../AdvertSignature.h"
 #include "../TxtDataHelpers.h"
 #include <WiFiUdp.h>
 #include <Timezone.h>
@@ -372,6 +373,10 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
   // the per-slot list below is what usually gets clamped away first.
   if (b->_filtered_packets > 0) {
     replyAppendf(buf, bufsize, &pos, " filt=%lu", b->_filtered_packets);
+  }
+  // badsig=<n>: RX adverts dropped by mqtt.advert.verify. Omitted while zero.
+  if (b->_bad_sig_adverts > 0) {
+    replyAppendf(buf, bufsize, &pos, " badsig=%lu", b->_bad_sig_adverts);
   }
   // down=<n>: ready slots that are not connected. Without this the reply cannot
   // show an outage at all — sN= counts publishes, and a slot that never connects
@@ -3625,6 +3630,18 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
   if (!shouldQueuePacketType(packet->getPayloadType(), filtered)) {
     if (filtered) _filtered_packets++;
     return;
+  }
+
+  // Opt-in: drop adverts that fail verification (RF corruption that passed the
+  // LoRa CRC). Runs here, where Mesh::onRecvPacket already verifies on this stack.
+  if (_obs->mqtt_advert_verify && packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
+    uint8_t message[AdvertSignature::kMaxMessageLen];
+    const uint8_t* sig = nullptr;
+    int msg_len = AdvertSignature::buildMessage(packet->payload, packet->payload_len, message, &sig);
+    if (msg_len < 0 || !mesh::Identity(packet->payload).verify(sig, message, msg_len)) {
+      _bad_sig_adverts++;
+      return;
+    }
   }
 
   // Queue packet for transmission

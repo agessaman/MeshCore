@@ -223,10 +223,10 @@ class MQTTPrefsSerializer : public ConfigSerializer {
 
   class MqttPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
-    int32_t _packets_enabled, _raw_enabled, _tx_enabled, _rx_enabled;
+    int32_t _packets_enabled, _raw_enabled, _tx_enabled, _rx_enabled, _advert_verify;
     char _default_iata[sizeof(MQTTPrefs::mqtt_iata)];
     bool _seen_origin = false, _seen_iata = false, _seen_packets = false;
-    bool _seen_raw = false, _seen_tx = false, _seen_rx = false;
+    bool _seen_raw = false, _seen_tx = false, _seen_rx = false, _seen_advert_verify = false;
     StatusPrefs _status;
     NeighborPrefs _neighbors;
     OwnerPrefs _owner;
@@ -241,6 +241,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       defStrict("raw_enabled", _raw_enabled, _seen_raw);
       defStrict("tx_enabled", _tx_enabled, _seen_tx);
       defStrict("rx_enabled", _rx_enabled, _seen_rx);
+      defStrict("advert_verify", _advert_verify, _seen_advert_verify);
       def("status", _status);
       def("neighbors", _neighbors);
       def("owner", _owner);
@@ -255,7 +256,8 @@ class MQTTPrefsSerializer : public ConfigSerializer {
     MqttPrefs(MQTTPrefs* prefs, const MQTTPrefs* defaults)
         : _prefs(prefs), _packets_enabled(prefs->mqtt_packets_enabled),
           _raw_enabled(prefs->mqtt_raw_enabled), _tx_enabled(prefs->mqtt_tx_enabled),
-          _rx_enabled(prefs->mqtt_rx_enabled), _status(prefs), _neighbors(prefs),
+          _rx_enabled(prefs->mqtt_rx_enabled), _advert_verify(prefs->mqtt_advert_verify),
+          _status(prefs), _neighbors(prefs),
           _owner(prefs), _slot1(prefs, 0), _slot2(prefs, 1),
           _slot3(prefs, 2), _slot4(prefs, 3),
           _slot5(prefs, 4), _slot6(prefs, 5) {
@@ -272,10 +274,12 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       if (_raw_enabled < 0 || _raw_enabled > 1) { _raw_enabled = 0; *repaired = true; }
       if (_tx_enabled < 0 || _tx_enabled > 2) { _tx_enabled = 2; *repaired = true; }
       if (_rx_enabled < 0 || _rx_enabled > 1) { _rx_enabled = 1; *repaired = true; }
+      if (_advert_verify < 0 || _advert_verify > 1) { _advert_verify = 0; *repaired = true; }
       _prefs->mqtt_packets_enabled = static_cast<uint8_t>(_packets_enabled);
       _prefs->mqtt_raw_enabled = static_cast<uint8_t>(_raw_enabled);
       _prefs->mqtt_tx_enabled = static_cast<uint8_t>(_tx_enabled);
       _prefs->mqtt_rx_enabled = static_cast<uint8_t>(_rx_enabled);
+      _prefs->mqtt_advert_verify = static_cast<uint8_t>(_advert_verify);
       if (_prefs->mqtt_iata[0] != '\0') {
         if (!mqttIataValid(_prefs->mqtt_iata)) {
           memcpy(_prefs->mqtt_iata, _default_iata, sizeof(_default_iata));
