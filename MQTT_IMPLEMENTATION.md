@@ -524,6 +524,7 @@ These settings apply across all MQTT slots:
 - `get mqtt.packets` - Get packet message setting (on/off)
 - `get mqtt.raw` - Get raw message setting (on/off)
 - `get mqtt.rx` - Get RX packet uplinking setting (on/off)
+- `get mqtt.advert.verify` - Get advert signature filtering setting (on/off)
 - `get mqtt.tx` - Get TX packet uplinking setting (on/off/advert)
 - `get mqtt.interval` - Get status publish interval
 - `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; neighbors-enabled builds)
@@ -540,6 +541,7 @@ These settings apply across all MQTT slots:
 - `set mqtt.packets on|off` - Enable/disable packet messages
 - `set mqtt.raw on|off` - Enable/disable raw messages
 - `set mqtt.rx on|off` - Enable/disable RX (received) packet uplinking
+- `set mqtt.advert.verify on|off` - Skip received adverts whose signature fails (default off)
 - `set mqtt.tx on|off|advert` - Set TX packet uplinking mode:
   - `on` - Uplink all transmitted packets
   - `advert` - Uplink only this node's own advert packets (self-originated)

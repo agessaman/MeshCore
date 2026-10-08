@@ -131,6 +131,10 @@ struct MQTTPrefs {
   // is configured over Ethernet and therefore may intentionally have no Wi-Fi
   // SSID. Existing Wi-Fi installations remain complete by the helper below.
   uint8_t network_setup_complete;
+
+  // Drop received adverts whose Ed25519 signature fails before publishing.
+  // Defaults off so RF corruption on the mesh stays visible to collectors.
+  uint8_t mqtt_advert_verify;
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {

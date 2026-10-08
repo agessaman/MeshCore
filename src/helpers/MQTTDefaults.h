@@ -68,6 +68,7 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_raw_enabled = 0;
   prefs->mqtt_tx_enabled = 2;
   prefs->mqtt_rx_enabled = 1;
+  prefs->mqtt_advert_verify = 0;
   prefs->mqtt_status_interval = 300000;
   prefs->wifi_power_save = 1;
 

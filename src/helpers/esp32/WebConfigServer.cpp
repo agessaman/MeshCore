@@ -964,6 +964,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     mqtt["tx"] = _obs->mqtt_tx_enabled == 2 ? "advert"
                  : _obs->mqtt_tx_enabled == 1 ? "on" : "off";
     mqtt["rx"] = (bool)_obs->mqtt_rx_enabled;
+    mqtt["advert_verify"] = (bool)_obs->mqtt_advert_verify;
     mqtt["interval"] = _obs->mqtt_status_interval / 60000;  // CLI takes minutes
     mqtt["neighbors"] = (bool)_obs->mqtt_neighbors_enabled;
     mqtt["neighbors_interval"] = _obs->mqtt_neighbors_interval / 3600000UL;  // CLI takes hours

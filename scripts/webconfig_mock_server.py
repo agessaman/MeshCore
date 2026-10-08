@@ -117,7 +117,7 @@ def default_config(setup_mode):
         },
         "mqtt": {
             "origin": "" if setup_mode else "MockNode", "iata": "" if setup_mode else "DEN",
-            "status": True, "packets": True, "raw": False, "tx": "advert", "rx": True,
+            "status": True, "packets": True, "raw": False, "tx": "advert", "rx": True, "advert_verify": False,
             "interval": 5, "timezone": "MST7MDT,M3.2.0,M11.1.0", "timezone_offset": -7,
             "ntp": "pool.ntp.org", "owner": "", "email": "", "snmp": False,
             "snmp_community": "public",
@@ -216,7 +216,8 @@ class State:
 BOOL_KEYS = {"cad": ("radio", "cad"), "radio.rxgain": ("radio", "rxgain"),
              "repeat": ("radio", "repeat"), "mqtt.status": ("mqtt", "status"),
              "mqtt.packets": ("mqtt", "packets"), "mqtt.raw": ("mqtt", "raw"),
-             "mqtt.rx": ("mqtt", "rx"), "snmp": ("mqtt", "snmp"),
+             "mqtt.rx": ("mqtt", "rx"), "mqtt.advert.verify": ("mqtt", "advert_verify"),
+             "snmp": ("mqtt", "snmp"),
              "mqtt.neighbors": ("mqtt", "neighbors")}
 INT_KEYS = {"tx": ("radio", "tx"), "flood.max": ("radio", "flood_max"),
             "flood.max.advert": ("radio", "flood_max_advert"),

@@ -439,6 +439,43 @@ TEST(MQTTPrefsSerializer, DisplayFlipRoundTripsAndRepairs) {
   EXPECT_EQ(0, prefs.display_flip);
 }
 
+TEST(MQTTPrefsSerializer, AdvertVerifyDefaultsOffRoundTripsAndRepairs) {
+  MQTTPrefs source = defaults();
+  EXPECT_EQ(0, source.mqtt_advert_verify);
+  source.mqtt_advert_verify = 1;
+
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input));
+  bool repaired = false;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(1, loaded.mqtt_advert_verify);
+
+  // A file written before the key existed keeps the off default.
+  MQTTPrefs older = defaults();
+  InputStream legacy("{version:1,mqtt:{rx_enabled:1}}");
+  MQTTPrefsSerializer legacy_serializer(&older);
+  ASSERT_TRUE(legacy_serializer.loadSerial(legacy));
+  repaired = false;
+  ASSERT_TRUE(legacy_serializer.apply(&repaired));
+  EXPECT_EQ(0, older.mqtt_advert_verify);
+
+  MQTTPrefs prefs = defaults();
+  InputStream bogus("{version:1,mqtt:{advert_verify:5}}");
+  MQTTPrefsSerializer bogus_serializer(&prefs);
+  ASSERT_TRUE(bogus_serializer.loadSerial(bogus));
+  repaired = false;
+  ASSERT_TRUE(bogus_serializer.apply(&repaired));
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(0, prefs.mqtt_advert_verify);
+}
+
 TEST(MQTTPrefsSerializer, RepairsDisplayTimeoutOutOfRange) {
   MQTTPrefs prefs = defaults();
   InputStream input("{version:1,display:{timeout_s:99999}}");
