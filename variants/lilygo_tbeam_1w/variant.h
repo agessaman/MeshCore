@@ -93,10 +93,6 @@
 #define FAN_DEFAULT_LO_C 30   // off below typical indoor idle (~86F)
 #define FAN_DEFAULT_HI_C 36   // on at ~97F PCB; still far below 85C chip ratings
 
-// PA Ramp Time - T-Beam 1W requires >800us stabilization (default is 200us)
-// Value 0x05 = RADIOLIB_SX126X_PA_RAMP_800U
-#define SX126X_PA_RAMP_US 0x05
-
 // Display - SH1106 OLED (128x64)
 #define USE_SH1106
 #define OLED_WIDTH 128
