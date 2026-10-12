@@ -12,6 +12,16 @@ class CustomSX1262 : public SX1262 {
   public:
     CustomSX1262(Module *mod) : SX1262(mod) { }
 
+  #ifdef SX126X_PA_RAMP_US
+    // RadioLib resets the ramp to 200us on every power change; re-apply for external-PA boards
+    using SX1262::setOutputPower;
+    int16_t setOutputPower(int8_t power) override {
+      int16_t state = SX1262::setOutputPower(power);
+      if (state != RADIOLIB_ERR_NONE) return state;
+      return setPaRampTime(SX126X_PA_RAMP_US);
+    }
+  #endif
+
   #ifdef RP2040_PLATFORM
     bool std_init(SPIClassRP2040* spi = NULL)
   #else

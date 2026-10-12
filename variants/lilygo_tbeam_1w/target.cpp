@@ -34,13 +34,7 @@ bool radio_init() {
 
   // GPS serial initialized by EnvironmentSensorManager::begin()
 
-  bool success = radio.std_init(&spi);
-  if (success) {
-    // T-Beam 1W has external PA requiring longer ramp time (>800us recommended)
-    // RADIOLIB_SX126X_PA_RAMP_800U = 0x05
-    radio.setTxParams(LORA_TX_POWER, RADIOLIB_SX126X_PA_RAMP_800U);
-  }
-  return success;
+  return radio.std_init(&spi);
 }
 
 mesh::LocalIdentity radio_new_identity() {
