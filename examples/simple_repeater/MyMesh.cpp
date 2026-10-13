@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/radiolib/RxBoostedGainDefaults.h>
 #include <algorithm>
 
 /* ------------------------------ Config -------------------------------- */
@@ -926,13 +927,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   _prefs.adc_multiplier = 0.0f; // 0.0f means use default board multiplier
 
-#if defined(USE_SX1262) || defined(USE_SX1268)
-#ifdef SX126X_RX_BOOSTED_GAIN
-  _prefs.rx_boosted_gain = SX126X_RX_BOOSTED_GAIN;
-#else
-  _prefs.rx_boosted_gain = 1; // enabled by default;
-#endif
-#endif
+  _prefs.rx_boosted_gain = mesh::radio::configuredRxBoostedGainDefault();
   _prefs.radio_fem_rxgain = 1;
   _prefs.radio_fem_txgain = 0;
 

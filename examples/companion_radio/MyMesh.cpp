@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/radiolib/RxBoostedGainDefaults.h>
 
 #include <Arduino.h> // needed for PlatformIO
 #ifdef ENABLE_WIFI_INTERFACE
@@ -933,13 +934,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #endif
   //_prefs.rx_delay_base = 10.0f;  enable once new algo fixed
   _prefs.setRepeatEn(false);
-#if defined(USE_SX1262) || defined(USE_SX1268)
-#ifdef SX126X_RX_BOOSTED_GAIN
-  _prefs.rx_boosted_gain = SX126X_RX_BOOSTED_GAIN;
-#else
-  _prefs.rx_boosted_gain = 1; // enabled by default
-#endif
-#endif
+  _prefs.rx_boosted_gain = mesh::radio::configuredRxBoostedGainDefault();
 }
 
 void MyMesh::begin() {

@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/radiolib/RxBoostedGainDefaults.h>
 
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
@@ -674,13 +675,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
-#if defined(USE_SX1262) || defined(USE_SX1268)
-#ifdef SX126X_RX_BOOSTED_GAIN
-  _prefs.rx_boosted_gain = SX126X_RX_BOOSTED_GAIN;
-#else
-  _prefs.rx_boosted_gain = 1; // enabled by default;
-#endif
-#endif
+  _prefs.rx_boosted_gain = mesh::radio::configuredRxBoostedGainDefault();
   _prefs.radio_fem_rxgain = 1;
   _prefs.radio_fem_txgain = 0;
 
