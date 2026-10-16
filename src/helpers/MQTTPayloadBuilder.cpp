@@ -45,7 +45,8 @@ int MQTTPayloadBuilder::buildStatusMessage(
   int internal_heap,
   int packets_sent,
   int packets_received,
-  const char* repeat
+  const char* repeat,
+  const MQTTConnHealth& conn_health
 ) {
   doc.clear();
   JsonObject root = doc.to<JsonObject>();
@@ -62,9 +63,13 @@ int MQTTPayloadBuilder::buildStatusMessage(
     root["repeat"] = repeat;
   }
 
+  const bool has_conn_health = conn_health.slots_up >= 0 || conn_health.slots_total >= 0 ||
+      conn_health.worst_outage_secs >= 0 || conn_health.heap_largest >= 0 ||
+      conn_health.connect_failures > 0 || conn_health.slots_breaker > 0;
+
   if (battery_mv >= 0 || uptime_secs >= 0 || errors >= 0 || queue_len >= 0 ||
       noise_floor > -999 || tx_air_secs >= 0 || rx_air_secs >= 0 || recv_errors >= 0 ||
-      internal_heap >= 0 || packets_sent >= 0 || packets_received >= 0) {
+      internal_heap >= 0 || packets_sent >= 0 || packets_received >= 0 || has_conn_health) {
     JsonObject stats = root["stats"].to<JsonObject>();
 
     if (battery_mv >= 0) stats["battery_mv"] = battery_mv;
@@ -78,6 +83,22 @@ int MQTTPayloadBuilder::buildStatusMessage(
     if (rx_air_secs >= 0) stats["rx_air_secs"] = rx_air_secs;
     if (recv_errors >= 0) stats["recv_errors"] = recv_errors;
     if (internal_heap >= 0) stats["internal_heap"] = internal_heap;
+    if (conn_health.heap_largest >= 0) stats["heap_largest"] = conn_health.heap_largest;
+    if (conn_health.slots_up >= 0) stats["mqtt_slots_up"] = conn_health.slots_up;
+    if (conn_health.slots_total >= 0) stats["mqtt_slots_total"] = conn_health.slots_total;
+    // Emitted only during an outage of known duration, so the steady-state payload
+    // does not grow. Presence implies a slot is down, but absence does NOT imply
+    // health: a slot has no outage start time until its first attempt ends.
+    // `mqtt_slots_up < mqtt_slots_total` is the signal to alert on; this is detail.
+    if (conn_health.worst_outage_secs >= 0) {
+      stats["mqtt_outage_secs"] = conn_health.worst_outage_secs;
+    }
+    if (conn_health.connect_failures > 0) {
+      stats["mqtt_connect_failures"] = conn_health.connect_failures;
+    }
+    if (conn_health.slots_breaker > 0) {
+      stats["mqtt_slots_breaker"] = conn_health.slots_breaker;
+    }
   }
 
   return serializeComplete(root, buffer, buffer_size);
@@ -120,8 +141,6 @@ int MQTTPayloadBuilder::buildPacketMessage(
   snprintf(len_str, sizeof(len_str), "%d", len);
   snprintf(packet_type_str, sizeof(packet_type_str), "%d", packet_type);
   snprintf(payload_len_str, sizeof(payload_len_str), "%d", payload_len);
-  snprintf(snr_str, sizeof(snr_str), "%.1f", snr);
-  snprintf(rssi_str, sizeof(rssi_str), "%d", rssi);
 
   root["timestamp"] = timestamp;
   root["hash"] = hash;
@@ -138,8 +157,16 @@ int MQTTPayloadBuilder::buildPacketMessage(
   root["origin_id"] = origin_id;
 
   if (direction && strcmp(direction, "rx") == 0) {
-    root["SNR"] = snr_str;
-    root["RSSI"] = rssi_str;
+    // Omit SNR/RSSI entirely when no measurement exists rather than publish
+    // a placeholder a consumer could mistake for a real reading.
+    if (!isnan(snr)) {
+      snprintf(snr_str, sizeof(snr_str), "%.1f", snr);
+      root["SNR"] = snr_str;
+    }
+    if (rssi != MQTT_RSSI_UNKNOWN) {
+      snprintf(rssi_str, sizeof(rssi_str), "%d", rssi);
+      root["RSSI"] = rssi_str;
+    }
     if (!isnan(score)) {
       snprintf(score_str, sizeof(score_str), "%d", static_cast<int>(score * 1000));
       root["score"] = score_str;

@@ -63,29 +63,45 @@ public:
   virtual void setGpio(uint32_t values) {}
   virtual uint8_t getStartupReason() const = 0;
   virtual bool getBootloaderVersion(char* version, size_t max_len) { return false; }
-  virtual bool startOTAUpdate(const char* id, char reply[], bool force_ap = false) { return false; }   // not supported
+  // Retain the legacy two-argument hook for RP2040 boards while allowing
+  // observer-capable boards to request a forced access point.
+  virtual bool startOTAUpdate(const char* id, char reply[]) { return false; }   // not supported
+  virtual bool startOTAUpdate(const char* id, char reply[], bool force_ap) {
+    return startOTAUpdate(id, reply);
+  }
+  virtual bool stopOTAUpdate(char* reply) { (void)reply; return false; }
+  virtual bool isOTAUpdateInProgress() const { return false; }
+  virtual void maintainOTAUpdate(uint32_t now_ms) { (void)now_ms; }
   // Pull-based OTA: fetch the firmware build for this variant from a baked-in manifest and flash it.
   // current_ver is the running firmware version string (used to skip if already up to date); when
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.
   virtual bool otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) { return false; }
 
-  // LoRa front-end-module LNA (RX gain) control. Only FEM-equipped boards override
-  // these; others report they can't control it. Driven by NodePrefs.radio_fem_rxgain.
-  virtual bool setLoRaFemLnaEnabled(bool enable) { return false; }
-  virtual bool canControlLoRaFemLna() const { return false; }
-  virtual bool isLoRaFemLnaEnabled() const { return false; }
-  // Software-selectable external FEM transmit gain. This is not a PA power switch.
-  virtual bool setLoRaFemPaGainEnabled(bool enable) { return false; }
-  virtual bool canControlLoRaFemPaGain() const { return false; }
-  virtual bool isLoRaFemPaGainEnabled() const { return false; }
-
   // Power management interface (boards with power management override these)
+  virtual bool isPwrMgtInitialised() const { return false; }
   virtual bool isExternalPowered() { return false; }
+  // True while a board can identify an active battery-charging source.
+  virtual bool isChargerActive() { return false; }
+
+  // Optional, source-specific power detection. Boards that can distinguish a USB
+  // supply from a solar charger override these; defaults keep every other board
+  // unaffected (the generic CLI prints "n/a" when a capability is absent).
+  virtual bool hasUsbPowerDetect() const { return false; }
+  virtual bool isUsbPowered() { return false; }
+  virtual bool hasSolarChargerDetect() const { return false; }
+  virtual bool isSolarChargerActive() { return false; }
   virtual uint16_t getBootVoltage() { return 0; }
+  virtual bool getWakeLpcompSupported() const { return false; }
   virtual uint32_t getResetReason() const { return 0; }
   virtual const char* getResetReasonString(uint32_t reason) { return "Not available"; }
   virtual uint8_t getShutdownReason() const { return 0; }
   virtual const char* getShutdownReasonString(uint8_t reason) { return "Not available"; }
+
+  virtual bool handleCommand(const char* command, uint32_t sender_timestamp, char* reply) { return false; }
+
+  // Called from the example main loops. Lets a board feed its watchdog and
+  // run periodic housekeeping. Default no-op.
+  virtual void loop() { /* no op */ }
 };
 
 /**

@@ -136,6 +136,36 @@ fix was `rm -rf` the package and `pio pkg install` to re-download stock. A prepe
 search path keeps the change scoped to one env, because the linker takes each archive member
 from the first archive that satisfies an undefined symbol.
 
+### How the archives are distributed
+
+They are not committed: ~6 MB per architecture, and they have to be rebuilt for every
+`platformio/espressif32` bump, so committing them would grow history permanently and go
+stale silently. Instead they are published as a release asset and fetched on demand:
+
+```
+scripts/fetch_mbedtls_4k.sh esp32s3            # download + verify against the manifest
+MESHCORE_REDUCED_TLS=1 pio run -e Heltec_v3_repeater_observer_mqtt
+```
+
+- `scripts/mbedtls_4k_manifest.txt` — per-arch sha256 of each archive. **Update it on every
+  platform bump**, together with the published asset.
+- `scripts/fetch_mbedtls_4k.sh` — downloads into `.mbedtls-4k/<arch>/` (gitignored) and
+  verifies. `MBEDTLS_4K_LOCAL=<dir>` copies from a local build tree instead of downloading.
+- `scripts/mbedtls_4k.py` — wired into `esp32_base.extra_scripts`, but a **no-op unless
+  `MESHCORE_REDUCED_TLS=1`**, so ordinary builds need no artifact and behave as before.
+
+The opt-in path is deliberately loud, because both ways this can go wrong produce a
+firmware that looks correct and silently lacks the change:
+
+| failure | what happens without a guard | guard |
+|---|---|---|
+| directory missing or partial | linker ignores an unusable `-L` and resolves mbedTLS from the framework | pre-build: hard error |
+| archives stale after a platform bump | links the wrong build | pre-build: sha256 vs manifest |
+| `-L` present but outranked | framework archives win, flag is inert | post-link: `firmware.map` must resolve every `libmbed*.a` to `.mbedtls-4k/` |
+
+That last one is the reason the post-link check exists rather than trusting the flag: a
+build flag reaching the compiler proves nothing about what got linked.
+
 ## How to verify it worked
 
 1. `strings`/`grep` the new `sdkconfig.h` for the four settings.

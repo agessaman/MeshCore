@@ -174,9 +174,12 @@ TEST(MQTTLifecycle, RestartAfterStop) {
 
 // --- Timeout / fallback ----------------------------------------------------
 
-// Handoff: "Timeout/fallback behavior when the MQTT task or client does not
-// acknowledge." Models the reviewed fallback replacing the abrupt vTaskDelete.
-TEST(MQTTLifecycle, StopTimeoutFiresReviewedFallback) {
+// F01: a stop that passes its deadline unacknowledged releases NOTHING. The
+// MQTT task may still be inside mbedTLS or holding the SDK's API mutex, so the
+// queue, buffers, clients and the task itself all stay owned. The OTA barrier
+// is still unblocked — so it can abort — but nothing is freed and the bridge
+// may not restart.
+TEST(MQTTLifecycle, StopTimeoutReleasesNothingAndBlocksRestart) {
   FakeOps ops;
   L::Coordinator c(ops, kStopTimeoutMs);
   bringUpToRunning(c);
@@ -191,18 +194,70 @@ TEST(MQTTLifecycle, StopTimeoutFiresReviewedFallback) {
   EXPECT_EQ(L::State::StopRequested, c.state());
   EXPECT_EQ(0, ops.release_calls);
 
-  // At the deadline the fallback fires: forced release, dirty OTA signal.
   ops.now = 1000 + kStopTimeoutMs;
   c.tick();
-  EXPECT_EQ(L::State::Stopped, c.state());
+
+  EXPECT_EQ(L::State::StopUnproven, c.state());
+  EXPECT_TRUE(c.isStopUnproven());
   EXPECT_TRUE(c.stopTimedOut());
-  EXPECT_EQ(1, ops.release_calls);
+  EXPECT_EQ(0, ops.release_calls) << "an unproven stop must not release";
   EXPECT_EQ(1, ops.stop_complete_calls);
   EXPECT_FALSE(ops.last_stop_clean);
 
-  // A late ack after the fallback does not double-release.
+  // Everything the task can reach is still owned, and neither a restart nor a
+  // flash is permitted. A repeated tick does not change that.
+  EXPECT_TRUE(c.mayTouchOwnedState());
+  EXPECT_FALSE(c.mayRestart());
+  EXPECT_FALSE(c.mayBeginFlash());
+  EXPECT_FALSE(c.acceptsNewWork());
+  EXPECT_FALSE(c.isStopInProgress()) << "end()'s wait loop must terminate";
+
+  ops.now += kStopTimeoutMs * 10;
+  c.tick();
+  EXPECT_EQ(L::State::StopUnproven, c.state());
+  EXPECT_EQ(0, ops.release_calls);
+
+  // A start attempt is refused outright: a new start is not proof that the
+  // previous clients stopped.
+  EXPECT_FALSE(c.requestStart());
+  EXPECT_EQ(L::State::StopUnproven, c.state());
+  EXPECT_EQ(1, ops.start_task_calls) << "no second task while unproven";
+  EXPECT_TRUE(c.stopTimedOut()) << "a refused start cannot clear the dirty latch";
+}
+
+// The deadline is an availability policy, not a statement about what an ack
+// means: the task publishes it only after tearing its clients down, so a late
+// ack is exactly as trustworthy as a timely one. Honouring it releases the
+// resources and makes the bridge restartable without a reboot.
+TEST(MQTTLifecycle, LateAckRecoversFromAnUnprovenStop) {
+  FakeOps ops;
+  L::Coordinator c(ops, kStopTimeoutMs);
+  bringUpToRunning(c);
+
+  ops.now = 1000;
+  ASSERT_TRUE(c.requestStop());
+  ops.now = 1000 + kStopTimeoutMs;
+  c.tick();
+  ASSERT_EQ(L::State::StopUnproven, c.state());
+  ASSERT_EQ(0, ops.release_calls);
+
+  ops.now = 1000 + kStopTimeoutMs * 4;
+  ASSERT_TRUE(c.onTaskStopped());
+
+  EXPECT_EQ(L::State::Stopped, c.state());
+  EXPECT_EQ(1, ops.release_calls) << "the proof arrived; release now";
+  EXPECT_TRUE(c.mayRestart());
+  // The OTA barrier already reported dirty and its caller acted on that, so the
+  // flash gate stays shut until a clean start/stop cycle.
+  EXPECT_EQ(1, ops.stop_complete_calls);
+  EXPECT_FALSE(c.mayBeginFlash());
+  EXPECT_TRUE(c.stopTimedOut());
+
+  // Restarting from the proven stop clears the latch, and a second ack is inert.
   EXPECT_FALSE(c.onTaskStopped());
   EXPECT_EQ(1, ops.release_calls);
+  ASSERT_TRUE(c.requestStart());
+  EXPECT_FALSE(c.stopTimedOut());
 }
 
 TEST(MQTTLifecycle, TickWithoutPendingStopIsNoop) {
@@ -371,7 +426,9 @@ TEST(MQTTLifecycle, OtaFlashBlockedUntilCleanStopAcknowledged) {
 }
 
 // Handoff OTA barrier: "MQTT stop times out: OTA aborts safely rather than
-// writing under uncertain ownership."
+// writing under uncertain ownership." The barrier is still released so the
+// caller aborts, but flashing stays shut and — unlike the pre-F01 contract —
+// the bridge cannot be restarted to paper over it.
 TEST(MQTTLifecycle, OtaAbortsWhenStopTimesOut) {
   FakeOps ops;
   L::Coordinator c(ops, kStopTimeoutMs);
@@ -382,11 +439,16 @@ TEST(MQTTLifecycle, OtaAbortsWhenStopTimesOut) {
   ops.now = 500 + kStopTimeoutMs;
   c.tick();
 
-  EXPECT_EQ(L::State::Stopped, c.state());
-  EXPECT_FALSE(c.mayBeginFlash());  // dirty stop => flashing withheld
-  EXPECT_FALSE(ops.last_stop_clean);
+  EXPECT_EQ(L::State::StopUnproven, c.state());
+  EXPECT_EQ(1, ops.stop_complete_calls);  // barrier released...
+  EXPECT_FALSE(ops.last_stop_clean);      // ...with "do not flash"
+  EXPECT_FALSE(c.mayBeginFlash());
+  EXPECT_FALSE(c.requestStart());         // and no restart to hide it
 
-  // A fresh clean start/stop cycle clears the latch and re-enables flashing.
+  // Only the task's late acknowledgement makes the bridge usable again, and
+  // only a clean cycle after that re-enables flashing.
+  ASSERT_TRUE(c.onTaskStopped());
+  EXPECT_FALSE(c.mayBeginFlash());
   ASSERT_TRUE(c.requestStart());
   EXPECT_FALSE(c.stopTimedOut());
   ASSERT_TRUE(c.onTaskStarted());
@@ -415,8 +477,13 @@ TEST(MQTTLifecycle, NoRestartWhileStopInProgress) {
 }
 
 // Handoff OTA barrier: "Repeated failed OTA attempts do not ... leave the
-// bridge permanently stopped."
-TEST(MQTTLifecycle, RepeatedFailedStopsLeaveBridgeRestartable) {
+// bridge permanently stopped." Re-encoded for the F01 contract: what keeps the
+// bridge usable across repeated slow stops is the task's acknowledgement, not
+// the deadline. A stop that is merely slow recovers every time; a stop that is
+// never acknowledged deliberately does NOT, because restarting on top of
+// clients that may still be running is the failure this state exists to
+// prevent. That is an availability trade, made knowingly.
+TEST(MQTTLifecycle, RepeatedSlowStopsRecoverOnTheirLateAck) {
   FakeOps ops;
   L::Coordinator c(ops, kStopTimeoutMs);
 
@@ -427,11 +494,42 @@ TEST(MQTTLifecycle, RepeatedFailedStopsLeaveBridgeRestartable) {
     ops.now += 1000;
     ASSERT_TRUE(c.requestStop());
     ops.now += kStopTimeoutMs;
-    c.tick();  // times out (dirty)
+    c.tick();                      // deadline passes with no ack
+    EXPECT_EQ(L::State::StopUnproven, c.state());
+    EXPECT_FALSE(c.mayRestart());  // not until the task proves it finished
+    EXPECT_EQ(attempt, ops.release_calls);
+
+    ops.now += 1000;
+    ASSERT_TRUE(c.onTaskStopped());  // the slow teardown completes
     EXPECT_EQ(L::State::Stopped, c.state());
-    EXPECT_TRUE(c.mayRestart());  // never permanently stuck
+    EXPECT_TRUE(c.mayRestart());
+    EXPECT_EQ(attempt + 1, ops.release_calls);
   }
   EXPECT_EQ(3, ops.start_task_calls);
+}
+
+// A never-acknowledged stop stays unusable for the rest of the boot: no
+// release, no restart, no flash, however long the owner waits or however many
+// times it asks.
+TEST(MQTTLifecycle, NeverAcknowledgedStopStaysUnproven) {
+  FakeOps ops;
+  L::Coordinator c(ops, kStopTimeoutMs);
+  bringUpToRunning(c);
+
+  ASSERT_TRUE(c.requestStop());
+  ops.now += kStopTimeoutMs;
+  c.tick();
+
+  for (int i = 0; i < 5; ++i) {
+    ops.now += 60'000;
+    c.tick();
+    EXPECT_FALSE(c.requestStart());
+    EXPECT_FALSE(c.requestStop());
+    EXPECT_EQ(L::State::StopUnproven, c.state());
+  }
+  EXPECT_EQ(0, ops.release_calls);
+  EXPECT_FALSE(c.mayBeginFlash());
+  EXPECT_TRUE(c.mayTouchOwnedState());
 }
 
 // --- Diagnostics -----------------------------------------------------------
@@ -440,6 +538,7 @@ TEST(MQTTLifecycle, StateAndEventNamesAreStable) {
   EXPECT_STREQ("Stopped", L::stateName(L::State::Stopped));
   EXPECT_STREQ("Running", L::stateName(L::State::Running));
   EXPECT_STREQ("StopRequested", L::stateName(L::State::StopRequested));
+  EXPECT_STREQ("StopUnproven", L::stateName(L::State::StopUnproven));
   EXPECT_STREQ("StartRequested", L::eventName(L::Event::StartRequested));
   EXPECT_STREQ("StopTimedOut", L::eventName(L::Event::StopTimedOut));
 }

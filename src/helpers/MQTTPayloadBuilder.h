@@ -4,9 +4,43 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Connection health of the MQTT slots themselves, reported inside a status
+// publication. A slot that cannot reach its broker cannot report its own outage,
+// so this travels on every *healthy* slot's status message and is how a fleet
+// learns that a sibling slot is down. Publish-success/error counters cannot show
+// this: a slot that never connects never attempts a publish, so its error count
+// stays at zero for the entire outage.
+//
+// `heap_largest` is the leading indicator. Observed on non-PSRAM hardware: a slot
+// needs one contiguous 16,384-byte block for its TLS record buffers, and measured
+// immediately before an attempt this value predicted the outcome every time. Free
+// heap alone does not — an 85 KB-free board sat unable to connect for hours.
+// A low value with all slots up is normal, not a fault: established sessions
+// already hold their buffers. It means only that the next slot to ask will fail.
+// Sampled at status-publish time, not at the attempt, so it is a trend, not a
+// per-attempt reading.
+struct MQTTConnHealth {
+  int slots_up = -1;             // -1 = not supplied, field omitted
+  int slots_total = -1;          // enabled, fully configured slots, connected or not
+  int worst_outage_secs = -1;    // longest timed outage; -1 = none timed (see below)
+  int heap_largest = -1;         // largest free internal block, bytes
+  // Attempts that ended without reaching onConnect, summed across all slots since
+  // boot. A slot stuck retrying moves this while its publish counters stay frozen,
+  // which is what separates "actively failing" from "idle and quiet".
+  int connect_failures = -1;
+  // Slots parked by the circuit breaker. Materially worse than a retrying slot:
+  // the breaker only probes every 30 minutes, so recovery is far slower.
+  int slots_breaker = -1;
+};
+
 // Mesh-independent JSON serialization core for MQTT publication payloads.
 // MQTTMessageBuilder keeps the firmware-facing API and delegates these three
 // deterministic contracts here so they can be exercised by native tests.
+
+// RSSI sentinel for "no radio measurement": far outside the small negative ints
+// a radio actually reports, so a real reading can never collide with it.
+static const int MQTT_RSSI_UNKNOWN = INT16_MIN;
+
 class MQTTPayloadBuilder {
 public:
   static int buildStatusMessage(
@@ -32,7 +66,8 @@ public:
     int internal_heap = -1,
     int packets_sent = -1,
     int packets_received = -1,
-    const char* repeat = nullptr
+    const char* repeat = nullptr,
+    const MQTTConnHealth& conn_health = MQTTConnHealth()
   );
 
   static int buildPacketMessage(

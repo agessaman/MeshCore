@@ -15,6 +15,10 @@
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/IdentityStore.h>
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+#include <helpers/RadioActivityWindow.h>
+#endif
+
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/AlertReporter.h>
 #include <helpers/TxtDataHelpers.h>
@@ -39,11 +43,11 @@
 /* ------------------------------ Config -------------------------------- */
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
+  #define FIRMWARE_BUILD_DATE   "15 Oct 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.17.1"
+  #define FIRMWARE_VERSION   "v1.18.0"
 #endif
 
 #ifndef LORA_FREQ
@@ -117,6 +121,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   uint64_t uptime_millis;
   unsigned long next_local_advert, next_flood_advert;
   bool _logging;
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  RadioActivityWindow _activity;   // rolling RF receive window, for the TFT dashboard
+#endif
   bool region_load_active;
   NodePrefs _prefs;
   TransportKeyStore key_store;
@@ -199,6 +206,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* bridge;
+  // begin() was refused after an unproven stop; restart once the task acknowledges.
+  bool _bridge_resume_pending = false;
 #endif
 #ifdef WITH_SNMP
   MeshSNMPAgent _snmp_agent;
@@ -273,10 +282,23 @@ protected:
 
   void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
+  // Build the DHCP hostname from the current node name and hand it to the
+  // link. Only automatic links carry one: a plain Wi-Fi observer keeps the
+  // framework default, and changing that for the existing fleet is a separate
+  // decision.
+  void applyNetworkHostname(const char* when);
+
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
 
   void begin(FILESYSTEM* fs);
+
+  // CommonCLICallbacks: `set name` has just rewritten node_name.
+  void onNodeNameChanged() override {
+#if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+    applyNetworkHostname(" (renamed)");
+#endif
+  }
   void addSystemPost(const char* postData);
 
   const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
@@ -287,9 +309,22 @@ public:
     return &_prefs;
   }
 
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  RadioActivityWindow* getActivityWindow() { return &_activity; }
+#endif
+
+#ifdef WITH_MQTT_BRIDGE
+  MQTTPrefs* getObserverPrefs() { return _cli.getObserverPrefs(); }
+#endif
+
   void savePrefs() override {
     _cli.savePrefs(_fs);
   }
+#ifdef WITH_MQTT_BRIDGE
+  bool saveObserverPrefs() override {
+    return _cli.saveObserverPrefs(_fs);
+  }
+#endif
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size);
 
@@ -343,6 +378,9 @@ public:
 #endif
       if (!bridge) return;
     }
+#ifdef WITH_MQTT_BRIDGE
+    if (!enable) _bridge_resume_pending = false;   // an explicit stop cancels a pending resume
+#endif
     if (enable == bridge->isRunning()) return;
     if (enable)
     {
@@ -366,6 +404,7 @@ public:
       bridge->begin();
 #ifdef WITH_MQTT_BRIDGE
       _alerter.setBridge(bridge);
+      _bridge_resume_pending = !bridge->isRunning() && bridge->isStopUnproven();
 #endif
     }
     else
@@ -373,6 +412,7 @@ public:
       bridge->end();
 #ifdef WITH_MQTT_BRIDGE
       _alerter.setBridge(nullptr);
+      _bridge_resume_pending = false;
 #endif
     }
   }
@@ -397,6 +437,9 @@ public:
     bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
 #endif
     bridge->begin();
+#ifdef WITH_MQTT_BRIDGE
+    _bridge_resume_pending = !bridge->isRunning() && bridge->isStopUnproven();
+#endif
   }
 
   void restartBridgeSlot(int slot) override {
@@ -479,6 +522,15 @@ public:
     _wc_slot_restart_mask = 0;
   }
   void onConfigBatchEnd() override;
+  bool onInitialSetupComplete() override {
+    // The password command does not report its save; make it durable first.
+    if (!_cli.savePrefs(_fs)) return false;
+    MQTTPrefs* obs = _cli.getObserverPrefs();
+    obs->network_setup_complete = 1;
+    if (_cli.saveObserverPrefs(_fs)) return true;
+    obs->network_setup_complete = 0;
+    return false;
+  }
   void buildStatsJson(char* buf, size_t buf_size) override;
 #endif
 };

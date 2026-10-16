@@ -96,6 +96,19 @@ TEST(MQTTConnectionPolicy, CircuitBreakerProbeHasExactThirtyMinuteBoundary) {
   EXPECT_TRUE(Policy::circuitBreakerProbeDue(900000U, last));
 }
 
+TEST(MQTTConnectionPolicy, LinkRecoveryMakesCurrentBackoffDueImmediately) {
+  const uint32_t now = 1234U;
+  const uint32_t last = Policy::immediateRetryLastAttempt(now, false, 4, 2);
+  EXPECT_TRUE(Policy::reconnectDue(now, last, 4, 2));
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(now, last));
+}
+
+TEST(MQTTConnectionPolicy, LinkRecoveryMakesBreakerProbeDueWithoutClearingIt) {
+  const uint32_t now = 1234U;
+  const uint32_t last = Policy::immediateRetryLastAttempt(now, true, 5, 2);
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(now, last));
+}
+
 TEST(MQTTConnectionPolicy, JwtLifetimeUsesCappedPerSlotStagger) {
   EXPECT_EQ(86400U, Policy::jwtLifetimeSecs(86400U, 0));
   EXPECT_EQ(86100U, Policy::jwtLifetimeSecs(86400U, 1));
@@ -135,6 +148,50 @@ TEST(MQTTConnectionPolicy, SyncedClockRenewsInvalidExpiredOrImminentTokens) {
   EXPECT_TRUE(Policy::tokenNeedsRenewal(true, expires - 300U, expires, 300U));
   EXPECT_TRUE(Policy::tokenNeedsRenewal(true, expires, expires, 300U));
   EXPECT_TRUE(Policy::tokenNeedsRenewal(true, expires + 1U, expires, 300U));
+}
+
+TEST(MQTTConnectionPolicy, JwtReconnectReusesOnlyProvenValidCredentials) {
+  const uint32_t now = 1735689600U;
+  const uint32_t usable_expiry = now + Policy::kJwtReconnectSafetyMarginSecs + 1U;
+
+  // Buffer 0 gates on the flat margin alone, which is what these cases cover.
+  EXPECT_TRUE(Policy::canReuseJwtForReconnect(true, true, false, now, usable_expiry, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(
+      true, true, false, now, Policy::kMinimumValidEpoch - 1U, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, 0U, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(
+      true, true, false, now, now + Policy::kJwtReconnectSafetyMarginSecs, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now - 1U, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, false, false, now, usable_expiry, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(false, true, false, now, usable_expiry, 0U));
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, true, now, usable_expiry, 0U));
+}
+
+TEST(MQTTConnectionPolicy, JwtReuseRefusesATokenTheRenewalPathIsAboutToBounce) {
+  const uint32_t now = 1735689600U;
+  const uint32_t buffer = Policy::renewalBufferSecs(3300U);  // waev's 55-minute tokens
+  ASSERT_EQ(buffer, 300U);
+  const uint32_t floor_secs = buffer + Policy::kJwtReconnectSafetyMarginSecs;
+
+  // The observed defect (d3, 2026-08-17T14:31): reused at 302 s remaining under the
+  // flat 60 s margin, then renewed five seconds later, which bounced the slot.
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now + 302U, buffer));
+
+  // Anything the renewal path would act on is refused, and so is the slack above it.
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(true, true, false, now, now + buffer, buffer));
+  EXPECT_FALSE(
+      Policy::canReuseJwtForReconnect(true, true, false, now, now + floor_secs, buffer));
+  const uint32_t tightest_reuse = now + floor_secs + 1U;
+  EXPECT_TRUE(Policy::canReuseJwtForReconnect(true, true, false, now, tightest_reuse, buffer));
+
+  // What the margin above the buffer buys: the tightest token reuse will accept is still
+  // not due for renewal a full margin later, so no renewal can bounce in behind it.
+  EXPECT_FALSE(Policy::tokenNeedsRenewal(
+      true, now + Policy::kJwtReconnectSafetyMarginSecs, tightest_reuse, buffer));
+
+  // A buffer that would wrap the floor has to fail closed, not reuse a doomed token.
+  EXPECT_FALSE(Policy::canReuseJwtForReconnect(
+      true, true, false, now, now + 100000U, std::numeric_limits<uint32_t>::max()));
 }
 
 TEST(MQTTConnectionPolicy, RenewalThrottleHasExactBoundaryAndHandlesRollover) {
@@ -184,6 +241,21 @@ TEST(MQTTConnectionPolicy, WifiReconnectRequiresBothDownAndSinceAttemptToClearRu
   EXPECT_FALSE(Policy::wifiReconnectDue(1000U + 15000U, down_since, 1000U + 10000U, attempt));
   // Both cleared at the exact boundary: due.
   EXPECT_TRUE(Policy::wifiReconnectDue(1000U + 15000U, down_since, last_attempt, attempt));
+}
+
+TEST(MQTTConnectionPolicy, WifiOutageStartStickyAcrossReconnectAttempts) {
+  // First observe-down (or connected→down) records `now`. Further down samples
+  // — including STA backoff WiFi.disconnect() — must keep that start so
+  // AlertReporter quotes the outage, not the last attempt / boot event.
+  EXPECT_EQ(0U, Policy::wifiCurrentOutageStartMs(5000, true, false, 0, false));
+  EXPECT_EQ(5000U, Policy::wifiCurrentOutageStartMs(5000, false, false, 0, false));
+
+  const uint32_t start = 9000U;
+  EXPECT_EQ(start, Policy::wifiCurrentOutageStartMs(start, false, true, 0, true));
+  EXPECT_EQ(start, Policy::wifiCurrentOutageStartMs(start + 15000U, false, false, start, true));
+  EXPECT_EQ(start, Policy::wifiCurrentOutageStartMs(start + 2U * 3600U * 1000U,
+                                                    false, false, start, true));
+  EXPECT_EQ(0U, Policy::wifiCurrentOutageStartMs(start + 1000U, true, false, start, true));
 }
 
 TEST(MQTTConnectionPolicy, WifiReconnectDueSurvivesMillisRollover) {
@@ -240,6 +312,80 @@ TEST(SlotActivation, DisabledAndOutOfRangeSlots) {
   EXPECT_EQ(SlotActivation::Disabled, Policy::classifySlotActivation(1, enabled, 3, 2));
   EXPECT_EQ(SlotActivation::Disabled, Policy::classifySlotActivation(-1, enabled, 3, 2));
   EXPECT_EQ(SlotActivation::Disabled, Policy::classifySlotActivation(0, nullptr, 3, 2));
+}
+
+using Policy::StaleTokenAction;
+
+TEST(StaleToken, ConnectedSlotOnAnExpEnforcingBrokerBounces) {
+  // The broker will reject the stale token, and esp-mqtt refuses reconnect() from
+  // CONNECTED, so the transport has to close first.
+  EXPECT_EQ(StaleTokenAction::Bounce,
+            Policy::classifyStaleToken(/*minted=*/true, /*connected=*/true,
+                                       /*broker_enforces_exp=*/true));
+}
+
+TEST(StaleToken, ConnectedSlotOnATolerantBrokerKeepsItsSession) {
+  // waev leaves live sessions alone past exp. Bouncing would spend a 16 KiB
+  // contiguous handshake to replace a session the broker was not going to drop.
+  EXPECT_EQ(StaleTokenAction::KeepAlive,
+            Policy::classifyStaleToken(true, true, /*broker_enforces_exp=*/false));
+}
+
+TEST(StaleToken, DisconnectedSlotReconnectsRegardlessOfBrokerPolicy) {
+  EXPECT_EQ(StaleTokenAction::Reconnect, Policy::classifyStaleToken(true, false, true));
+  EXPECT_EQ(StaleTokenAction::Reconnect, Policy::classifyStaleToken(true, false, false));
+}
+
+TEST(StaleToken, FailedMintNeverReconnects) {
+  // Reconnecting here would re-present the credentials the correction invalidated.
+  // Every combination defers — including the disconnected one, which is the case
+  // that previously reconnected on the stale token.
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, false, true));
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, false, false));
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, true));
+  EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, false));
+}
+
+using Policy::ClockSource;
+
+// 2026-01-01, the bridge's plausibility floor, and the 2024 placeholder
+// ESP32RTCClock::begin() stamps into libc on a power-on reset.
+static const uint32_t kFloor = 1767225600;
+static const uint32_t kPowerOnPlaceholder = 1715770351;
+static const uint32_t kPlausibleNow = 1786000000;
+
+TEST(FallbackClock, PrefersTheSystemClockWhenItIsUsable) {
+  // A clock SNTP set recently outranks an RTC that may have drifted.
+  EXPECT_EQ(ClockSource::System,
+            Policy::chooseFallbackClock(false, kPlausibleNow, kPlausibleNow - 900, kFloor));
+}
+
+TEST(FallbackClock, FallsBackToTheRtcOnAColdBoot) {
+  // The case the system-clock-only check missed: libc holds the power-on
+  // placeholder while a detected chip holds real time.
+  EXPECT_EQ(ClockSource::Rtc,
+            Policy::chooseFallbackClock(false, kPowerOnPlaceholder, kPlausibleNow, kFloor));
+}
+
+TEST(FallbackClock, NothingUsableStaysUnsynced) {
+  EXPECT_EQ(ClockSource::None,
+            Policy::chooseFallbackClock(false, kPowerOnPlaceholder, kPowerOnPlaceholder, kFloor));
+  // rtc_time 0 is how a board with no clock to consult is passed in.
+  EXPECT_EQ(ClockSource::None,
+            Policy::chooseFallbackClock(false, kPowerOnPlaceholder, 0, kFloor));
+}
+
+TEST(FallbackClock, ServerValidationNeverAcceptsALocalClock) {
+  // `set mqtt.ntp` asks whether that host answers. No clock can answer for it,
+  // however plausible — this is the path where a typo has to fail.
+  EXPECT_EQ(ClockSource::None,
+            Policy::chooseFallbackClock(true, kPlausibleNow, kPlausibleNow, kFloor));
+}
+
+TEST(FallbackClock, TheFloorItselfIsAccepted) {
+  EXPECT_EQ(ClockSource::System, Policy::chooseFallbackClock(false, kFloor, 0, kFloor));
+  EXPECT_EQ(ClockSource::Rtc, Policy::chooseFallbackClock(false, kFloor - 1, kFloor, kFloor));
+  EXPECT_EQ(ClockSource::None, Policy::chooseFallbackClock(false, kFloor - 1, kFloor - 1, kFloor));
 }
 
 int main(int argc, char** argv) {

@@ -101,6 +101,9 @@ def default_config(setup_mode):
         "radio": {
             "freq": 910.525, "bw": 62.5, "sf": 7, "cr": 5, "tx": 22, "af": 1.0,
             "rxdelay": 0.0, "txdelay": 0.5, "cad": False, "rxgain": True,
+            # Stored in NodePrefs like any other radio pref; only the COMMAND
+            # is board-specific, so the value exists even where nothing drives it.
+            "fem_rxgain": True, "fem_txgain": False,
             "repeat": True, "flood_max": 64, "flood_max_advert": 8,
             "flood_max_unscoped": 8, "loop_detect": "moderate",
             "name": "MockNode", "lat": 39.7392, "lon": -104.9903,
@@ -114,7 +117,7 @@ def default_config(setup_mode):
         },
         "mqtt": {
             "origin": "" if setup_mode else "MockNode", "iata": "" if setup_mode else "DEN",
-            "status": True, "packets": True, "raw": False, "tx": "advert", "rx": True,
+            "status": True, "packets": True, "raw": False, "tx": "advert", "rx": True, "advert_verify": False,
             "interval": 5, "timezone": "MST7MDT,M3.2.0,M11.1.0", "timezone_offset": -7,
             "ntp": "pool.ntp.org", "owner": "", "email": "", "snmp": False,
             "snmp_community": "public",
@@ -149,6 +152,10 @@ class State:
         self.lock = threading.Lock()
         self.setup_mode = args.setup
         self.active_slots = args.active_slots
+        # Board::handleCommand() commands this "board" answers. Empty by default:
+        # the mock is a Heltec V3, which implements no such hook at all.
+        self.board_cmds = [c for c in args.board_cmds.split(",") if c]
+        self.probe_delay = args.probe_delay
         self.cfg = default_config(args.setup)
         # latched at AP start, like WebConfigServer::_initial_setup
         self.initial_setup = args.setup and self.cfg["wifi"]["ssid"] == ""
@@ -180,7 +187,7 @@ class State:
         return c
 
     def status_json(self, authed):
-        return {
+        out = {
             "mode": "setup" if self.setup_mode else "lan",
             "auth": authed,
             "needs_setup": self.cfg["wifi"]["ssid"] == "",
@@ -194,6 +201,12 @@ class State:
             "runtime_slots": 6, "max_slots": 6, "active_slots": self.active_slots,
             "max_cmds": CLI_MAX_CMDS,
         }
+        # ABSENT, not empty, until the board has been probed: the node's routes
+        # go live a tick before probeBoardCommands() runs, and the page has to
+        # retry rather than latch "this board has no board commands".
+        if time.time() - self.start >= self.probe_delay:
+            out["board_cmds"] = ",".join(self.board_cmds)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +216,8 @@ class State:
 BOOL_KEYS = {"cad": ("radio", "cad"), "radio.rxgain": ("radio", "rxgain"),
              "repeat": ("radio", "repeat"), "mqtt.status": ("mqtt", "status"),
              "mqtt.packets": ("mqtt", "packets"), "mqtt.raw": ("mqtt", "raw"),
-             "mqtt.rx": ("mqtt", "rx"), "snmp": ("mqtt", "snmp"),
+             "mqtt.rx": ("mqtt", "rx"), "mqtt.advert.verify": ("mqtt", "advert_verify"),
+             "snmp": ("mqtt", "snmp"),
              "mqtt.neighbors": ("mqtt", "neighbors")}
 INT_KEYS = {"tx": ("radio", "tx"), "flood.max": ("radio", "flood_max"),
             "flood.max.advert": ("radio", "flood_max_advert"),
@@ -252,9 +266,6 @@ def apply_set(cfg, key, val):
         global ADMIN_PASSWORD
         ADMIN_PASSWORD = val
         return True, "OK"
-
-    if key == "radio.fem.rxgain":
-        return False, "Error: unsupported"   # no FEM on the mock board, see GETTERS
 
     if key == "dutycycle":
         try:
@@ -340,11 +351,72 @@ def apply_set(cfg, key, val):
         sec, f = STR_KEYS[key]
         cfg[sec][f] = val
         return True, "OK"
+    gate = BOARD_CMD_GATE.get(key)
+    if gate:
+        if gate not in ST.board_cmds:
+            return False, "unknown config: %s" % key   # no such command on this board
+        return apply_board_set(cfg, key, val)
+
     # Strict fallthrough: this function is the single authority on what can be
     # set, for the batch and the CLI alike. Accepting unknown keys here once hid
     # the fact that the CLI could not reach `dutycycle` or `radio.fem.rxgain`.
     # Verbatim shape from CommonCLI::handleSetCmd's fallthrough.
+    #
+    # This is also where the board-specific commands land. `radio.fem.*` and
+    # `fan*` come from Board::handleCommand(), which is dispatched ahead of
+    # CommonCLI; the mock board is a Heltec V3 and implements no such hook, so
+    # they reach this fallthrough exactly as they do on the real thing.
     return False, "unknown config: %s" % key
+
+
+# Commands that reach Board::handleCommand() rather than CommonCLI. Which ones a
+# node answers is a property of the board, so the portal probes for them at
+# startup and reports the answers in /api/status; --board-cmds picks which ones
+# this mock claims. `fan.lo` / `fan.hi` have no getter and ride on `fan`.
+BOARD_CMD_GATE = {
+    "radio.fem.rxgain": "radio.fem.rxgain",
+    "radio.fem.txgain": "radio.fem.txgain",
+    "fan": "fan",
+    "fan.lo": "fan",
+    "fan.hi": "fan",
+}
+BOARD_STATE = {"fan": "auto", "fan.lo": 45, "fan.hi": 60}
+FEM_FIELD = {"radio.fem.rxgain": "fem_rxgain", "radio.fem.txgain": "fem_txgain"}
+
+
+def apply_board_set(cfg, key, val):
+    if key in FEM_FIELD:
+        if val not in ("on", "off"):
+            return False, "Error: state must be on or off"
+        cfg["radio"][FEM_FIELD[key]] = val == "on"
+        return True, "OK - LoRa FEM %s gain %s" % ("RX" if "rx" in key else "TX", val)
+    if key == "fan":
+        if val not in ("on", "off", "auto"):
+            return False, "Error: fan must be on, off, or auto"
+        BOARD_STATE["fan"] = val
+        return True, "OK - fan %s" % val
+    try:
+        n = int(val)
+    except ValueError:
+        return False, "Error: expected a number"
+    if key == "fan.lo" and not (0 <= n <= 100 and n < BOARD_STATE["fan.hi"]):
+        return False, "Error: fan.lo must be 0..100 and < fan.hi"
+    if key == "fan.hi" and not (BOARD_STATE["fan.lo"] < n <= 120):
+        return False, "Error: fan.hi must be > fan.lo and <= 120"
+    BOARD_STATE[key] = n
+    return True, "OK - %s %d" % (key, n)
+
+
+def board_get(cfg, key):
+    """Getter reply, or None when this board does not answer the command."""
+    if BOARD_CMD_GATE.get(key) not in ST.board_cmds:
+        return None
+    if key == "fan":
+        return "%s 41.0C fan=%s cd=0s" % (
+            BOARD_STATE["fan"], "on" if BOARD_STATE["fan"] == "on" else "off")
+    if key in FEM_FIELD:
+        return "on" if cfg["radio"][FEM_FIELD[key]] else "off"
+    return None           # fan.lo / fan.hi are set-only on the board too
 
 
 # Payload-type names accepted alongside the decimal form. Mirrors
@@ -497,6 +569,13 @@ GETTERS = {
     "wifi.status": lambda c: (
         "SSID: %s\nIP: 192.168.1.42\nRSSI: -58 dBm\nUptime: %dm"
         % (c["wifi"]["ssid"] or "(not set)", int(time.time() - ST.start) // 60)),
+    "link.status": lambda c: (
+        "wifi: connected, IP: 192.168.1.42, RSSI: -58 dBm, Uptime: %dm"
+        % (int(time.time() - ST.start) // 60)),
+    "link.diag": lambda c: (
+        "why:ethernet-not-enabled selected:wifi\n"
+        "wifi:state:connected ip:192.168.1.42"),
+    "link.dns": lambda c: "dns:192.168.1.1 gw:192.168.1.1 lease:192.168.1.1",
     "mqtt.status": lambda c: cli_mqtt_status(c),
     "mqtt.presets": lambda c: "\n".join(
         "%2d. %s%s" % (i + 1, n, "" if nd == "none" else "  (needs %s)" % nd)
@@ -510,10 +589,6 @@ GETTERS = {
     "mqtt.ntp.diag": lambda c: "last sync: 42s ago via %s (offset +0.011s)" % (c["mqtt"]["ntp"] or "none"),
     "mqtt.stats": lambda c: ("published: %d\ndropped: 0\nqueue: 0/24\nreconnects: 1"
                              % (100 + int(time.time() - ST.start))),
-    # Runtime-gated on the real device (Board::canControlLoRaFemLna), not
-    # compiled out — the command exists everywhere and the board answers for
-    # itself. The mock board is a Heltec V3, which has no FEM.
-    "radio.fem.rxgain": lambda c: None,
 }
 
 
@@ -541,6 +616,11 @@ def cli_get(cfg, key):
 
 
 def _cli_get_value(cfg, key):
+    if key in BOARD_CMD_GATE:
+        val = board_get(cfg, key)
+        # Not answered: the board has no hook for it, so CommonCLI's own getter
+        # fallthrough is what replies — exactly as on the real thing.
+        return (True, val) if val is not None else (False, "??: %s" % key)
     if key in GETTERS:
         val = GETTERS[key](cfg)
         return (True, val) if val is not None else (False, "Error: unsupported")
@@ -1047,6 +1127,12 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--setup", action="store_true", help="first-boot setup wizard mode")
     ap.add_argument("--active-slots", type=int, default=5, help="server slots to expose (2 or 5)")
+    ap.add_argument("--probe-delay", type=float, default=0.0,
+                    help="seconds to withhold board_cmds from /api/status, simulating "
+                         "the gap before the node has probed its board")
+    ap.add_argument("--board-cmds", default="",
+                    help="comma list of Board::handleCommand() commands to answer, e.g. "
+                         "radio.fem.rxgain,radio.fem.txgain,fan (default: none, like a Heltec V3)")
     ap.add_argument("--fw-version", default=FW_VERSION,
                     help="version string to report, shaped like build.sh's embedded one")
     ap.add_argument("--minify", action="store_true",

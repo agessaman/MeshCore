@@ -41,7 +41,7 @@ concurrency:
 env:
   # Version embedded in firmware filenames; must match the version key in the
   # flasher's config.json. Bump here when the observer version changes.
-  FIRMWARE_VERSION: v1.17.1
+  FIRMWARE_VERSION: v1.18.0
   # Rolling release tag that hosts the latest observer binaries.
   RELEASE_TAG: observer-mqtt-latest
   # Download host serving RELEASE_TAG's assets (cloudflare-worker in the flasher
@@ -268,8 +268,15 @@ jobs:
           # in out/ — the assets actually uploaded to the release — stamping this
           # build's number. Then persist the counter so the next run increments
           # from here.
+          # --prune deletes manifests for envs this build no longer produces, so
+          # a retired env cannot leave behind a manifest pointing at a release
+          # asset that later gets pruned (which is a 404 for `ota update` on any
+          # node still running it). The generator caps the prune (--prune-limit,
+          # default 4) and fails the run rather than pruning when a build looks
+          # like it silently lost envs.
           python3 flasher/scripts/gen-slim-manifests.py \
             --bin-dir out \
+            --prune \
             --static-path "$STATIC_PATH" \
             --out-dir flasher/v \
             --base-version "$FIRMWARE_VERSION" \

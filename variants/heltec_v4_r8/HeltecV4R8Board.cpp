@@ -1,5 +1,9 @@
 #include "HeltecV4R8Board.h"
 
+#if defined(HELTEC_V4_R8_TFT) && defined(DISPLAY_CLASS)
+  #include <target.h>
+#endif
+
 void HeltecV4R8Board::begin() {
   ESP32Board::begin();
 
@@ -8,14 +12,15 @@ void HeltecV4R8Board::begin() {
 
   loRaFEMControl.init();
 
-#ifdef PIN_TOUCH_RST
-  pinMode(PIN_TOUCH_RST, OUTPUT);
-  digitalWrite(PIN_TOUCH_RST, HIGH);
-  delay(10);
-  digitalWrite(PIN_TOUCH_RST, LOW);
-  delay(100);
-  digitalWrite(PIN_TOUCH_RST, HIGH);
-#endif
+  // Expansion Kit V2 display/touch pins, verified against Heltec's
+  // Expansion_board_V2.03 schematic and the V4-R8 datasheet pinout:
+  //   GPIO 17/18  TP_SDA / TP_SCL - the module's OLED_SDA/OLED_SCL I2C bus
+  //   GPIO 21     LCD_RST *and* TP_RST on one net (the module's OLED_RST)
+  //   GPIO 43     TP_INT, optional via R13, and also U0TXD
+  //   GPIO 44     LCD_LEDK backlight, also U0RXD
+  // ST7789LCDDisplay owns GPIO 21, so there is no separate touch reset to do
+  // here - and because that net is shared, it must not be parked low while the
+  // display is off or the touch controller is held in reset with it.
 
   esp_reset_reason_t reason = esp_reset_reason();
   if (reason == ESP_RST_DEEPSLEEP) {
@@ -40,6 +45,10 @@ void HeltecV4R8Board::onAfterTransmit(void) {
 }
 
 void HeltecV4R8Board::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
+#if defined(HELTEC_V4_R8_TFT) && defined(DISPLAY_CLASS)
+  display.turnOff();
+#endif
+
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
 
   rtc_gpio_set_direction((gpio_num_t)P_LORA_DIO_1, RTC_GPIO_MODE_INPUT_ONLY);
@@ -62,8 +71,20 @@ void HeltecV4R8Board::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
 }
 
 void HeltecV4R8Board::powerOff() {
-  enterDeepSleep(0);
+#if defined(HELTEC_V4_R8_TFT) && defined(DISPLAY_CLASS)
+  display.turnOff();
+#endif
+
+  // Deliberately NOT enterDeepSleep(): that always arms an ext1 wake on
+  // P_LORA_DIO_1, so a node sitting in live traffic woke - and a deep-sleep
+  // wake is a full reboot - within seconds of showing "Turning OFF". With every
+  // wake source disabled the node stays down until RST or a power cycle, which
+  // is what asking for power-off means.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  loRaFEMControl.setRxModeEnableWhenMCUSleep();
+  esp_deep_sleep_start();
 }
+
 
 uint16_t HeltecV4R8Board::getBattMilliVolts() {
   analogReadResolution(12);
@@ -83,4 +104,62 @@ const char* HeltecV4R8Board::getManufacturerName() const {
 #else
   return "Heltec V4 R8 OLED";
 #endif
+}
+
+bool HeltecV4R8Board::setLoRaFemLnaEnabled(bool enable) {
+  if (!loRaFEMControl.isLnaCanControl()) {
+    return false;
+  }
+
+  loRaFEMControl.setLNAEnable(enable);
+  loRaFEMControl.setRxModeEnable();
+  return true;
+}
+
+bool HeltecV4R8Board::isLoRaFemLnaEnabled() const {
+  return loRaFEMControl.isLNAEnabled();
+}
+
+void HeltecV4R8Board::attachDynamicPrefs(KeyValueStore* prefs) {
+  _prefs = prefs;
+
+  char gain[8] = { 0 };
+  _prefs->getByKey("fem_rxgain", gain, sizeof(gain));
+  setLoRaFemLnaEnabled(strcmp(gain, "1") == 0);
+}
+
+bool HeltecV4R8Board::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
+  if (strcmp(command, "get radio.fem.rxgain") == 0) {
+    if (!loRaFEMControl.isLnaCanControl()) {
+      strcpy(reply, "Error: unsupported");
+    } else {
+      sprintf(reply, "> %s", isLoRaFemLnaEnabled() ? "on" : "off");
+    }
+    return true;
+  }
+
+  if (memcmp(command, "set radio.fem.rxgain ", 21) == 0) {
+    if (!loRaFEMControl.isLnaCanControl()) {
+      strcpy(reply, "Error: unsupported");
+    } else if (memcmp(&command[21], "on", 2) == 0) {
+      if (setLoRaFemLnaEnabled(true)) {
+        _prefs->setByKey("fem_rxgain", "1");
+        strcpy(reply, "OK - LoRa FEM RX gain on");
+      } else {
+        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+      }
+    } else if (memcmp(&command[21], "off", 3) == 0) {
+      if (setLoRaFemLnaEnabled(false)) {
+        _prefs->setByKey("fem_rxgain", "0");
+        strcpy(reply, "OK - LoRa FEM RX gain off");
+      } else {
+        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+      }
+    } else {
+      strcpy(reply, "Error: state must be on or off");
+    }
+    return true;
+  }
+
+  return false;
 }

@@ -71,8 +71,8 @@ inline bool resolveToken(const char* begin, size_t len, uint8_t* type_out) {
 }
 
 // Parse an allowlist value. Empty input means "all" so WebConfig can clear a
-// field and retain the same backwards-compatible default as an older
-// /mqtt_prefs file. Keywords and type names are deliberately lowercase; "all"
+// field and retain the same all-packet-types default as an older preference
+// file. Keywords and type names are deliberately lowercase; "all"
 // and "none" cannot be mixed into a list. Entries may be decimal (0..15) or
 // named, may carry surrounding ASCII whitespace, and may be repeated.
 inline bool parse(const char* input, uint16_t* mask_out) {
@@ -186,8 +186,8 @@ inline uint16_t enabledUnion(const uint16_t* masks, const bool* enabled, size_t 
   return combined;
 }
 
-// True when every slot still carries the default all-types mask, i.e. nothing
-// depends on the packet-filter tail of /mqtt_prefs being written.
+// True when every slot still carries the default all-types mask. The legacy
+// binary encoder uses this while producing migration fixtures.
 inline bool allMasksDefault(const uint16_t* masks, size_t count) {
   if (masks == nullptr) return true;
   for (size_t i = 0; i < count; ++i) {

@@ -13,9 +13,20 @@ class ST7789LCDDisplay : public DisplayDriver {
   #endif
   Adafruit_ST7789 display;
   bool _isOn;
+  bool _panel_ready = false;   // panel has been configured at least once
+  bool _flipped = false;
   uint16_t _color;
   RefCountedDigitalPin* _peripher_power;
 
+#ifdef ST7789_PORTRAIT_PROFILE
+  uint8_t _logical_text_size = 1;
+
+  uint16_t measureTextWidth(const char* str, uint8_t physical_scale);
+  uint8_t selectTextScale(const char* str, uint16_t available_width);
+  void printFitted(const char* str, uint16_t available_width);
+#endif
+
+  uint8_t effectiveRotation() const;
   bool i2c_probe(TwoWire& wire, uint8_t addr);
 public:
 #ifdef USE_PIN_TFT
@@ -48,6 +59,7 @@ public:
   void turnOff() override;
   void clear() override;
   void startFrame(ColorVal bkg = UIColor::window_bkg) override;
+  void setFlipped(bool flipped) override;
   void setTextSize(int sz) override;
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;

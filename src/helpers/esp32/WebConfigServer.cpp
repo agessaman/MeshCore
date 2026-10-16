@@ -7,20 +7,70 @@
 #include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
 #include <ArduinoJson.h>
+#include <esp_random.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <SHA256.h>
 
 #include <helpers/CommonCLI.h>
+#include <helpers/NetworkLink.h>
 #include <helpers/MQTTPacketFilter.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
+#include <helpers/WifiPowerSavePolicy.h>
 #include <helpers/bridges/MQTTBridge.h>
+
+#include "HttpPort80Lease.h"
 
 #include "WebConfigHtml.h"
 
 // Placeholder sent instead of stored secrets; POSTs carrying it are dropped
 // so an untouched password field never overwrites the stored value.
 static const char SECRET_SENTINEL[] = "********";
+
+// The ESP hardware RNG has a continuous entropy source only while an RF block
+// is running. Ethernet LAN mode deliberately keeps Wi-Fi and Bluetooth down,
+// so briefly start an unassociated station while creating login secrets. The
+// bootloader RNG helper is intentionally not used here: ESP-IDF limits it to
+// early boot, before normal RF/ADC/I2S operation begins.
+class WebConfigEntropyGuard {
+  wifi_mode_t _previous_mode;
+  bool _started_wifi;
+  bool _ready;
+
+ public:
+  WebConfigEntropyGuard()
+      : _previous_mode(WiFi.getMode()), _started_wifi(false), _ready(true) {
+    if (_previous_mode == WIFI_MODE_NULL) {
+      _ready = WiFi.mode(WIFI_MODE_STA);
+      _started_wifi = _ready;
+    }
+  }
+
+  ~WebConfigEntropyGuard() {
+    if (_started_wifi) WiFi.mode(_previous_mode);
+  }
+
+  bool ready() const { return _ready; }
+};
+
+static bool fillRandomBytes(uint8_t* output, size_t byte_count) {
+  if (!output || byte_count == 0) return false;
+  WebConfigEntropyGuard entropy;
+  if (!entropy.ready()) return false;
+
+  esp_fill_random(output, byte_count);
+  return true;
+}
+
+static void bytesToHex(char* output, const uint8_t* bytes, size_t byte_count) {
+  static const char HEX_DIGITS[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < byte_count; ++i) {
+    output[i * 2] = HEX_DIGITS[bytes[i] >> 4];
+    output[i * 2 + 1] = HEX_DIGITS[bytes[i] & 0x0f];
+  }
+  output[byte_count * 2] = '\0';
+}
 
 // Key classification (allowlist, secret detection, slot-prefix parsing) lives in
 // helpers/WebConfigKeys.h so it can be unit-tested on the host. Thin aliases keep
@@ -42,6 +92,21 @@ static inline bool isSecretKey(const char* key) { return wcIsSecretKey(key); }
 static inline bool wcIsDeferredReboot(const char* cmd) {
   return strncmp(cmd, "reboot", 6) == 0;
 }
+
+// Commands answered by Board::handleCommand(), which CommonCLI dispatches ahead
+// of its own table. Whether a node answers them is a property of the BOARD, not
+// of the build, so the page cannot know from the firmware version alone. Rather
+// than mirror a per-board list here — which would have to be edited every time a
+// variant grows a command — ask the board itself: probeBoardCommands() runs each
+// getter once and keeps the ones that answer.
+static const char* const WC_BOARD_CMDS[] = {
+  "radio.fem.rxgain",   // front-end module LNA (Heltec V4/V4 R8/Tracker V2, Station G3)
+  "radio.fem.txgain",   // front-end module PA level (Station G3)
+  "fan",                // thermal fan, and with it fan.lo / fan.hi (T-Beam 1W)
+};
+static const size_t WC_BOARD_CMD_COUNT = sizeof(WC_BOARD_CMDS) / sizeof(WC_BOARD_CMDS[0]);
+static_assert(sizeof(WC_BOARD_CMDS) / sizeof(WC_BOARD_CMDS[0]) <= 8,
+              "_board_cmds is a uint8_t bitmask");
 
 // Commands the CLI reaches but the portal cannot honestly serve. Rejected at
 // POST so nothing in the sequence runs, rather than failing halfway with a
@@ -172,15 +237,26 @@ bool WebConfigServer::isRebootPending() {
 
 bool WebConfigServer::getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t ip_len) {
   WebConfigServer* w = _active;
-  if (w == NULL || w->_mode != MODE_SETUP || w->_stopping) return false;
+  if (w == NULL || w->_stopping ||
+      (w->_mode != MODE_SETUP && !(w->_mode == MODE_LAN && w->_initial_setup))) {
+    return false;
+  }
   if (ssid && ssid_len > 0) {
-    strncpy(ssid, w->_ap_ssid, ssid_len - 1);
+    const char* label = w->_mode == MODE_LAN ? w->_setup_code : w->_ap_ssid;
+    strncpy(ssid, label, ssid_len - 1);
     ssid[ssid_len - 1] = 0;
   }
   if (ip && ip_len > 0) {
-    snprintf(ip, ip_len, "%s", WiFi.softAPIP().toString().c_str());
+    const IPAddress address = w->_mode == MODE_LAN
+        ? activeNetworkLink().localIP() : WiFi.softAPIP();
+    snprintf(ip, ip_len, "%s", address.toString().c_str());
   }
   return true;
+}
+
+bool WebConfigServer::isLanSetup() {
+  WebConfigServer* w = _active;
+  return w != NULL && !w->_stopping && w->_initial_setup && w->_mode == MODE_LAN;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +266,11 @@ bool WebConfigServer::getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t
 bool WebConfigServer::startSetupMode(char reply[]) {
   if (_mode != MODE_OFF || _stopping) {
     strcpy(reply, "Err: webconfig busy");
+    return false;
+  }
+  if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
+    snprintf(reply, 160, "Err: port 80 is in use by %s",
+             HttpPort80Lease::ownerName());
     return false;
   }
   // AP_STA (not pure AP) so the WiFi scan for the SSID picker works while
@@ -213,6 +294,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
 #endif
   if (!ap_ok) {
     WiFi.mode(WIFI_OFF);
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
     strcpy(reply, "Err: failed to start AP");
     return false;
   }
@@ -223,8 +305,10 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _dns->start(53, "*", ip);  // captive portal: every name resolves to us
 
   _mode = MODE_SETUP;
-  _initial_setup = (_obs->wifi_ssid[0] == 0);
+  _initial_setup = !mqttNetworkSetupComplete(_obs);
   createServer();
+  activeNetworkLink().lockSwitching();
+  _network_locked = true;
   _was_setup_ap = true;
   _last_activity = millis();
   WiFi.scanNetworks(true);  // pre-populate the SSID picker
@@ -233,21 +317,59 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   return true;
 }
 
-bool WebConfigServer::startLanMode(char reply[]) {
+bool WebConfigServer::startLanMode(bool initial_setup, char reply[]) {
   if (_mode != MODE_OFF || _stopping) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
-  if (WiFi.status() != WL_CONNECTED) {
-    strcpy(reply, "Err: WiFi not connected");
+  if (!HttpPort80Lease::acquire(HttpPort80Lease::Owner::WebConfig)) {
+    snprintf(reply, 160, "Err: port 80 is in use by %s",
+             HttpPort80Lease::ownerName());
     return false;
   }
+  activeNetworkLink().lockSwitching();
+  _network_locked = true;
+  // Read the address only once the route is pinned, so it names the locked link.
+  const IPAddress ip = activeNetworkLink().localIP();
+  if (!activeNetworkLink().isConnected() || ip == IPAddress()) {
+    activeNetworkLink().unlockSwitching();
+    _network_locked = false;
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
+    strcpy(reply, "Err: selected network not connected");
+    return false;
+  }
+  _initial_setup = initial_setup;
+  uint8_t session_entropy[sizeof(_session_secret) + 6];
+  const size_t entropy_size = sizeof(_session_secret) + (_initial_setup ? 6 : 0);
+  if (!fillRandomBytes(session_entropy, entropy_size)) {
+    activeNetworkLink().unlockSwitching();
+    _network_locked = false;
+    HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
+    strcpy(reply, "Err: secure random source unavailable");
+    return false;
+  }
+  memcpy(_session_secret, session_entropy, sizeof(_session_secret));
+  _session_generation = 0;
+  if (_initial_setup) {
+    bytesToHex(_setup_code, session_entropy + sizeof(_session_secret), 6);
+  } else {
+    _setup_code[0] = 0;
+  }
+  memset(session_entropy, 0, sizeof(session_entropy));
   _mode = MODE_LAN;
   createServer();
   _last_activity = millis();
 
-  int pos = sprintf(reply, "WebConfig started: http://%s/ (admin password login)",
-                    WiFi.localIP().toString().c_str());
+  int pos;
+  if (_initial_setup) {
+    pos = sprintf(reply, "WebConfig Ethernet setup: http://%s/ code %s",
+                  ip.toString().c_str(), _setup_code);
+    _setup_reminder_at = millis() + 60000;
+    if (_setup_reminder_at == 0) _setup_reminder_at = 1;
+  } else {
+    pos = sprintf(reply, "WebConfig started: http://%s/ (admin password login)",
+                  ip.toString().c_str());
+  }
   if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 60 * 1024) {
     sprintf(reply + pos, " WARN: low heap");
   }
@@ -317,8 +439,8 @@ void WebConfigServer::finalizeTeardown() {
   _dns = NULL;
   if (_was_setup_ap) {
     WiFi.softAPdisconnect(true);
-    // Nothing else owns WiFi when we raised the AP: either the node is
-    // unconfigured, or `start webconfig ap` required the bridge stopped.
+    // A Wi-Fi-selected bridge must be stopped before a forced AP. An
+    // Ethernet-selected bridge can remain up because it does not own the STA.
     if (_obs->wifi_ssid[0] == 0) {
       WiFi.mode(WIFI_OFF);
     } else {
@@ -334,9 +456,43 @@ void WebConfigServer::finalizeTeardown() {
   _batch_state = BATCH_IDLE;
   _batch_next = 0;
   _batch_reboot_armed = false;
+  memset(_session_secret, 0, sizeof(_session_secret));
+  _session_generation = 0;
   _session_token[0] = 0;
   _stats_json[0] = 0;
+  _setup_code[0] = 0;
+  _setup_reminder_at = 0;
+  if (_network_locked) {
+    activeNetworkLink().unlockSwitching();
+    _network_locked = false;
+  }
+  HttpPort80Lease::release(HttpPort80Lease::Owner::WebConfig);
   if (_cb) _cb->onWebConfigStopped();
+}
+
+// Ask the board which of WC_BOARD_CMDS it answers, once per start. The getters
+// are pure reads, and the reply says everything needed: CommonCLI answers a real
+// getter "> value", while every no-answer path — the "??:" fallthrough a board
+// with no hook reaches, and the "Error: unsupported" a board with the hook but
+// not the hardware returns — starts with something else.
+//
+// Loop task only: execCommand() reaches the CLI, which the async task must not.
+// The routes are already live by the time this first runs — createServer()
+// happens in startLanMode()/startSetupMode(), one tick earlier — so the result
+// is published under _mux and read the same way, and /api/status leaves the
+// field out entirely until then rather than reporting a premature "nothing".
+void WebConfigServer::probeBoardCommands() {
+  char cmd[48], reply[160];
+  uint8_t mask = 0;
+  for (size_t i = 0; i < WC_BOARD_CMD_COUNT; i++) {
+    snprintf(cmd, sizeof(cmd), "get %s", WC_BOARD_CMDS[i]);
+    reply[0] = 0;
+    _cb->execCommand(cmd, reply);
+    if (reply[0] == '>') mask |= (uint8_t)(1 << i);
+  }
+  WCLock lock(_mux);
+  _board_cmds = mask;
+  _board_cmds_probed = true;
 }
 
 void WebConfigServer::tick(uint32_t now) {
@@ -357,6 +513,17 @@ void WebConfigServer::tick(uint32_t now) {
     return;
   }
   if (_mode == MODE_OFF) return;
+
+  if (!_board_cmds_probed) probeBoardCommands();
+
+  if (_mode == MODE_LAN && _initial_setup && _setup_reminder_at != 0 &&
+      (int32_t)(now - _setup_reminder_at) >= 0) {
+    Serial.printf("WC: Ethernet setup http://%s/ code %s\n",
+                  activeNetworkLink().localIP().toString().c_str(),
+                  _setup_code);
+    _setup_reminder_at = now + 60000;
+    if (_setup_reminder_at == 0) _setup_reminder_at = 1;
+  }
 
   if (_dns) _dns->processNextRequest();
 
@@ -457,6 +624,15 @@ void WebConfigServer::drainBatch(uint32_t now) {
     }
     if (!WebConfigBatch::drainFinished(_batch_next, _batch_count)) {
       return;  // more commands next tick
+    }
+  }
+  // Wi-Fi onboarding is recorded by the stored SSID; only Ethernet LAN setup needs the marker.
+  if (_initial_setup && _admin_pwd_set && _batch_all_ok && _mode == MODE_LAN) {
+    if (_cb->onInitialSetupComplete()) {
+      _initial_setup = false;
+      _setup_code[0] = 0;
+    } else {
+      _batch_all_ok = false;
     }
   }
   _cb->onConfigBatchEnd();
@@ -572,13 +748,14 @@ bool WebConfigServer::checkAuth(AsyncWebServerRequest* req) {
   _last_activity = millis();
   if (_mode == MODE_SETUP) return true;  // physical proximity implied, nothing configured
   if (_mode != MODE_LAN) return false;
-  if (_session_token[0] == 0) return false;
   if (!req->hasHeader("Cookie")) return false;
   const String& cookies = req->getHeader("Cookie")->value();
   int idx = cookies.indexOf("wcs=");
   if (idx < 0 || (int)cookies.length() < idx + 4 + 32) return false;
   String token = cookies.substring(idx + 4, idx + 4 + 32);
   uint32_t now = millis();
+  WCLock lock(_mux);
+  if (_session_token[0] == 0) return false;
   if ((uint32_t)(now - _session_last_seen) > WEBCONFIG_SESSION_TTL_MS) return false;
   if (!fixedTimeEquals(token.c_str(), _session_token, 32)) return false;
   _session_last_seen = now;  // sliding expiry
@@ -608,10 +785,10 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   bool authed = checkAuth(req);
 
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(640);
   doc["mode"] = (_mode == MODE_SETUP) ? "setup" : "lan";
   doc["auth"] = authed;
-  doc["needs_setup"] = (_obs->wifi_ssid[0] == 0);
+  doc["needs_setup"] = !mqttNetworkSetupComplete(_obs);
   doc["name"] = (const char*)_prefs->node_name;
   char node_id[17];
   for (int i = 0; i < 8; i++) sprintf(&node_id[i * 2], "%02x", _pub_key[i]);
@@ -622,6 +799,31 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   doc["build_date"] = _build_date;
   doc["role"] = _role;
   doc["board"] = _board_name;
+  // Board-specific CLI commands this board answers; the page hides the controls
+  // for everything absent here rather than offering one that cannot work.
+  // ABSENT until the probe has run, which is not the same as an empty list: the
+  // page must not latch "this board has none" from a status served in the gap
+  // between the routes going live and the first tick.
+  bool probed;
+  uint8_t board_mask;
+  {
+    WCLock lock(_mux);
+    probed = _board_cmds_probed;
+    board_mask = _board_cmds;
+  }
+  if (probed) {
+    char board_cmds[80];
+    size_t n = 0;
+    board_cmds[0] = 0;   // the nothing-supported case
+    for (size_t i = 0; i < WC_BOARD_CMD_COUNT && n < sizeof(board_cmds) - 1; i++) {
+      if (!(board_mask & (1 << i))) continue;
+      int w = snprintf(&board_cmds[n], sizeof(board_cmds) - n, "%s%s",
+                       n ? "," : "", WC_BOARD_CMDS[i]);
+      if (w < 0) break;
+      n += (size_t)w;    // snprintf NUL-terminates; a truncating w stops the loop
+    }
+    doc["board_cmds"] = board_cmds;
+  }
   doc["uptime_s"] = millis() / 1000;
   doc["runtime_slots"] = RUNTIME_MQTT_SLOTS;
   doc["max_slots"] = MAX_MQTT_SLOTS;
@@ -657,7 +859,10 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
     return;
   }
   const char* pwd = doc["password"] | "";
-  if (!fixedTimeEquals(pwd, _prefs->password, sizeof(_prefs->password))) {
+  const char* expected = _initial_setup ? _setup_code : _prefs->password;
+  const size_t expected_size = _initial_setup ? sizeof(_setup_code)
+                                               : sizeof(_prefs->password);
+  if (!fixedTimeEquals(pwd, expected, expected_size)) {
     if (++_login_fails >= 5) {
       _login_lock_until = now + 30000;
       if (_login_lock_until == 0) _login_lock_until = 1;
@@ -668,19 +873,41 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
   }
   _login_fails = 0;
   _login_lock_until = 0;
-  for (int i = 0; i < 4; i++) sprintf(&_session_token[i * 8], "%08lx", (unsigned long)esp_random());
-  _session_last_seen = now;
+  uint32_t generation;
+  {
+    WCLock lock(_mux);
+    generation = ++_session_generation;
+    if (generation == 0) generation = ++_session_generation;
+  }
+  uint8_t token_bytes[16];
+  SHA256 token_hmac;
+  token_hmac.resetHMAC(_session_secret, sizeof(_session_secret));
+  token_hmac.update(reinterpret_cast<const uint8_t*>(&generation),
+                    sizeof(generation));
+  token_hmac.finalizeHMAC(_session_secret, sizeof(_session_secret),
+                          token_bytes, sizeof(token_bytes));
+  char session_token[33];
+  bytesToHex(session_token, token_bytes, sizeof(token_bytes));
+  memset(token_bytes, 0, sizeof(token_bytes));
+  {
+    WCLock lock(_mux);
+    memcpy(_session_token, session_token, sizeof(_session_token));
+    _session_last_seen = now;
+  }
 
   AsyncWebServerResponse* res = req->beginResponse(200, "application/json", "{\"ok\":true}");
   char cookie[80];
-  sprintf(cookie, "wcs=%s; HttpOnly; SameSite=Lax; Path=/", _session_token);
+  sprintf(cookie, "wcs=%s; HttpOnly; SameSite=Lax; Path=/", session_token);
   res->addHeader("Set-Cookie", cookie);
   req->send(res);
 }
 
 void WebConfigServer::handleLogout(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
-  _session_token[0] = 0;
+  {
+    WCLock lock(_mux);
+    _session_token[0] = 0;
+  }
   AsyncWebServerResponse* res = req->beginResponse(200, "application/json", "{\"ok\":true}");
   res->addHeader("Set-Cookie", "wcs=; Max-Age=0; Path=/");
   req->send(res);
@@ -707,6 +934,10 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     radio["txdelay"] = _prefs->tx_delay_factor;
     radio["cad"] = (bool)_prefs->cad_enabled;
     radio["rxgain"] = (bool)_prefs->rx_boosted_gain;
+    // FEM gain is driven by Board::handleCommand(), not CommonCLI, so these are
+    // the stored intent; a board with no front-end module rejects the `set`.
+    radio["fem_rxgain"] = (bool)_prefs->radio_fem_rxgain;
+    radio["fem_txgain"] = (bool)_prefs->radio_fem_txgain;
     radio["repeat"] = !(bool)_prefs->disable_fwd;   // CLI `repeat on` == disable_fwd 0
     radio["flood_max"] = _prefs->flood_max;
     radio["flood_max_advert"] = _prefs->flood_max_advert;
@@ -722,8 +953,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     JsonObject wifi = doc.createNestedObject("wifi");
     wifi["ssid"] = (const char*)_obs->wifi_ssid;
     wifi["pwd"] = _obs->wifi_password[0] ? SECRET_SENTINEL : "";
-    wifi["powersave"] = _obs->wifi_power_save == 0 ? "min"
-                        : _obs->wifi_power_save == 2 ? "max" : "none";
+    wifi["powersave"] = WifiPowerSavePolicy::nameFor(_obs->wifi_power_save);
 
     JsonObject mqtt = doc.createNestedObject("mqtt");
     mqtt["origin"] = (const char*)_obs->mqtt_origin;
@@ -734,6 +964,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     mqtt["tx"] = _obs->mqtt_tx_enabled == 2 ? "advert"
                  : _obs->mqtt_tx_enabled == 1 ? "on" : "off";
     mqtt["rx"] = (bool)_obs->mqtt_rx_enabled;
+    mqtt["advert_verify"] = (bool)_obs->mqtt_advert_verify;
     mqtt["interval"] = _obs->mqtt_status_interval / 60000;  // CLI takes minutes
     mqtt["neighbors"] = (bool)_obs->mqtt_neighbors_enabled;
     mqtt["neighbors_interval"] = _obs->mqtt_neighbors_interval / 3600000UL;  // CLI takes hours
@@ -836,7 +1067,7 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
   // First onboarding is not complete until the known factory password has
   // been replaced. Enforce this server-side so the Advanced editor or a crafted
   // request cannot save WiFi and strand the node with the default password.
-  if (_mode == MODE_SETUP && _initial_setup && !set.containsKey("password") &&
+  if (_initial_setup && !set.containsKey("password") &&
       (reboot_after || set.containsKey("wifi.ssid"))) {
     req->send(400, "application/json", "{\"error\":\"admin password required for initial setup\"}");
     return;
@@ -1148,7 +1379,7 @@ void WebConfigServer::handleCliPost(AsyncWebServerRequest* req) {
   // LAN still holding the factory password is a known credential on someone
   // else's network. The terminal warned about this client-side, which is a
   // reminder, not a rule — a pasted script or a direct POST ignored it.
-  if (_mode == MODE_SETUP && _initial_setup && !seq_sets_pwd && !_admin_pwd_set &&
+  if (_initial_setup && !seq_sets_pwd && !_admin_pwd_set &&
       (defer_reboot || seq_sets_ssid)) {
     req->send(400, "application/json",
               "{\"error\":\"admin password required for initial setup — "

@@ -36,6 +36,16 @@ static int buildRepresentativePacket(JsonDocument& scratch, const char* directio
       path_hash_size, 64, buffer, buffer_size);
 }
 
+static int buildPacketWithMetrics(JsonDocument& scratch, const char* direction,
+                                 float snr, int rssi, float score,
+                                 char* buffer, size_t buffer_size) {
+  return MQTTPayloadBuilder::buildPacketMessage(
+      scratch, "DEN Repeater", "0123456789ABCDEF", kTimestamp, direction,
+      "12:34:56", "18/07/2026", 42, 4, "D", 20, "A0B1C2D3",
+      snr, rssi, score, "89ABCDEF01234567", nullptr, 0, 0, 64,
+      buffer, buffer_size);
+}
+
 TEST(MQTTPayloadBuilder, MinimalStatusHasExactRequiredContract) {
   JsonDocument scratch;
   char buffer[768];
@@ -81,6 +91,157 @@ TEST(MQTTPayloadBuilder, StatusIncludesRepeatAndEveryRequestedStatistic) {
   EXPECT_EQ(180864, stats["internal_heap"].as<int>());
   EXPECT_EQ(31, stats["packets_sent"].as<int>());
   EXPECT_EQ(47, stats["packets_received"].as<int>());
+}
+
+TEST(MQTTPayloadBuilder, StatusReportsConnectionHealthWhenSupplied) {
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.slots_up = 2;
+  health.slots_total = 3;
+  health.worst_outage_secs = 18432;
+  health.heap_largest = 16116;
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health);
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  ASSERT_FALSE(stats.isNull());
+  EXPECT_EQ(2, stats["mqtt_slots_up"].as<int>());
+  EXPECT_EQ(3, stats["mqtt_slots_total"].as<int>());
+  EXPECT_EQ(18432, stats["mqtt_outage_secs"].as<int>());
+  EXPECT_EQ(16116, stats["heap_largest"].as<int>());
+}
+
+TEST(MQTTPayloadBuilder, StatusReportsConnectFailuresAndBreakerOnlyWhenNonZero) {
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.slots_up = 1;
+  health.slots_total = 3;
+  health.connect_failures = 57;
+  health.slots_breaker = 1;
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health);
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  EXPECT_EQ(57, stats["mqtt_connect_failures"].as<int>());
+  EXPECT_EQ(1, stats["mqtt_slots_breaker"].as<int>());
+
+  // A healthy board must not carry either key: zero connect failures and zero
+  // tripped breakers are the normal case, and the steady-state payload is
+  // already close to the buffer bound.
+  MQTTConnHealth healthy;
+  healthy.slots_up = 3;
+  healthy.slots_total = 3;
+  healthy.connect_failures = 0;
+  healthy.slots_breaker = 0;
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, healthy), 0);
+  JsonDocument healthy_parsed;
+  ASSERT_FALSE(deserializeJson(healthy_parsed, buffer));
+  JsonObject healthy_stats = healthy_parsed["stats"].as<JsonObject>();
+  EXPECT_FALSE(healthy_stats["mqtt_connect_failures"].is<JsonVariant>());
+  EXPECT_FALSE(healthy_stats["mqtt_slots_breaker"].is<JsonVariant>());
+}
+
+// Zero counters with nothing else supplied must not create an empty stats object.
+TEST(MQTTPayloadBuilder, StatusOmitsStatsWhenOnlyZeroCountersSupplied) {
+  JsonDocument scratch;
+  char buffer[768];
+  MQTTConnHealth health;
+  health.connect_failures = 0;
+  health.slots_breaker = 0;
+
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["stats"].is<JsonVariant>());
+}
+
+// The outage key doubles as the "something is down" flag, so its absence has to be
+// meaningful: a fully healthy board must not emit it.
+TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
+  JsonDocument scratch;
+  char buffer[768];
+  MQTTConnHealth health;
+  health.slots_up = 3;
+  health.slots_total = 3;
+  health.heap_largest = 54260;   // worst_outage_secs left at -1
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health);
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  ASSERT_FALSE(stats.isNull());
+  EXPECT_EQ(3, stats["mqtt_slots_up"].as<int>());
+  EXPECT_FALSE(stats["mqtt_outage_secs"].is<JsonVariant>());
+}
+
+// serializeComplete() returns 0 and clears the buffer when the payload does not fit,
+// and MQTTBridge publishes only a positive length — so overflowing STATUS_JSON_BUFFER_SIZE
+// silently stops status publication altogether. That is the same class of blindness this
+// field set exists to fix, so the worst realistic payload must fit with margin.
+// Field widths are the real MQTTBridge maxima, not plausible-looking strings:
+//   _origin[32] _device_id[65] _firmware_version[64] _board_model[64]
+// and client_version is snprintf("meshcore/%s", _firmware_version) into char[64].
+// isValidName() rejects [ ] / \ : , ? * but ALLOWS '"', so a node name of 31 quotes
+// is legal and every one escapes to two bytes — that is the true worst case for the
+// only free-text field an operator controls.
+TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
+  constexpr size_t kStatusJsonBufferSize = 1024;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  const std::string origin(31, '"');                 // _origin[32], worst-case escaping
+  const std::string origin_id(64, 'A');              // _device_id[65]
+  const std::string model(63, 'M');                  // _board_model[64]
+  const std::string firmware(63, 'F');               // _firmware_version[64]
+  const std::string client_version(63, 'C');         // char client_version[64]
+  const std::string radio("9999.999999,1000.0,12,8");
+
+  JsonDocument scratch;
+  char buffer[kStatusJsonBufferSize];
+  MQTTConnHealth health;
+  health.slots_up = 0;
+  health.slots_total = 6;              // RUNTIME_MQTT_SLOTS on PSRAM, the widest
+  health.worst_outage_secs = 4294967;  // millis() rollover / 1000, the widest value
+  health.heap_largest = 8388608;
+  health.connect_failures = 2147483647;
+  health.slots_breaker = 6;
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, origin.c_str(), origin_id.c_str(), model.c_str(), firmware.c_str(),
+      radio.c_str(), client_version.c_str(), "online", kTimestamp,
+      buffer, sizeof(buffer),
+      4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
+      8388608, 2147483647, 2147483647,
+      "off", health);
+
+  ASSERT_GT(len, 0) << "worst-case status payload overflowed the " << kStatusJsonBufferSize
+                    << "-byte production buffer; serializeComplete() returns 0 and the "
+                       "bridge publishes only len>0, so ALL status publication would "
+                       "stop silently";
+  EXPECT_LT(static_cast<size_t>(len), kStatusJsonBufferSize - 32)
+      << "less than 32 bytes of headroom left in the status buffer (len=" << len << ")";
 }
 
 TEST(MQTTPayloadBuilder, StatusOmissionSentinelsRemainOmitted) {
@@ -166,6 +327,72 @@ TEST(MQTTPayloadBuilder, RxPacketOmitsUnknownNanScore) {
   ASSERT_FALSE(deserializeJson(parsed, buffer));
   EXPECT_TRUE(parsed["SNR"].is<const char*>());
   EXPECT_TRUE(parsed["RSSI"].is<const char*>());
+  EXPECT_FALSE(parsed["score"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RxPacketOmitsUnknownSnrAndRssi) {
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "rx", NAN, MQTT_RSSI_UNKNOWN, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
+  EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
+  EXPECT_FALSE(parsed["score"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RxPacketFormatsRealSnrAndRssi) {
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "rx", 7.25f, -93, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("7.2", parsed["SNR"].as<const char*>());
+  EXPECT_STREQ("-93", parsed["RSSI"].as<const char*>());
+  EXPECT_FALSE(parsed["score"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RxPacketOmitsOnlyUnknownMetric) {
+  // SNR unknown, RSSI real: only the SNR key is omitted.
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "rx", NAN, -93, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
+  EXPECT_STREQ("-93", parsed["RSSI"].as<const char*>());
+
+  // RSSI unknown, SNR real: only the RSSI key is omitted.
+  len = buildPacketWithMetrics(
+      scratch, "rx", 7.25f, MQTT_RSSI_UNKNOWN, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  parsed.clear();
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("7.2", parsed["SNR"].as<const char*>());
+  EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, TxPacketOmitsSnrRssiAndScoreWithRealValues) {
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "tx", 7.25f, -93, 0.5f, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
+  EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
   EXPECT_FALSE(parsed["score"].is<JsonVariant>());
 }
 

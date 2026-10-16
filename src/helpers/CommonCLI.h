@@ -7,6 +7,8 @@
 #include <helpers/MQTTPresets.h>  // For MAX_MQTT_SLOTS (used in NodePrefs struct layout)
 #include <helpers/RegionMap.h>
 #include <helpers/ConfigSerializer.h>
+#include <helpers/CommonRadioPrefs.h>
+#include <helpers/DynamicConfigSerializer.h>
 
 #if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
 #define WITH_BRIDGE
@@ -74,11 +76,11 @@ public:
   uint8_t extra_sf[4];
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) are not in NodePrefs.
-  // They live in MQTTPrefs, persisted separately to /mqtt_prefs, so this struct
+  // They live in MQTTPrefs, persisted separately to /mqtt.json, so this struct
   // stays aligned with upstream. See struct MQTTPrefs below.
 
 private:
-  class RadioPrefs : public ConfigSerializer {
+  class RadioPrefs : public CommonRadioPrefs {
     NodePrefs* _parent;
   protected:
     void structure() override {
@@ -102,6 +104,41 @@ private:
     }
   public:
     RadioPrefs(NodePrefs* parent) : _parent(parent) { }
+    // CommonRadioPrefs interface
+    float getFreq() const override { return _parent->freq; }
+    void setFreq(float f) override { _parent->freq = f; markDirty(); }
+    float getBandwidth() const override { return _parent->bw; }
+    void setBandwidth(float bw) override { _parent->bw = bw; markDirty(); }
+    uint8_t getSpreadFactor() const override { return _parent->sf; }
+    void setSpreadFactor(uint8_t sf) override { _parent->sf = sf; markDirty(); }
+    uint8_t getCodingRate() const override { return _parent->cr; }
+    void setCodingRate(uint8_t cr) override { _parent->cr = cr; markDirty(); }
+    float getAirtimeFactor() const override { return _parent->airtime_factor; }
+    void setAirtimeFactor(float af) override { _parent->airtime_factor = af; markDirty(); }
+    bool isCadEnabled() const override { return _parent->cad_enabled; }
+    void setCadEnabled(bool en) override { _parent->cad_enabled = en; markDirty(); }
+    uint8_t getIntThresh() const override { return _parent->interference_threshold; }
+    void setIntThresh(uint8_t t) override { _parent->interference_threshold = t; markDirty(); }
+    uint8_t getRxGain() const override { return _parent->rx_boosted_gain; }
+    void setRxGain(uint8_t g) override { _parent->rx_boosted_gain = g; markDirty(); }
+    int8_t getTxPower() const override { return _parent->tx_power_dbm; }
+    void setTxPower(int8_t dbm) override { _parent->tx_power_dbm = dbm; markDirty(); }
+    float getRxDelay() const override { return _parent->rx_delay_base; }
+    void setRxDelay(float d) override { _parent->rx_delay_base = d; markDirty(); }
+    uint16_t getAgcResetInt() const override { return _parent->agc_reset_interval * 4; }
+    void setAgcResetInt(uint16_t secs) override { _parent->agc_reset_interval = secs / 4; markDirty(); }
+    uint8_t getHashMode() const override { return _parent->path_hash_mode; }
+    void setHashMode(uint8_t m) override { _parent->path_hash_mode = m; markDirty(); }
+    uint8_t getMultiAcks() const override { return _parent->multi_acks; }
+    void setMultiAcks(uint8_t m) override { _parent->multi_acks = m; markDirty(); }
+    float getFloodTxDelay() const override { return _parent->tx_delay_factor; }
+    void setFloodTxDelay(float d) override { _parent->tx_delay_factor = d; markDirty(); }
+    float getDirectTxDelay() const override { return _parent->direct_tx_delay_factor; }
+    void setDirectTxDelay(float d) override { _parent->direct_tx_delay_factor = d; markDirty(); }
+    uint8_t getFEMRxGain() const override { return _parent->radio_fem_rxgain; }
+    void setFEMRxGain(uint8_t g) override { _parent->radio_fem_rxgain = g; markDirty(); }
+    uint8_t getFEMTxGain() const override { return _parent->radio_fem_txgain; }
+    void setFEMTxGain(uint8_t g) override { _parent->radio_fem_txgain = g; markDirty(); }
   };
   RadioPrefs radio;
 
@@ -172,6 +209,8 @@ private:
   };
   RoomPrefs room;
 
+  DynamicConfigSerializer custom;
+
 protected:
   void structure() override {
     def("name", node_name, sizeof(node_name));
@@ -190,16 +229,23 @@ protected:
     def("repeat", repeat);
     def("room", room);
     def("power", power);
+    def("custom", custom);
   }
 
 public:
-  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this) {
+  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this), custom(&radio) {
     node_name[0] = 0;
     password[0] = 0;
     guest_password[0] = 0;
     bridge_secret[0] = 0;
     owner_info[0] = 0;
   }
+
+  CommonRadioPrefs* getRadioPrefs() { return &radio; }
+  KeyValueStore* getCustom() { return &custom; }
+
+  bool isDirty() const override { return ConfigSerializer::isDirty() || radio.isDirty() || custom.isDirty(); }
+  void clearDirty() override { ConfigSerializer::clearDirty(); radio.clearDirty(); custom.clearDirty(); }
 };
 
 #ifdef WITH_MQTT_BRIDGE
@@ -230,6 +276,17 @@ struct LegacyObserverTail {
 class CommonCLICallbacks {
 public:
   virtual void savePrefs() = 0;
+  // The node name feeds the DHCP hostname, which is built once when the link
+  // starts. Renaming a running node has to rebuild it or the node keeps
+  // advertising the old name to DHCP until the next reflash.
+  virtual void onNodeNameChanged() {}
+#ifdef WITH_MQTT_BRIDGE
+  virtual bool saveObserverPrefs() = 0;
+#else
+  virtual bool saveObserverPrefs() {
+    return false;
+  }
+#endif
   virtual const char* getFirmwareVer() = 0;
   virtual const char* getBuildDate() = 0;
   virtual const char* getRole() = 0;
@@ -361,10 +418,18 @@ class CommonCLI {
   char tmp[PRV_KEY_SIZE*2 + 4];
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
+  // Points at a per-command snapshot only while an observer setter is running.
+  // persistObserverPrefs() uses it to undo RAM mutations when flash commit fails.
+  const MQTTPrefs* _observer_prefs_rollback = nullptr;
   LegacyObserverTail _legacy_tail;
-  // /mqtt_prefs is newer, corrupt, or temporarily unreadable. The in-memory prefs
+  // /mqtt.json is newer, corrupt, or temporarily unreadable. The in-memory prefs
   // run on defaults and saveMQTTPrefs() must not overwrite the source file.
   bool _mqtt_prefs_hold = false;
+  // A failed publish could not be undone, so the next boot may still come up
+  // with the value that was refused. persistObserverPrefs() must not call that
+  // a rollback. Latched for the boot: the artifact left behind also makes every
+  // later transaction fail to begin, so the condition cannot clear itself.
+  bool _observer_save_indeterminate = false;
 #endif
   bool _com_prefs_needs_upgrade = false;  // old-format legacy prefs detected; rewrite once after load
 
@@ -386,6 +451,7 @@ class CommonCLI {
   // false to fall through to the base get/set parsing.
   bool handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply);
   bool handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply);
+  bool persistObserverPrefs(char* reply);
   // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
   // also live in CommonCLI_Observer.cpp; returns true if it handled the command.
   bool handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply);
@@ -395,14 +461,17 @@ public:
       : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks) { }
 
   void loadPrefs(FILESYSTEM* _fs);
-  bool savePrefs(FILESYSTEM* _fs, bool save_mqtt = true);
+  // Node preferences and observer preferences are separate transactions.
+  // Callers must explicitly request an observer save when they changed it.
+  bool savePrefs(FILESYSTEM* _fs, bool save_mqtt = false);
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   mesh::MainBoard* getBoard() { return _board; }
   uint8_t buildAdvertData(uint8_t node_type, uint8_t* app_data);
 #ifdef WITH_MQTT_BRIDGE
-  // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt_prefs.
+  // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
   // Exposed so the app can hand it to MQTTBridge/AlertReporter, which read these
   // fields directly (they no longer live in NodePrefs).
   MQTTPrefs* getObserverPrefs() const { return const_cast<MQTTPrefs*>(&_mqtt_prefs); }
+  bool saveObserverPrefs(FILESYSTEM* fs) { return saveMQTTPrefs(fs); }
 #endif
 };

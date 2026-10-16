@@ -85,8 +85,9 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ### Start an Over-The-Air (OTA) firmware update
 **Usage:**
-- `start ota` — serves the ElegantOTA web upload page on the station IP if joined to a Wi-Fi network, otherwise raises the `MeshCore-OTA` Wi-Fi hotspot.
+- `start ota` — serves the ElegantOTA web upload page on the selected Ethernet or Wi-Fi IP when connected, otherwise raises the `MeshCore-OTA` Wi-Fi hotspot. The manual-OTA session stops after 15 minutes unless an upload is in progress.
 - `start ota ap` — always raises the `MeshCore-OTA` Wi-Fi hotspot, even when joined to a network. Use this when the network applies client isolation and the station IP isn't reachable.
+- `stop ota` — stops an idle manual-OTA web server, releases port 80, and re-enables automatic network switching. It refuses while a firmware upload is in progress.
 
 ### Switch the OTA release channel (observer builds)
 
@@ -231,7 +232,7 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 
 **Set by build flag:** `LORA_FREQ`, `LORA_BW`, `LORA_SF`, `LORA_CR`
 
-**Default:** `869.525,250,11,5`
+**Default:** `869.618,62.5,8,5`
 
 **Note:** Requires reboot to apply
 
@@ -276,7 +277,7 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 **Parameters:**
 - `frequency`: Frequency in MHz
 
-**Default:** `869.525`
+**Default:** `869.618`
 
 **Note:** Requires reboot to apply
 **Serial Only:** `set freq <frequency>`
@@ -324,6 +325,27 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 - On Station G3, remove the PA PL1 jumper to allow software control. `on` selects PA PL1 high/short and `off` selects PA PL1 low/open. The PA PL2 hardware jumper determines whether this switches between power levels 1/3 or 2/4.
 - Select an operating level and SX1262 transmit power that comply with local RF limits and the Station G3 power-supply requirements.
 - The setting is saved immediately, but on Station G3 the level is applied to the hardware at the start of the next transmit, so that the PA supply rail is never re-targeted while the PA is being driven. `get` reports the configured state, which may lead the hardware until the node next transmits.
+
+---
+
+#### View the fan state, or change how it is driven, on supported boards
+**Usage:**
+- `get fan`
+- `set fan <mode>`
+- `set fan.lo <celsius>`
+- `set fan.hi <celsius>`
+
+**Parameters:**
+- `mode`: `on`|`off`|`auto`
+- `celsius`: `fan.lo` is 0-100 and must be below `fan.hi`; `fan.hi` is at most 120 and must be above `fan.lo`
+
+**Default:** `auto`, with `fan.lo` 45 and `fan.hi` 60
+
+**Notes:**
+- Currently the T-Beam 1W, the only board with a fan under software control.
+- `get fan` reports the mode, the measured temperature, whether the fan is running, and the remaining cooldown, e.g. `auto 52.4C fan=on cd=18s`. The temperature reads `n/a` when the NTC value is implausible.
+- In `auto` the fan starts at `fan.hi` and stops at `fan.lo`; the gap between them is what keeps it from chattering around one threshold.
+- `fan.lo` and `fan.hi` are set-only: `get fan` reports the mode and current state, not the thresholds.
 
 ---
 
@@ -557,7 +579,7 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 **Parameters:**
 - `value`: Direct transmit delay factor (0-2)
 
-**Default:** `0.2`
+**Default:** `0.3` (Repeater) - `0.2` (Room Server, Sensor)
 
 **Note:** Same collision-avoidance random window as `txdelay`, but applied to direct (non-flood, routed) traffic. The default is lower because direct packets are addressed to a specific next hop, so far fewer nodes compete to retransmit them.
 
@@ -648,7 +670,7 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 - `set agc.reset.interval <value>`
 
 **Parameters:**
-- `value`: Interval in seconds rounded down to a multiple of 4 (17 becomes 16). 0 to disable.
+- `value`: Interval in seconds, 0-1020, rounded down to a multiple of 4 (17 becomes 16). 0 to disable.
 
 **Default:** `0.0`
 
@@ -665,6 +687,37 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 **Default:** `5`
 
 **Note:** On quiet meshes, increasing this can reduce false recoveries when no traffic is expected.
+
+---
+
+#### View or change the display timeout
+**Usage:**
+- `get display.timeout`
+- `set display.timeout <seconds>`
+
+**Parameters:**
+- `seconds`: `0` to keep the display on permanently, or `1-3600` seconds of inactivity before it blanks
+
+**Default:** `60`
+
+**Note:** Observer builds with a display only. The change applies immediately and restarts the
+countdown. Tap the panel or press the USER button to wake or blank it by hand.
+
+---
+
+#### Rotate the display 180 degrees
+**Usage:**
+- `get display.flip`
+- `set display.flip <state>`
+
+**Parameters:**
+- `state`: `0`/`off` (as built) or `1`/`on` (rotated 180 degrees)
+
+**Default:** `0`
+
+**Note:** Observer builds with a display only, for a board mounted the other way up. This is
+persisted config, so it survives a firmware update - a node that looks upside down after an
+update may simply still be carrying `display.flip 1`. The boot log reports the current state.
 
 ---
 
@@ -688,7 +741,7 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 **Parameters:**
 - `hours`: Interval in hours (3-168)
 
-**Default:** `12` (Repeater) - `0` (Sensor)
+**Default:** `47` (Repeater, Room Server) - `0`, disabled (Sensor)
 
 ---
 
@@ -700,7 +753,12 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 **Parameters:**
 - `minutes`: Interval in minutes rounded down to the nearest multiple of 2 (61 becomes 60) (60-240)
 
-**Default:** `0`
+**Default:** `2` on a factory-fresh node, then `0` (disabled) once configured.
+
+**Note:** A new install ships with a 2 minute zero-hop advert interval. Saving
+any setting resets an interval below the 60 minute minimum to `0`, on the
+assumption that the node has now been deliberately configured. To keep zero-hop
+adverts running, set an explicit value in the 60-240 range.
 
 ---
 
@@ -1169,6 +1227,21 @@ region save
 **Default:** `advert`
 
 > **Note:** `mqtt.rx` and `mqtt.tx` take effect immediately — no restart required. Both can be enabled simultaneously.
+
+---
+
+#### View or change MQTT advert signature filtering
+**Usage:**
+- `get mqtt.advert.verify`
+- `set mqtt.advert.verify <on|off>`
+
+**Parameters:**
+- `on`: verify the Ed25519 signature of each received advert and skip publishing any that fail (the same check the mesh applies before relaying)
+- `off`: publish received adverts as heard
+
+**Default:** `off`
+
+> **Note:** Adverts are uploaded before the mesh validates them, so a frame corrupted over the air that still passes the LoRa CRC is published with a mangled name or location. Leaving this off keeps that corruption visible to collectors; turning it on hides it from them. Dropped adverts are counted as `badsig=` in `get mqtt.stats`. Takes effect immediately.
 
 ---
 

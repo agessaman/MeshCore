@@ -1,7 +1,11 @@
 name: Check MQTT Preset Name Parity
 
-# Ensures observer-firmware and observer-firmware-dev share the same built-in
-# MQTT preset *names* (config details may differ). See scripts/check_mqtt_preset_parity.py.
+# Ensures observer-firmware and observer-firmware-dev ship an identical
+# src/helpers/MQTTPresets.h. A slot's preset is stored in /mqtt.json by name, and
+# firmware that does not know a name repairs it to "none" and writes the file
+# back, so a node that rolls back between channels loses that slot for good.
+# Behaviour that differs per channel belongs in MQTTPresetPolicy.h, which is not
+# compared. See scripts/check_mqtt_preset_parity.py.
 
 permissions:
   contents: read
@@ -81,9 +85,9 @@ jobs:
       - name: Self-test checker
         run: python3 scripts/check_mqtt_preset_parity.py --self-test
 
-      - name: Compare preset names
+      - name: Compare preset tables
         run: |
-          python3 scripts/check_mqtt_preset_parity.py \
+          python3 scripts/check_mqtt_preset_parity.py --exact \
             /tmp/preset-parity/prod.h \
             /tmp/preset-parity/dev.h \
             --label-a observer-firmware \

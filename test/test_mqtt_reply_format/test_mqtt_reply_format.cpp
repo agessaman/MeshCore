@@ -88,6 +88,27 @@ TEST(ReplyAppendf, NoWritePastBufferAcrossOverflowingChain) {
   EXPECT_EQ(c.buf()[c.logical - 1], '\0');  // still NUL-terminated
 }
 
+// The caller, not the helper, was where the mbedtls: line went wrong: production
+// negated a value ESP-IDF already stores as a magnitude, so it rendered
+// "mbedtls:-0xFFFF8100" instead of "-0x7F00". The chain test above never caught it
+// because it passes the correct magnitude straight in.
+TEST(MbedtlsErrorMagnitude, NormalisesEitherSignForTheNegativeHexConvention) {
+  EXPECT_EQ(mbedtlsErrorMagnitude(0x7F00), 0x7F00u);   // ESP-IDF 4.4 stores +magnitude
+  EXPECT_EQ(mbedtlsErrorMagnitude(-0x7F00), 0x7F00u);  // a later SDK may store the real code
+  EXPECT_EQ(mbedtlsErrorMagnitude(0), 0u);
+
+  char buf[32];
+  int pos = 0;
+  replyAppendf(buf, sizeof(buf), &pos, ", mbedtls:-0x%04X",
+               (unsigned)mbedtlsErrorMagnitude(0x7F00));
+  EXPECT_STREQ(buf, ", mbedtls:-0x7F00");
+}
+
+// Negating INT32_MIN is undefined behaviour, which is why the helper widens first.
+TEST(MbedtlsErrorMagnitude, HandlesInt32MinWithoutOverflow) {
+  EXPECT_EQ(mbedtlsErrorMagnitude(INT32_MIN), 2147483648u);
+}
+
 TEST(ReplyAppendf, ExactFitBoundary) {
   char buf[11];  // room for exactly "0123456789" + NUL
   int pos = 0;

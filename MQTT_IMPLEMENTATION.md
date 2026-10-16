@@ -80,7 +80,8 @@ reboot
 **9. Verify configuration**
 ```bash
 get wifi.ssid
-get wifi.status
+get link.status
+get link.diag
 get bridge.enabled
 get mqtt.rx
 get mqtt.tx
@@ -213,6 +214,8 @@ pio run -e Station_G2_repeater_observer_mqtt
 # Station G3 (ESP32)
 pio run -e Station_G3_ESP32_repeater_observer_mqtt
 pio run -e Station_G3_ESP32_room_server_observer_mqtt
+pio run -e Station_G3_ESP32_r2_repeater_observer_mqtt   # second RF slot
+pio run -e Station_G3_ESP32_r2_room_server_observer_mqtt   # second RF slot
 
 # LilyGo T-LoRa V2.1-1.6 (TTGO LoRa32 V1.0)
 pio run -e LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt
@@ -223,11 +226,14 @@ pio run -e ThinkNode_M7_repeater_observer_mqtt
 pio run -e ThinkNode_M7_room_server_observer_mqtt
 ```
 
-**ThinkNode M7 — WiFi only:** the M7 has an onboard CH390 Ethernet controller, and
-`ThinkNode_M7_companion_radio_ethernet` uses it, but the MQTT bridge's link
-management is bound to the WiFi station API, so the observer envs uplink over WiFi.
-See `UPSTREAM_BUGS.md` for the Ethernet gap. The board has PSRAM, so these builds
-get neighbors publication (`WITH_MQTT_NEIGHBORS`) automatically.
+**ThinkNode M7 — Ethernet preferred, WiFi fallback:** the observer envs use the onboard
+CH390 Ethernet when it has a DHCP lease at boot, otherwise the stored WiFi network, and
+switch between the two at runtime (`get link.status`, `get link.diag`). Nodes without a
+cable behave like WiFi observers after a brief (about 1 s) Ethernet probe at boot. The DHCP hostname is
+`meshcore-<node name>` on either medium. A first boot on Ethernet with no WiFi configured
+opens WebConfig on the LAN with a one-time login code printed on serial (and shown on
+the display), and requires replacing the admin password. The board has PSRAM, so these
+builds get neighbors publication (`WITH_MQTT_NEIGHBORS`) automatically.
 
 **TLora naming:** The env prefix `LilyGo_TLora_V2_1_1_6` is LilyGo’s **T-LoRa V2.1–1.6** board (SX1276); PlatformIO selects **`ttgo-lora32-v1`** (TTGO LoRa32 V1.0). **MQTT observer** envs extend a slim base **without** `sensor_base` so the image fits `min_spiffs`; **all other** `LilyGo_TLora_V2_1_1_6_*` targets still use optional I2C environmental sensors as before. The **`lilygo_tlora_c6`** variant is separate hardware (ESP32-C6).
 
@@ -247,6 +253,8 @@ Some MQTT observer builds use a non-default partition table to accommodate the l
 | `Station_G2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
 | `Station_G3_ESP32_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
 | `Station_G3_ESP32_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
+| `Station_G3_ESP32_r2_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | Second RF slot; same board and layout as the slot-1 env |
+| `Station_G3_ESP32_r2_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | same |
 | `LilyGo_TBeam_1W_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | Set in `boards/t_beam_1w.json`; required vs implicit `default.csv` |
 | `LilyGo_TBeam_1W_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | same |
 
@@ -288,7 +296,7 @@ flash regardless of target.
 
 #### Compile-time fresh-install defaults (`src/helpers/MQTTDefaults.h`)
 
-Optional PlatformIO `build_flags` override defaults written when `/mqtt_prefs` is first created. They do **not** change existing saved prefs on upgrade or reflash (unless `/mqtt_prefs` is erased).
+Optional PlatformIO `build_flags` override defaults used when `/mqtt.json` is first created. They do **not** change existing saved prefs on upgrade or reflash (unless `/mqtt.json` is erased).
 
 | Macro | Default | Notes |
 |-------|---------|-------|
@@ -516,22 +524,24 @@ These settings apply across all MQTT slots:
 - `get mqtt.packets` - Get packet message setting (on/off)
 - `get mqtt.raw` - Get raw message setting (on/off)
 - `get mqtt.rx` - Get RX packet uplinking setting (on/off)
+- `get mqtt.advert.verify` - Get advert signature filtering setting (on/off)
 - `get mqtt.tx` - Get TX packet uplinking setting (on/off/advert)
 - `get mqtt.interval` - Get status publish interval
 - `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; neighbors-enabled builds)
 - `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (neighbors-enabled builds)
 - `get mqtt.ntp` - Get effective NTP server hostname
-- `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, LoRa shows a compact `<server> ok|fail` list)
+- `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, or why a probe was rejected — `DNS failed`, `unsolicited reply`, `server unsynced`, ... — and LoRa shows a compact `<server> ok|fail` list)
 - `get mqtt.owner` - Get owner public key (serial console only)
 - `get mqtt.email` - Get owner email address (serial console only)
 
 #### Set Commands
 - `set mqtt.origin <name>` - Set device origin name
 - `set mqtt.iata <code>` - Set IATA code (auto-uppercased)
-- `set mqtt.status on|off` - Enable/disable status messages
+- `set mqtt.status on|off` - Enable/disable status messages (periodic *and* the one sent on each broker connect)
 - `set mqtt.packets on|off` - Enable/disable packet messages
 - `set mqtt.raw on|off` - Enable/disable raw messages
 - `set mqtt.rx on|off` - Enable/disable RX (received) packet uplinking
+- `set mqtt.advert.verify on|off` - Skip received adverts whose signature fails (default off)
 - `set mqtt.tx on|off|advert` - Set TX packet uplinking mode:
   - `on` - Uplink all transmitted packets
   - `advert` - Uplink only this node's own advert packets (self-originated)
@@ -543,12 +553,15 @@ These settings apply across all MQTT slots:
 - `set mqtt.owner <64-hex-char-public-key>` - Set owner public key
 - `set mqtt.email <email>` - Set owner email address
 
-### WiFi Commands
+### Network and WiFi Commands
 
 #### Get Commands
 - `get wifi.ssid` - Get WiFi SSID
 - `get wifi.pwd` - Get WiFi password
-- `get wifi.status` - Get WiFi connection status, IP, RSSI, and uptime
+- `get link.status` - Get the selected network medium, connection status, IP, signal when available, and uptime
+- `get link.diag` - Explain automatic Ethernet selection using controller initialization, link event, IP, WiFi fallback, route-lock, and reason state
+- `get link.dns` - Show the live DNS resolver list, the selected medium's gateway, and the DNS each medium's DHCP lease installed (trailing empty slots are omitted; `-` = empty slot or empty list, `none` = never leased)
+- `get wifi.status` - WiFi-only compatibility alias; reports n/a when another medium is selected
 - `get wifi.powersave` - Get WiFi power save mode (none/min/max)
 
 #### Set Commands
@@ -860,6 +873,22 @@ the radio actually performs in that case.
 ### Connection Handling
 - Automatic reconnection with exponential backoff per slot; a slot that stays down through
   the full backoff ladder is retried on a slow periodic probe instead of hammering the broker
+- Ethernet-preferred builds wait the full configured boot probe window for an Ethernet IP;
+  delayed or unavailable PHY carrier reporting does not shorten the DHCP deadline. The boot
+  selection log includes the measured probe duration.
+- CH390 startup initializes Arduino's shared network event runtime without associating WiFi;
+  this keeps the framework's DNS and TLS hostname paths safe when Ethernet wins directly.
+- Ethernet/WiFi transitions are logged. A lost or changed route closes every live MQTT
+  transport with a bounded disconnect that keeps the client task; a slot that was still
+  connecting is stopped instead, so its attempt cannot complete against the old route and
+  report a connection that no longer exists. When the same link returns, each slot gets one
+  immediate attempt at its current backoff rung (a tripped circuit breaker gets one immediate
+  probe); a switch to the other medium also clears backoff and breakers
+- Each medium's DHCP DNS servers are remembered when it gets its lease and restored when it is
+  selected again. lwIP keeps one global resolver list, so without this a node that fell back to
+  WiFi and then failed back to Ethernet would keep asking the WiFi network's DNS server
+- WiFi credentials changed at runtime (`set wifi.ssid` / `set wifi.pwd`) are used on the next
+  reconnect attempt without a reboot
 - Packets are queued while a slot is disconnected and flushed when it recovers
 
 ### Raw Radio Data Capture
@@ -880,7 +909,8 @@ the radio actually performs in that case.
 ### NTP Time Synchronization
 - Automatic time synchronization with NTP servers (required for JWT authentication)
 - Default primary: `pool.ntp.org`; built-in fallbacks (tried sequentially on failure): `time.google.com`, `time.cloudflare.com`, `time.aws.com`, `time.nist.gov`
-- Periodic time updates (every hour) on the effective primary only; system time is kept in UTC
+- Periodic time updates (every hour) through the same validated probe, one attempt per server in list order; system time is kept in UTC
+- Replies are validated before they are trusted: the datagram must be a full-length NTPv3/v4 server reply from the queried address and port, from a synchronised server (stratum 1-15, no leap alarm), echoing the random transmit timestamp of the request, with a plausible epoch. Anything else is discarded and the clock, the RTC and JWT issuance are left alone
 - Configure and diagnose with `set mqtt.ntp` / `get mqtt.ntp` / `get mqtt.ntp.diag` — see [MQTT Shared Commands](#mqtt-shared-commands)
 
 ### Authentication

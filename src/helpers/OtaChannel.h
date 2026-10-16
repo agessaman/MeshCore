@@ -82,8 +82,9 @@ static inline bool ota_parse_channel(const char* arg, uint8_t* out) {
 // or without a transport this node depends on. Bump OTA_STATE_GEN when a build starts
 // storing state that older builds cannot read.
 //   1: /prefs.json + /mqtt_prefs
+//   2: /mqtt.json
 #ifndef OTA_STATE_GEN
-#define OTA_STATE_GEN 1
+#define OTA_STATE_GEN 2
 #endif
 #define OTA_CAP_ETH 0x01  // carries MQTT over Ethernet
 #if defined(NETWORK_PREFER_ETHERNET)

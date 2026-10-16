@@ -1,6 +1,12 @@
 #include "MyMesh.h"
 #include <algorithm>
+#include <climits>
 #include <helpers/RxReservePacketManager.h>
+#include <helpers/NetworkLink.h>
+#include <helpers/NetworkHostname.h>
+#if defined(ESP_PLATFORM)
+#include <WiFi.h>
+#endif
 #include <helpers/OtaChannel.h>
 #if defined(WITH_MQTT_NEIGHBORS)
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
@@ -247,6 +253,11 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+#ifdef DISPLAY_ACTIVITY_DASHBOARD
+  // Valid parsed RF packet: the only event the dashboard's window counts.
+  _activity.recordPacket(millis(), (uint16_t)len, _radio->getEstAirtimeFor(len),
+                         (int8_t)(pkt->getSNR() * 4.0f), (int16_t)_radio->getLastRSSI());
+#endif
 #ifdef WITH_MQTT_BRIDGE
   // MQTT bridge: always feed RX packets — bridge decides based on mqtt.rx setting
   if (_prefs.bridge_enabled && bridge) bridge->onPacketReceived(pkt);
@@ -545,7 +556,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     memcpy(&sender_timestamp, data, 4); // timestamp (by sender's RTC clock - which could be wrong)
     uint8_t flags = (data[4] >> 2);        // message attempt number, and other flags
 
-    if (!(flags == TXT_TYPE_PLAIN || flags == TXT_TYPE_CLI_DATA)) {
+    if (!(flags == TXT_TYPE_PLAIN || flags == TXT_TYPE_CLI_DATA || flags == TXT_TYPE_CLI_COMMAND)) {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: unsupported command flags received: flags=%02x", (uint32_t)flags);
     } else if (sender_timestamp >= client->last_timestamp) { // prevent replay attacks, but send Acks for retries
       bool is_retry = (sender_timestamp == client->last_timestamp);
@@ -565,7 +576,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
 
       uint8_t temp[166];
       bool send_ack;
-      if (flags == TXT_TYPE_CLI_DATA) {
+      if (flags == TXT_TYPE_CLI_DATA || flags == TXT_TYPE_CLI_COMMAND) {
         if (client->isAdmin()) {
           if (is_retry) {
             temp[5] = 0; // no reply
@@ -892,7 +903,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.radio_fem_txgain = 0;
 
   // Observer defaults (alert.*, etc.) moved to applyMQTTDefaults() — they live
-  // in /mqtt_prefs now, not NodePrefs.
+  // in /mqtt.json now, not NodePrefs.
 
   // bridge defaults (same as repeater)
   _prefs.bridge_enabled = 1;    // enabled
@@ -901,7 +912,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bridge_baud = 115200;  // baud rate
   _prefs.bridge_channel = 1;    // channel 1
 
-  // MQTT/WiFi/timezone defaults live in /mqtt_prefs now (see applyMQTTDefaults).
+  // MQTT/WiFi/timezone defaults live in /mqtt.json now (see applyMQTTDefaults).
 
   next_post_idx = 0;
   next_client_idx = 0;
@@ -933,11 +944,48 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   memset(default_scope.key, 0, sizeof(default_scope.key));
 }
 
+#if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+// Only an automatic link carries a hostname today (see the header note). The
+// value reaches DHCP when the link next starts or reconnects: IDF 4.4 states
+// plainly that a hostname changed after the interface is up "would only be
+// reflected once the interface restarts/reconnects", and Arduino 2.x's
+// WiFi.setHostname() does not even touch a running netif — it writes a static
+// string the netif reads at bring-up. So this cannot rename a live lease, and
+// deliberately does not bounce the link to force one: dropping an observer's
+// route mid-operation costs every MQTT slot a reconnect, which is not a
+// reasonable price for a cosmetic rename.
+void MyMesh::applyNetworkHostname(const char* when) {
+  NetworkLink& link = activeNetworkLink();
+  if (!link.isAutomatic()) return;
+  char network_hostname[NetworkHostname::kBufferSize];
+  NetworkHostname::build(network_hostname, sizeof(network_hostname),
+                         _prefs.node_name, self_id.pub_key, PUB_KEY_SIZE);
+  link.setHostname(network_hostname);
+  Serial.printf("Network: hostname %s%s\n", network_hostname, when);
+}
+#endif
+
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
+
+#if defined(WITH_MQTT_BRIDGE) && defined(ESP_PLATFORM)
+  NetworkLink& boot_network = activeNetworkLink();
+  if (boot_network.isAutomatic()) {
+    applyNetworkHostname("");
+    MQTTPrefs* obs = _cli.getObserverPrefs();
+    Serial.printf("Network: probing Ethernet for up to %lums\n",
+                  (unsigned long)NETWORK_ETHERNET_BOOT_WAIT_MS);
+    const uint32_t ethernet_probe_started_at = millis();
+    boot_network.bootstrap(obs->wifi_ssid, obs->wifi_password,
+                           NETWORK_ETHERNET_BOOT_WAIT_MS);
+    Serial.printf("Network: selected %s (%s) after %lums\n",
+                  boot_network.mediumName(), boot_network.statusName(),
+                  (unsigned long)(millis() - ethernet_probe_started_at));
+  }
+#endif
 
   acl.load(_fs, self_id);
   region_map.load(_fs);
@@ -965,8 +1013,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
-  board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);   // LoRa FEM LNA (FEM boards only)
-  board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
+  board.attachDynamicPrefs(_prefs.getCustom());
 
   updateAdvertTimer();
   updateFloodAdvertTimer();
@@ -1015,9 +1062,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
 
 #if defined(WITH_WEBCONFIG) && !defined(WEBCONFIG_NO_AUTO_AP)
-  // First-boot setup portal: raised only when no WiFi has ever been configured,
-  // so an OTA onto a deployed (configured) node can never open an AP.
-  if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+  // Existing Wi-Fi installs are complete by virtue of their stored SSID. An
+  // Ethernet-only install uses the explicit completion marker instead.
+  if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
     char wc_reply[160];
     startWebConfig(false, wc_reply);
     Serial.println(wc_reply);
@@ -1278,15 +1325,18 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   }
   if (force_ap) {
     // The setup AP owns WiFi outright; refuse while the bridge holds the STA.
-    if (bridge && bridge->isRunning()) {
+    if (bridge && bridge->isRunning() &&
+        activeNetworkLink().medium() != NetworkMedium::Ethernet) {
       strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
       return true;
     }
     _webconfig->startSetupMode(reply);
-  } else if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
-    _webconfig->startSetupMode(reply);   // unconfigured: same portal as first boot
+  } else if (activeNetworkLink().isConnected()) {
+    _webconfig->startLanMode(!mqttNetworkSetupComplete(_cli.getObserverPrefs()), reply);
+  } else if (!mqttNetworkSetupComplete(_cli.getObserverPrefs())) {
+    _webconfig->startSetupMode(reply);
   } else {
-    _webconfig->startLanMode(reply);     // reports "WiFi not connected" if down
+    strcpy(reply, "Err: selected network not connected");
   }
   return true;
 }
@@ -1321,12 +1371,17 @@ void MyMesh::onConfigBatchEnd() {
 // same sources as the stats CLI replies and `get mqtt.stats`.
 void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
   char ip[20] = "";
-  int wifi_rssi = 0;
-  if (WiFi.status() == WL_CONNECTED) {
-    strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
-    wifi_rssi = WiFi.RSSI();
-  } else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
+  char wifi_rssi[12] = "null";
+  NetworkLink& network = activeNetworkLink();
+  const char* network_medium = network.mediumName();
+  if (network.isConnected()) {
+    strncpy(ip, network.localIP().toString().c_str(), sizeof(ip) - 1);
+    const int signal = network.rssi();
+    if (signal != INT_MIN) snprintf(wifi_rssi, sizeof(wifi_rssi), "%d", signal);
+  }
+  else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
     strncpy(ip, WiFi.softAPIP().toString().c_str(), sizeof(ip) - 1);
+    network_medium = "wifi-ap";
   }
   int pos = snprintf(buf, buf_size,
       "{\"uptime_s\":%lu,\"batt_mv\":%u,"
@@ -1335,7 +1390,8 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
       "\"airtime_s\":%lu,\"rx_airtime_s\":%lu,"
       "\"recv\":%lu,\"sent\":%lu,\"rx_err\":%lu,"
       "\"sent_flood\":%lu,\"sent_direct\":%lu,\"recv_flood\":%lu,\"recv_direct\":%lu,"
-      "\"tx_queue\":%d,\"wifi_rssi\":%d,\"ip\":\"%s\",\"mqtt_queue\":%d,\"slots\":[",
+      "\"tx_queue\":%d,\"wifi_rssi\":%s,\"network_medium\":\"%s\","
+      "\"ip\":\"%s\",\"mqtt_queue\":%d,\"slots\":[",
       (unsigned long)(uptime_millis / 1000), (unsigned)board.getBattMilliVolts(),
       (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
       (unsigned long)ESP.getMaxAllocHeap(),
@@ -1346,7 +1402,7 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
       (unsigned long)radio_driver.getPacketsRecvErrors(),
       (unsigned long)getNumSentFlood(), (unsigned long)getNumSentDirect(),
       (unsigned long)getNumRecvFlood(), (unsigned long)getNumRecvDirect(),
-      (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, ip,
+      (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, network_medium, ip,
       bridge ? bridge->getQueueSize() : 0);
   if (pos < 0 || pos >= (int)buf_size - 3) return;  // truncated; snprintf terminated it
   bool first = true;
@@ -1498,6 +1554,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       addSystemPost(msg);
       snprintf(reply, MAX_POST_TEXT_LEN, "OK");
     }
+  } else if (memcmp(command, "set repeat on", 13) == 0) {
+    strcpy(reply, "ERR - repeat now deprecated");
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1511,6 +1569,19 @@ void MyMesh::loop() {
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing can take time, so we prioritize radio reception
   mesh::Mesh::loop();
+
+#ifdef WITH_MQTT_BRIDGE
+  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
+  // Release the withheld resources whenever that late ack lands, and restart
+  // only a bridge that is still meant to be running.
+  if (bridge && bridge->stopAcknowledgedLate()) {
+    bridge->pollLateStopAck();
+    if (_bridge_resume_pending && _prefs.bridge_enabled) {
+      Serial.println("MQTT: stop acknowledged late - resuming bridge");
+      setBridgeState(true);
+    }
+  }
+#endif
 #ifdef WITH_MQTT_BRIDGE
   // bridge.loop() is now handled by FreeRTOS task on Core 0 - no need to call it here
 #endif
@@ -1606,14 +1677,18 @@ void MyMesh::loop() {
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
 
     bool may_flash = true;
+    if (bridge) bridge->pollLateStopAck();
     if (bridge_was_running) {
       setBridgeState(false);
       // OTA must not write after a forced/timed-out MQTT shutdown: its TLS/heap
       // ownership is uncertain until a subsequent clean start/stop cycle.
       may_flash = bridge && bridge->canFlashAfterStop();
-      if (!may_flash) {
-        Serial.println("OTA: aborted, MQTT stop did not complete cleanly");
-      }
+    } else if (bridge && bridge->isStopUnproven()) {
+      // Reads as stopped, but an unacknowledged MQTT task may still own TLS/client state.
+      may_flash = false;
+    }
+    if (!may_flash) {
+      Serial.println("OTA: aborted, MQTT stop did not complete cleanly");
     }
 
     char ota_reply[160];

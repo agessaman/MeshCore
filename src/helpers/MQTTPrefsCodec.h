@@ -53,6 +53,9 @@ static const size_t kEncodedSize = sizeof(MQTTPrefsHeader) + kV1BaselinePayloadS
 // refuses to overwrite the file, so the node cannot be recovered over the air.
 // Touching any filter opts that node into the longer payload — a deliberate,
 // operator-initiated trade rather than a side effect of upgrading.
+// The encoder below is retained for host migration fixtures and downgrade
+// compatibility tests. Production firmware reads legacy binary files but only
+// writes the JSON schema.
 inline size_t payloadLenFor(const MQTTPrefs& prefs) {
   return MQTTPacketFilter::allMasksDefault(prefs.mqtt_slot_packet_filter,
                                            MQTT_PREFS_SLOT_COUNT)
@@ -68,13 +71,60 @@ inline MQTTPrefsHeader makeHeader(size_t payload_len) {
   return header;
 }
 
+inline void freezeV1(const MQTTPrefs& prefs, LegacyV1MQTTPrefs* frozen) {
+  if (frozen == nullptr) return;
+  memset(frozen, 0, sizeof(*frozen));
+  memcpy(frozen->mqtt_origin, prefs.mqtt_origin, sizeof(frozen->mqtt_origin));
+  memcpy(frozen->mqtt_iata, prefs.mqtt_iata, sizeof(frozen->mqtt_iata));
+  frozen->mqtt_status_enabled = prefs.mqtt_status_enabled;
+  frozen->mqtt_packets_enabled = prefs.mqtt_packets_enabled;
+  frozen->mqtt_raw_enabled = prefs.mqtt_raw_enabled;
+  frozen->mqtt_tx_enabled = prefs.mqtt_tx_enabled;
+  frozen->mqtt_status_interval = prefs.mqtt_status_interval;
+  memcpy(frozen->wifi_ssid, prefs.wifi_ssid, sizeof(frozen->wifi_ssid));
+  memcpy(frozen->wifi_password, prefs.wifi_password, sizeof(frozen->wifi_password));
+  frozen->wifi_power_save = prefs.wifi_power_save;
+  memcpy(frozen->timezone_string, prefs.timezone_string, sizeof(frozen->timezone_string));
+  frozen->timezone_offset = prefs.timezone_offset;
+  memcpy(frozen->mqtt_slot_preset, prefs.mqtt_slot_preset, sizeof(frozen->mqtt_slot_preset));
+  memcpy(frozen->mqtt_slot_host, prefs.mqtt_slot_host, sizeof(frozen->mqtt_slot_host));
+  memcpy(frozen->mqtt_slot_port, prefs.mqtt_slot_port, sizeof(frozen->mqtt_slot_port));
+  memcpy(frozen->mqtt_slot_username, prefs.mqtt_slot_username, sizeof(frozen->mqtt_slot_username));
+  memcpy(frozen->mqtt_slot_password, prefs.mqtt_slot_password, sizeof(frozen->mqtt_slot_password));
+  memcpy(frozen->mqtt_owner_public_key, prefs.mqtt_owner_public_key,
+         sizeof(frozen->mqtt_owner_public_key));
+  memcpy(frozen->mqtt_email, prefs.mqtt_email, sizeof(frozen->mqtt_email));
+  memcpy(frozen->mqtt_slot_token, prefs.mqtt_slot_token, sizeof(frozen->mqtt_slot_token));
+  memcpy(frozen->mqtt_slot_topic, prefs.mqtt_slot_topic, sizeof(frozen->mqtt_slot_topic));
+  memcpy(frozen->mqtt_slot_audience, prefs.mqtt_slot_audience,
+         sizeof(frozen->mqtt_slot_audience));
+  frozen->mqtt_rx_enabled = prefs.mqtt_rx_enabled;
+  memcpy(frozen->mqtt_ntp_server, prefs.mqtt_ntp_server, sizeof(frozen->mqtt_ntp_server));
+  frozen->snmp_enabled = prefs.snmp_enabled;
+  memcpy(frozen->snmp_community, prefs.snmp_community, sizeof(frozen->snmp_community));
+  frozen->radio_watchdog_minutes = prefs.radio_watchdog_minutes;
+  frozen->alert_enabled = prefs.alert_enabled;
+  memcpy(frozen->alert_psk_hex, prefs.alert_psk_hex, sizeof(frozen->alert_psk_hex));
+  frozen->alert_wifi_minutes = prefs.alert_wifi_minutes;
+  frozen->alert_mqtt_minutes = prefs.alert_mqtt_minutes;
+  frozen->alert_min_interval_min = prefs.alert_min_interval_min;
+  memcpy(frozen->alert_hashtag, prefs.alert_hashtag, sizeof(frozen->alert_hashtag));
+  memcpy(frozen->alert_region, prefs.alert_region, sizeof(frozen->alert_region));
+  frozen->mqtt_neighbors_enabled = prefs.mqtt_neighbors_enabled;
+  frozen->mqtt_neighbors_interval = prefs.mqtt_neighbors_interval;
+  memcpy(frozen->mqtt_slot_packet_filter, prefs.mqtt_slot_packet_filter,
+         sizeof(frozen->mqtt_slot_packet_filter));
+}
+
 inline size_t encode(const MQTTPrefs& prefs, uint8_t* output, size_t output_size) {
   const size_t payload_len = payloadLenFor(prefs);
   const size_t encoded_size = sizeof(MQTTPrefsHeader) + payload_len;
   if (output == nullptr || output_size < encoded_size) return 0;
   const MQTTPrefsHeader header = makeHeader(payload_len);
+  LegacyV1MQTTPrefs frozen;
+  freezeV1(prefs, &frozen);
   memcpy(output, &header, sizeof(header));
-  memcpy(output + sizeof(header), &prefs, payload_len);
+  memcpy(output + sizeof(header), &frozen, payload_len);
   return encoded_size;
 }
 
@@ -343,6 +393,120 @@ inline bool isPlausibleLegacy(Source source, const uint8_t* input, size_t size) 
     }
     default:
       return false;
+  }
+}
+
+// A valid v1 header proves the intended layout, not that a torn or corrupted
+// payload still contains bounded C strings. Validate every field present at a
+// shipped v1 boundary before copying it into the runtime object; otherwise the
+// later semantic validators and JSON writer could scan beyond a fixed array.
+inline bool isPlausibleV1(const LegacyV1MQTTPrefs& prefs, size_t payload_len) {
+  if (payload_len != kV1PreObserverPayloadSize &&
+      payload_len != kV1PreNeighborsPayloadSize &&
+      payload_len != kV1PreFilterPayloadSize &&
+      payload_len != kV1BaselinePayloadSize) {
+    return false;
+  }
+  const uint8_t* input = reinterpret_cast<const uint8_t*>(&prefs);
+  // A v1 header already identifies the layout. At this stage only reject
+  // fields that could make later C-string validation/serialization read past a
+  // fixed array; numeric values are safely repaired by MQTTPrefsSerializer.
+  if (!hasTerminatedText(input, payload_len,
+          offsetof(LegacyV1MQTTPrefs, mqtt_origin), sizeof(prefs.mqtt_origin)) ||
+      !hasTerminatedText(input, payload_len,
+          offsetof(LegacyV1MQTTPrefs, mqtt_iata), sizeof(prefs.mqtt_iata)) ||
+      !hasTerminatedText(input, payload_len,
+          offsetof(LegacyV1MQTTPrefs, wifi_ssid), sizeof(prefs.wifi_ssid)) ||
+      !hasTerminatedText(input, payload_len,
+          offsetof(LegacyV1MQTTPrefs, wifi_password), sizeof(prefs.wifi_password)) ||
+      !hasTerminatedText(input, payload_len,
+          offsetof(LegacyV1MQTTPrefs, timezone_string), sizeof(prefs.timezone_string)) ||
+      !hasPlausibleSharedAuth(input, payload_len,
+          offsetof(LegacyV1MQTTPrefs, mqtt_owner_public_key),
+          offsetof(LegacyV1MQTTPrefs, mqtt_email)) ||
+      !hasPlausibleSlotText(input, payload_len, MQTT_PREFS_SLOT_COUNT,
+          offsetof(LegacyV1MQTTPrefs, mqtt_slot_preset),
+          offsetof(LegacyV1MQTTPrefs, mqtt_slot_host),
+          offsetof(LegacyV1MQTTPrefs, mqtt_slot_username),
+          offsetof(LegacyV1MQTTPrefs, mqtt_slot_password),
+          offsetof(LegacyV1MQTTPrefs, mqtt_slot_token),
+          offsetof(LegacyV1MQTTPrefs, mqtt_slot_topic),
+          offsetof(LegacyV1MQTTPrefs, mqtt_slot_audience)) ||
+      !hasTerminatedText(input, payload_len,
+          offsetof(LegacyV1MQTTPrefs, mqtt_ntp_server),
+          sizeof(prefs.mqtt_ntp_server))) {
+    return false;
+  }
+  if (payload_len >= kV1PreNeighborsPayloadSize) {
+    if (!hasTerminatedText(input, payload_len,
+            offsetof(LegacyV1MQTTPrefs, snmp_community),
+            sizeof(prefs.snmp_community)) ||
+        !hasTerminatedText(input, payload_len,
+            offsetof(LegacyV1MQTTPrefs, alert_psk_hex),
+            sizeof(prefs.alert_psk_hex)) ||
+        !hasTerminatedText(input, payload_len,
+            offsetof(LegacyV1MQTTPrefs, alert_hashtag),
+            sizeof(prefs.alert_hashtag)) ||
+        !hasTerminatedText(input, payload_len,
+            offsetof(LegacyV1MQTTPrefs, alert_region),
+            sizeof(prefs.alert_region))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline void migrateV1(const LegacyV1MQTTPrefs& old_prefs, size_t payload_len,
+                      MQTTPrefs* prefs) {
+  if (prefs == nullptr || payload_len < kV1PreObserverPayloadSize) return;
+  memcpy(prefs->mqtt_origin, old_prefs.mqtt_origin, sizeof(prefs->mqtt_origin));
+  memcpy(prefs->mqtt_iata, old_prefs.mqtt_iata, sizeof(prefs->mqtt_iata));
+  prefs->mqtt_status_enabled = old_prefs.mqtt_status_enabled;
+  prefs->mqtt_packets_enabled = old_prefs.mqtt_packets_enabled;
+  prefs->mqtt_raw_enabled = old_prefs.mqtt_raw_enabled;
+  prefs->mqtt_tx_enabled = old_prefs.mqtt_tx_enabled;
+  prefs->mqtt_status_interval = old_prefs.mqtt_status_interval;
+  memcpy(prefs->wifi_ssid, old_prefs.wifi_ssid, sizeof(prefs->wifi_ssid));
+  memcpy(prefs->wifi_password, old_prefs.wifi_password, sizeof(prefs->wifi_password));
+  prefs->wifi_power_save = old_prefs.wifi_power_save;
+  memcpy(prefs->timezone_string, old_prefs.timezone_string, sizeof(prefs->timezone_string));
+  prefs->timezone_offset = old_prefs.timezone_offset;
+  memcpy(prefs->mqtt_slot_preset, old_prefs.mqtt_slot_preset, sizeof(prefs->mqtt_slot_preset));
+  memcpy(prefs->mqtt_slot_host, old_prefs.mqtt_slot_host, sizeof(prefs->mqtt_slot_host));
+  memcpy(prefs->mqtt_slot_port, old_prefs.mqtt_slot_port, sizeof(prefs->mqtt_slot_port));
+  memcpy(prefs->mqtt_slot_username, old_prefs.mqtt_slot_username, sizeof(prefs->mqtt_slot_username));
+  memcpy(prefs->mqtt_slot_password, old_prefs.mqtt_slot_password, sizeof(prefs->mqtt_slot_password));
+  memcpy(prefs->mqtt_owner_public_key, old_prefs.mqtt_owner_public_key,
+         sizeof(prefs->mqtt_owner_public_key));
+  memcpy(prefs->mqtt_email, old_prefs.mqtt_email, sizeof(prefs->mqtt_email));
+  memcpy(prefs->mqtt_slot_token, old_prefs.mqtt_slot_token, sizeof(prefs->mqtt_slot_token));
+  memcpy(prefs->mqtt_slot_topic, old_prefs.mqtt_slot_topic, sizeof(prefs->mqtt_slot_topic));
+  memcpy(prefs->mqtt_slot_audience, old_prefs.mqtt_slot_audience,
+         sizeof(prefs->mqtt_slot_audience));
+  prefs->mqtt_rx_enabled = old_prefs.mqtt_rx_enabled;
+  memcpy(prefs->mqtt_ntp_server, old_prefs.mqtt_ntp_server, sizeof(prefs->mqtt_ntp_server));
+
+  if (payload_len >= kV1PreNeighborsPayloadSize) {
+    prefs->snmp_enabled = old_prefs.snmp_enabled;
+    memcpy(prefs->snmp_community, old_prefs.snmp_community, sizeof(prefs->snmp_community));
+    prefs->radio_watchdog_minutes = old_prefs.radio_watchdog_minutes;
+    prefs->alert_enabled = old_prefs.alert_enabled;
+    memcpy(prefs->alert_psk_hex, old_prefs.alert_psk_hex, sizeof(prefs->alert_psk_hex));
+    prefs->alert_wifi_minutes = old_prefs.alert_wifi_minutes;
+    prefs->alert_mqtt_minutes = old_prefs.alert_mqtt_minutes;
+    prefs->alert_min_interval_min = old_prefs.alert_min_interval_min;
+    memcpy(prefs->alert_hashtag, old_prefs.alert_hashtag, sizeof(prefs->alert_hashtag));
+    memcpy(prefs->alert_region, old_prefs.alert_region, sizeof(prefs->alert_region));
+    // The pre-neighbors payload includes the old zero padding byte at this
+    // offset; copying it preserves the deployed format's disabled default.
+    prefs->mqtt_neighbors_enabled = old_prefs.mqtt_neighbors_enabled;
+  }
+  if (payload_len >= kV1PreFilterPayloadSize) {
+    prefs->mqtt_neighbors_interval = old_prefs.mqtt_neighbors_interval;
+  }
+  if (payload_len >= kV1BaselinePayloadSize) {
+    memcpy(prefs->mqtt_slot_packet_filter, old_prefs.mqtt_slot_packet_filter,
+           sizeof(prefs->mqtt_slot_packet_filter));
   }
 }
 

@@ -33,12 +33,23 @@
 // Fix: [esp32_base] adds `-Wl,--wrap=esp_transport_ws_init`, so every
 // creation of a WS transport (esp-mqtt does one per wss slot) is routed
 // through __wrap_esp_transport_ws_init below, which replaces the freshly
-// allocated 1024-byte buffer with a (WS_BUFFER_SIZE + 1)-byte one. The
-// out-of-bounds index WS_BUFFER_SIZE then lands on our extra byte and the
-// handshake fails cleanly ("Upgrade" header not found) instead of corrupting
-// the heap. Upstream fixed this in ESP-IDF 5.x, so this file compiles to a
+// allocated 1024-byte buffer with a (WS_BUFFER_SIZE + 1)-byte one, so the
+// out-of-bounds index WS_BUFFER_SIZE lands on our extra byte instead of the
+// heap canary. Upstream fixed this in ESP-IDF 5.x, so this file compiles to a
 // pass-through there and can be deleted (together with the --wrap flag) when
 // the fork moves to Arduino core 3.x.
+//
+// Scope: this stops the heap corruption and NOTHING else. It does not make an
+// oversized response fail the handshake — v4.4's read loop also exits on
+// `header_len < WS_BUFFER_SIZE` going false, and then still accepts the
+// connection if "Sec-WebSocket-Accept:" was inside those first bytes (it comes
+// early, so it usually is). ws_connect() therefore returns success on a partial
+// header block and the unread remainder arrives as the first "payload" read,
+// where the deframer parses HTTP bytes as a frame header. Observed on hardware
+// 2026-08-12: a large Cloudflare CSP header produced exactly that, surfacing as
+// `Invalid MSG_TYPE response: 3`. Only IDF 5.2+ fixes it (it requires the
+// "\r\n\r\n" delimiter, preserves the bytes after it, and fails cleanly when the
+// buffer fills); it cannot be patched here because transport_ws.c is precompiled.
 //
 // transport_ws_t below is copied verbatim from ESP-IDF release/v4.4
 // transport_ws.c (the struct is file-private, so it is not in any shipped
