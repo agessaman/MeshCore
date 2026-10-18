@@ -85,15 +85,19 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ### Start an Over-The-Air (OTA) firmware update
 **Usage:**
-- `start ota` — serves the ElegantOTA web upload page on the selected Ethernet or Wi-Fi IP when connected, otherwise raises the `MeshCore-OTA` Wi-Fi hotspot. The manual-OTA session stops after 15 minutes unless an upload is in progress.
-- `start ota ap` — always raises the `MeshCore-OTA` Wi-Fi hotspot, even when joined to a network. Use this when the network applies client isolation and the station IP isn't reachable.
-- `stop ota` — stops an idle manual-OTA web server, releases port 80, and re-enables automatic network switching. It refuses while a firmware upload is in progress.
+- `start ota`: serves the ElegantOTA web upload page on the selected Ethernet or Wi-Fi IP when connected, otherwise raises the `MeshCore-OTA` Wi-Fi hotspot. The manual-OTA session stops after 15 minutes unless an upload is in progress.
+- `start ota ap`: always raises the `MeshCore-OTA` Wi-Fi hotspot, even when joined to a network. Use this when the network applies client isolation and the station IP isn't reachable.
+- `stop ota`: stops an idle manual-OTA web server, releases port 80, and re-enables automatic network switching. It refuses while a firmware upload is in progress.
 
-### Switch the OTA release channel (observer builds)
+### Online firmware update (observer builds)
 
-- `ota branch` — shows the selected channel, the channel this build was made for, and the manifest base `ota check`/`ota update` will use.
-- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`) — pull future `ota update`s from that channel. The selection is saved; run `ota update` to switch.
-- `ota branch default` — follow the channel this build was made for.
+- `ota check`: reports whether the release manifest has a newer build for this board. Does not flash.
+- `ota update`: downloads and flashes the newer build, then reboots. Refuses builds that change the partition table (flash those by cable).
+- `ota branch`: shows the selected channel, the channel this build came from, and the manifest URL.
+- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`): pull future updates from that channel. The choice is saved; run `ota update` to switch.
+- `ota branch default`: follow the channel this build came from.
+
+See [MQTT_IMPLEMENTATION.md](../MQTT_IMPLEMENTATION.md#firmware-updates-ota) for replies and channel-switch rules.
 
 ---
 
