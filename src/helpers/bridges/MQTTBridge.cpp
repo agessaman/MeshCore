@@ -3059,7 +3059,7 @@ bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, size_
 // ---------------------------------------------------------------------------
 bool MQTTBridge::substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size) {
   return mqttBuildPublicationTopic(MQTT_ROUTE_CUSTOM, (int)type, tmpl,
-                                   _iata, _device_id, _obs->mqtt_slot_token[slot_index],
+                                   slotIata(slot_index), _device_id, _obs->mqtt_slot_token[slot_index],
                                    buf, buf_size);
 }
 
@@ -3079,7 +3079,7 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
     MQTTTopicRouteStyle style = (slot.preset->topic_style == MQTT_TOPIC_MESHRANK)
         ? MQTT_ROUTE_MESHRANK : MQTT_ROUTE_MESHCORE;
     return mqttBuildPublicationTopic(style, (int)type, nullptr,
-                                     _iata, _device_id, _obs->mqtt_slot_token[index],
+                                     slotIata(index), _device_id, _obs->mqtt_slot_token[index],
                                      topic_buf, buf_size);
   }
 
@@ -3089,7 +3089,7 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
   }
   // Default: meshcore format
   return mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, (int)type, nullptr,
-                                   _iata, _device_id, _obs->mqtt_slot_token[index],
+                                   slotIata(index), _device_id, _obs->mqtt_slot_token[index],
                                    topic_buf, buf_size);
 }
 
@@ -3448,11 +3448,14 @@ bool MQTTBridge::isReady() const {
   return _initialized && isNetworkConfigValid(_obs);
 }
 
-bool MQTTBridge::isIATAValid() const {
-  if (strlen(_iata) == 0 || strcmp(_iata, "XXX") == 0) {
-    return false;
-  }
-  return true;
+const char* MQTTBridge::slotIata(int index) const {
+  if (!mqttTopicSlotIndexValid(index, RUNTIME_MQTT_SLOTS)) return _iata;
+  return mqttSlotIata(_iata, _obs->mqtt_slot_iata[index]);
+}
+
+bool MQTTBridge::isSlotIATAValid(int index) const {
+  const char* iata = slotIata(index);
+  return iata[0] != '\0' && strcmp(iata, "XXX") != 0;
 }
 
 bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) const {
@@ -3468,7 +3471,7 @@ bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) co
         return false;
       }
     } else if (slot.preset->topic_style == MQTT_TOPIC_MESHCORE) {
-      if (!isIATAValid()) {
+      if (!isSlotIATAValid(index)) {
         if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt.iata <airport_code>");
         return false;
       }
@@ -3485,7 +3488,7 @@ bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) co
     }
   } else {
     // Custom slot without a topic template uses meshcore format, needs IATA
-    if (_obs->mqtt_slot_topic[index][0] == '\0' && !isIATAValid()) {
+    if (_obs->mqtt_slot_topic[index][0] == '\0' && !isSlotIATAValid(index)) {
       if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt.iata <airport_code> or set mqtt%d.topic <template>", index + 1);
       return false;
     }

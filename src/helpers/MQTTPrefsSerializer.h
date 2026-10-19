@@ -184,6 +184,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
     bool _seen_preset = false, _seen_host = false, _seen_port = false;
     bool _seen_username = false, _seen_password = false, _seen_token = false;
     bool _seen_topic = false, _seen_audience = false, _seen_filter = false;
+    bool _seen_iata = false;
   protected:
     void structure() override {
       defStrict("preset", _prefs->mqtt_slot_preset[_index],
@@ -202,6 +203,8 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       defStrict("audience", _prefs->mqtt_slot_audience[_index],
                 sizeof(_prefs->mqtt_slot_audience[_index]), _seen_audience);
       defStrict("packet_filter", _filter, _seen_filter);
+      defStrict("iata", _prefs->mqtt_slot_iata[_index],
+                sizeof(_prefs->mqtt_slot_iata[_index]), _seen_iata);
     }
   public:
     SlotPrefs(MQTTPrefs* prefs, int index)
@@ -218,6 +221,22 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       }
       _prefs->mqtt_slot_port[_index] = static_cast<uint16_t>(_port);
       _prefs->mqtt_slot_packet_filter[_index] = static_cast<uint16_t>(_filter);
+      // An unusable override is dropped rather than repaired to a default: the
+      // slot then falls back to the global IATA, the same as never setting one.
+      char* iata = _prefs->mqtt_slot_iata[_index];
+      if (iata[0] != '\0') {
+        if (!mqttIataValid(iata)) {
+          iata[0] = '\0';
+          *repaired = true;
+        } else {
+          for (char* p = iata; *p; ++p) {
+            if (*p >= 'a' && *p <= 'z') {
+              *p = static_cast<char>(*p - ('a' - 'A'));
+              *repaired = true;
+            }
+          }
+        }
+      }
     }
   };
 

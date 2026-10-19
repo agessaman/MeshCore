@@ -603,7 +603,9 @@ private:
   // (callers should fall back to UTC). Zero-allocation.
   static bool timezoneRulesFromString(const char* tz_string, TimeChangeRule& dst_out, TimeChangeRule& std_out);
   void checkConfigurationMismatch();
-  bool isIATAValid() const;
+  // Region code for one slot's MeshCore topics: mqttN.iata, else mqtt.iata.
+  const char* slotIata(int index) const;
+  bool isSlotIATAValid(int index) const;
   bool isSlotReady(int index, char* reason_buf = nullptr, size_t reason_size = 0) const;
 
   void optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_large_buffer = false);
