@@ -536,6 +536,62 @@ TEST(MQTTPrefsSerializer, UnknownKeysInsideAKnownGroupAreDowngradeSafe) {
   EXPECT_EQ(2, prefs.wifi_power_save);
 }
 
+TEST(MQTTPrefsSerializer, SlotIataRoundTripsAndDefaultsEmpty) {
+  MQTTPrefs source = defaults();
+  strcpy(source.mqtt_iata, "SAT");
+  strcpy(source.mqtt_slot_iata[1], "CRP");
+
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+  EXPECT_NE(std::string::npos, output.text().find("iata:\"CRP\"")) << output.text();
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input)) << output.text();
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_STREQ("SAT", loaded.mqtt_iata);
+  EXPECT_STREQ("CRP", loaded.mqtt_slot_iata[1]);
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
+    if (i != 1) EXPECT_STREQ("", loaded.mqtt_slot_iata[i]) << i;
+  }
+}
+
+TEST(MQTTPrefsSerializer, PrefsWrittenBeforeSlotIataStillLoad) {
+  // Upgrade path: a slot group without the key keeps an empty override, so the
+  // slot follows mqtt.iata exactly as it did before.
+  MQTTPrefs prefs = defaults();
+  InputStream input(
+      "{version:1,mqtt:{iata:\"SEA\",slot1:{preset:\"analyzer-us\"}}}");
+  MQTTPrefsSerializer serializer(&prefs);
+  ASSERT_TRUE(serializer.loadSerial(input));
+  bool repaired = false;
+  ASSERT_TRUE(serializer.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_STREQ("", prefs.mqtt_slot_iata[0]);
+}
+
+TEST(MQTTPrefsSerializer, RepairsSlotIataCaseAndDropsInvalidOverrides) {
+  MQTTPrefs prefs = defaults();
+  InputStream input(
+      "{version:1,mqtt:{iata:\"SEA\",slot1:{iata:\"den\"},"
+      "slot2:{iata:\"toolong\"},slot3:{iata:\"a/b\"}}}");
+  MQTTPrefsSerializer serializer(&prefs);
+  ASSERT_TRUE(serializer.loadSerial(input));
+  bool repaired = false;
+  ASSERT_TRUE(serializer.apply(&repaired));
+  EXPECT_TRUE(repaired);
+  EXPECT_STREQ("DEN", prefs.mqtt_slot_iata[0]);
+  // Invalid overrides are cleared, not repaired to a default, so those slots
+  // fall back to the node-wide code.
+  EXPECT_STREQ("", prefs.mqtt_slot_iata[1]);
+  EXPECT_STREQ("", prefs.mqtt_slot_iata[2]);
+  EXPECT_STREQ("SEA", prefs.mqtt_iata);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

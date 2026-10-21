@@ -192,6 +192,30 @@ TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
   EXPECT_STREQ("neighbors", mqttPublicationTypeName(MQTT_PUBLICATION_NEIGHBORS));
 }
 
+TEST(MQTTTopicRouter, SlotIataOverridesTheGlobalCodeOnlyWhenUsable) {
+  EXPECT_STREQ("CRP", mqttSlotIata("SAT", "CRP"));
+  EXPECT_STREQ("SAT", mqttSlotIata("SAT", ""));
+  EXPECT_STREQ("SAT", mqttSlotIata("SAT", nullptr));
+  EXPECT_STREQ("SAT", mqttSlotIata("SAT", "XXX"));
+  EXPECT_STREQ("SAT", mqttSlotIata("SAT", "TOOLONG"));
+  EXPECT_STREQ("SAT", mqttSlotIata("SAT", "a/b"));
+  // The override still works with no node-wide code configured.
+  EXPECT_STREQ("CRP", mqttSlotIata("", "CRP"));
+  EXPECT_STREQ("", mqttSlotIata(nullptr, nullptr));
+}
+
+TEST(MQTTTopicRouter, SlotIataFeedsMeshCoreAndCustomTopics) {
+  char topic[128];
+  const char* iata = mqttSlotIata("SAT", "CRP");
+  ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, MQTT_PUBLICATION_PACKETS,
+                                        nullptr, iata, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("meshcore/CRP/0123456789ABCDEF/packets", topic);
+  ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_CUSTOM, MQTT_PUBLICATION_STATUS,
+                                        "mesh/{iata}/{type}", iata, DEVICE, TOKEN,
+                                        topic, sizeof(topic)));
+  EXPECT_STREQ("mesh/CRP/status", topic);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

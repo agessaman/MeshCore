@@ -801,7 +801,7 @@ function revertAll(){loadConfig().then(function(){toast("Reverted")})}
 // mqttN.filter is deliberately absent: it is a bitmask, not a text buffer, and
 // its accepted input (names, spaces) is longer than its canonical output — a
 // maxlength here would silently truncate a valid list into a different one.
-var SLOT_MAXLEN={token:47,username:31,password:63,server:63,topic:95,audience:63};
+var SLOT_MAXLEN={token:47,username:31,password:63,server:63,topic:95,audience:63,iata:3};
 
 // Payload types, mirroring PAYLOAD_TYPE_* in src/Packet.h. 12-14 are reserved
 // upstream with no name, so they are offered by number only.
@@ -906,6 +906,7 @@ function buildSlots(sel){
       +slotFieldHtml(i,"password","password","Password","")
       +slotFieldHtml(i,"server","text","Server host","")
       +slotFieldHtml(i,"port","number","Port","")
+      +slotFieldHtml(i,"iata","text","IATA region code","Optional — blank uses the node's IATA")
       +slotFieldHtml(i,"topic","text","Topic template","Placeholders: {iata} {device} {type} {token}")
       +slotFieldHtml(i,"audience","text","JWT audience","Optional — blank for user/pass auth")
       +packetFilterHtml(i)
@@ -922,7 +923,8 @@ function refreshSlotFields(host,i){
   var needs=name==="custom"?"custom":(def?def.needs:"none");
   var showMap={token:needs==="token",username:needs==="userpass"||needs==="custom",
     password:needs==="userpass"||needs==="password"||needs==="custom",server:needs==="custom",
-    port:needs==="custom",topic:needs==="custom",audience:needs==="custom",filter:name!=="none"};
+    port:needs==="custom",topic:needs==="custom",audience:needs==="custom",filter:name!=="none",
+    iata:name!=="none"&&needs!=="token"};
   Object.keys(showMap).forEach(function(f){
     var w=card.querySelector(".sf-"+f);if(w)w.classList.toggle("hide",!showMap[f]);
   });
@@ -1652,6 +1654,7 @@ var CLI_SLOT=[
   ["username","username"],
   ["password","password"],
   ["token","token (required by some presets)"],
+  ["iata","region code for this slot's topics, blank uses mqtt.iata"],
   ["topic","custom topic template, e.g. {iata}/{device}/{type}"],
   ["audience","JWT audience — enables Ed25519 auth, blank clears"],
   ["filter","packet types to publish: all, none, or a CSV of names/0-15"]

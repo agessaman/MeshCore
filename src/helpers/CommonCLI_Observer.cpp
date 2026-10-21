@@ -31,6 +31,7 @@
 #include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
 #include "MQTTPacketFilter.h"
+#include "MQTTTopicRouter.h"   // mqttSlotIata() — a slot's effective region code
 #endif
 
 // Local copy of the busted-libc-safe atoi (the original in CommonCLI.cpp is static).
@@ -510,10 +511,11 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           _callbacks->restartBridgeSlot(slot);
           // Check if the slot has everything it needs to connect
           const MQTTPresetDef* p = findMQTTPreset(preset_name);
+          const char* slot_iata = mqttSlotIata(_mqtt_prefs.mqtt_iata, _mqtt_prefs.mqtt_slot_iata[slot]);
           if (p && p->topic_style == MQTT_TOPIC_MESHRANK && _mqtt_prefs.mqtt_slot_token[slot][0] == '\0') {
             sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt%d.token <your_token>' to connect)", slot + 1, preset_name, slot + 1);
           } else if (p && p->topic_style == MQTT_TOPIC_MESHCORE &&
-                     (strlen(_mqtt_prefs.mqtt_iata) == 0 || strcmp(_mqtt_prefs.mqtt_iata, "XXX") == 0)) {
+                     (strlen(slot_iata) == 0 || strcmp(slot_iata, "XXX") == 0)) {
             sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt.iata <airport_code>' to publish)", slot + 1, preset_name);
           } else if (p && mqttPresetNeedsSlotPassword(p) &&
                      _mqtt_prefs.mqtt_slot_password[slot][0] == '\0' &&
@@ -609,6 +611,26 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         if (!persistObserverPrefs(reply)) return true;
         _callbacks->restartBridgeSlot(slot);
         sprintf(reply, "OK - slot %d topic: %s", slot + 1, _mqtt_prefs.mqtt_slot_topic[slot]);
+      }
+    } else if (strcmp(subcmd, "iata") == 0 || memcmp(subcmd, "iata ", 5) == 0) {
+      // Per-slot region code for MeshCore-style topics. Bare or empty clears
+      // the override so the slot follows mqtt.iata again.
+      const char* iata = subcmd[4] == '\0' ? "" : &subcmd[5];
+      if (iata[0] == '\0') {
+        _mqtt_prefs.mqtt_slot_iata[slot][0] = '\0';
+        if (!persistObserverPrefs(reply)) return true;
+        _callbacks->restartBridgeSlot(slot);
+        sprintf(reply, "OK - slot %d IATA cleared (using mqtt.iata)", slot + 1);
+      } else if (!mqttIataValid(iata)) {
+        strcpy(reply, "Error: IATA code must be exactly 3 letters/digits (e.g. DEN)");
+      } else {
+        StrHelper::strncpy(_mqtt_prefs.mqtt_slot_iata[slot], iata, sizeof(_mqtt_prefs.mqtt_slot_iata[slot]));
+        for (int i = 0; _mqtt_prefs.mqtt_slot_iata[slot][i]; i++) {
+          _mqtt_prefs.mqtt_slot_iata[slot][i] = toupper(_mqtt_prefs.mqtt_slot_iata[slot][i]);
+        }
+        if (!persistObserverPrefs(reply)) return true;
+        _callbacks->restartBridgeSlot(slot);
+        sprintf(reply, "OK - slot %d IATA: %s", slot + 1, _mqtt_prefs.mqtt_slot_iata[slot]);
       }
     } else if (memcmp(subcmd, "audience ", 9) == 0) {
       if (valueTooLong(&subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_audience[slot]), reply, "audience")) return true;
@@ -1004,6 +1026,13 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
         sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_topic[slot]);
       } else {
         strcpy(reply, "> (default: meshcore/{iata}/{device}/{type})");
+      }
+    } else if (strcmp(subcmd, "iata") == 0) {
+      if (_mqtt_prefs.mqtt_slot_iata[slot][0] != '\0') {
+        sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_iata[slot]);
+      } else {
+        sprintf(reply, "> (not set - using mqtt.iata: %s)",
+                _mqtt_prefs.mqtt_iata[0] ? _mqtt_prefs.mqtt_iata : "not set");
       }
     } else if (memcmp(subcmd, "audience", 8) == 0) {
       if (_mqtt_prefs.mqtt_slot_audience[slot][0] != '\0') {

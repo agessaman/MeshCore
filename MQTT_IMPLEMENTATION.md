@@ -64,7 +64,8 @@ set mqtt3.preset none         # disable the slot
 
 Broker address, transport, and credentials ship in the firmware. The **Extra setup**
 column lists the presets that need more. Every preset except `meshrank` uses the
-`meshcore/{iata}/…` topic layout, so `mqtt.iata` must be set.
+`meshcore/{iata}/…` topic layout, so `mqtt.iata` must be set (or `mqttN.iata` for
+that slot, see [Per-slot region codes](#per-slot-region-codes)).
 
 `get mqtt.presets` lists what the running firmware ships. The table matches the current build.
 
@@ -147,6 +148,7 @@ Commands work over serial and over a remote admin login unless marked *serial on
 | `get/set mqttN.token <token>` | Per-slot token, e.g. MeshRank; `get` shows the value on serial only |
 | `get/set mqttN.topic <template>` | Topic template, `custom` slots only |
 | `get/set mqttN.audience <aud>` | Switches a `custom` slot to JWT auth; bare `set` clears it |
+| `get/set mqttN.iata <code>` | Region code for this slot's topics; bare `set` clears it back to `mqtt.iata` |
 | `get/set mqttN.filter <all\|none\|list>` | Packet types sent to this slot |
 | `get mqttN.diag` | Last connection error and timing for the slot |
 
@@ -228,10 +230,28 @@ or the scheme's default.
 
 | Placeholder | Value |
 |-------------|-------|
-| `{iata}` | `mqtt.iata` |
+| `{iata}` | `mqttN.iata`, else `mqtt.iata` |
 | `{device}` | public key, 64 hex chars |
 | `{token}` | `mqttN.token` |
 | `{type}` | `status`, `packets`, `raw`, or `neighbors` |
+
+### Per-slot region codes
+
+Brokers don't all draw regions the same way. A code one network expects can be
+unknown to another, and some brokers reject codes they don't recognize.
+`mqttN.iata` lets one observer publish to each slot under the code that network
+uses:
+
+```bash
+set mqtt.iata SAT          # node-wide default, used by every slot without an override
+set mqtt2.iata CRP         # slot 2 publishes meshcore/CRP/... instead
+get mqtt2.iata             # > CRP
+set mqtt2.iata             # clear: slot 2 follows mqtt.iata again
+```
+
+The override applies to every `meshcore/{iata}/…` topic the slot publishes and to
+`{iata}` in a `custom` topic template. MeshRank topics don't carry a region code, so
+it has no effect there. An empty or invalid override falls back to `mqtt.iata`.
 
 ### MQTT Shared Settings
 

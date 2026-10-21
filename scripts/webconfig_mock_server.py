@@ -144,7 +144,7 @@ def default_config(setup_mode):
 def _slot():
     return {"preset": "none", "server": "", "port": 8883, "username": "",
             "password": "", "token": "", "topic": "", "audience": "",
-            "filter": "all"}
+            "filter": "all", "iata": ""}
 
 
 class State:
@@ -478,6 +478,14 @@ def apply_slot_set(cfg, idx, field, val):
             return False, "Error: port must be between 1 and 65535"
         slot["port"] = p
         return True, "OK"
+    if field == "iata":
+        if val == "":
+            slot["iata"] = ""
+            return True, "OK - slot %d IATA cleared (using mqtt.iata)" % (idx + 1)
+        if len(val) != 3 or not val.isalnum() or not val.isascii():
+            return False, "Error: IATA code must be exactly 3 letters/digits (e.g. DEN)"
+        slot["iata"] = val.upper()
+        return True, "OK - slot %d IATA: %s" % (idx + 1, slot["iata"])
     if field == "filter":
         canonical = canonical_packet_filter(val)
         if canonical is None:

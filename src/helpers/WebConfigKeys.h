@@ -31,7 +31,7 @@ static const char* const WC_ALLOWED_SET_KEYS[] = {
 };
 static const char* const WC_ALLOWED_SLOT_KEYS[] = {
   "preset", "server", "port", "username", "password", "token", "topic", "audience",
-  "filter",
+  "filter", "iata",
 };
 
 // True when `key` is a well-formed per-slot key ("mqttN.<field>" with N in

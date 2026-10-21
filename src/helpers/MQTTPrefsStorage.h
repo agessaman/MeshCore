@@ -135,6 +135,11 @@ struct MQTTPrefs {
   // Drop received adverts whose Ed25519 signature fails before publishing.
   // Defaults off so RF corruption on the mesh stays visible to collectors.
   uint8_t mqtt_advert_verify;
+
+  // Per-slot IATA override for MeshCore-style topics. Empty uses mqtt_iata, so
+  // one observer can publish under different region codes to brokers whose
+  // region maps differ. Runtime only, like display_timeout_secs.
+  char mqtt_slot_iata[MQTT_PREFS_SLOT_COUNT][8];
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {
