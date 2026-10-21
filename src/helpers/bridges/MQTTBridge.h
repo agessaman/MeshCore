@@ -161,6 +161,7 @@ private:
     char username[32];
     char password[64];
     char audience[64];              // JWT audience for custom JWT slots (empty = username/password)
+    char iata[8];                   // mqttN.iata as last applied; topics read this, not _obs
     char broker_uri[128];           // Persistent URI for custom slots (avoids dangling pointer)
 
     // Reconnect backoff
@@ -606,6 +607,7 @@ private:
   // Region code for one slot's MeshCore topics: mqttN.iata, else mqtt.iata.
   const char* slotIata(int index) const;
   bool isSlotIATAValid(int index) const;
+  void copySlotIata(int index);
   bool isSlotReady(int index, char* reason_buf = nullptr, size_t reason_size = 0) const;
 
   void optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_large_buffer = false);

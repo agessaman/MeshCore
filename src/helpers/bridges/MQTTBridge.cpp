@@ -989,6 +989,7 @@ void MQTTBridge::begin() {
   // Apply slot presets from preferences
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const char* preset_name = _obs->mqtt_slot_preset[i];
+    copySlotIata(i);
     if (preset_name[0] != '\0' && strcmp(preset_name, MQTT_PRESET_NONE) != 0) {
       if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
         // Custom broker: copy host/port/username/password from prefs
@@ -3295,6 +3296,9 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
   // connected (F04). Every other case keeps the task and only closes the
   // transport.
   teardownSlot(slot_index, disabling ? TeardownReason::Disable : TeardownReason::Reconfigure);
+  // Only queued after a successful save, so the worker never publishes under an
+  // edit that is still pending or later rolled back.
+  copySlotIata(slot_index);
 
   if (disabling) {
     slot.enabled = false;
@@ -3450,7 +3454,12 @@ bool MQTTBridge::isReady() const {
 
 const char* MQTTBridge::slotIata(int index) const {
   if (!mqttTopicSlotIndexValid(index, RUNTIME_MQTT_SLOTS)) return _iata;
-  return mqttSlotIata(_iata, _obs->mqtt_slot_iata[index]);
+  return mqttSlotIata(_iata, _slots[index].iata);
+}
+
+void MQTTBridge::copySlotIata(int index) {
+  strncpy(_slots[index].iata, _obs->mqtt_slot_iata[index], sizeof(_slots[index].iata) - 1);
+  _slots[index].iata[sizeof(_slots[index].iata) - 1] = '\0';
 }
 
 bool MQTTBridge::isSlotIATAValid(int index) const {
