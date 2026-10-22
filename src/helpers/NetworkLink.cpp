@@ -4,6 +4,7 @@
 
 #include "MQTTConnectionPolicy.h"
 #include "WifiPowerSavePolicy.h"
+#include "WifiTxPowerPolicy.h"
 
 #include <atomic>
 #include <climits>
@@ -227,6 +228,34 @@ class WiFiNetworkLink final : public NetworkLinkBase {
   char _password[65] = {};
   unsigned long _last_reconnect_attempt = 0;
   uint8_t _reconnect_backoff_attempt = 0;
+  // Written by the CLI (loop task), read by begin()/maintain() (MQTT task).
+  std::atomic<uint8_t> _tx_power_stored{WifiTxPowerPolicy::kBoardDefault};
+
+#ifdef MQTT_WIFI_TX_POWER
+  static constexpr int32_t kBuildTxPowerQdbm = (int32_t)MQTT_WIFI_TX_POWER;
+#else
+  static constexpr int32_t kBuildTxPowerQdbm = WifiTxPowerPolicy::kFallbackQdbm;
+#endif
+
+  static int8_t readTxPower() {
+    if (WiFi.getMode() == WIFI_MODE_NULL) return -1;
+    int8_t qdbm = -1;
+    return esp_wifi_get_max_tx_power(&qdbm) == ESP_OK ? qdbm : -1;
+  }
+
+  // Called directly rather than through WiFi.setTxPower(): wifi_power_t differs
+  // between Arduino-ESP32 2.x and 3.x, and the readback is the only record of
+  // what the chip actually quantized the request to.
+  int8_t applyTxPower() {
+    if (WiFi.getMode() == WIFI_MODE_NULL) return -1;
+    const int8_t requested = WifiTxPowerPolicy::qdbmFor(
+        _tx_power_stored.load(std::memory_order_acquire), kBuildTxPowerQdbm);
+    const esp_err_t set_result = esp_wifi_set_max_tx_power(requested);
+    const int8_t applied = readTxPower();
+    NETWORK_DEBUG_PRINTLN("WiFi TX power: requested %d, applied %d qdBm (err=%d)",
+                          (int)requested, (int)applied, (int)set_result);
+    return applied;
+  }
 
   // One mapping for startup, reconnect and CLI (see WifiPowerSavePolicy). The
   // stored default is `none`; `min` means MIN_MODEM here exactly as the CLI
@@ -244,16 +273,21 @@ class WiFiNetworkLink final : public NetworkLinkBase {
     esp_wifi_get_ps(&applied);
     NETWORK_DEBUG_PRINTLN("WiFi power save: %s (mode=%d)",
                           WifiPowerSavePolicy::nameFor(wifi_power_save), (int)applied);
-#ifdef MQTT_WIFI_TX_POWER
-    WiFi.setTxPower(MQTT_WIFI_TX_POWER);
-#else
-    WiFi.setTxPower(WIFI_POWER_11dBm);
-#endif
+    // Kept after association as well as at start: some Arduino/IDF versions
+    // reset the cap when the station (re)starts or the country is applied.
+    applyTxPower();
   }
 
  public:
   const char* mediumName() const override { return "wifi"; }
   NetworkMedium medium() const override { return NetworkMedium::WiFi; }
+
+  int8_t setWifiTxPower(uint8_t stored) override {
+    _tx_power_stored.store(stored, std::memory_order_release);
+    return applyTxPower();
+  }
+  int8_t reapplyWifiTxPower() override { return applyTxPower(); }
+  int8_t appliedWifiTxPower() const override { return readTxPower(); }
   const char* statusName() const override {
     switch (WiFi.status()) {
       case WL_CONNECTED: return "connected";
@@ -292,6 +326,8 @@ class WiFiNetworkLink final : public NetworkLinkBase {
     if (_hostname[0] != '\0') WiFi.setHostname(_hostname);
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+    // Before WiFi.begin() so association and the handshake honor the cap too.
+    applyTxPower();
 
     if (!_event_registered) {
       WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -746,6 +782,12 @@ class AutomaticNetworkLink final : public NetworkLink {
     _ethernet.setHostname(hostname);
     _wifi.setHostname(hostname);
   }
+
+  // The fallback STA and the setup AP share one radio, so the cap goes to the
+  // Wi-Fi link whichever medium is selected.
+  int8_t setWifiTxPower(uint8_t stored) override { return _wifi.setWifiTxPower(stored); }
+  int8_t reapplyWifiTxPower() override { return _wifi.reapplyWifiTxPower(); }
+  int8_t appliedWifiTxPower() const override { return _wifi.appliedWifiTxPower(); }
 
   bool begin(const char* wifi_ssid, const char* wifi_password) override {
     rememberWifi(wifi_ssid, wifi_password);

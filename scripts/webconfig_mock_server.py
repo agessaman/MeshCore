@@ -114,6 +114,8 @@ def default_config(setup_mode):
             "ssid": "" if setup_mode else "HomeNet",
             "pwd": "" if setup_mode else "secretpw",   # stored raw; masked on GET
             "powersave": "min",
+            # stored dBm, 0 = board default; *_applied is the radio's readback
+            "txpower": 0, "txpower_applied": 11,
         },
         "mqtt": {
             "origin": "" if setup_mode else "MockNode", "iata": "" if setup_mode else "DEN",
@@ -252,6 +254,11 @@ def _hex64(v):
     return len(v) == 64 and all(c in "0123456789abcdefABCDEF" for c in v)
 
 
+def _fmt_dbm(cfg):
+    a = cfg["wifi"]["txpower_applied"]
+    return ("%g" % a) if a is not None else None
+
+
 def apply_set(cfg, key, val):
     """Return (ok, reply) and mutate cfg. Mirrors the firmware's validation for
     the fields where it matters (length, IATA, owner key, port, radio combo)."""
@@ -296,6 +303,20 @@ def apply_set(cfg, key, val):
             return False, "Error, invalid radio params"
         cfg["radio"].update(freq=f, bw=bw, sf=sf, cr=cr)
         return True, "OK - reboot to apply"
+
+    if key == "wifi.txpower":
+        # Mirrors WifiTxPowerPolicy::parse; the mock radio applies it unrounded.
+        word = val.split(" ")[0]
+        if word in ("default", "0"):
+            dbm = 0
+        elif word.isdigit() and 2 <= int(word) <= 20:
+            dbm = int(word)
+        else:
+            return False, "Error: must be default or 2..20 (dBm)"
+        cfg["wifi"]["txpower"] = dbm
+        cfg["wifi"]["txpower_applied"] = dbm or 11
+        stored = "%d dBm" % dbm if dbm else "default"
+        return True, "OK - TX power %s (applied %s dBm)" % (stored, _fmt_dbm(cfg))
 
     if key == "mqtt.iata":
         if val == "":
@@ -569,6 +590,9 @@ def cli_reply_is_failure(reply):
 
 # Commands the device answers but that have no config-key equivalent.
 GETTERS = {
+    "wifi.txpower": lambda c: "%s, applied %s dBm" % (
+        "%d dBm" % c["wifi"]["txpower"] if c["wifi"]["txpower"] else "default",
+        _fmt_dbm(c)),
     "freq": lambda c: "%.3f" % c["radio"]["freq"],
     "bw": lambda c: "%.2f" % c["radio"]["bw"],
     "sf": lambda c: str(c["radio"]["sf"]),

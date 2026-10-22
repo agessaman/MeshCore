@@ -18,6 +18,7 @@
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
 #include "NetworkLink.h"
 #include "WifiPowerSavePolicy.h"     // one powersave value->mode/name mapping
+#include "WifiTxPowerPolicy.h"       // wifi.txpower parsing and dBm formatting
 #include <Utils.h>
 #include <climits>
 #include <new>
@@ -472,6 +473,34 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       }
 #else
       sprintf(reply, "OK - saved as %s", ps_name);
+#endif
+    }
+  } else if (memcmp(config, "wifi.txpower ", 13) == 0) {
+    uint8_t tx_value;
+    if (!WifiTxPowerPolicy::parse(&config[13], &tx_value)) {
+      sprintf(reply, "Error: must be default or %u..%u (dBm)",
+              (unsigned)WifiTxPowerPolicy::kMinDbm, (unsigned)WifiTxPowerPolicy::kMaxDbm);
+    } else {
+      _mqtt_prefs.wifi_tx_power = tx_value;
+      if (!persistObserverPrefs(reply)) return true;
+      char stored[12];
+      if (tx_value == WifiTxPowerPolicy::kBoardDefault) {
+        strcpy(stored, "default");
+      } else {
+        sprintf(stored, "%u dBm", (unsigned)tx_value);
+      }
+#ifdef ESP_PLATFORM
+      // The radio quantizes the request per chip, so report its readback.
+      const int8_t applied = activeNetworkLink().setWifiTxPower(tx_value);
+      if (applied >= 0) {
+        char applied_dbm[8];
+        WifiTxPowerPolicy::formatQdbm(applied_dbm, sizeof(applied_dbm), applied);
+        sprintf(reply, "OK - TX power %s (applied %s dBm)", stored, applied_dbm);
+      } else {
+        sprintf(reply, "OK - saved as %s (will apply when WiFi starts)", stored);
+      }
+#else
+      sprintf(reply, "OK - saved as %s", stored);
 #endif
     }
   } else if (memcmp(config, "timezone ", 9) == 0) {
@@ -1148,6 +1177,25 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     }
   } else if (memcmp(config, "wifi.powersave", 14) == 0) {
     sprintf(reply, "> %s", WifiPowerSavePolicy::nameFor(_mqtt_prefs.wifi_power_save));
+  } else if (memcmp(config, "wifi.txpower", 12) == 0) {
+    char stored[12];
+    if (_mqtt_prefs.wifi_tx_power == WifiTxPowerPolicy::kBoardDefault) {
+      strcpy(stored, "default");
+    } else {
+      sprintf(stored, "%u dBm", (unsigned)_mqtt_prefs.wifi_tx_power);
+    }
+#ifdef ESP_PLATFORM
+    const int8_t applied = activeNetworkLink().appliedWifiTxPower();
+    if (applied >= 0) {
+      char applied_dbm[8];
+      WifiTxPowerPolicy::formatQdbm(applied_dbm, sizeof(applied_dbm), applied);
+      sprintf(reply, "> %s, applied %s dBm", stored, applied_dbm);
+    } else {
+      sprintf(reply, "> %s, not applied yet (WiFi off)", stored);
+    }
+#else
+    sprintf(reply, "> %s", stored);
+#endif
   } else if (memcmp(config, "timezone.offset", 15) == 0) {
     // Must precede the "timezone" (8-byte) check below — that prefix-matches
     // "timezone.offset" too, so the more-specific key has to come first or

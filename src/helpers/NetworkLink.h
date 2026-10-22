@@ -40,6 +40,16 @@ class NetworkLink {
   }
   virtual NetworkTransition maintain(uint32_t now_ms, uint8_t wifi_power_save) = 0;
 
+  // Stored `wifi.txpower` (see WifiTxPowerPolicy). Retained for every later
+  // radio start and association, and applied at once if the radio is running.
+  // Returns the quarter-dBm the radio reports afterwards, -1 if not running.
+  virtual int8_t setWifiTxPower(uint8_t stored) { (void)stored; return -1; }
+  // Re-applies the retained value, e.g. after something else restarted the
+  // radio (setup AP). Same return as setWifiTxPower().
+  virtual int8_t reapplyWifiTxPower() { return -1; }
+  // Quarter-dBm the radio reports now, -1 if it is not running.
+  virtual int8_t appliedWifiTxPower() const { return -1; }
+
   // Automatic selectors are boot-owned so first-run services can use the
   // chosen link before MQTT starts. Compatibility Wi-Fi builds keep the
   // original MQTT-task-owned begin() path.

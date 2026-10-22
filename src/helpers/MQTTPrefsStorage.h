@@ -140,6 +140,10 @@ struct MQTTPrefs {
   // one observer can publish under different region codes to brokers whose
   // region maps differ. Runtime only, like display_timeout_secs.
   char mqtt_slot_iata[MQTT_PREFS_SLOT_COUNT][8];
+
+  // WiFi TX power cap in whole dBm; 0 follows the build's MQTT_WIFI_TX_POWER
+  // (see WifiTxPowerPolicy). Runtime only, like display_timeout_secs.
+  uint8_t wifi_tx_power;
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {

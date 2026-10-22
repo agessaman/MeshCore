@@ -285,6 +285,7 @@ RX/TX, filter, and neighbors changes apply live. `get mqtt.analyzer.us` and
 | `get/set wifi.ssid <ssid>` | Up to 31 characters |
 | `get/set wifi.pwd <password>` | Up to 63 characters; `get` shows it on serial only. `set wifi.pwd ` (trailing space) for an open network |
 | `get/set wifi.powersave none\|min\|max` | Default `none` |
+| `get/set wifi.txpower default\|2..20` | WiFi TX power cap in whole dBm; `default` follows the build's `MQTT_WIFI_TX_POWER`. Applies at once and on every WiFi start, including the setup AP. Replies show what the radio actually applied, which the chip rounds to its own steps |
 | `get link.status` | Active medium, IP, signal, uptime, or the last disconnect reason |
 | `get link.diag` | Why Ethernet or WiFi was chosen |
 | `get link.dns` | Live DNS servers and what each medium's DHCP lease supplied |
@@ -596,7 +597,7 @@ esptool.py write_flash 0x0 .pio/build/LilyGo_T3S3_sx1262_repeater_observer_mqtt/
 | `WITH_MQTT_BRIDGE=1` | MQTT bridge (required) |
 | `WITH_SNMP=1` | SNMP agent |
 | `MQTT_DEBUG=1` | Debug logging |
-| `MQTT_WIFI_TX_POWER` | WiFi TX power (default `WIFI_POWER_11dBm`) |
+| `MQTT_WIFI_TX_POWER` | Board default WiFi TX power (default `WIFI_POWER_11dBm`); `set wifi.txpower` overrides it per node |
 
 These set fresh-install defaults (see `src/helpers/MQTTDefaults.h`). They don't change a
 node that already has `/mqtt.json`.

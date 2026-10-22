@@ -1346,6 +1346,7 @@ void MQTTBridge::mqttTask(void* parameter) {
 void MQTTBridge::initializeNetworkInTask() {
   MQTT_DEBUG_PRINTLN("Initializing %s network in MQTT task...", _network->mediumName());
 
+  _network->setWifiTxPower(_obs->wifi_tx_power);
   // begin() is idempotent and deliberately leaves an already-up link alone.
   // MQTT end()/begin() cycles therefore keep the transport alive for OTA and do
   // not race the first DNS lookup after a bridge restart.

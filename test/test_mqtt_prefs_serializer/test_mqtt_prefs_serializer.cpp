@@ -439,6 +439,51 @@ TEST(MQTTPrefsSerializer, DisplayFlipRoundTripsAndRepairs) {
   EXPECT_EQ(0, prefs.display_flip);
 }
 
+// 0 is "board default", not 0 dBm; it must survive a save so a later build can
+// still move the default. Files from older firmware have no tx_power at all.
+TEST(MQTTPrefsSerializer, WifiTxPowerRoundTripsDefaultsAndRepairs) {
+  MQTTPrefs source = defaults();
+  EXPECT_EQ(WifiTxPowerPolicy::kBoardDefault, source.wifi_tx_power);
+  for (uint8_t dbm : {(uint8_t)0, (uint8_t)2, (uint8_t)15, (uint8_t)20}) {
+    source.wifi_tx_power = dbm;
+    OutputStream output;
+    MQTTPrefsSerializer writer(&source);
+    ASSERT_TRUE(writer.saveSerial(output)) << (int)dbm;
+
+    MQTTPrefs loaded = defaults();
+    loaded.wifi_tx_power = 7;
+    InputStream input(output.text());
+    MQTTPrefsSerializer reader(&loaded);
+    ASSERT_TRUE(reader.loadSerial(input)) << (int)dbm;
+    bool repaired = false;
+    ASSERT_TRUE(reader.apply(&repaired)) << (int)dbm;
+    EXPECT_FALSE(repaired) << (int)dbm;
+    EXPECT_EQ(dbm, loaded.wifi_tx_power);
+  }
+
+  MQTTPrefs legacy = defaults();
+  InputStream old_file("{version:1,wifi:{ssid:\"home\",power_save:1}}");
+  MQTTPrefsSerializer legacy_serializer(&legacy);
+  ASSERT_TRUE(legacy_serializer.loadSerial(old_file));
+  bool repaired = false;
+  ASSERT_TRUE(legacy_serializer.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(WifiTxPowerPolicy::kBoardDefault, legacy.wifi_tx_power);
+
+  for (const char* bogus_text : {"{version:1,wifi:{tx_power:1}}",
+                                 "{version:1,wifi:{tx_power:21}}",
+                                 "{version:1,wifi:{tx_power:-3}}"}) {
+    MQTTPrefs prefs = defaults();
+    InputStream bogus(bogus_text);
+    MQTTPrefsSerializer bogus_serializer(&prefs);
+    ASSERT_TRUE(bogus_serializer.loadSerial(bogus)) << bogus_text;
+    repaired = false;
+    ASSERT_TRUE(bogus_serializer.apply(&repaired)) << bogus_text;
+    EXPECT_TRUE(repaired) << bogus_text;
+    EXPECT_EQ(WifiTxPowerPolicy::kBoardDefault, prefs.wifi_tx_power) << bogus_text;
+  }
+}
+
 TEST(MQTTPrefsSerializer, AdvertVerifyDefaultsOffRoundTripsAndRepairs) {
   MQTTPrefs source = defaults();
   EXPECT_EQ(0, source.mqtt_advert_verify);

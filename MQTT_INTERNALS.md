@@ -175,7 +175,7 @@ first property of the root object. The main shape is:
 
 ```text
 {version:1,
- wifi:{ssid:"...",password:"...",power_save:1},
+ wifi:{ssid:"...",password:"...",power_save:1,tx_power:0},
  time:{timezone:"...",utc_offset:0,ntp_server:"..."},
  mqtt:{origin:"...",iata:"SEA",packets_enabled:1,raw_enabled:0,
        tx_enabled:2,rx_enabled:1,

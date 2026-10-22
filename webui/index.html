@@ -483,6 +483,9 @@ body.tab-cli{padding-bottom:0}
       <div class="f"><label>Password</label><input type="password" data-k="wifi.pwd" maxlength="63" autocomplete="off"></div>
       <div class="f"><label>Power save</label>
         <select data-k="wifi.powersave"><option value="none">None (default, lowest latency)</option><option value="min">Minimum</option><option value="max">Maximum (battery)</option></select></div>
+      <div class="f"><label>TX power</label>
+        <select data-k="wifi.txpower" style="max-width:160px"><option value="default">Board default</option><option value="20">20 dBm</option><option value="19">19 dBm</option><option value="18">18 dBm</option><option value="17">17 dBm</option><option value="16">16 dBm</option><option value="15">15 dBm</option><option value="14">14 dBm</option><option value="13">13 dBm</option><option value="12">12 dBm</option><option value="11">11 dBm</option><option value="10">10 dBm</option><option value="9">9 dBm</option><option value="8">8 dBm</option><option value="7">7 dBm</option><option value="6">6 dBm</option><option value="5">5 dBm</option><option value="4">4 dBm</option><option value="3">3 dBm</option><option value="2">2 dBm</option></select>
+        <div class="hint" id="wifi-txp-cur"></div></div>
     </div>
     <div class="card">
       <h2>Maintenance</h2>
@@ -711,6 +714,7 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"flood.advert.interval":return String(r.flood_advert_interval);
     case"password":return"";
     case"wifi.ssid":return w.ssid;case"wifi.pwd":return w.pwd;case"wifi.powersave":return w.powersave;
+    case"wifi.txpower":return w.txpower?String(w.txpower):"default";
     case"mqtt.origin":return q.origin;case"mqtt.iata":return q.iata;
     case"mqtt.status":return q.status?"on":"off";case"mqtt.packets":return q.packets?"on":"off";
     case"mqtt.raw":return q.raw?"on":"off";case"mqtt.tx":return q.tx;case"mqtt.rx":return q.rx?"on":"off";
@@ -747,7 +751,7 @@ function loadConfig(){
     });
     $$("[data-cfm]").forEach(function(el){el.value=""});  // confirm twins have no stored value
     $$("[data-rg]").forEach(function(el){el.value=String(c.radio[el.dataset.rg]);el.classList.remove("dirty")});
-    st.orig.radio=radioCombo();afHint();
+    st.orig.radio=radioCombo();afHint();txpHint();
     for(var i=1;i<=st.nslots;i++){refreshSlotFields($("#app-slots"),i);refreshSlotFields($("#wz-slots"),i)}
     syncPacketFilters();
     updateSaveBar();
@@ -762,6 +766,12 @@ function markDirty(k,v,el){
 // The CLI's `dutycycle` is not its own pref — it just writes airtime_factor as
 // 100/(dc)-1. Showing the equivalent duty cycle beside `af` gives the number
 // operators actually reason about without a second field fighting over one pref.
+// The radio rounds the cap to a chip-specific step, so show its own readback.
+function txpHint(){
+  var e=$("#wifi-txp-cur");if(!e||!st.cfg)return;
+  var a=st.cfg.wifi.txpower_applied;
+  e.textContent=a==null?"Applies when WiFi starts.":"Radio reports "+a+" dBm.";
+}
 function afHint(){
   var e=$("#af-dc");if(!e)return;
   var af=parseFloat($('[data-k="af"]').value);
@@ -1092,7 +1102,7 @@ function pollResult(cb,errs,idles,acked,reqid,submitted){
 }
 function loadConfigSoft(){ // re-sync accepted values without clobbering chips/rejected edits
   api("/api/config").then(function(c){
-    st.cfg=c;
+    st.cfg=c;txpHint();
     $$("[data-k]").forEach(function(el){
       var k=el.dataset.k,stored=cfgVal(k);
       st.orig[k]=stored;
@@ -1565,6 +1575,7 @@ var CLI_KEYS=[
   ["wifi.ssid","WiFi network name",0],
   ["wifi.pwd","WiFi password",0],
   ["wifi.powersave","WiFi power-save mode",0,"none|min|max"],
+  ["wifi.txpower","WiFi TX power cap in dBm {2-20}, or default",0,"default|8|11|15|20"],
   ["link.status","Selected network, IP, signal and uptime",1],
   ["link.diag","Ethernet selection and fallback diagnostics",1],
   ["link.dns","DNS servers, gateway and per-network lease DNS",1],
