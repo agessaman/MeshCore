@@ -108,6 +108,7 @@ that slot, see [Per-slot region codes](#per-slot-region-codes)).
 | `ntxmesh` | `wss://ntxmesh.dhovin.me:8883` | JWT | |
 | `bsmesh` | `wss://mqtt.bsmesh.de:8885` | JWT | |
 | `marwoj` | `mqtts://mqtt.marwoj.net:8883` | user/pass (built in) | |
+| `upstatemesh` | `wss://mqtt.upst8me.sh:443/mqtt` | JWT | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 
