@@ -590,9 +590,10 @@ def cli_reply_is_failure(reply):
 
 # Commands the device answers but that have no config-key equivalent.
 GETTERS = {
-    "wifi.txpower": lambda c: "%s, applied %s dBm" % (
+    "wifi.txpower": lambda c: "%s, %s" % (
         "%d dBm" % c["wifi"]["txpower"] if c["wifi"]["txpower"] else "default",
-        _fmt_dbm(c)),
+        "applied %s dBm" % _fmt_dbm(c) if _fmt_dbm(c) is not None
+        else "not applied yet (WiFi off)"),
     "freq": lambda c: "%.3f" % c["radio"]["freq"],
     "bw": lambda c: "%.2f" % c["radio"]["bw"],
     "sf": lambda c: str(c["radio"]["sf"]),

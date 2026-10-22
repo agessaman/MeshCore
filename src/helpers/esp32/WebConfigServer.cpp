@@ -276,7 +276,11 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   // AP_STA (not pure AP) so the WiFi scan for the SSID picker works while
   // the AP is up. STA stays unconnected - the bridge won't touch WiFi
   // while wifi_ssid is empty, and `start webconfig ap` requires it stopped.
+  // Starting as STA first lets the cap land before the AP beacons at the SDK
+  // default (~20 dBm), which brownout-prone boards cannot take.
+  activeNetworkLink().prepareWifiForAp();
   WiFi.mode(WIFI_AP_STA);
+  activeNetworkLink().reapplyWifiTxPower();
   // Setup mode serves an UNAUTHENTICATED API on the trust of physical AP
   // proximity. `start webconfig ap` can be run with the STA still associated
   // to the operator's LAN (MQTTBridge::end() leaves the STA link up and
@@ -298,8 +302,6 @@ bool WebConfigServer::startSetupMode(char reply[]) {
     strcpy(reply, "Err: failed to start AP");
     return false;
   }
-  // AP_STA restarts the radio at the SDK default, ~20 dBm; boards that brown
-  // out under Wi-Fi TX need the cap during setup as much as in service.
   activeNetworkLink().reapplyWifiTxPower();
   delay(100);  // let the AP netif settle before reading its IP
   IPAddress ip = WiFi.softAPIP();

@@ -496,6 +496,9 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         char applied_dbm[8];
         WifiTxPowerPolicy::formatQdbm(applied_dbm, sizeof(applied_dbm), applied);
         sprintf(reply, "OK - TX power %s (applied %s dBm)", stored, applied_dbm);
+      } else if (applied == WifiTxPowerPolicy::kApplyFailed) {
+        // Saved; the next association retries it.
+        sprintf(reply, "OK - saved as %s, but failed to apply", stored);
       } else {
         sprintf(reply, "OK - saved as %s (will apply when WiFi starts)", stored);
       }

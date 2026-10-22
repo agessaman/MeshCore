@@ -26,6 +26,9 @@ static const int8_t kMinQdbm = 8;
 static const int8_t kMaxQdbm = 84;
 // Arduino's WIFI_POWER_11dBm, used when a build sets no MQTT_WIFI_TX_POWER.
 static const int8_t kFallbackQdbm = 44;
+// Apply results other than a quarter-dBm readback.
+static const int8_t kNotRunning = -1;   // radio off; applies when it starts
+static const int8_t kApplyFailed = -2;  // SDK rejected the request
 
 static inline bool isValidStored(int32_t stored) {
   return stored == kBoardDefault || (stored >= kMinDbm && stored <= kMaxDbm);

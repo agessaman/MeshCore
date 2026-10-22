@@ -22,6 +22,7 @@ AsyncWebServer* ota_server = nullptr;
 bool ota_routes_registered = false;
 bool ota_server_running = false;
 bool ota_raised_ap = false;
+bool ota_started_radio = false;  // the OTA AP turned Wi-Fi on
 bool ota_network_locked = false;
 uint32_t ota_started_at = 0;
 char ota_id_buf[60];
@@ -42,7 +43,10 @@ void otaRegisterRoutes() {
 void otaReleaseTransport() {
   if (ota_server) ota_server->end();
   if (ota_raised_ap) WiFi.softAPdisconnect(true);
+  // softAPdisconnect leaves the STA prepareWifiForAp() started; restore off.
+  if (ota_started_radio) WiFi.mode(WIFI_OFF);
   ota_raised_ap = false;
+  ota_started_radio = false;
   ota_server_running = false;
   ota_started_at = 0;
   if (ota_network_locked) {
@@ -81,7 +85,10 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
           force_ap, activeNetworkLink().isConnected())) {
     ip = activeNetworkLink().localIP();
   } else {
+    // Cap first: OTA pairs sustained Wi-Fi TX with flash writes.
+    ota_started_radio = activeNetworkLink().prepareWifiForAp();
     ota_raised_ap = WiFi.softAP("MeshCore-OTA", NULL);
+    if (ota_raised_ap) activeNetworkLink().reapplyWifiTxPower();
     if (!ota_raised_ap) {
       otaReleaseTransport();
       inhibit_sleep = false;

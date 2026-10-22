@@ -9,6 +9,7 @@
 #include <atomic>
 #include <climits>
 #include <cstring>
+#include <mutex>
 
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -228,8 +229,10 @@ class WiFiNetworkLink final : public NetworkLinkBase {
   char _password[65] = {};
   unsigned long _last_reconnect_attempt = 0;
   uint8_t _reconnect_backoff_attempt = 0;
-  // Written by the CLI (loop task), read by begin()/maintain() (MQTT task).
-  std::atomic<uint8_t> _tx_power_stored{WifiTxPowerPolicy::kBoardDefault};
+  // The CLI (loop task), maintain() (MQTT task) and the WiFi event task all
+  // apply; the lock keeps a delayed apply from restoring an older value.
+  std::mutex _tx_power_mutex;
+  uint8_t _tx_power_stored = WifiTxPowerPolicy::kBoardDefault;
 
 #ifdef MQTT_WIFI_TX_POWER
   static constexpr int32_t kBuildTxPowerQdbm = (int32_t)MQTT_WIFI_TX_POWER;
@@ -246,15 +249,22 @@ class WiFiNetworkLink final : public NetworkLinkBase {
   // Called directly rather than through WiFi.setTxPower(): wifi_power_t differs
   // between Arduino-ESP32 2.x and 3.x, and the readback is the only record of
   // what the chip actually quantized the request to.
-  int8_t applyTxPower() {
-    if (WiFi.getMode() == WIFI_MODE_NULL) return -1;
-    const int8_t requested = WifiTxPowerPolicy::qdbmFor(
-        _tx_power_stored.load(std::memory_order_acquire), kBuildTxPowerQdbm);
+  int8_t applyTxPowerLocked() {
+    if (WiFi.getMode() == WIFI_MODE_NULL) return WifiTxPowerPolicy::kNotRunning;
+    const int8_t requested =
+        WifiTxPowerPolicy::qdbmFor(_tx_power_stored, kBuildTxPowerQdbm);
     const esp_err_t set_result = esp_wifi_set_max_tx_power(requested);
     const int8_t applied = readTxPower();
     NETWORK_DEBUG_PRINTLN("WiFi TX power: requested %d, applied %d qdBm (err=%d)",
                           (int)requested, (int)applied, (int)set_result);
-    return applied;
+    // A failed set leaves the old cap, which the readback would pass off as
+    // the new one.
+    return set_result == ESP_OK ? applied : WifiTxPowerPolicy::kApplyFailed;
+  }
+
+  int8_t applyTxPower() {
+    std::lock_guard<std::mutex> lock(_tx_power_mutex);
+    return applyTxPowerLocked();
   }
 
   // One mapping for startup, reconnect and CLI (see WifiPowerSavePolicy). The
@@ -283,11 +293,17 @@ class WiFiNetworkLink final : public NetworkLinkBase {
   NetworkMedium medium() const override { return NetworkMedium::WiFi; }
 
   int8_t setWifiTxPower(uint8_t stored) override {
-    _tx_power_stored.store(stored, std::memory_order_release);
-    return applyTxPower();
+    std::lock_guard<std::mutex> lock(_tx_power_mutex);
+    _tx_power_stored = stored;
+    return applyTxPowerLocked();
   }
   int8_t reapplyWifiTxPower() override { return applyTxPower(); }
   int8_t appliedWifiTxPower() const override { return readTxPower(); }
+  bool prepareWifiForAp() override {
+    const bool started = WiFi.getMode() == WIFI_MODE_NULL && WiFi.mode(WIFI_STA);
+    applyTxPower();
+    return started;
+  }
   const char* statusName() const override {
     switch (WiFi.status()) {
       case WL_CONNECTED: return "connected";
@@ -332,7 +348,14 @@ class WiFiNetworkLink final : public NetworkLinkBase {
     if (!_event_registered) {
       WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
         switch (event) {
+          // Applied from the event task as well as maintain(): its 10 s
+          // sampling misses a quick auto-reconnect, and association may
+          // reset the cap. GOT_IP repeats it in case CONNECTED raced it.
+          case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+            applyTxPower();
+            break;
           case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            applyTxPower();
             NETWORK_DEBUG_PRINTLN("WiFi connected: %s",
                 IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
             noteConnected(millis());
@@ -788,6 +811,7 @@ class AutomaticNetworkLink final : public NetworkLink {
   int8_t setWifiTxPower(uint8_t stored) override { return _wifi.setWifiTxPower(stored); }
   int8_t reapplyWifiTxPower() override { return _wifi.reapplyWifiTxPower(); }
   int8_t appliedWifiTxPower() const override { return _wifi.appliedWifiTxPower(); }
+  bool prepareWifiForAp() override { return _wifi.prepareWifiForAp(); }
 
   bool begin(const char* wifi_ssid, const char* wifi_password) override {
     rememberWifi(wifi_ssid, wifi_password);
