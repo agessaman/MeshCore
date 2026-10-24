@@ -130,7 +130,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 37;
+static const int MQTT_PRESET_COUNT = 39;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -180,6 +180,10 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "ntxmesh",       "wss://ntxmesh.dhovin.me:8883",            "ntxmesh.dhovin.me",               ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "bsmesh",        "wss://mqtt.bsmesh.de:8885",               "mqtt.bsmesh.de",                  ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "marwoj",        "mqtts://mqtt.marwoj.net:8883",            nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   55,      "observer-agessaman", "ipRwCEclZkX47K" },
+    // LE Gen-Y ECDSA chain (YE1 → Root YE → X2) anchors at ISRG Root X1.
+    { "sacmesh",       "wss://mqtt.sacmesh.org:443/",             "mqtt.sacmesh.org",                ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // Upstate Mesh (NY Capital District). JWT; LE Gen-Y ECDSA chain (YE1 → Root YE → X2) anchors at ISRG Root X1.
+    { "upstatemesh",   "wss://mqtt.upst8me.sh:443/mqtt",          "mqtt.upst8me.sh",                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found
