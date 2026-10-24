@@ -107,6 +107,7 @@ column lists the presets that need more. Every preset except `meshrank` uses the
 | `ntxmesh` | `wss://ntxmesh.dhovin.me:8883` | JWT | |
 | `bsmesh` | `wss://mqtt.bsmesh.de:8885` | JWT | |
 | `marwoj` | `mqtts://mqtt.marwoj.net:8883` | user/pass (built in) | |
+| `sacmesh` | `wss://mqtt.sacmesh.org:443/` | JWT | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 
