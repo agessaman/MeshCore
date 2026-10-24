@@ -8,13 +8,23 @@
 void TBeam1WBoard::begin() {
   ESP32Board::begin();
 
+  // Deselect shared SPI devices before radio power-up (SD_CS has no pull-up on schematic)
+  pinMode(SDCARD_CS, OUTPUT);
+  digitalWrite(SDCARD_CS, HIGH);
+  pinMode(P_LORA_NSS, OUTPUT);
+  digitalWrite(P_LORA_NSS, HIGH);
+
+  // Keep external LNA (CTRL / GPIO21) off during radio power-up and calibration
+  pinMode(SX126X_RXEN, OUTPUT);
+  digitalWrite(SX126X_RXEN, LOW);
+
   // Power on radio module (must be done before radio init)
   pinMode(SX126X_POWER_EN, OUTPUT);
   digitalWrite(SX126X_POWER_EN, HIGH);
   radio_powered = true;
   delay(10);  // Allow radio to power up
 
-  // RF switch RXEN pin handled by RadioLib via setRfSwitchPins()
+  // RF switch RXEN pin is subsequently managed by RadioLib via setRfSwitchPins()
 
   // Initialize LED
   pinMode(LED_PIN, OUTPUT);

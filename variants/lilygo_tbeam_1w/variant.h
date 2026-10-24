@@ -62,7 +62,7 @@
 #define SX126X_RXEN 21  // LNA enable - HIGH during RX
 
 // TCXO voltage - required for radio init
-#define SX126X_DIO3_TCXO_VOLTAGE 3.0
+#define SX126X_DIO3_TCXO_VOLTAGE 1.8
 
 #define SX126X_MAX_POWER 22
 #endif

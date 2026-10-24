@@ -63,6 +63,19 @@ class CustomSX1262 : public SX1262 {
       if (spi) spi->begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);
     #endif
   #endif
+  #if defined(SX126X_RXEN) || defined(SX126X_TXEN)
+    #ifndef SX126X_RXEN
+      #define SX126X_RXEN RADIOLIB_NC
+    #endif
+    #ifndef SX126X_TXEN
+      #define SX126X_TXEN RADIOLIB_NC
+    #endif
+      // Configure RF switch pins and force IDLE (LNA/PA off) before begin()
+      // runs power-on calibration.
+      setRfSwitchPins(SX126X_RXEN, SX126X_TXEN);
+      this->mod->setRfSwitchState(Module::MODE_IDLE);
+  #endif
+
       int status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo, useRegulatorLDO);
       // if radio init fails with -707/-706, try again with tcxo voltage set to 0.0f
       if (status == RADIOLIB_ERR_SPI_CMD_FAILED || status == RADIOLIB_ERR_SPI_CMD_INVALID) {
@@ -84,18 +97,16 @@ class CustomSX1262 : public SX1262 {
   #ifdef SX126X_DIO2_AS_RF_SWITCH
       setDio2AsRfSwitch(SX126X_DIO2_AS_RF_SWITCH);
   #endif
+  #if defined(SX126X_STANDBY_XOSC) && SX126X_STANDBY_XOSC
+      if (tcxo > 0.0f) {
+        // Keep TCXO powered in standby and after TX/RX fallback instead of
+        // dropping to STDBY_RC and cold-starting the oscillator every time.
+        setStandbyXOSC(true);
+      }
+  #endif
   #ifdef SX126X_RX_BOOSTED_GAIN
       setRxBoostedGainMode(SX126X_RX_BOOSTED_GAIN);
   #endif
-  #if defined(SX126X_RXEN) || defined(SX126X_TXEN)
-    #ifndef SX126X_RXEN
-      #define SX126X_RXEN RADIOLIB_NC
-    #endif
-    #ifndef SX126X_TXEN
-      #define SX126X_TXEN RADIOLIB_NC
-    #endif
-      setRfSwitchPins(SX126X_RXEN, SX126X_TXEN);
-  #endif 
 
   // for improved RX with Heltec v4
   #ifdef SX126X_REGISTER_PATCH
