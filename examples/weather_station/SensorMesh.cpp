@@ -156,7 +156,7 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp, u
     // TODO: let requester know permissions they have:  telemetry.addPresence(TELEM_CHANNEL_SELF, perms);
     float temperature = board.getMCUTemperature();
     if (!isnan(temperature)) {   // Supported boards with built-in temperature sensor. ESP32-C3 may return NAN
-      telemetry.addTemperature(TELEM_CHANNEL_SELF, temperature);    // Built-in MCU Temperature
+      telemetry.addTemperature(TELEM_CHANNEL_SELF + 4, temperature);    // Built-in MCU Temperature (ch 1 is the BME280)
     }
 
     uint8_t tlen = telemetry.getSize();
@@ -1038,10 +1038,9 @@ void SensorMesh::loop() {
     telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
     // query other sensors -- target specific
     sensors.querySensors(0xFF, telemetry);  // allow all telemetry permissions
-  	// This MCU temperature will be overridden by external sensors (if any)
     float temperature = board.getMCUTemperature();
     if (!isnan(temperature)) {   // Supported boards with built-in temperature sensor. ESP32-C3 may return NAN
-      telemetry.addTemperature(TELEM_CHANNEL_SELF, temperature);    // Built-in MCU Temperature
+      telemetry.addTemperature(TELEM_CHANNEL_SELF + 4, temperature);    // Built-in MCU Temperature (ch 1 is the BME280)
     }
 
     // compare with previous telemetry, check if any deltas are greater than subscriber minimums
