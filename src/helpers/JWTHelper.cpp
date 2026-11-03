@@ -10,8 +10,6 @@
 #include "ed_25519.h"
 #include "Base64Url.h"
 
-// Base64 URL encoding table (without padding)
-static const char base64url_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 bool JWTHelper::createAuthToken(
   const mesh::LocalIdentity& identity,

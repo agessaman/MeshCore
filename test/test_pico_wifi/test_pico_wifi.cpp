@@ -123,6 +123,25 @@ TEST_F(PicoWifi, ChangedCredentialsRestartOnceAndUnchangedCredentialsKeepLease) 
   EXPECT_EQ(WiFi.begins, 2); EXPECT_TRUE(link.isConnected());
 }
 
+TEST_F(PicoWifi, RestartWithSameCredentialsResetsBackoffAfterDriverFailure) {
+  link.begin("restart-network", "secret"); EXPECT_EQ(WiFi.begins, 2);
+  uint32_t now = 2000;
+  for (int i = 0; i < 4; ++i) { mock_link = CYW43_LINK_BADAUTH; now += 300000; poll(now); }
+  const int attempts = WiFi.begins;
+  mock_link = CYW43_LINK_BADAUTH; poll(now + 1000);
+  link.begin("restart-network", "secret"); EXPECT_EQ(WiFi.begins, attempts + 1);
+  mock_link = CYW43_LINK_BADAUTH; poll(now + 1000 + 14999); EXPECT_EQ(WiFi.begins, attempts + 1);
+  poll(now + 1000 + 15000); EXPECT_EQ(WiFi.begins, attempts + 2);
+}
+
+TEST_F(PicoWifi, RestartWithSameCredentialsLeavesJoinInProgressAndLeaseAlone) {
+  link.begin("same-network", "secret"); const int attempts = WiFi.begins;
+  poll(2000); link.begin("same-network", "secret");
+  EXPECT_EQ(WiFi.begins, attempts);
+  lease(); poll(3000); link.begin("same-network", "secret");
+  EXPECT_EQ(WiFi.begins, attempts); EXPECT_TRUE(link.isConnected());
+}
+
 TEST_F(PicoWifi, EmptyPasswordUsesOpenAuthenticationAndEmptySsidStopsRetries) {
   link.begin("open-network", ""); EXPECT_TRUE(WiFi.open);
   link.begin("", ""); const int attempts = WiFi.begins;

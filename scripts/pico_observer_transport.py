@@ -46,10 +46,10 @@ def patch_source(build_env, node):
                     clientDisconnect(&_client, "HTTP header timeout or too long");
                     return;
                 }""")
-        text = text.replace(
-            "_lastHeaderSent + WEBSOCKETS_TCP_TIMEOUT < millis()",
-            "millis() - _lastHeaderSent >= WEBSOCKETS_TCP_TIMEOUT",
-        )
+        needle = "_lastHeaderSent + WEBSOCKETS_TCP_TIMEOUT < millis()"
+        if text.count(needle) != 1:
+            raise RuntimeError("Pinned WebSockets header deadline changed")
+        text = text.replace(needle, "millis() - _lastHeaderSent >= WEBSOCKETS_TCP_TIMEOUT")
     elif source.name == "WebSockets.cpp":
         needle = "len = client->tcp->read((uint8_t *)out, n);\n        if(len > 0) {\n            t = millis();"
         if text.count(needle) != 1:
@@ -61,10 +61,12 @@ def patch_source(build_env, node):
             raise RuntimeError("Pinned Arduino-Pico application task creation changed")
         text = text.replace(needle, 'xTaskCreate(__core0, "CORE0", 4096,')
     elif source.name == "CYW43shim.cpp":
-        start = text.index("        cyw43_wifi_join(")
+        # Line-anchored so the deeper-indented retry join inside the loop is not counted.
+        start_marker = "\n        cyw43_wifi_join("
         end_marker = "        return false; // We ended above with a failure"
-        if text.count(end_marker) != 1:
+        if text.count(start_marker) != 1 or text.count(end_marker) != 1:
             raise RuntimeError("Pinned CYW43 association loop changed")
+        start = text.index(start_marker) + 1
         end = text.index(end_marker, start) + len(end_marker)
         # The observer calls WiFi.beginNoBlock on the lwIP task. Waiting here
         # would prevent that same task from servicing association and DHCP.

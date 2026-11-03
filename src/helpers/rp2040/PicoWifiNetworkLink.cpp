@@ -72,6 +72,10 @@ public:
       if (_ssid[0]) startAttempt();
       else if (_started) runOnLwip([](void*) { WiFi.disconnect(); }, nullptr);
       _started = true;
+    } else if (_ssid[0] && !read().up) {
+      // A bridge restart with the same credentials restarts the backoff ladder.
+      _attempt = 0;
+      if (read().link < 0) startAttempt();
     }
     maintain(millis(), 0);
     return _ssid[0];

@@ -53,7 +53,7 @@ class MQTTBridge : public BridgeBase {
   SemaphoreHandle_t _health_mutex = nullptr;
   QueueHandle_t _captures = nullptr, _config_queue = nullptr, _rtc_updates = nullptr;
   TaskHandle_t _task = nullptr;
-  std::atomic<bool> _stop{false}, _acked{false}, _force_ntp{false};
+  std::atomic<bool> _stop{false}, _acked{false}, _force_ntp{false}, _time_valid{false};
   std::atomic<uint32_t> _dropped{0}, _filtered{0}, _unsynced{0};
   uint32_t _last_sample = 0, _last_config_sample = 0;
   uint32_t _stop_started = 0;

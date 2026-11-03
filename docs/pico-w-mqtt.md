@@ -157,6 +157,9 @@ immediate join rejection. Neither check substitutes for a physical connection.
   events, time drops, sampled minimum heap and worker stack high-water. QoS 0
   success means the transport accepted the bytes; it does not prove broker
   receipt. Status uses QoS 1 and the preset's retain policy.
+- Only Wi-Fi, slot 1 endpoint/credential/token/topic, IATA, owner and email
+  changes reconnect MQTT and discard queued packets. Other observer settings
+  (publish toggles, filters, status interval, radio parameters) apply in place.
 - `get mqtt.ntp.diag` reports cached time state and configured primary; active
   probe-only diagnostics are unavailable. Changing `mqtt.ntp` schedules
   synchronization on the worker.

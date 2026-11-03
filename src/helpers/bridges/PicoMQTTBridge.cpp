@@ -1,6 +1,7 @@
 #if defined(PICO_MQTT_OBSERVER)
 #include "PicoMQTTBridge.h"
 #include "helpers/mqtt/PicoObserverMqttClient.h"
+#include "helpers/mqtt/PicoObserverConfigPolicy.h"
 #include "helpers/MQTTMessageBuilder.h"
 #include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPacketQueuePolicy.h"
@@ -59,8 +60,9 @@ struct Runtime {
   JsonDocument json{&allocator};
   char payload[2048], topic[256], auth[768], username[70], client_version[80];
   uint32_t expires = 0;
-  uint32_t last_attempt = 0, last_ntp = 0, last_status = 0;
-  uint8_t backoff = 0, max_failures = 0;
+  uint32_t last_attempt = 0, ntp_at = 0, last_status = 0;
+  uint8_t backoff = 0, max_failures = 0, ntp_server = 0;
+  bool ntp_scheduled = false;
   bool attempted = false, tripped = false;
 };
 
@@ -159,7 +161,7 @@ void MQTTBridge::begin() {
   _config_queue = xQueueCreate(1, sizeof(Configuration));
   _rtc_updates = xQueueCreate(1, sizeof(uint32_t));
   if (!_captures || !_config_queue || !_rtc_updates) { release(); return; }
-  _stop.store(false); _acked.store(false);
+  _stop.store(false); _acked.store(false); _time_valid.store(false);
   xSemaphoreTake(_health_mutex, portMAX_DELAY); _health = Health{}; xSemaphoreGive(_health_mutex);
   _last_config.generation = 0;
   snapshotConfiguration();
@@ -243,7 +245,7 @@ void MQTTBridge::capture(mesh::Packet* packet, bool tx) {
   if (!allowed || !MQTTPacketFilter::allows(_obs->mqtt_slot_packet_filter[0], packet->getPayloadType())) {
     ++_filtered; _staged.length = 0; return;
   }
-  if (!readHealth().time_valid) { ++_unsynced; _staged.length = 0; return; }
+  if (!_time_valid.load(std::memory_order_acquire)) { ++_unsynced; _staged.length = 0; return; }
   if (!tx && _obs->mqtt_advert_verify && packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
     uint8_t message[AdvertSignature::kMaxMessageLen]; const uint8_t* signature = nullptr;
     const int size = AdvertSignature::buildMessage(packet->payload, packet->payload_len, message, &signature);
@@ -271,7 +273,8 @@ void MQTTBridge::taskEntry(void* value) {
 
 void MQTTBridge::run() {
   std::unique_ptr<Runtime> runtime(new(std::nothrow) Runtime);
-  if (!runtime) {
+  std::unique_ptr<Configuration> incoming(new(std::nothrow) Configuration);
+  if (!runtime || !incoming) {
     xSemaphoreTake(_health_mutex, portMAX_DELAY);
     snprintf(_health.state, sizeof(_health.state), "out of memory");
     xSemaphoreGive(_health_mutex);
@@ -279,12 +282,18 @@ void MQTTBridge::run() {
   }
   Runtime& r = *runtime;
   Health health;
-  auto report = [&]() {
+  uint32_t last_report = 0;
+  bool reported = false;
+  // Stack scan, heap walk and mutex at most once a second unless the state changes.
+  auto report = [&](bool force = false) {
+    const uint32_t at = millis();
+    if (!force && reported && at - last_report < 1000) return;
+    reported = true; last_report = at;
     health.stack_free = uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
     health.min_heap = std::min(health.min_heap, static_cast<uint32_t>(rp2040.getFreeHeap()));
     xSemaphoreTake(_health_mutex, portMAX_DELAY); _health = health; xSemaphoreGive(_health_mutex);
   };
-  auto state = [&](const char* value) { snprintf(health.state, sizeof(health.state), "%s", value); report(); };
+  auto state = [&](const char* value) { snprintf(health.state, sizeof(health.state), "%s", value); report(true); };
   auto& network = activeNetworkLink();
   bool configured = false;
   Capture item;
@@ -292,21 +301,37 @@ void MQTTBridge::run() {
   uint8_t retries = 0;
   uint32_t retry_at = 0;
   while (!_stop.load(std::memory_order_acquire)) {
-    char old_ntp[64];
-    snprintf(old_ntp, sizeof(old_ntp), "%s", _config.observer.mqtt_ntp_server);
-    if (xQueueReceive(_config_queue, &_config, 0) == pdTRUE) {
-      r.client.disconnect(); health.connected = false;
-      _dropped.fetch_add(getQueueSize() + (pending ? 1 : 0));
-      xQueueReset(_captures); pending = false; retries = 0;
-      char hostname[NetworkHostname::kBufferSize];
-      NetworkHostname::build(hostname, sizeof(hostname), _config.origin, _config.identity.pub_key, PUB_KEY_SIZE);
-      network.setHostname(hostname);
-      network.begin(_config.observer.wifi_ssid, _config.observer.wifi_password);
-      r.attempted = r.tripped = false; r.backoff = r.max_failures = 0; r.expires = 0;
-      r.last_status = 0; configured = true;
-      if (strcmp(old_ntp, _config.observer.mqtt_ntp_server)) _force_ntp.store(true);
-      snprintf(r.client_version, sizeof(r.client_version), "meshcore/%s", _config.firmware);
-      state("configured");
+    if (xQueueReceive(_config_queue, incoming.get(), 0) == pdTRUE) {
+      const Configuration& next = *incoming;
+      const auto& before = _config.observer;
+      const auto& after = next.observer;
+      // Only Wi-Fi, endpoint, credential, token and topic changes need a new session.
+      const bool reconnect = !configured ||
+        memcmp(next.identity.pub_key, _config.identity.pub_key, PUB_KEY_SIZE) ||
+        strcmp(next.firmware, _config.firmware) || PicoObserverConfigPolicy::connectionChanged(after, before);
+      const bool rename = !configured || strcmp(next.origin, _config.origin);
+      const bool restatus = rename || next.frequency != _config.frequency || next.bandwidth != _config.bandwidth ||
+        next.sf != _config.sf || next.cr != _config.cr || next.repeat != _config.repeat ||
+        strcmp(next.model, _config.model) || after.mqtt_status_enabled != before.mqtt_status_enabled ||
+        after.mqtt_status_interval != before.mqtt_status_interval;
+      const bool ntp_changed = configured && strcmp(after.mqtt_ntp_server, before.mqtt_ntp_server);
+      _config = next;
+      if (rename) {
+        char hostname[NetworkHostname::kBufferSize];
+        NetworkHostname::build(hostname, sizeof(hostname), _config.origin, _config.identity.pub_key, PUB_KEY_SIZE);
+        network.setHostname(hostname);
+      }
+      if (reconnect) {
+        r.client.disconnect(); health.connected = false;
+        _dropped.fetch_add(getQueueSize() + (pending ? 1 : 0));
+        xQueueReset(_captures); pending = false; retries = 0;
+        network.begin(_config.observer.wifi_ssid, _config.observer.wifi_password);
+        r.attempted = r.tripped = false; r.backoff = r.max_failures = 0; r.expires = 0;
+        snprintf(r.client_version, sizeof(r.client_version), "meshcore/%s", _config.firmware);
+      }
+      if (restatus) r.last_status = 0;
+      if (ntp_changed) _force_ntp.store(true);
+      if (reconnect) { configured = true; state("configured"); }
     }
     if (!configured) { delay(10); continue; }
     const uint32_t now = millis();
@@ -317,19 +342,27 @@ void MQTTBridge::run() {
     }
     if (transition == NetworkTransition::Up) r.attempted = false;
     const bool forced = _force_ntp.exchange(false);
-    if (forced || !health.time_valid || now - r.last_ntp >= 3600000UL) {
-      if (forced || !r.last_ntp || now - r.last_ntp >= (health.time_valid ? 3600000UL : 30000UL)) {
-        r.last_ntp = now; state("NTP sync");
-        const char* servers[] = {effectiveNtpPrimary(&_config.observer), "time.google.com", "time.cloudflare.com", "time.aws.com", "time.nist.gov"};
-        for (const auto* server : servers) {
-          uint32_t epoch;
-          if (probeNtp(server, epoch, _stop)) {
-            timeval value{static_cast<time_t>(epoch), 0}; settimeofday(&value, nullptr);
-            xQueueOverwrite(_rtc_updates, &epoch); health.time_valid = true; break;
-          }
-          if (_stop.load()) break;
+    if (forced) r.ntp_server = 0;
+    if (forced || !r.ntp_scheduled || static_cast<int32_t>(now - r.ntp_at) >= 0) {
+      if (!health.connected) state("NTP sync");
+      const char* servers[] = {effectiveNtpPrimary(&_config.observer), "time.google.com", "time.cloudflare.com", "time.aws.com", "time.nist.gov"};
+      constexpr uint8_t count = sizeof(servers) / sizeof(servers[0]);
+      // While connected, one probe per pass bounds the MQTT service gap to one DNS + probe.
+      const uint8_t probes = health.connected ? 1 : count;
+      bool synced = false;
+      for (uint8_t i = 0; i < probes && !_stop.load(); ++i) {
+        uint32_t epoch;
+        if (probeNtp(servers[r.ntp_server], epoch, _stop)) {
+          timeval value{static_cast<time_t>(epoch), 0}; settimeofday(&value, nullptr);
+          xQueueOverwrite(_rtc_updates, &epoch); health.time_valid = true;
+          _time_valid.store(true, std::memory_order_release);
+          synced = true; break;
         }
+        r.ntp_server = (r.ntp_server + 1) % count;
       }
+      if (synced) r.ntp_server = 0;
+      r.ntp_scheduled = true;
+      r.ntp_at = millis() + (synced ? 3600000UL : 30000UL);
     }
     if (!health.time_valid) { state("waiting for time"); delay(50); continue; }
     if (_stop.load()) break;
@@ -380,8 +413,10 @@ void MQTTBridge::run() {
       r.expires = 0;
       if (jwt) {
         const uint32_t lifetime = preset && preset->token_lifetime ? preset->token_lifetime : 86400;
+        char owner[sizeof(obs.mqtt_owner_public_key)];
         if (!JWTHelper::createAuthToken(_config.identity, audience, epoch, lifetime, r.auth, sizeof(r.auth),
-              obs.mqtt_owner_public_key[0] ? obs.mqtt_owner_public_key : nullptr, r.client_version, obs.mqtt_email[0] ? obs.mqtt_email : nullptr)) {
+              PicoObserverConfigPolicy::ownerKeyClaim(obs.mqtt_owner_public_key, owner, sizeof(owner)),
+              r.client_version, obs.mqtt_email[0] ? obs.mqtt_email : nullptr)) {
           state("JWT failed"); continue;
         }
         snprintf(r.username, sizeof(r.username), "v1_%s", _config.device);
@@ -421,7 +456,8 @@ void MQTTBridge::run() {
       if (ok) ++health.published; else ++health.errors;
       return ok;
     };
-    if (obs.mqtt_status_enabled && (!r.last_status || now - r.last_status >= obs.mqtt_status_interval)) {
+    if (obs.mqtt_status_enabled && (!r.last_status ||
+        now - r.last_status >= PicoObserverConfigPolicy::statusIntervalMs(obs.mqtt_status_interval))) {
       r.last_status = now;
       RadioStats stats;
       xSemaphoreTake(_health_mutex, portMAX_DELAY); stats = _radio_stats; xSemaphoreGive(_health_mutex);
