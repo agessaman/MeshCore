@@ -25,7 +25,7 @@ jobs:
           python3 -B scripts/check_arduinojson_pin.py
 
       - name: Run Unit Tests
-        run: pio test -e native -e native_kiss_modem -vv
+        run: pio test -e native -e native_kiss_modem -e native_ota_channel -e native_pico_transport -e native_pico_wifi -vv
 
       - name: Upload Test Results
         # Upload test results even if the test step failed.

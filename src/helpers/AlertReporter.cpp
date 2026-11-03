@@ -197,6 +197,9 @@ bool AlertReporter::sendText(const char* text) {
 }
 
 void AlertReporter::onLoop(unsigned long now_ms) {
+#ifdef PICO_MQTT_OBSERVER
+  return;
+#endif
   if (!_prefs || !_obs || !_obs->alert_enabled) return;
   if (!_mesh) return;
 

@@ -1,0 +1,38 @@
+name: Build experimental Pico W observer
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'examples/**'
+      - 'variants/rpi_picow/**'
+      - 'scripts/pico_observer_transport.py'
+      - 'scripts/test_pico_observer_cyw43.py'
+      - 'platformio.ini'
+      - '.github/workflows/build-pico-observer.yml'
+  push:
+    branches: [feat/pico-w-mqtt]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-build-environment
+      - name: Compile experimental observer
+        run: pio run -e PicoW_repeater_observer_mqtt_experimental
+      - name: Check asynchronous association with generated driver source
+        run: python3 scripts/test_pico_observer_cyw43.py
+      - name: Checksum UF2
+        working-directory: .pio/build/PicoW_repeater_observer_mqtt_experimental
+        run: sha256sum firmware.uf2 > firmware.uf2.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pico-w-mqtt-experimental
+          path: |
+            .pio/build/PicoW_repeater_observer_mqtt_experimental/firmware.uf2
+            .pio/build/PicoW_repeater_observer_mqtt_experimental/firmware.uf2.sha256

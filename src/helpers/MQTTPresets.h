@@ -10,7 +10,9 @@ static const int MAX_MQTT_SLOTS = 6;
 // Runtime slot array size: fewer slots on non-PSRAM boards to save ~1.2KB of heap.
 // Non-PSRAM boards are limited to 2 active connections (_max_active_slots), so 3 runtime
 // slots (2 active + 1 spare for reconfiguration) is sufficient.
-#if defined(BOARD_HAS_PSRAM)
+#if defined(PICO_MQTT_OBSERVER)
+static const int RUNTIME_MQTT_SLOTS = 1;
+#elif defined(BOARD_HAS_PSRAM)
 static const int RUNTIME_MQTT_SLOTS = 6;
 #else
 static const int RUNTIME_MQTT_SLOTS = 3;

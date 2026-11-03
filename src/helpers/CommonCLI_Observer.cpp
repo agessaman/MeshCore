@@ -231,6 +231,14 @@ bool CommonCLI::persistObserverPrefs(char* reply) {
 
 bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
+#ifdef PICO_MQTT_OBSERVER
+  if (!strncmp(config, "snmp", 4) || !strncmp(config, "alert", 5) ||
+      !strncmp(config, "wifi.powersave", 14) || !strncmp(config, "wifi.txpower", 12) ||
+      !strncmp(config, "mqtt.neighbors", 14)) {
+    strcpy(reply, "Error: not supported by the Pico observer");
+    return true;
+  }
+#endif
   const bool needs_snapshot = isObserverPrefsSetCommand(config);
   ObserverPrefsRollbackScope rollback_scope(
       &_observer_prefs_rollback, _mqtt_prefs, needs_snapshot);
@@ -941,6 +949,31 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 
 bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
+#ifdef PICO_MQTT_OBSERVER
+  if (!strncmp(config, "snmp", 4) || !strncmp(config, "alert", 5) ||
+      !strncmp(config, "wifi.powersave", 14) || !strncmp(config, "wifi.txpower", 12)) {
+    strcpy(reply, "> unavailable on Pico");
+    return true;
+  }
+  if (!strcmp(config, "link.diag") || !strcmp(config, "link.status") ||
+      !strcmp(config, "wifi.status")) {
+    activeNetworkLink().formatDiagnostics(reply, 160);
+    return true;
+  }
+  if (!strcmp(config, "link.dns")) {
+    activeNetworkLink().formatDns(reply, 160);
+    return true;
+  }
+  if (!strcmp(config, "mqtt.ntp.diag")) {
+    if (!_callbacks->runMqttNtpDiag(reply, 160, sender_timestamp == 0))
+      strcpy(reply, "Error: observer is not running");
+    return true;
+  }
+  if (!strcmp(config, "mqtt.config.valid")) {
+    strcpy(reply, MQTTBridge::isConfigValid(&_mqtt_prefs) ? "> valid" : "> invalid");
+    return true;
+  }
+#endif
   bool handled = true;
   if (memcmp(config, "snmp.community", 14) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.snmp_community);
@@ -1254,6 +1287,13 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 
 bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
+#ifdef PICO_MQTT_OBSERVER
+  if (!strncmp(command, "alert ", 6) || !strncmp(command, "ota ", 4) ||
+      !strncmp(command, "tls.bundletest", 14)) {
+    strcpy(reply, "ERR: unavailable on the Pico observer");
+    return true;
+  }
+#endif
   if (memcmp(command, "tls.bundletest ", 15) == 0) {
 #ifdef ESP_PLATFORM
     if (!activeNetworkLink().isConnected()) {

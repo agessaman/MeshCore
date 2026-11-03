@@ -1,5 +1,9 @@
 #pragma once
 
+#if defined(PICO_MQTT_OBSERVER)
+#include "PicoMQTTBridge.h"
+#else
+
 #include "MeshCore.h"
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/NetworkLink.h"
@@ -21,6 +25,7 @@
 #ifdef WITH_SNMP
 class MeshSNMPAgent;  // Forward declaration
 #endif
+
 
 #ifdef ESP_PLATFORM
 #include <freertos/FreeRTOS.h>
@@ -859,3 +864,4 @@ public:
 };
 
 #endif
+#endif // PICO_MQTT_OBSERVER

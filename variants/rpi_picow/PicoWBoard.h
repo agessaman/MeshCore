@@ -20,11 +20,15 @@ public:
   void attachDynamicPrefs(KeyValueStore* prefs) { }  // no-op
 
   void onBeforeTransmit() override {
+#ifndef PICO_MQTT_OBSERVER
     digitalWrite(LED_BUILTIN, HIGH);   // turn TX LED on
+#endif
   }
 
   void onAfterTransmit() override {
+#ifndef PICO_MQTT_OBSERVER
     digitalWrite(LED_BUILTIN, LOW);   // turn TX LED off
+#endif
   }
 
   #define BATTERY_SAMPLES 8

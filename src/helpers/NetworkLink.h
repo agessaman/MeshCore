@@ -2,7 +2,7 @@
 
 #include "NetworkPolicy.h"
 
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) || defined(PICO_MQTT_OBSERVER)
 
 #include <Arduino.h>
 #include <IPAddress.h>

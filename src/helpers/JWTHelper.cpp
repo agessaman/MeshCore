@@ -8,7 +8,7 @@
 #include <SHA256.h>
 #include <string.h>
 #include "ed_25519.h"
-#include "mbedtls/base64.h"
+#include "Base64Url.h"
 
 // Base64 URL encoding table (without padding)
 static const char base64url_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -117,28 +117,7 @@ size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* o
     return 0;
   }
   
-  size_t outlen = 0;
-  int ret = mbedtls_base64_encode((unsigned char*)output, outputSize - 1, &outlen, input, inputLen);
-  
-  if (ret != 0) {
-    return 0;
-  }
-  
-  // Convert to base64 URL format in-place (replace + with -, / with _, remove padding =)
-  for (size_t i = 0; i < outlen; i++) {
-    if (output[i] == '+') {
-      output[i] = '-';
-    } else if (output[i] == '/') {
-      output[i] = '_';
-    }
-  }
-  
-  // Remove padding '=' characters
-  while (outlen > 0 && output[outlen-1] == '=') {
-    outlen--;
-  }
-  output[outlen] = '\0';
-  return outlen;
+  return Base64Url::encode(input, inputLen, output, outputSize);
 }
 
 size_t JWTHelper::createHeader(char* output, size_t outputSize) {

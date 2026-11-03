@@ -1757,6 +1757,10 @@ void MyMesh::loop() {
   // MQTT processing runs in a separate FreeRTOS task on Core 0, so we don't call bridge.loop() here
   mesh::Mesh::loop();
 
+#ifdef PICO_MQTT_OBSERVER
+  if (bridge) bridge->loop();
+#endif
+
 #ifdef WITH_MQTT_BRIDGE
   // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
   // Release the withheld resources whenever that late ack lands, and restart
