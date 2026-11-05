@@ -40,7 +40,13 @@ static inline bool mqttPresetEnforcesTokenExp(const MQTTPresetDef* preset) {
 // check stored slot presets without a table lookup per pass.
 static inline bool mqttPresetNameWantsNeighbors(const char* name) {
   if (!name) return false;  // custom and none never match: opt in with mqtt.neighbors on
-  return strcmp(name, "comchan") == 0;
+  static const char* const kWantsNeighbors[] = {
+    "cascadiamesh", "chimesh", "comchan", "meshmapper",
+  };
+  for (const char* wanted : kWantsNeighbors) {
+    if (strcmp(name, wanted) == 0) return true;
+  }
+  return false;
 }
 
 static inline bool mqttPresetWantsNeighbors(const MQTTPresetDef* preset) {

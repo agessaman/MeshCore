@@ -1256,7 +1256,7 @@ region save
 
 **Parameters:**
 - `auto`: run the periodic cycle only while a slot uses a preset whose broker asks for
-  neighbor data (currently `comchan`), and publish it only to those slots
+  neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshmapper`), and publish it only to those slots
 - `on`: periodically discover neighbor scopes and publish the neighbor table to every
   connected slot's `neighbors` topic
 - `off`: disable periodic neighbors publishing

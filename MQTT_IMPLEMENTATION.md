@@ -425,7 +425,7 @@ restart. See [MQTT_SNMP.md](MQTT_SNMP.md).
 **Neighbors** publish after `discover.scopes`, or every `mqtt.neighbors.interval` hours
 when periodic neighbors run. `mqtt.neighbors on` runs them and publishes to every
 connected slot. `auto` (the default) runs them only while a slot uses a preset whose
-broker asks for neighbor data, currently `comchan`, and sends the periodic snapshot
+broker asks for neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshmapper`), and sends the periodic snapshot
 only to those slots. A manual `discover.scopes` always goes to every connected slot.
 A periodic run first refreshes the neighbor table for 60 s
 (like `discover.neighbors`), then queries each neighbor's scopes. A manual

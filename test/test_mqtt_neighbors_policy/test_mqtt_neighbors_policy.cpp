@@ -49,21 +49,26 @@ TEST(MQTTNeighborsPolicy, RejectsUnknownModesWithoutTouchingTheOutput) {
   EXPECT_EQ(MQTT_NEIGHBORS_ON, mode);
 }
 
-TEST(MQTTNeighborsPolicy, OnlyComchanOptsIn) {
-  EXPECT_TRUE(mqttPresetWantsNeighbors(findMQTTPreset("comchan")));
-  EXPECT_FALSE(mqttPresetWantsNeighbors(findMQTTPreset("analyzer-us")));
+TEST(MQTTNeighborsPolicy, OptInPresets) {
+  for (const char* name : {"cascadiamesh", "chimesh", "comchan", "meshmapper"}) {
+    ASSERT_NE(nullptr, findMQTTPreset(name)) << name;  // a renamed preset would silently drop out
+    EXPECT_TRUE(mqttPresetWantsNeighbors(findMQTTPreset(name))) << name;
+  }
+  for (const char* name : {"analyzer-us", "analyzer-eu", "waev", "meshrank"}) {
+    EXPECT_FALSE(mqttPresetWantsNeighbors(findMQTTPreset(name))) << name;
+  }
   EXPECT_FALSE(mqttPresetWantsNeighbors(nullptr));  // custom slot
   EXPECT_FALSE(mqttPresetNameWantsNeighbors("custom"));
   EXPECT_FALSE(mqttPresetNameWantsNeighbors("none"));
   EXPECT_FALSE(mqttPresetNameWantsNeighbors(nullptr));
 }
 
-TEST(MQTTNeighborsPolicy, EveryOptInNameIsARealPreset) {
+TEST(MQTTNeighborsPolicy, OptInCountMatchesTheTable) {
   int opted_in = 0;
   for (int i = 0; i < MQTT_PRESET_COUNT; i++) {
     if (mqttPresetWantsNeighbors(&MQTT_PRESETS[i])) opted_in++;
   }
-  EXPECT_GE(opted_in, 1);  // a renamed preset would silently opt nobody in
+  EXPECT_EQ(4, opted_in);  // every name in the opt-in list resolves to exactly one preset
 }
 
 TEST(MQTTNeighborsPolicy, AutoCollectsOnlyWithAnOptedInSlot) {
