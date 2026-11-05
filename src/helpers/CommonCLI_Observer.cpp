@@ -31,6 +31,7 @@
 #include "bridges/MQTTBridge.h"
 #include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
+#include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
 #include "MQTTPacketFilter.h"
 #include "MQTTTopicRouter.h"   // mqttSlotIata() — a slot's effective region code
 #endif
@@ -398,9 +399,14 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.neighbors ", 15) == 0) {
     // The mesh loop reads this live, so no bridge restart is needed; enabling it
     // triggers a discovery on the next eligible loop pass.
-    _mqtt_prefs.mqtt_neighbors_enabled = memcmp(&config[15], "on", 2) == 0;
-    if (!persistObserverPrefs(reply)) return true;
-    strcpy(reply, "OK");
+    uint8_t mode;
+    if (!mqttNeighborsParseMode(&config[15], &mode)) {
+      strcpy(reply, "Error: use auto, on, or off");
+    } else {
+      _mqtt_prefs.mqtt_neighbors_enabled = mode;
+      if (!persistObserverPrefs(reply)) return true;
+      strcpy(reply, "OK");
+    }
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0 ||
              memcmp(config, "mqtt.neighbors ", 15) == 0) {
@@ -680,6 +686,21 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       if (!persistObserverPrefs(reply)) return true;
       _callbacks->restartBridgeSlot(slot);
       sprintf(reply, "OK - slot %d JWT audience cleared (using username/password auth)", slot + 1);
+#if defined(WITH_MQTT_NEIGHBORS)
+    } else if (strncmp(subcmd, "neighbors ", 10) == 0) {
+      // Read live by the mesh loop; no bridge restart needed.
+      uint8_t mode;
+      if (!mqttNeighborsParseMode(&subcmd[10], &mode)) {
+        strcpy(reply, "Error: use auto, on, or off");
+      } else {
+        _mqtt_prefs.mqtt_slot_neighbors[slot] = mode;
+        if (!persistObserverPrefs(reply)) return true;
+        sprintf(reply, "OK - slot %d neighbors: %s", slot + 1, mqttNeighborsModeName(mode));
+      }
+#elif defined(WITH_MQTT_BRIDGE)
+    } else if (strncmp(subcmd, "neighbors ", 10) == 0) {
+      strcpy(reply, "Err - neighbors not enabled in this build");
+#endif
     } else if (strcmp(subcmd, "filter") == 0 ||
                strncmp(subcmd, "filter ", 7) == 0) {
       // Empty/bare input resets to the backwards-compatible all-types default.
@@ -1001,7 +1022,12 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     uint32_t hours = (_mqtt_prefs.mqtt_neighbors_interval + 3599999) / 3600000;
     sprintf(reply, "> %u hours (%lu ms)", (unsigned)hours, (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
   } else if (memcmp(config, "mqtt.neighbors", 14) == 0) {
-    sprintf(reply, "> %s", _mqtt_prefs.mqtt_neighbors_enabled ? "on" : "off");
+    if (_mqtt_prefs.mqtt_neighbors_enabled == MQTT_NEIGHBORS_AUTO) {
+      sprintf(reply, "> auto (%s)",
+              mqttNeighborsCollectionEnabled(&_mqtt_prefs, RUNTIME_MQTT_SLOTS) ? "active" : "inactive");
+    } else {
+      sprintf(reply, "> %s", mqttNeighborsModeName(_mqtt_prefs.mqtt_neighbors_enabled));
+    }
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval", 23) == 0 ||
              memcmp(config, "mqtt.neighbors", 14) == 0) {
@@ -1072,6 +1098,16 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       } else {
         strcpy(reply, "> (not set - custom slots use username/password auth)");
       }
+#if defined(WITH_MQTT_NEIGHBORS)
+    } else if (strcmp(subcmd, "neighbors") == 0) {
+      // Show the setting and whether periodic snapshots reach this slot.
+      sprintf(reply, "> %s (periodic: %s)",
+              mqttNeighborsModeName(_mqtt_prefs.mqtt_slot_neighbors[slot]),
+              mqttNeighborsSlotWants(&_mqtt_prefs, slot, true) ? "yes" : "no");
+#elif defined(WITH_MQTT_BRIDGE)
+    } else if (strcmp(subcmd, "neighbors") == 0) {
+      strcpy(reply, "Err - neighbors not enabled in this build");
+#endif
     } else if (strcmp(subcmd, "filter") == 0) {
       char filter_text[MQTTPacketFilter::kFilterTextSize];
       if (MQTTPacketFilter::format(_mqtt_prefs.mqtt_slot_packet_filter[slot],

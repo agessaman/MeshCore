@@ -32,3 +32,23 @@ static inline bool mqttPresetEnforcesTokenExp(const MQTTPresetDef* preset) {
   if (!preset || !preset->name) return true;   // custom/audience slots: assume enforced
   return strcmp(preset->name, "waev") != 0;
 }
+
+// True when the broker's collector consumes neighbor snapshots. With
+// mqtt.neighbors auto (the default), a slot on one of these turns on periodic
+// neighbor collection and receives the periodic snapshots; other slots do not.
+// Keyed by name for the same reason as above; the name form lets the mesh loop
+// check stored slot presets without a table lookup per pass.
+static inline bool mqttPresetNameWantsNeighbors(const char* name) {
+  if (!name) return false;  // custom and none never match: opt in with mqtt.neighbors on
+  static const char* const kWantsNeighbors[] = {
+    "cascadiamesh", "chimesh", "comchan", "meshmapper",
+  };
+  for (const char* wanted : kWantsNeighbors) {
+    if (strcmp(name, wanted) == 0) return true;
+  }
+  return false;
+}
+
+static inline bool mqttPresetWantsNeighbors(const MQTTPresetDef* preset) {
+  return preset && mqttPresetNameWantsNeighbors(preset->name);
+}

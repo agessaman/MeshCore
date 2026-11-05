@@ -409,6 +409,9 @@ private:
   // Release/acquire handoff from the mesh loop (Core 1) to the MQTT task (Core 0).
   // A second snapshot is dropped while the current one is still publishing.
   std::atomic<bool> _neighbors_publish_pending;
+  // Slots the snapshot goes to (bit i = slot i), chosen by the mesh from prefs
+  // so the MQTT task never reads them. Published by the same release store.
+  uint8_t _neighbors_publish_slots;
   // Written by the MQTT task (Core 0), read by the CLI (Core 1) for `get mqtt.status`.
   enum NeighborsResult : uint8_t { NBR_RESULT_NONE, NBR_RESULT_OK, NBR_RESULT_FAIL };
   std::atomic<uint8_t> _neighbors_last_result;
@@ -586,8 +589,8 @@ private:
                      float snr = 0.0f, float rssi = 0.0f);
   bool publishRaw(mesh::Packet* packet, bool& has_eligible_target);
 #if defined(WITH_MQTT_NEIGHBORS)
-  // Publishes the pending _neighbors_json_buffer to every connected slot's
-  // neighbors topic. Runs on the MQTT task (Core 0) only.
+  // Publishes the pending _neighbors_json_buffer to the neighbors topic of each
+  // connected slot it is meant for. Runs on the MQTT task (Core 0) only.
   bool publishNeighbors();
 #endif
   void queuePacket(mesh::Packet* packet, bool is_tx);
@@ -727,8 +730,9 @@ public:
   // Called by the mesh (Core 1) once a neighbor-discovery pass has built the
   // table JSON. Copies it into the persistent PSRAM buffer and raises the
   // publish-pending flag for the MQTT task; a request is dropped if one is
-  // already in flight or the buffer is unavailable.
-  void requestPublishNeighbors(const char* json, size_t len);
+  // already in flight or the buffer is unavailable. slot_mask comes from
+  // mqttNeighborsSlotMask(); bit i sends to slot i.
+  void requestPublishNeighbors(const char* json, size_t len, uint8_t slot_mask);
 
   // Periodic-neighbors schedule, reported by the mesh loop for `get mqtt.status`.
   // The mesh owns the timer; the bridge only caches the summary so the wrap-safe

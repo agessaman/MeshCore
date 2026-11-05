@@ -90,6 +90,22 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   it in pool — and a starved pool sets `doc.overflowed()`, which drops the entire publish
   instead of truncating it. `NEIGHBORS_MAX_PUBLISH_ENTRIES` (20 without PSRAM) keeps the
   pool inside a single block.
+- **Mode and per-preset opt-in** (`MQTTNeighborsPolicy.h`): `mqtt_neighbors_enabled` holds
+  a mode in RAM, 0 = auto, 1 = on, 2 = off. `/mqtt.json` stores it as `neighbors.mode` and
+  keeps `neighbors.enabled` as the 0/1 older firmware validates (1 only for on), so a
+  rollback repairs nothing, does not rewrite the file, and keeps `mode` for the next
+  upgrade. A file without `mode` maps `enabled` 0 to auto and 1 to on without counting
+  as a repair, so upgrading does not rewrite every node's file. Out-of-range values
+  repair to off. `mqttNeighborsCollectionEnabled()` gates the mesh loop's periodic cycle: on always runs
+  it, auto only while a stored slot preset passes `mqttPresetNameWantsNeighbors()`
+  (`MQTTPresetPolicy.h`, keyed by name so `MQTTPresets.h` stays identical across
+  channels). `startNeighborDiscover(reply, periodic)` records the origin. A periodic
+  scope pass is abandoned (`abortNeighborDiscover()`) if collection turns off mid-run.
+  `mqttNeighborsSlotWants()` combines the node mode, the per-slot
+  `mqtt_slot_neighbors` override (0 auto, 1 on, 2 off; `slotN.neighbors` in
+  `/mqtt.json`, missing = auto) and the preset list. The mesh hands the bridge a slot
+  bitmask (`mqttNeighborsSlotMask()`) with each snapshot, so the MQTT task never
+  reads prefs.
 - **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into the
   persistent buffer (`NEIGHBORS_JSON_BUFFER_SIZE`, PSRAM where available) and sets
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)

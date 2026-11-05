@@ -6,6 +6,7 @@
 #include <MeshCore.h>
 #include "CommonCLI.h"
 #include "MQTTPacketFilter.h"
+#include "MQTTNeighborsPolicy.h"
 #include "MQTTPresets.h"
 
 // Compile-time defaults for fresh /mqtt.json (override via platformio build_flags).
@@ -107,9 +108,9 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->alert_mqtt_minutes = 240;
   prefs->alert_min_interval_min = 60;
 
-  // Neighbors publishing defaults off; a defaulted tail is a valid 24h interval
-  // (not 0) so an in-lineage upgrade from a pre-neighbors payload is sane.
-  prefs->mqtt_neighbors_enabled = 0;
+  // Neighbors default to auto (per-preset opt-in); a defaulted tail is a valid 24h
+  // interval (not 0) so an in-lineage upgrade from a pre-neighbors payload is sane.
+  prefs->mqtt_neighbors_enabled = MQTT_NEIGHBORS_AUTO;
   prefs->mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
 
   prefs->display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;

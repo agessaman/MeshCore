@@ -287,7 +287,7 @@ TEST(MQTTPrefsSerializer, RepairsSemanticRanges) {
   InputStream input(
       "{version:1,wifi:{power_save:9},time:{utc_offset:99},"
       "mqtt:{tx_enabled:7,status:{enabled:3,interval_ms:10},"
-      "neighbors:{enabled:2,interval_ms:100},slot1:{port:-1,packet_filter:-2}},"
+      "neighbors:{enabled:3,interval_ms:100},slot1:{port:-1,packet_filter:-2}},"
       "radio:{watchdog_min:121},alert:{rate_limit_min:1}}");
   MQTTPrefsSerializer serializer(&prefs);
   ASSERT_TRUE(serializer.loadSerial(input));
@@ -298,6 +298,7 @@ TEST(MQTTPrefsSerializer, RepairsSemanticRanges) {
   EXPECT_EQ(-7, prefs.timezone_offset);
   EXPECT_EQ(2, prefs.mqtt_tx_enabled);
   EXPECT_EQ(300000u, prefs.mqtt_status_interval);
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF, prefs.mqtt_neighbors_enabled);  // corrupt fails safe
   EXPECT_EQ(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS, prefs.mqtt_neighbors_interval);
   EXPECT_EQ(0, prefs.mqtt_slot_port[0]);
   EXPECT_EQ(0xffff, prefs.mqtt_slot_packet_filter[0]);
@@ -481,6 +482,122 @@ TEST(MQTTPrefsSerializer, WifiTxPowerRoundTripsDefaultsAndRepairs) {
     ASSERT_TRUE(bogus_serializer.apply(&repaired)) << bogus_text;
     EXPECT_TRUE(repaired) << bogus_text;
     EXPECT_EQ(WifiTxPowerPolicy::kBoardDefault, prefs.wifi_tx_power) << bogus_text;
+  }
+}
+
+static MQTTPrefs loadNeighbors(const char* json, bool* repaired) {
+  MQTTPrefs prefs = defaults();
+  prefs.mqtt_neighbors_enabled = 0xee;  // must be overwritten
+  InputStream input(json);
+  MQTTPrefsSerializer serializer(&prefs);
+  EXPECT_TRUE(serializer.loadSerial(input)) << json;
+  *repaired = false;
+  EXPECT_TRUE(serializer.apply(repaired)) << json;
+  return prefs;
+}
+
+TEST(MQTTPrefsSerializer, NeighborsModeRoundTripsAndKeepsEnabledReadableByOlderFirmware) {
+  struct { uint8_t mode; const char* written; } cases[] = {
+    {MQTT_NEIGHBORS_AUTO, "neighbors:{enabled:0,mode:0,"},
+    {MQTT_NEIGHBORS_ON, "neighbors:{enabled:1,mode:1,"},
+    {MQTT_NEIGHBORS_OFF, "neighbors:{enabled:0,mode:2,"},
+  };
+  for (const auto& c : cases) {
+    MQTTPrefs source = defaults();
+    source.mqtt_neighbors_enabled = c.mode;
+    OutputStream output;
+    MQTTPrefsSerializer writer(&source);
+    ASSERT_TRUE(writer.saveSerial(output));
+    // Older firmware validates "enabled" as 0/1; it must never need repairing,
+    // or the rewrite would drop "mode".
+    EXPECT_NE(std::string::npos, output.text().find(c.written)) << output.text();
+
+    bool repaired = true;
+    MQTTPrefs loaded = loadNeighbors(output.text().c_str(), &repaired);
+    EXPECT_FALSE(repaired) << (int)c.mode;
+    EXPECT_EQ(c.mode, loaded.mqtt_neighbors_enabled);
+  }
+}
+
+TEST(MQTTPrefsSerializer, NeighborsFileWithoutModeMapsTheOldBoolean) {
+  bool repaired = true;
+  // enabled:0 was both "never set" and "off"; both now mean auto.
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO,
+            loadNeighbors("{version:1,mqtt:{neighbors:{enabled:0,interval_ms:86400000}}}",
+                          &repaired).mqtt_neighbors_enabled);
+  EXPECT_FALSE(repaired);  // no fleet-wide rewrite on upgrade
+  EXPECT_EQ(MQTT_NEIGHBORS_ON,
+            loadNeighbors("{version:1,mqtt:{neighbors:{enabled:1,interval_ms:86400000}}}",
+                          &repaired).mqtt_neighbors_enabled);
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF,
+            loadNeighbors("{version:1,mqtt:{neighbors:{enabled:9,interval_ms:86400000}}}",
+                          &repaired).mqtt_neighbors_enabled);
+  EXPECT_TRUE(repaired);
+}
+
+TEST(MQTTPrefsSerializer, NeighborsModeWinsAndRepairsFailSafe) {
+  bool repaired = false;
+  // Off survives a rollback: older firmware left enabled:0 and mode alone.
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF,
+            loadNeighbors("{version:1,mqtt:{neighbors:{enabled:0,mode:2}}}",
+                          &repaired).mqtt_neighbors_enabled);
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF,
+            loadNeighbors("{version:1,mqtt:{neighbors:{enabled:0,mode:7}}}",
+                          &repaired).mqtt_neighbors_enabled);
+  EXPECT_TRUE(repaired);
+  // An "enabled" that disagrees with "mode" is rewritten so older firmware sees the truth.
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO,
+            loadNeighbors("{version:1,mqtt:{neighbors:{enabled:1,mode:0}}}",
+                          &repaired).mqtt_neighbors_enabled);
+  EXPECT_TRUE(repaired);
+}
+
+TEST(MQTTPrefsSerializer, SlotNeighborsRoundTripDefaultAutoAndRepairOff) {
+  MQTTPrefs source = defaults();
+  source.mqtt_slot_neighbors[0] = MQTT_NEIGHBORS_ON;
+  source.mqtt_slot_neighbors[3] = MQTT_NEIGHBORS_OFF;
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input));
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_ON, loaded.mqtt_slot_neighbors[0]);
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO, loaded.mqtt_slot_neighbors[1]);
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF, loaded.mqtt_slot_neighbors[3]);
+
+  // Written before the key existed: auto, and not a repair.
+  MQTTPrefs older = defaults();
+  InputStream older_input("{version:1,mqtt:{slot1:{preset:\"comchan\"}}}");
+  MQTTPrefsSerializer older_reader(&older);
+  ASSERT_TRUE(older_reader.loadSerial(older_input));
+  bool older_repaired = true;
+  ASSERT_TRUE(older_reader.apply(&older_repaired));
+  EXPECT_FALSE(older_repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO, older.mqtt_slot_neighbors[0]);
+
+  bool bad_repaired = false;
+  MQTTPrefs bad = loadNeighbors("{version:1,mqtt:{slot2:{neighbors:5}}}", &bad_repaired);
+  EXPECT_TRUE(bad_repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF, bad.mqtt_slot_neighbors[1]);
+}
+
+TEST(MQTTPrefsSerializer, NeighborsNormalizeKeepsTheInMemoryMode) {
+  for (uint8_t mode : {MQTT_NEIGHBORS_AUTO, MQTT_NEIGHBORS_ON, MQTT_NEIGHBORS_OFF}) {
+    MQTTPrefs prefs = defaults();
+    prefs.mqtt_neighbors_enabled = mode;
+    MQTTPrefsSerializer serializer(&prefs);
+    bool repaired = true;
+    ASSERT_TRUE(serializer.normalize(&repaired));
+    EXPECT_FALSE(repaired) << (int)mode;
+    EXPECT_EQ(mode, prefs.mqtt_neighbors_enabled);
   }
 }
 

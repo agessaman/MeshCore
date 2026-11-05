@@ -144,6 +144,11 @@ struct MQTTPrefs {
   // WiFi TX power cap in whole dBm; 0 follows the build's MQTT_WIFI_TX_POWER
   // (see WifiTxPowerPolicy). Runtime only, like display_timeout_secs.
   uint8_t wifi_tx_power;
+
+  // Per-slot neighbors override (MQTTNeighborsMode): 0 auto follows
+  // mqtt.neighbors and the preset opt-in, 1 on, 2 off. Runtime only, like
+  // display_timeout_secs.
+  uint8_t mqtt_slot_neighbors[MQTT_PREFS_SLOT_COUNT];
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {

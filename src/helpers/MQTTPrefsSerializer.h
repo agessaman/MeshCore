@@ -3,6 +3,7 @@
 #include <helpers/ConfigSerializer.h>
 #include <helpers/MQTTObserverValidation.h>
 #include <helpers/MQTTPresets.h>
+#include <helpers/MQTTNeighborsPolicy.h>
 #include <helpers/MQTTPrefsStorage.h>
 #include <helpers/WifiPowerSavePolicy.h>
 #include <helpers/WifiTxPowerPolicy.h>
@@ -140,27 +141,56 @@ class MQTTPrefsSerializer : public ConfigSerializer {
     }
   };
 
+  // "mode" holds auto/on/off. "enabled" stays the 0/1 older firmware reads:
+  // 1 only for on, so a rollback sees off for both auto and off and repairs
+  // nothing — the file, and with it "mode", survives unless the old firmware
+  // rewrites it for another reason.
   class NeighborPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
-    int32_t _enabled, _interval_ms;
-    bool _seen_enabled = false, _seen_interval = false;
+    int32_t _enabled, _mode, _interval_ms;
+    bool _seen_enabled = false, _seen_mode = false, _seen_interval = false;
   protected:
     void structure() override {
       defStrict("enabled", _enabled, _seen_enabled);
+      defStrict("mode", _mode, _seen_mode);
       defStrict("interval_ms", _interval_ms, _seen_interval);
     }
   public:
     explicit NeighborPrefs(MQTTPrefs* prefs)
-        : _prefs(prefs), _enabled(prefs->mqtt_neighbors_enabled),
+        : _prefs(prefs),
+          _enabled(prefs->mqtt_neighbors_enabled == MQTT_NEIGHBORS_ON ? 1 : 0),
+          _mode(prefs->mqtt_neighbors_enabled),
           _interval_ms(static_cast<int32_t>(prefs->mqtt_neighbors_interval)) {}
     void apply(bool* repaired) {
-      if (_enabled < 0 || _enabled > 1) { _enabled = 0; *repaired = true; }
+      if (_seen_mode) {
+        if (_mode < 0 || _mode > MQTT_NEIGHBORS_MODE_MAX) {
+          _mode = MQTT_NEIGHBORS_OFF;
+          *repaired = true;
+        }
+        // Keep "enabled" truthful for older firmware.
+        if (_seen_enabled && _enabled != (_mode == MQTT_NEIGHBORS_ON ? 1 : 0)) *repaired = true;
+      } else if (_seen_enabled) {
+        // Written before "mode" existed: 0 was never set or off there, now auto.
+        // Not a repair, so upgrading does not rewrite every node's file; the
+        // key is added on the next save.
+        if (_enabled == 1) {
+          _mode = MQTT_NEIGHBORS_ON;
+        } else if (_enabled == 0) {
+          _mode = MQTT_NEIGHBORS_AUTO;
+        } else {
+          _mode = MQTT_NEIGHBORS_OFF;
+          *repaired = true;
+        }
+      } else if (_mode < 0 || _mode > MQTT_NEIGHBORS_MODE_MAX) {
+        _mode = MQTT_NEIGHBORS_OFF;
+        *repaired = true;
+      }
       if (_interval_ms < static_cast<int32_t>(MQTT_NEIGHBORS_MIN_INTERVAL_MS) ||
           _interval_ms > static_cast<int32_t>(MQTT_NEIGHBORS_MAX_INTERVAL_MS)) {
         _interval_ms = static_cast<int32_t>(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS);
         *repaired = true;
       }
-      _prefs->mqtt_neighbors_enabled = static_cast<uint8_t>(_enabled);
+      _prefs->mqtt_neighbors_enabled = static_cast<uint8_t>(_mode);
       _prefs->mqtt_neighbors_interval = static_cast<uint32_t>(_interval_ms);
     }
   };
@@ -188,11 +218,11 @@ class MQTTPrefsSerializer : public ConfigSerializer {
   class SlotPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
     int _index;
-    int32_t _port, _filter;
+    int32_t _port, _filter, _neighbors;
     bool _seen_preset = false, _seen_host = false, _seen_port = false;
     bool _seen_username = false, _seen_password = false, _seen_token = false;
     bool _seen_topic = false, _seen_audience = false, _seen_filter = false;
-    bool _seen_iata = false;
+    bool _seen_iata = false, _seen_neighbors = false;
   protected:
     void structure() override {
       defStrict("preset", _prefs->mqtt_slot_preset[_index],
@@ -213,13 +243,21 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       defStrict("packet_filter", _filter, _seen_filter);
       defStrict("iata", _prefs->mqtt_slot_iata[_index],
                 sizeof(_prefs->mqtt_slot_iata[_index]), _seen_iata);
+      defStrict("neighbors", _neighbors, _seen_neighbors);
     }
   public:
     SlotPrefs(MQTTPrefs* prefs, int index)
         : _prefs(prefs), _index(index), _port(prefs->mqtt_slot_port[index]),
-          _filter(prefs->mqtt_slot_packet_filter[index]) {}
+          _filter(prefs->mqtt_slot_packet_filter[index]),
+          _neighbors(prefs->mqtt_slot_neighbors[index]) {}
     void apply(bool* repaired) {
       if (_port < 0 || _port > 65535) { _port = 0; *repaired = true; }
+      // Missing (older file) keeps the auto default; corrupt fails safe to off.
+      if (_neighbors < 0 || _neighbors > MQTT_NEIGHBORS_MODE_MAX) {
+        _neighbors = MQTT_NEIGHBORS_OFF;
+        *repaired = true;
+      }
+      _prefs->mqtt_slot_neighbors[_index] = static_cast<uint8_t>(_neighbors);
       if (_filter < 0 || _filter > 65535) { _filter = 0xffff; *repaired = true; }
       const char* preset = _prefs->mqtt_slot_preset[_index];
       if (strcmp(preset, MQTT_PRESET_NONE) != 0 &&

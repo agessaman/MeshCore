@@ -179,6 +179,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool neighbor_discover_active;
   bool neighbor_table_refresh_active;
   bool neighbor_table_refresh_periodic;
+  bool neighbor_discover_periodic;       // scope pass came from the periodic cycle
   unsigned long neighbor_discover_until;
   mesh::Packet* neighbor_discover_request;
   unsigned long next_neighbors_publish;
@@ -194,9 +195,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool completeNeighborDiscoverEntry();
   void resetNeighborDiscoverJsonBudget();
   bool neighborDiscoverReady(char* reply);
-  bool startNeighborDiscover(char* reply);
+  bool startNeighborDiscover(char* reply, bool periodic);
   void loopNeighborDiscover();
   void finishNeighborDiscover();
+  void clearNeighborDiscoverState();
+  void abortNeighborDiscover();
   bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
   void touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp);
   void getLocalScopes(char* buf, size_t len);

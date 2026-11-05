@@ -153,6 +153,7 @@ Commands work over serial and over a remote admin login unless marked *serial on
 | `get/set mqttN.audience <aud>` | Switches a `custom` slot to JWT auth; bare `set` clears it |
 | `get/set mqttN.iata <code>` | Region code for this slot's topics; bare `set` clears it back to `mqtt.iata` |
 | `get/set mqttN.filter <all\|none\|list>` | Packet types sent to this slot |
+| `get/set mqttN.neighbors auto\|on\|off` | Neighbor snapshots for this slot; `auto` follows `mqtt.neighbors` (neighbors builds) |
 | `get mqttN.diag` | Last connection error and timing for the slot |
 
 Server and port apply only to `custom` slots. The username and password apply to
@@ -269,7 +270,7 @@ it has no effect there. An empty or invalid override falls back to `mqtt.iata`.
 | `get/set mqtt.tx on\|off\|advert` | Publish transmitted packets; `advert` sends only this node's own adverts | advert |
 | `get/set mqtt.advert.verify on\|off` | Drop received adverts with bad signatures (counted as `badsig=` in `mqtt.stats`) | off |
 | `get/set mqtt.interval <1-60>` | Status interval, minutes | 5 |
-| `get/set mqtt.neighbors on\|off` | Periodic neighbors publish (neighbors builds) | off |
+| `get/set mqtt.neighbors auto\|on\|off` | Periodic neighbors publish (neighbors builds); `auto` only for presets that ask for it | auto |
 | `get/set mqtt.neighbors.interval <12-336>` | Neighbors interval, hours | 24 |
 | `get/set mqtt.ntp <host\|none>` | Primary NTP server; `set` syncs once to test it | `pool.ntp.org` |
 | `get mqtt.ntp.diag` | Probe every NTP server without changing the clock | |
@@ -404,7 +405,7 @@ restart. See [MQTT_SNMP.md](MQTT_SNMP.md).
 
 | Command | Shows |
 |---------|-------|
-| `get mqtt.status` | Each slot's state; with neighbors on, `nbr: <next>/<last>` |
+| `get mqtt.status` | Each slot's state; while periodic neighbors run, `nbr: <next>/<last>` |
 | `get mqttN.diag` | Last error for slot N (TLS, socket, clock) and its filter |
 | `get mqtt.stats` | Heap, queue depth, outbox, drops, `filt=`, `badsig=` |
 | `get mqtt.config.valid` | `valid` when the saved MQTT settings pass validation |
@@ -423,7 +424,16 @@ restart. See [MQTT_SNMP.md](MQTT_SNMP.md).
 `{PUBLIC_KEY}` is 64 hex characters. MeshRank uses `meshrank/uplink/{token}/{PUBLIC_KEY}/<type>`.
 
 **Neighbors** publish after `discover.scopes`, or every `mqtt.neighbors.interval` hours
-when `mqtt.neighbors` is on. A periodic run first refreshes the neighbor table for 60 s
+when periodic neighbors run. Which slots get the periodic snapshot:
+
+- `mqttN.neighbors on` or `off` decides for that slot.
+- `mqttN.neighbors auto` (the default) follows the node: `mqtt.neighbors on` sends to
+  the slot; `mqtt.neighbors auto` (the default) sends only if the slot's preset asks
+  for neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshmapper`).
+- `mqtt.neighbors off` stops periodic snapshots on every slot.
+
+The periodic cycle runs only while at least one slot would receive it. A manual
+`discover.scopes` goes to every connected slot not set `off`. A periodic run first refreshes the neighbor table for 60 s
 (like `discover.neighbors`), then queries each neighbor's scopes. A manual
 `discover.scopes` during a refresh waits for it and says so:
 `OK - scopes queued (47s discovery remaining)`.

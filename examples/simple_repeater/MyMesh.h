@@ -184,6 +184,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool neighbor_discover_active;          // scope-query phase in flight
   bool neighbor_table_refresh_active;     // zero-hop table refresh (stage 1) in flight
   bool neighbor_table_refresh_periodic;   // that refresh was kicked by the periodic timer
+  bool neighbor_discover_periodic;       // scope pass came from the periodic cycle
   unsigned long neighbor_discover_until;  // current queue or response deadline
   mesh::Packet* neighbor_discover_request; // request awaiting TX completion
   unsigned long next_neighbors_publish;   // periodic publish deadline (0 = fire ASAP)
@@ -197,9 +198,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool completeNeighborDiscoverEntry();
   void resetNeighborDiscoverJsonBudget();
   bool neighborDiscoverReady(char* reply);
-  bool startNeighborDiscover(char* reply);
+  bool startNeighborDiscover(char* reply, bool periodic);
   void loopNeighborDiscover();
   void finishNeighborDiscover();
+  void clearNeighborDiscoverState();
+  void abortNeighborDiscover();
   bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
   void touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp);
   void getLocalScopes(char* buf, size_t len);

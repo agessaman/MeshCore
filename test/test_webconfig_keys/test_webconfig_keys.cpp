@@ -27,6 +27,7 @@ TEST(WebConfigKeys, AllowsPerSlotKeys) {
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt2.filter"));
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt6.audience"));  // MAX_MQTT_SLOTS == 6
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt2.iata"));
+  EXPECT_TRUE(wcIsAllowedSetKey("mqtt3.neighbors"));
 }
 
 TEST(WebConfigKeys, RejectsDangerousOrUnknownKeys) {
