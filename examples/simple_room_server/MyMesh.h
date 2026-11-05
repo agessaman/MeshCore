@@ -198,6 +198,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool startNeighborDiscover(char* reply, bool periodic);
   void loopNeighborDiscover();
   void finishNeighborDiscover();
+  void clearNeighborDiscoverState();
+  void abortNeighborDiscover();
   bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
   void touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp);
   void getLocalScopes(char* buf, size_t len);

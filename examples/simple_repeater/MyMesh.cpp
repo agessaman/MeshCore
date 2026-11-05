@@ -1874,7 +1874,12 @@ void MyMesh::loop() {
   bool periodic_neighbors_enabled =
       mqttNeighborsCollectionEnabled(_cli.getObserverPrefs(), RUNTIME_MQTT_SLOTS);
   if (neighbor_discover_active) {
-    loopNeighborDiscover();
+    if (neighbor_discover_periodic && !periodic_neighbors_enabled) {
+      abortNeighborDiscover();
+      MESH_DEBUG_PRINTLN("MQTT periodic neighbor scope pass cancelled");
+    } else {
+      loopNeighborDiscover();
+    }
   } else if (neighbor_table_refresh_active) {
     if (neighbor_table_refresh_periodic && !periodic_neighbors_enabled) {
       // periodic switched off mid-refresh -> cancel (leave pending_discover_tag alone)
@@ -2257,13 +2262,23 @@ void MyMesh::finishNeighborDiscover() {
       neighbor_discover_truncated);
 
     if (json_len > 0 && bridge) {
-      bridge->requestPublishNeighbors(json_buf, (size_t)json_len, !neighbor_discover_periodic);
+      // Manual runs reach every slot; periodic ones follow the mode they ran under.
+      uint8_t mode = neighbor_discover_periodic ? _cli.getObserverPrefs()->mqtt_neighbors_enabled
+                                                : (uint8_t)MQTT_NEIGHBORS_ON;
+      bridge->requestPublishNeighbors(json_buf, (size_t)json_len, mode);
     }
   }
 
   neighborsFree(scratch);
   neighborsFree(json_buf);
 
+  clearNeighborDiscoverState();
+  if (mqttNeighborsCollectionEnabled(_cli.getObserverPrefs(), RUNTIME_MQTT_SLOTS)) {
+    next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
+  }
+}
+
+void MyMesh::clearNeighborDiscoverState() {
   neighbor_discover_active = false;
   neighbor_discover_count = 0;
   neighbor_discover_next = 0;
@@ -2273,9 +2288,15 @@ void MyMesh::finishNeighborDiscover() {
   neighbor_discover_truncated = false;
   neighbor_discover_until = 0;
   neighbor_discover_request = NULL;
-  if (mqttNeighborsCollectionEnabled(_cli.getObserverPrefs(), RUNTIME_MQTT_SLOTS)) {
-    next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
-  }
+}
+
+// Drop a periodic scope pass whose collection was switched off mid-run, so it
+// stops spending airtime on a snapshot no slot would receive. A request already
+// on air is left to finish; with the pass inactive its callbacks ignore it.
+void MyMesh::abortNeighborDiscover() {
+  cancelNeighborDiscoverRequest();
+  clearNeighborDiscoverState();
+  next_neighbors_publish = 0;
 }
 
 // Advance the newest-first scope-query phase. Keep only one request in flight so

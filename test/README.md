@@ -24,6 +24,7 @@ does not reflect the GoogleTest count — run the built binary directly
 | Suite | Source under test | Covers |
 |-------|-------------------|--------|
 | `test_mqtt_presets` | `src/helpers/MQTTPresets.h` | preset lookup; table integrity (unique names, non-empty URLs, JWT-audience invariant, names fit the slot buffer); `mqttPresetNeedsSlotCredentials`; slot-count constants |
+| `test_mqtt_neighbors_policy` | `src/helpers/MQTTNeighborsPolicy.h`, `src/helpers/MQTTPresetPolicy.h` | `mqtt.neighbors` auto/on/off parsing and names; per-preset opt-in; auto collection gate from stored slot presets (runtime slot bound); periodic slot selection per mode |
 | `test_observer_validation` | `src/helpers/MQTTObserverValidation.h` | IATA (exactly 3 alphanumerics), owner key (64 hex), NTP hostname, and the buffer-fit check behind the #17 length validation — including boundaries and nulls |
 | `test_webconfig_keys` | `src/helpers/WebConfigKeys.h` | POST-key allowlist, secret detection, admin-password classification/validation, slot-index bounds, and the short-key out-of-bounds guard (attacker-supplied keys) |
 | `test_topic_template` | `src/helpers/MQTTTopicTemplate.h` | `{iata}/{device}/{token}/{type}` expansion, overflow/NUL-termination, and a buffer-size fuzz |

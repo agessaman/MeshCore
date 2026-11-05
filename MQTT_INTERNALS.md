@@ -91,14 +91,18 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   instead of truncating it. `NEIGHBORS_MAX_PUBLISH_ENTRIES` (20 without PSRAM) keeps the
   pool inside a single block.
 - **Mode and per-preset opt-in** (`MQTTNeighborsPolicy.h`): `mqtt_neighbors_enabled` holds
-  a mode, 0 = auto, 1 = on, 2 = off. 0 used to mean off, so nodes that never changed it
-  move to auto on upgrade; older firmware repairs 2 to 0, so a rollback leaves it off.
-  `mqttNeighborsCollectionEnabled()` gates the mesh loop's periodic cycle: on always runs
+  a mode in RAM, 0 = auto, 1 = on, 2 = off. `/mqtt.json` stores it as `neighbors.mode` and
+  keeps `neighbors.enabled` as the 0/1 older firmware validates (1 only for on), so a
+  rollback repairs nothing, does not rewrite the file, and keeps `mode` for the next
+  upgrade. A file without `mode` maps `enabled` 0 to auto and 1 to on without counting
+  as a repair, so upgrading does not rewrite every node's file. Out-of-range values
+  repair to off. `mqttNeighborsCollectionEnabled()` gates the mesh loop's periodic cycle: on always runs
   it, auto only while a stored slot preset passes `mqttPresetNameWantsNeighbors()`
   (`MQTTPresetPolicy.h`, keyed by name so `MQTTPresets.h` stays identical across
-  channels). `startNeighborDiscover(reply, periodic)` records the origin and the
-  snapshot carries it to the bridge: manual snapshots reach every connected slot, and
-  periodic ones only the slots `mqttNeighborsSlotSelected()` picks.
+  channels). `startNeighborDiscover(reply, periodic)` records the origin. A periodic
+  scope pass is abandoned (`abortNeighborDiscover()`) if collection turns off mid-run.
+  The snapshot carries the mode it ran under to the bridge (on for manual runs), so the
+  MQTT task never reads the live pref; `mqttNeighborsSlotSelected()` picks the slots.
 - **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into the
   persistent buffer (`NEIGHBORS_JSON_BUFFER_SIZE`, PSRAM where available) and sets
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)

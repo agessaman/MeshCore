@@ -123,7 +123,7 @@ def default_config(setup_mode):
             "interval": 5, "timezone": "MST7MDT,M3.2.0,M11.1.0", "timezone_offset": -7,
             "ntp": "pool.ntp.org", "owner": "", "email": "", "snmp": False,
             "snmp_community": "public",
-            "neighbors": False, "neighbors_interval": 24,
+            "neighbors": "auto", "neighbors_interval": 24,
             "slots": [_slot() for _ in range(6)],
         },
         # Settings the CLI reaches but no portal form does, so they are absent
@@ -219,8 +219,7 @@ BOOL_KEYS = {"cad": ("radio", "cad"), "radio.rxgain": ("radio", "rxgain"),
              "repeat": ("radio", "repeat"), "mqtt.status": ("mqtt", "status"),
              "mqtt.packets": ("mqtt", "packets"), "mqtt.raw": ("mqtt", "raw"),
              "mqtt.rx": ("mqtt", "rx"), "mqtt.advert.verify": ("mqtt", "advert_verify"),
-             "snmp": ("mqtt", "snmp"),
-             "mqtt.neighbors": ("mqtt", "neighbors")}
+             "snmp": ("mqtt", "snmp")}
 INT_KEYS = {"tx": ("radio", "tx"), "flood.max": ("radio", "flood_max"),
             "flood.max.advert": ("radio", "flood_max_advert"),
             "flood.max.unscoped": ("radio", "flood_max_unscoped"),
@@ -345,6 +344,12 @@ def apply_set(cfg, key, val):
     m = re.match(r"^mqtt([1-6])\.(\w+)$", key)
     if m:
         return apply_slot_set(cfg, int(m.group(1)) - 1, m.group(2), val)
+
+    if key == "mqtt.neighbors":
+        if val not in ("auto", "on", "off"):
+            return False, "Error: use auto, on, or off"
+        cfg["mqtt"]["neighbors"] = val
+        return True, "OK"
 
     if key in BOOL_KEYS:
         sec, f = BOOL_KEYS[key]

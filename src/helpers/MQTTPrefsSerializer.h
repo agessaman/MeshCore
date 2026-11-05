@@ -141,22 +141,48 @@ class MQTTPrefsSerializer : public ConfigSerializer {
     }
   };
 
+  // "mode" holds auto/on/off. "enabled" stays the 0/1 older firmware reads:
+  // 1 only for on, so a rollback sees off for both auto and off and repairs
+  // nothing — the file, and with it "mode", survives unless the old firmware
+  // rewrites it for another reason.
   class NeighborPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
-    int32_t _enabled, _interval_ms;
-    bool _seen_enabled = false, _seen_interval = false;
+    int32_t _enabled, _mode, _interval_ms;
+    bool _seen_enabled = false, _seen_mode = false, _seen_interval = false;
   protected:
     void structure() override {
       defStrict("enabled", _enabled, _seen_enabled);
+      defStrict("mode", _mode, _seen_mode);
       defStrict("interval_ms", _interval_ms, _seen_interval);
     }
   public:
     explicit NeighborPrefs(MQTTPrefs* prefs)
-        : _prefs(prefs), _enabled(prefs->mqtt_neighbors_enabled),
+        : _prefs(prefs),
+          _enabled(prefs->mqtt_neighbors_enabled == MQTT_NEIGHBORS_ON ? 1 : 0),
+          _mode(prefs->mqtt_neighbors_enabled),
           _interval_ms(static_cast<int32_t>(prefs->mqtt_neighbors_interval)) {}
     void apply(bool* repaired) {
-      if (_enabled < 0 || _enabled > MQTT_NEIGHBORS_MODE_MAX) {
-        _enabled = MQTT_NEIGHBORS_AUTO;
+      if (_seen_mode) {
+        if (_mode < 0 || _mode > MQTT_NEIGHBORS_MODE_MAX) {
+          _mode = MQTT_NEIGHBORS_OFF;
+          *repaired = true;
+        }
+        // Keep "enabled" truthful for older firmware.
+        if (_seen_enabled && _enabled != (_mode == MQTT_NEIGHBORS_ON ? 1 : 0)) *repaired = true;
+      } else if (_seen_enabled) {
+        // Written before "mode" existed: 0 was never set or off there, now auto.
+        // Not a repair, so upgrading does not rewrite every node's file; the
+        // key is added on the next save.
+        if (_enabled == 1) {
+          _mode = MQTT_NEIGHBORS_ON;
+        } else if (_enabled == 0) {
+          _mode = MQTT_NEIGHBORS_AUTO;
+        } else {
+          _mode = MQTT_NEIGHBORS_OFF;
+          *repaired = true;
+        }
+      } else if (_mode < 0 || _mode > MQTT_NEIGHBORS_MODE_MAX) {
+        _mode = MQTT_NEIGHBORS_OFF;
         *repaired = true;
       }
       if (_interval_ms < static_cast<int32_t>(MQTT_NEIGHBORS_MIN_INTERVAL_MS) ||
@@ -164,7 +190,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
         _interval_ms = static_cast<int32_t>(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS);
         *repaired = true;
       }
-      _prefs->mqtt_neighbors_enabled = static_cast<uint8_t>(_enabled);
+      _prefs->mqtt_neighbors_enabled = static_cast<uint8_t>(_mode);
       _prefs->mqtt_neighbors_interval = static_cast<uint32_t>(_interval_ms);
     }
   };

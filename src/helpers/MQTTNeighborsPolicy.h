@@ -6,12 +6,11 @@
 #include <stdint.h>
 #include <string.h>
 
-// mqtt.neighbors modes, stored in MQTTPrefs::mqtt_neighbors_enabled.
-//
-// 0 was "off" before auto existed. It is reused as auto so the existing fleet,
-// which never touched the setting, picks up per-preset collection on upgrade.
-// Explicit off moves to 2, which older firmware repairs to 0 — off there too —
-// so a rollback never turns collection on.
+// mqtt.neighbors modes, held in MQTTPrefs::mqtt_neighbors_enabled. /mqtt.json
+// stores the mode under neighbors.mode and keeps neighbors.enabled as the 0/1
+// older firmware reads (1 only for on); see NeighborPrefs in
+// MQTTPrefsSerializer.h. A file without "mode" maps enabled 0 to auto, so nodes
+// that never touched the setting pick up per-preset collection on upgrade.
 enum MQTTNeighborsMode : uint8_t {
   MQTT_NEIGHBORS_AUTO = 0,  // collect and publish only for presets that opt in
   MQTT_NEIGHBORS_ON = 1,    // collect, and publish to every connected slot
@@ -41,8 +40,8 @@ static inline bool mqttNeighborsParseMode(const char* text, uint8_t* mode) {
   return false;
 }
 
-// Whether a periodic snapshot goes to a slot with this preset (nullptr = custom).
-// Off has no periodic snapshots; manual ones bypass this and reach every slot.
+// Whether a snapshot published under this mode goes to a slot with this preset
+// (nullptr = custom). Manual snapshots are published as on, reaching every slot.
 static inline bool mqttNeighborsSlotSelected(uint8_t mode, const MQTTPresetDef* preset) {
   if (mode == MQTT_NEIGHBORS_ON) return true;
   if (mode == MQTT_NEIGHBORS_AUTO) return mqttPresetWantsNeighbors(preset);

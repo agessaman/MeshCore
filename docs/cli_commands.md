@@ -1277,7 +1277,8 @@ region save
 >
 > Before `auto` existed the default was `off`. Nodes that never changed it upgrade to
 > `auto`; so do nodes set to `off` on that older firmware, because both were stored
-> as the same value.
+> as the same value. An `off` set on this firmware survives a rollback and
+> re-upgrade, unless a setting is changed while the older firmware runs.
 
 ---
 

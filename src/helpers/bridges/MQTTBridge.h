@@ -409,9 +409,9 @@ private:
   // Release/acquire handoff from the mesh loop (Core 1) to the MQTT task (Core 0).
   // A second snapshot is dropped while the current one is still publishing.
   std::atomic<bool> _neighbors_publish_pending;
-  // Manual snapshots go to every slot; periodic ones only to slots that
-  // mqttNeighborsSlotSelected() picks. Published by the same release store.
-  bool _neighbors_publish_all_slots;
+  // Mode the snapshot was taken under, captured by the mesh so the MQTT task
+  // never reads the live pref. Published by the same release store.
+  uint8_t _neighbors_publish_mode;
   // Written by the MQTT task (Core 0), read by the CLI (Core 1) for `get mqtt.status`.
   enum NeighborsResult : uint8_t { NBR_RESULT_NONE, NBR_RESULT_OK, NBR_RESULT_FAIL };
   std::atomic<uint8_t> _neighbors_last_result;
@@ -730,9 +730,9 @@ public:
   // Called by the mesh (Core 1) once a neighbor-discovery pass has built the
   // table JSON. Copies it into the persistent PSRAM buffer and raises the
   // publish-pending flag for the MQTT task; a request is dropped if one is
-  // already in flight or the buffer is unavailable. all_slots is true for a
-  // manual discover.scopes run, false for the periodic cycle.
-  void requestPublishNeighbors(const char* json, size_t len, bool all_slots);
+  // already in flight or the buffer is unavailable. mode picks the slots via
+  // mqttNeighborsSlotSelected(); manual discover.scopes runs pass on.
+  void requestPublishNeighbors(const char* json, size_t len, uint8_t mode);
 
   // Periodic-neighbors schedule, reported by the mesh loop for `get mqtt.status`.
   // The mesh owns the timer; the bridge only caches the summary so the wrap-safe
