@@ -686,6 +686,21 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       if (!persistObserverPrefs(reply)) return true;
       _callbacks->restartBridgeSlot(slot);
       sprintf(reply, "OK - slot %d JWT audience cleared (using username/password auth)", slot + 1);
+#if defined(WITH_MQTT_NEIGHBORS)
+    } else if (strncmp(subcmd, "neighbors ", 10) == 0) {
+      // Read live by the mesh loop; no bridge restart needed.
+      uint8_t mode;
+      if (!mqttNeighborsParseMode(&subcmd[10], &mode)) {
+        strcpy(reply, "Error: use auto, on, or off");
+      } else {
+        _mqtt_prefs.mqtt_slot_neighbors[slot] = mode;
+        if (!persistObserverPrefs(reply)) return true;
+        sprintf(reply, "OK - slot %d neighbors: %s", slot + 1, mqttNeighborsModeName(mode));
+      }
+#elif defined(WITH_MQTT_BRIDGE)
+    } else if (strncmp(subcmd, "neighbors ", 10) == 0) {
+      strcpy(reply, "Err - neighbors not enabled in this build");
+#endif
     } else if (strcmp(subcmd, "filter") == 0 ||
                strncmp(subcmd, "filter ", 7) == 0) {
       // Empty/bare input resets to the backwards-compatible all-types default.
@@ -1083,6 +1098,16 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       } else {
         strcpy(reply, "> (not set - custom slots use username/password auth)");
       }
+#if defined(WITH_MQTT_NEIGHBORS)
+    } else if (strcmp(subcmd, "neighbors") == 0) {
+      // Show the setting and whether periodic snapshots reach this slot.
+      sprintf(reply, "> %s (periodic: %s)",
+              mqttNeighborsModeName(_mqtt_prefs.mqtt_slot_neighbors[slot]),
+              mqttNeighborsSlotWants(&_mqtt_prefs, slot, true) ? "yes" : "no");
+#elif defined(WITH_MQTT_BRIDGE)
+    } else if (strcmp(subcmd, "neighbors") == 0) {
+      strcpy(reply, "Err - neighbors not enabled in this build");
+#endif
     } else if (strcmp(subcmd, "filter") == 0) {
       char filter_text[MQTTPacketFilter::kFilterTextSize];
       if (MQTTPacketFilter::format(_mqtt_prefs.mqtt_slot_packet_filter[slot],

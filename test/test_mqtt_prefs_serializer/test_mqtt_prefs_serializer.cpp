@@ -554,6 +554,41 @@ TEST(MQTTPrefsSerializer, NeighborsModeWinsAndRepairsFailSafe) {
   EXPECT_TRUE(repaired);
 }
 
+TEST(MQTTPrefsSerializer, SlotNeighborsRoundTripDefaultAutoAndRepairOff) {
+  MQTTPrefs source = defaults();
+  source.mqtt_slot_neighbors[0] = MQTT_NEIGHBORS_ON;
+  source.mqtt_slot_neighbors[3] = MQTT_NEIGHBORS_OFF;
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input));
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_ON, loaded.mqtt_slot_neighbors[0]);
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO, loaded.mqtt_slot_neighbors[1]);
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF, loaded.mqtt_slot_neighbors[3]);
+
+  // Written before the key existed: auto, and not a repair.
+  MQTTPrefs older = defaults();
+  InputStream older_input("{version:1,mqtt:{slot1:{preset:\"comchan\"}}}");
+  MQTTPrefsSerializer older_reader(&older);
+  ASSERT_TRUE(older_reader.loadSerial(older_input));
+  bool older_repaired = true;
+  ASSERT_TRUE(older_reader.apply(&older_repaired));
+  EXPECT_FALSE(older_repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO, older.mqtt_slot_neighbors[0]);
+
+  bool bad_repaired = false;
+  MQTTPrefs bad = loadNeighbors("{version:1,mqtt:{slot2:{neighbors:5}}}", &bad_repaired);
+  EXPECT_TRUE(bad_repaired);
+  EXPECT_EQ(MQTT_NEIGHBORS_OFF, bad.mqtt_slot_neighbors[1]);
+}
+
 TEST(MQTTPrefsSerializer, NeighborsNormalizeKeepsTheInMemoryMode) {
   for (uint8_t mode : {MQTT_NEIGHBORS_AUTO, MQTT_NEIGHBORS_ON, MQTT_NEIGHBORS_OFF}) {
     MQTTPrefs prefs = defaults();

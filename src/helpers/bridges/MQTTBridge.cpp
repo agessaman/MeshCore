@@ -798,7 +798,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   // std::atomic has no value-initializing default ctor pre-C++20, so set them here.
   _neighbors_json_buffer = nullptr;
   _neighbors_publish_len = 0;
-  _neighbors_publish_mode = MQTT_NEIGHBORS_ON;
+  _neighbors_publish_slots = 0;
   _neighbors_publish_pending.store(false, std::memory_order_relaxed);
   _neighbors_last_result.store(NBR_RESULT_NONE, std::memory_order_relaxed);
   _neighbors_phase.store(NBR_SCHEDULED, std::memory_order_relaxed);
@@ -4356,7 +4356,7 @@ void MQTTBridge::setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_
   _neighbors_secs_until_next.store(secs_until_next, std::memory_order_relaxed);
 }
 
-void MQTTBridge::requestPublishNeighbors(const char* json, size_t len, uint8_t mode) {
+void MQTTBridge::requestPublishNeighbors(const char* json, size_t len, uint8_t slot_mask) {
   if (!json || len == 0) return;
   // Drop a new snapshot while one is still being published (Core 0 clears the
   // flag when done). Acquire pairs with the task loop's release store.
@@ -4381,7 +4381,7 @@ void MQTTBridge::requestPublishNeighbors(const char* json, size_t len, uint8_t m
   memcpy(_neighbors_json_buffer, json, len);
   _neighbors_json_buffer[len] = '\0';
   _neighbors_publish_len = len;
-  _neighbors_publish_mode = mode;
+  _neighbors_publish_slots = slot_mask;
   _neighbors_publish_pending.store(true, std::memory_order_release);
 }
 
@@ -4395,9 +4395,7 @@ bool MQTTBridge::publishNeighbors() {
   char topic[128];
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
-      if (!mqttNeighborsSlotSelected(_neighbors_publish_mode, _slots[i].preset)) {
-        continue;
-      }
+      if (!(_neighbors_publish_slots & (1u << i))) continue;
       // Slots that cannot form a neighbors topic are skipped here.
       if (buildTopicForSlot(i, MSG_NEIGHBORS, topic, sizeof(topic))) {
         // Neighbor snapshots are periodically refreshed. Publish synchronously
@@ -4405,6 +4403,7 @@ bool MQTTBridge::publishNeighbors() {
         bool use_retain = _slots[i].preset ? _slots[i].preset->allow_retain : false;
         if (publishToSlot(i, topic, _neighbors_json_buffer, _neighbors_publish_len, use_retain, 0)) {
           published = true;
+          MQTT_DEBUG_PRINTLN("MQTT%d neighbors published", i + 1);
         }
       }
     }

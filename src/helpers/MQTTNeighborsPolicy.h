@@ -40,22 +40,41 @@ static inline bool mqttNeighborsParseMode(const char* text, uint8_t* mode) {
   return false;
 }
 
-// Whether a snapshot published under this mode goes to a slot with this preset
-// (nullptr = custom). Manual snapshots are published as on, reaching every slot.
-static inline bool mqttNeighborsSlotSelected(uint8_t mode, const MQTTPresetDef* preset) {
-  if (mode == MQTT_NEIGHBORS_ON) return true;
-  if (mode == MQTT_NEIGHBORS_AUTO) return mqttPresetWantsNeighbors(preset);
-  return false;
+static inline bool mqttNeighborsSlotConfigured(const char* preset) {
+  return preset && preset[0] != '\0' && strcmp(preset, MQTT_PRESET_NONE) != 0;
 }
 
-// Whether the periodic neighbor cycle should run, from the stored slot presets.
-static inline bool mqttNeighborsCollectionEnabled(const MQTTPrefs* prefs, int slot_count) {
-  if (!prefs) return false;
-  if (prefs->mqtt_neighbors_enabled == MQTT_NEIGHBORS_ON) return true;
-  if (prefs->mqtt_neighbors_enabled != MQTT_NEIGHBORS_AUTO) return false;
+// Whether a snapshot goes to slot `slot`, from the stored prefs. A slot's own
+// mqttN.neighbors on/off decides for that slot; auto follows mqtt.neighbors on,
+// or in auto the preset opt-in. Global off stops periodic snapshots on every
+// slot. Manual discover.scopes snapshots reach every slot not set off.
+static inline bool mqttNeighborsSlotWants(const MQTTPrefs* prefs, int slot, bool periodic) {
+  if (!prefs || slot < 0 || slot >= MQTT_PREFS_SLOT_COUNT) return false;
+  const char* preset = prefs->mqtt_slot_preset[slot];
+  if (!mqttNeighborsSlotConfigured(preset)) return false;
+  const uint8_t own = prefs->mqtt_slot_neighbors[slot];
+  if (own == MQTT_NEIGHBORS_OFF) return false;
+  if (!periodic) return true;
+  const uint8_t global = prefs->mqtt_neighbors_enabled;
+  if (global == MQTT_NEIGHBORS_OFF) return false;
+  if (own == MQTT_NEIGHBORS_ON) return true;
+  if (own != MQTT_NEIGHBORS_AUTO) return false;  // corrupt: fail safe
+  if (global == MQTT_NEIGHBORS_ON) return true;
+  return global == MQTT_NEIGHBORS_AUTO && mqttPresetNameWantsNeighbors(preset);
+}
+
+// Bit i set = slot i receives the snapshot. Computed on the mesh side and handed
+// to the bridge with the snapshot, so the MQTT task never reads prefs.
+static inline uint8_t mqttNeighborsSlotMask(const MQTTPrefs* prefs, int slot_count, bool periodic) {
   if (slot_count > MQTT_PREFS_SLOT_COUNT) slot_count = MQTT_PREFS_SLOT_COUNT;
+  uint8_t mask = 0;
   for (int i = 0; i < slot_count; i++) {
-    if (mqttPresetNameWantsNeighbors(prefs->mqtt_slot_preset[i])) return true;
+    if (mqttNeighborsSlotWants(prefs, i, periodic)) mask |= static_cast<uint8_t>(1u << i);
   }
-  return false;
+  return mask;
+}
+
+// Whether the periodic neighbor cycle should run: some slot would receive it.
+static inline bool mqttNeighborsCollectionEnabled(const MQTTPrefs* prefs, int slot_count) {
+  return mqttNeighborsSlotMask(prefs, slot_count, true) != 0;
 }

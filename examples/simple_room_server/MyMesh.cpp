@@ -2122,10 +2122,9 @@ void MyMesh::finishNeighborDiscover() {
       neighbor_discover_truncated);
 
     if (json_len > 0 && bridge) {
-      // Manual runs reach every slot; periodic ones follow the mode they ran under.
-      uint8_t mode = neighbor_discover_periodic ? _cli.getObserverPrefs()->mqtt_neighbors_enabled
-                                                : (uint8_t)MQTT_NEIGHBORS_ON;
-      bridge->requestPublishNeighbors(json_buf, (size_t)json_len, mode);
+      uint8_t slots = mqttNeighborsSlotMask(_cli.getObserverPrefs(), RUNTIME_MQTT_SLOTS,
+                                            neighbor_discover_periodic);
+      bridge->requestPublishNeighbors(json_buf, (size_t)json_len, slots);
     }
   }
 

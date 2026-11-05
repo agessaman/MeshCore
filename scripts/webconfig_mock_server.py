@@ -146,7 +146,7 @@ def default_config(setup_mode):
 def _slot():
     return {"preset": "none", "server": "", "port": 8883, "username": "",
             "password": "", "token": "", "topic": "", "audience": "",
-            "filter": "all", "iata": ""}
+            "filter": "all", "iata": "", "neighbors": "auto"}
 
 
 class State:
@@ -512,6 +512,11 @@ def apply_slot_set(cfg, idx, field, val):
             return False, "Error: IATA code must be exactly 3 letters/digits (e.g. DEN)"
         slot["iata"] = val.upper()
         return True, "OK - slot %d IATA: %s" % (idx + 1, slot["iata"])
+    if field == "neighbors":
+        if val not in ("auto", "on", "off"):
+            return False, "Error: use auto, on, or off"
+        slot["neighbors"] = val
+        return True, "OK - slot %d neighbors: %s" % (idx + 1, val)
     if field == "filter":
         canonical = canonical_packet_filter(val)
         if canonical is None:

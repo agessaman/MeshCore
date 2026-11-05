@@ -218,11 +218,11 @@ class MQTTPrefsSerializer : public ConfigSerializer {
   class SlotPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
     int _index;
-    int32_t _port, _filter;
+    int32_t _port, _filter, _neighbors;
     bool _seen_preset = false, _seen_host = false, _seen_port = false;
     bool _seen_username = false, _seen_password = false, _seen_token = false;
     bool _seen_topic = false, _seen_audience = false, _seen_filter = false;
-    bool _seen_iata = false;
+    bool _seen_iata = false, _seen_neighbors = false;
   protected:
     void structure() override {
       defStrict("preset", _prefs->mqtt_slot_preset[_index],
@@ -243,13 +243,21 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       defStrict("packet_filter", _filter, _seen_filter);
       defStrict("iata", _prefs->mqtt_slot_iata[_index],
                 sizeof(_prefs->mqtt_slot_iata[_index]), _seen_iata);
+      defStrict("neighbors", _neighbors, _seen_neighbors);
     }
   public:
     SlotPrefs(MQTTPrefs* prefs, int index)
         : _prefs(prefs), _index(index), _port(prefs->mqtt_slot_port[index]),
-          _filter(prefs->mqtt_slot_packet_filter[index]) {}
+          _filter(prefs->mqtt_slot_packet_filter[index]),
+          _neighbors(prefs->mqtt_slot_neighbors[index]) {}
     void apply(bool* repaired) {
       if (_port < 0 || _port > 65535) { _port = 0; *repaired = true; }
+      // Missing (older file) keeps the auto default; corrupt fails safe to off.
+      if (_neighbors < 0 || _neighbors > MQTT_NEIGHBORS_MODE_MAX) {
+        _neighbors = MQTT_NEIGHBORS_OFF;
+        *repaired = true;
+      }
+      _prefs->mqtt_slot_neighbors[_index] = static_cast<uint8_t>(_neighbors);
       if (_filter < 0 || _filter > 65535) { _filter = 0xffff; *repaired = true; }
       const char* preset = _prefs->mqtt_slot_preset[_index];
       if (strcmp(preset, MQTT_PRESET_NONE) != 0 &&

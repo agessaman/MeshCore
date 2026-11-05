@@ -1256,7 +1256,8 @@ region save
 
 **Parameters:**
 - `auto`: run the periodic cycle only while a slot uses a preset whose broker asks for
-  neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshmapper`), and publish it only to those slots
+  neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshmapper`) or is set with
+  `mqtt<N>.neighbors on`, and publish it only to those slots
 - `on`: periodically discover neighbor scopes and publish the neighbor table to every
   connected slot's `neighbors` topic
 - `off`: disable periodic neighbors publishing
@@ -1273,12 +1274,33 @@ region save
 > In `auto`, `get mqtt.neighbors` shows `auto (active)` or `auto (inactive)`.
 > While the periodic cycle runs, `get mqtt.status` gains a trailing
 > `nbr: <next>/<last>` field (time to next publish, and how the last publish went).
-> A manual `discover.scopes` publishes to every connected slot in any mode.
+> A manual `discover.scopes` publishes to every connected slot not set
+> `mqtt<N>.neighbors off`, in any mode. Per-slot overrides are described below.
 >
 > Before `auto` existed the default was `off`. Nodes that never changed it upgrade to
 > `auto`; so do nodes set to `off` on that older firmware, because both were stored
 > as the same value. An `off` set on this firmware survives a rollback and
 > re-upgrade, unless a setting is changed while the older firmware runs.
+
+---
+
+#### View or change neighbors for one MQTT slot (MQTT observer, PSRAM only)
+**Usage:**
+- `get mqtt<N>.neighbors`
+- `set mqtt<N>.neighbors <auto|on|off>`
+
+**Parameters:**
+- `N`: slot number, 1–6
+- `auto`: follow `mqtt.neighbors` — send when it is `on`, or when it is `auto` and this
+  slot's preset asks for neighbor data
+- `on`: send periodic snapshots to this slot (unless `mqtt.neighbors` is `off`)
+- `off`: never send neighbor snapshots to this slot, including manual `discover.scopes`
+
+**Default:** `auto`
+
+> **Note:** `get` also shows whether periodic snapshots currently reach the slot, e.g.
+> `> auto (periodic: yes)`. Applies live; no restart needed. Use `on` to send
+> neighbors to a custom broker without sending them to every other slot.
 
 ---
 

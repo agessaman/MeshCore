@@ -920,6 +920,9 @@ function buildSlots(sel){
       +slotFieldHtml(i,"iata","text","IATA region code","Optional — blank uses the node's IATA")
       +slotFieldHtml(i,"topic","text","Topic template","Placeholders: {iata} {device} {type} {token}")
       +slotFieldHtml(i,"audience","text","JWT audience","Optional — blank for user/pass auth")
+      +'<div class="f sf-neighbors"><label>Neighbors</label><select data-k="mqtt'+i+'.neighbors">'
+      +'<option value="auto">Auto (follow node setting)</option><option value="on">Always send</option><option value="off">Never send</option></select>'
+      +'<div class="hint">Auto sends when the node publishes neighbors to all brokers, or when this preset asks for them.</div></div>'
       +packetFilterHtml(i)
       +'</div>';
   }
@@ -934,7 +937,7 @@ function refreshSlotFields(host,i){
   var needs=name==="custom"?"custom":(def?def.needs:"none");
   var showMap={token:needs==="token",username:needs==="userpass"||needs==="custom",
     password:needs==="userpass"||needs==="password"||needs==="custom",server:needs==="custom",
-    port:needs==="custom",topic:needs==="custom",audience:needs==="custom",filter:name!=="none",
+    port:needs==="custom",topic:needs==="custom",audience:needs==="custom",filter:name!=="none",neighbors:name!=="none",
     iata:name!=="none"&&needs!=="token"};
   Object.keys(showMap).forEach(function(f){
     var w=card.querySelector(".sf-"+f);if(w)w.classList.toggle("hide",!showMap[f]);

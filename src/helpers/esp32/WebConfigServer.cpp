@@ -1006,6 +1006,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
       s["topic"] = (const char*)_obs->mqtt_slot_topic[i];
       s["audience"] = (const char*)_obs->mqtt_slot_audience[i];
       s["iata"] = (const char*)_obs->mqtt_slot_iata[i];
+      s["neighbors"] = mqttNeighborsModeName(_obs->mqtt_slot_neighbors[i]);
       char filter_text[MQTTPacketFilter::kFilterTextSize];
       if (MQTTPacketFilter::format(_obs->mqtt_slot_packet_filter[i],
                                    filter_text, sizeof(filter_text))) {

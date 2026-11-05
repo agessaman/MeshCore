@@ -97,15 +97,61 @@ TEST(MQTTNeighborsPolicy, OnAndOffIgnoreThePresets) {
   EXPECT_FALSE(mqttNeighborsCollectionEnabled(nullptr, RUNTIME_MQTT_SLOTS));
 }
 
-TEST(MQTTNeighborsPolicy, PeriodicSnapshotsReachOnlySelectedSlots) {
-  const MQTTPresetDef* comchan = findMQTTPreset("comchan");
-  const MQTTPresetDef* analyzer = findMQTTPreset("analyzer-us");
-  EXPECT_TRUE(mqttNeighborsSlotSelected(MQTT_NEIGHBORS_AUTO, comchan));
-  EXPECT_FALSE(mqttNeighborsSlotSelected(MQTT_NEIGHBORS_AUTO, analyzer));
-  EXPECT_FALSE(mqttNeighborsSlotSelected(MQTT_NEIGHBORS_AUTO, nullptr));
-  EXPECT_TRUE(mqttNeighborsSlotSelected(MQTT_NEIGHBORS_ON, analyzer));
-  EXPECT_TRUE(mqttNeighborsSlotSelected(MQTT_NEIGHBORS_ON, nullptr));
-  EXPECT_FALSE(mqttNeighborsSlotSelected(MQTT_NEIGHBORS_OFF, comchan));
+TEST(MQTTNeighborsPolicy, PeriodicMaskInAutoFollowsThePresetList) {
+  MQTTPrefs prefs = prefsWith(MQTT_NEIGHBORS_AUTO, "analyzer-us", "comchan");
+  strcpy(prefs.mqtt_slot_preset[2], "custom");
+  EXPECT_EQ(0b010, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, true));
+}
+
+TEST(MQTTNeighborsPolicy, PeriodicMaskWhenOnReachesEveryConfiguredSlot) {
+  MQTTPrefs prefs = prefsWith(MQTT_NEIGHBORS_ON, "analyzer-us", "comchan");
+  strcpy(prefs.mqtt_slot_preset[2], "custom");
+  EXPECT_EQ(0b111, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, true));
+}
+
+TEST(MQTTNeighborsPolicy, SlotOverridesBeatThePresetListAndNodeMode) {
+  MQTTPrefs prefs = prefsWith(MQTT_NEIGHBORS_AUTO, "analyzer-us", "comchan");
+  strcpy(prefs.mqtt_slot_preset[2], "custom");
+  prefs.mqtt_slot_neighbors[0] = MQTT_NEIGHBORS_ON;   // not on the list, forced on
+  prefs.mqtt_slot_neighbors[1] = MQTT_NEIGHBORS_OFF;  // on the list, forced off
+  prefs.mqtt_slot_neighbors[2] = MQTT_NEIGHBORS_ON;   // custom broker opts in
+  EXPECT_EQ(0b101, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, true));
+
+  prefs.mqtt_neighbors_enabled = MQTT_NEIGHBORS_ON;
+  EXPECT_EQ(0b101, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, true));  // slot off still wins
+}
+
+TEST(MQTTNeighborsPolicy, NodeOffStopsPeriodicEvenForSlotsSetOn) {
+  MQTTPrefs prefs = prefsWith(MQTT_NEIGHBORS_OFF, "comchan", "analyzer-us");
+  prefs.mqtt_slot_neighbors[1] = MQTT_NEIGHBORS_ON;
+  EXPECT_EQ(0, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, true));
+  EXPECT_FALSE(mqttNeighborsCollectionEnabled(&prefs, RUNTIME_MQTT_SLOTS));
+}
+
+TEST(MQTTNeighborsPolicy, ManualSnapshotsSkipOnlySlotsSetOff) {
+  MQTTPrefs prefs = prefsWith(MQTT_NEIGHBORS_OFF, "analyzer-us", "comchan");
+  strcpy(prefs.mqtt_slot_preset[2], "custom");
+  EXPECT_EQ(0b111, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, false));
+  prefs.mqtt_slot_neighbors[1] = MQTT_NEIGHBORS_OFF;
+  EXPECT_EQ(0b101, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, false));
+}
+
+TEST(MQTTNeighborsPolicy, UnconfiguredAndCorruptSlotsNeverReceive) {
+  MQTTPrefs prefs = prefsWith(MQTT_NEIGHBORS_ON, "none", "");
+  prefs.mqtt_slot_neighbors[0] = MQTT_NEIGHBORS_ON;
+  EXPECT_EQ(0, mqttNeighborsSlotMask(&prefs, RUNTIME_MQTT_SLOTS, false));
+  EXPECT_FALSE(mqttNeighborsCollectionEnabled(&prefs, RUNTIME_MQTT_SLOTS));
+
+  MQTTPrefs corrupt = prefsWith(MQTT_NEIGHBORS_ON, "comchan");
+  corrupt.mqtt_slot_neighbors[0] = 9;
+  EXPECT_EQ(0, mqttNeighborsSlotMask(&corrupt, RUNTIME_MQTT_SLOTS, true));
+}
+
+TEST(MQTTNeighborsPolicy, SlotCountBoundsTheMask) {
+  MQTTPrefs prefs = prefsWith(MQTT_NEIGHBORS_ON, "comchan");
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; i++) strcpy(prefs.mqtt_slot_preset[i], "comchan");
+  EXPECT_EQ(0b11, mqttNeighborsSlotMask(&prefs, 2, true));
+  EXPECT_EQ(0x3f, mqttNeighborsSlotMask(&prefs, MQTT_PREFS_SLOT_COUNT + 3, true));
 }
 
 int main(int argc, char** argv) {

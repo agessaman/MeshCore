@@ -101,8 +101,11 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   (`MQTTPresetPolicy.h`, keyed by name so `MQTTPresets.h` stays identical across
   channels). `startNeighborDiscover(reply, periodic)` records the origin. A periodic
   scope pass is abandoned (`abortNeighborDiscover()`) if collection turns off mid-run.
-  The snapshot carries the mode it ran under to the bridge (on for manual runs), so the
-  MQTT task never reads the live pref; `mqttNeighborsSlotSelected()` picks the slots.
+  `mqttNeighborsSlotWants()` combines the node mode, the per-slot
+  `mqtt_slot_neighbors` override (0 auto, 1 on, 2 off; `slotN.neighbors` in
+  `/mqtt.json`, missing = auto) and the preset list. The mesh hands the bridge a slot
+  bitmask (`mqttNeighborsSlotMask()`) with each snapshot, so the MQTT task never
+  reads prefs.
 - **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into the
   persistent buffer (`NEIGHBORS_JSON_BUFFER_SIZE`, PSRAM where available) and sets
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)
