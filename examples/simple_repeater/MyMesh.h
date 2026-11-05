@@ -50,6 +50,9 @@
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
+#ifdef WITH_MQTT_BRIDGE
+#include <helpers/Radio2Scanner.h>
+#endif
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
 
@@ -125,6 +128,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
   CayenneLPP telemetry;
   unsigned long set_radio_at, revert_radio_at;
+#ifdef WITH_MQTT_BRIDGE
+  // Receive-only second radio profile (`set radio2 ...`); see Radio2Profile.h.
+  Radio2Scanner _radio2;
+  void loopRadio2();
+  void radio2Retune(uint8_t profile);
+#endif
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
   uint8_t _ota_update_channel = 0;   // channel `ota update` checked; a later `ota branch` cannot retarget it
   float pending_freq;
@@ -252,6 +261,10 @@ protected:
   uint32_t getRadioWatchdogMillis() const override {
     return ((uint32_t)_cli.getObserverPrefs()->radio_watchdog_minutes) * 60000UL;
   }
+  // radio2 packets are logged and published only, never routed or repeated.
+  bool shouldRouteRecv(mesh::Packet* pkt) override { return _radio2.current() == 0; }
+  // Sends always go out on the node's own radio settings.
+  bool isReadyToSend() override;
 #endif
   uint8_t getExtraAckTransmitCount() const override {
     return _prefs.multi_acks;
@@ -325,6 +338,10 @@ public:
 
   // CommonCLICallbacks
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;
+#ifdef WITH_MQTT_BRIDGE
+  bool supportsRadio2() const override { return true; }
+  bool formatRadio2Status(char* reply, size_t reply_size) override;
+#endif
 
 #ifdef WITH_MQTT_BRIDGE
   void onAlertConfigChanged() override { _alerter.onConfigChanged(); }

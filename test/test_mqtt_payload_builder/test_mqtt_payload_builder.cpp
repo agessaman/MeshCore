@@ -210,7 +210,7 @@ TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
 // is legal and every one escapes to two bytes — that is the true worst case for the
 // only free-text field an operator controls.
 TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
-  constexpr size_t kStatusJsonBufferSize = 1024;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  constexpr size_t kStatusJsonBufferSize = 1152;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
   const std::string origin(31, '"');                 // _origin[32], worst-case escaping
   const std::string origin_id(64, 'A');              // _device_id[65]
   const std::string model(63, 'M');                  // _board_model[64]
@@ -234,7 +234,7 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
       buffer, sizeof(buffer),
       4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
       8388608, 2147483647, 2147483647,
-      "off", health);
+      "off", health, "1020.000000,500.0,12,8");   // radio2's widest settings
 
   ASSERT_GT(len, 0) << "worst-case status payload overflowed the " << kStatusJsonBufferSize
                     << "-byte production buffer; serializeComplete() returns 0 and the "
@@ -706,4 +706,78 @@ TEST(MQTTPayloadBuilder, NeighborsMessageUnknownHeardAgeFitsMeasuredWidth) {
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+TEST(MQTTPayloadBuilder, StatusListsRadio2LikeKeymindCascade) {
+  JsonDocument scratch;
+  char buffer[1024];
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "910.525000,62.5,7,5", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999, -1, -1, -1, -1, -1, -1,
+      nullptr, MQTTConnHealth(), "911.150000,250.0,7,5");
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("910.525000,62.5,7,5", parsed["radio"].as<const char*>());
+  JsonArray radios = parsed["radios"].as<JsonArray>();
+  ASSERT_EQ(1u, radios.size());
+  EXPECT_STREQ("radio2", radios[0]["id"].as<const char*>());
+  EXPECT_STREQ("911.150000,250.0,7,5", radios[0]["radio"].as<const char*>());
+  EXPECT_STREQ("rx", radios[0]["mode"].as<const char*>());
+  EXPECT_TRUE(radios[0]["mediamesh"].as<bool>());
+  EXPECT_TRUE(radios[0]["temporary"].is<bool>());
+  EXPECT_FALSE(radios[0]["temporary"].as<bool>());
+}
+
+TEST(MQTTPayloadBuilder, StatusOmitsRadiosWithoutRadio2) {
+  JsonDocument scratch;
+  char buffer[768];
+  ASSERT_GT(buildMinimalStatus(scratch, buffer, sizeof(buffer)), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["radios"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, PacketHeardOnRadio2IsTagged) {
+  JsonDocument scratch;
+  char buffer[1024];
+  for (const char* direction : {"rx", "tx"}) {
+    int len = MQTTPayloadBuilder::buildPacketMessage(
+        scratch, "node", "id", kTimestamp, direction, "12:34:56", "18/07/2026", 42, 4, "F", 20,
+        "A0B1", 9.0f, -71, 0.5f, "89AB", nullptr, 0, 0, 64, buffer, sizeof(buffer), "radio2");
+    ASSERT_GT(len, 0);
+    JsonDocument parsed;
+    ASSERT_FALSE(deserializeJson(parsed, buffer));
+    const bool tx = strcmp(direction, "tx") == 0;
+    EXPECT_STREQ("radio2", parsed[tx ? "tx_radio_id" : "rx_radio_id"].as<const char*>());
+    EXPECT_FALSE(parsed[tx ? "rx_radio_id" : "tx_radio_id"].is<JsonVariant>());
+    EXPECT_TRUE(parsed["mediamesh"].is<bool>());
+    EXPECT_TRUE(parsed["mediamesh"].as<bool>());
+  }
+}
+
+TEST(MQTTPayloadBuilder, MainRadioPacketAndRawAreUntagged) {
+  JsonDocument scratch;
+  char buffer[1024];
+  ASSERT_GT(buildPacketWithMetrics(scratch, "rx", 9.0f, -71, 0.5f, buffer, sizeof(buffer)), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["rx_radio_id"].is<JsonVariant>());
+  EXPECT_FALSE(parsed["mediamesh"].is<JsonVariant>());
+
+  ASSERT_GT(MQTTPayloadBuilder::buildRawMessage(scratch, "node", "id", kTimestamp, "A0B1",
+                                                buffer, sizeof(buffer)), 0);
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["rx_radio_id"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RawHeardOnRadio2IsTagged) {
+  JsonDocument scratch;
+  char buffer[512];
+  ASSERT_GT(MQTTPayloadBuilder::buildRawMessage(scratch, "node", "id", kTimestamp, "A0B1",
+                                                buffer, sizeof(buffer), "radio2"), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("radio2", parsed["rx_radio_id"].as<const char*>());
+  EXPECT_TRUE(parsed["mediamesh"].as<bool>());
 }

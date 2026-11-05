@@ -4,6 +4,7 @@
 #include <helpers/MQTTObserverValidation.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/MQTTPrefsStorage.h>
+#include <helpers/Radio2Profile.h>
 #include <helpers/WifiPowerSavePolicy.h>
 #include <helpers/WifiTxPowerPolicy.h>
 
@@ -346,18 +347,67 @@ class MQTTPrefsSerializer : public ConfigSerializer {
     }
   };
 
+  // radio:{radio2:{...}}. A file from firmware without radio2 lacks the
+  // group and keeps the defaults (off).
+  class Radio2Prefs : public ConfigSerializer {
+    MQTTPrefs* _prefs;
+    int32_t _mode, _freq_khz, _bw_hz, _sf, _cr;
+    bool _seen_mode = false, _seen_freq = false, _seen_bw = false;
+    bool _seen_sf = false, _seen_cr = false;
+  protected:
+    void structure() override {
+      defStrict("mode", _mode, _seen_mode);
+      defStrict("freq_khz", _freq_khz, _seen_freq);
+      defStrict("bw_hz", _bw_hz, _seen_bw);
+      defStrict("sf", _sf, _seen_sf);
+      defStrict("cr", _cr, _seen_cr);
+    }
+  public:
+    explicit Radio2Prefs(MQTTPrefs* prefs)
+        : _prefs(prefs), _mode(prefs->radio2_mode),
+          _freq_khz(static_cast<int32_t>(prefs->radio2_freq_khz)),
+          _bw_hz(static_cast<int32_t>(prefs->radio2_bw_hz)),
+          _sf(prefs->radio2_sf), _cr(prefs->radio2_cr) {}
+    void apply(bool* repaired) {
+      if (_freq_khz < 0 || _bw_hz < 0 || _sf < 0 || _sf > 255 || _cr < 0 || _cr > 255) {
+        _mode = radio2::MODE_OFF;
+        _freq_khz = _bw_hz = _sf = _cr = 0;
+        *repaired = true;
+      }
+      Radio2Params params;
+      params.freq = radio2::khzToFreq(static_cast<uint32_t>(_freq_khz));
+      params.bw = radio2::hzToBw(static_cast<uint32_t>(_bw_hz));
+      params.sf = static_cast<uint8_t>(_sf);
+      params.cr = static_cast<uint8_t>(_cr);
+      if (_mode != radio2::MODE_OFF && (_mode != radio2::MODE_RX || !radio2::valid(params))) {
+        _mode = radio2::MODE_OFF;   // unknown mode or unusable settings: listen on one radio
+        *repaired = true;
+      }
+      _prefs->radio2_mode = static_cast<uint8_t>(_mode);
+      _prefs->radio2_freq_khz = static_cast<uint32_t>(_freq_khz);
+      _prefs->radio2_bw_hz = static_cast<uint32_t>(_bw_hz);
+      _prefs->radio2_sf = static_cast<uint8_t>(_sf);
+      _prefs->radio2_cr = static_cast<uint8_t>(_cr);
+    }
+  };
+
   class RadioPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
     int32_t _watchdog_min;
     bool _seen_watchdog = false;
+    Radio2Prefs _radio2;
   protected:
-    void structure() override { defStrict("watchdog_min", _watchdog_min, _seen_watchdog); }
+    void structure() override {
+      defStrict("watchdog_min", _watchdog_min, _seen_watchdog);
+      def("radio2", _radio2);
+    }
   public:
     explicit RadioPrefs(MQTTPrefs* prefs)
-        : _prefs(prefs), _watchdog_min(prefs->radio_watchdog_minutes) {}
+        : _prefs(prefs), _watchdog_min(prefs->radio_watchdog_minutes), _radio2(prefs) {}
     void apply(bool* repaired) {
       if (_watchdog_min < 0 || _watchdog_min > 120) { _watchdog_min = 5; *repaired = true; }
       _prefs->radio_watchdog_minutes = static_cast<uint8_t>(_watchdog_min);
+      _radio2.apply(repaired);
     }
   };
 

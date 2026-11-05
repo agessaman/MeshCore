@@ -238,6 +238,7 @@ private:
     uint8_t raw_data[256];
     uint8_t raw_len;
     bool has_raw_data;
+    bool radio2;                  // heard on the receive-only second radio profile
   };
 
   #if defined(BOARD_HAS_PSRAM)
@@ -358,6 +359,11 @@ private:
   float   _staged_snr       = 0.0f;
   float   _staged_rssi      = 0.0f;
   bool    _staged_raw_valid = false;
+  bool    _staged_radio2    = false;  // next RX packet was heard on radio2
+
+  // Set on Core 1 by the node while radio2 is running, read by status publishing on
+  // Core 0. A single bool, so a torn read is impossible.
+  volatile bool _radio2_active = false;
 
   // Core 0-owned copy of the most recent raw data — written only by processPacketQueue()
   // on Core 0, read only by publishStatus() on Core 0. No mutex required.
@@ -388,8 +394,9 @@ private:
   // serializeComplete() returns 0 and the bridge publishes only len>0, so status stops
   // entirely. Raised to 1024: no extra RAM while status serializes into the shared scratch
   // buffer, but +256 B of bridge-task stack in the fallback used if the PSRAM allocation
-  // failed. See the worst-case test in test_mqtt_payload_builder.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
+  // failed. Raised again to 1152 for the radio2 `radios` entry (worst case 1016/1024,
+  // under the test's 32-byte headroom). See the worst-case test in test_mqtt_payload_builder.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1152;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
   #if defined(BOARD_HAS_PSRAM)
@@ -583,8 +590,10 @@ private:
   #endif
   bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
                      const uint8_t* raw_data = nullptr, int raw_len = 0,
-                     float snr = 0.0f, float rssi = 0.0f);
-  bool publishRaw(mesh::Packet* packet, bool& has_eligible_target);
+                     float snr = 0.0f, float rssi = 0.0f, const char* radio_id = nullptr);
+  bool publishRaw(mesh::Packet* packet, bool& has_eligible_target, const char* radio_id = nullptr);
+  // Status `radios` value for an active radio2, or nullptr. Fills `buf`.
+  const char* radio2StatusRadio(char* buf, size_t buf_size) const;
 #if defined(WITH_MQTT_NEIGHBORS)
   // Publishes the pending _neighbors_json_buffer to every connected slot's
   // neighbors topic. Runs on the MQTT task (Core 0) only.
@@ -686,6 +695,10 @@ public:
   void setBoardModel(const char* board_model);
   void setBuildDate(const char* build_date);
   void storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi);
+  // Receive-only radio2: whether the next RX packet was heard on it (call before
+  // onPacketReceived), and whether radio2 is running (adds `radios` to status).
+  void setRxRadio2(bool radio2) { _staged_radio2 = radio2; }
+  void setRadio2Active(bool active) { _radio2_active = active; }
   void setMessageTypes(bool status, bool packets, bool raw);
 
 #if defined(WITH_MQTT_NEIGHBORS)

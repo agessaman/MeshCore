@@ -641,3 +641,62 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+TEST(MQTTPrefsSerializer, Radio2RoundTrips) {
+  MQTTPrefs source = defaults();
+  source.radio2_mode = radio2::MODE_RX;
+  source.radio2_freq_khz = 911150;
+  source.radio2_bw_hz = 250000;
+  source.radio2_sf = 7;
+  source.radio2_cr = 5;
+
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+  EXPECT_NE(std::string::npos, output.text().find("radio2:{")) << output.text();
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input)) << output.text();
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(radio2::MODE_RX, loaded.radio2_mode);
+  EXPECT_EQ(911150u, loaded.radio2_freq_khz);
+  EXPECT_EQ(250000u, loaded.radio2_bw_hz);
+  EXPECT_EQ(7, loaded.radio2_sf);
+  EXPECT_EQ(5, loaded.radio2_cr);
+}
+
+TEST(MQTTPrefsSerializer, PrefsWrittenBeforeRadio2LoadWithRadio2Off) {
+  MQTTPrefs prefs = defaults();
+  InputStream input("{version:1,radio:{watchdog_min:7}}");
+  MQTTPrefsSerializer serializer(&prefs);
+  ASSERT_TRUE(serializer.loadSerial(input));
+  bool repaired = true;
+  ASSERT_TRUE(serializer.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(7, prefs.radio_watchdog_minutes);
+  EXPECT_EQ(radio2::MODE_OFF, prefs.radio2_mode);
+}
+
+TEST(MQTTPrefsSerializer, Radio2RepairsToOff) {
+  const char* bad[] = {
+    "{version:1,radio:{radio2:{mode:2,freq_khz:911150,bw_hz:250000,sf:7,cr:5}}}",  // rxtx
+    "{version:1,radio:{radio2:{mode:1,freq_khz:911150,bw_hz:251000,sf:7,cr:5}}}",  // bandwidth
+    "{version:1,radio:{radio2:{mode:1,freq_khz:911150,bw_hz:250000,sf:13,cr:5}}}", // sf
+    "{version:1,radio:{radio2:{mode:1}}}",                                          // no settings
+    "{version:1,radio:{radio2:{mode:1,freq_khz:-1,bw_hz:250000,sf:7,cr:5}}}",      // negative
+  };
+  for (const char* text : bad) {
+    MQTTPrefs prefs = defaults();
+    InputStream input(text);
+    MQTTPrefsSerializer serializer(&prefs);
+    ASSERT_TRUE(serializer.loadSerial(input)) << text;
+    bool repaired = false;
+    ASSERT_TRUE(serializer.apply(&repaired)) << text;
+    EXPECT_TRUE(repaired) << text;
+    EXPECT_EQ(radio2::MODE_OFF, prefs.radio2_mode) << text;
+  }
+}

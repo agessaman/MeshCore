@@ -46,7 +46,8 @@ int MQTTPayloadBuilder::buildStatusMessage(
   int packets_sent,
   int packets_received,
   const char* repeat,
-  const MQTTConnHealth& conn_health
+  const MQTTConnHealth& conn_health,
+  const char* radio2
 ) {
   doc.clear();
   JsonObject root = doc.to<JsonObject>();
@@ -61,6 +62,16 @@ int MQTTPayloadBuilder::buildStatusMessage(
   root["client_version"] = client_version;
   if (repeat != nullptr) {
     root["repeat"] = repeat;
+  }
+  // Second radio profile (receive-only radio2), the multi-radio convention
+  // analyzers read; `radio` stays the main radio. Same shape as Keymind Cascade.
+  if (radio2 != nullptr) {
+    JsonObject r2 = root["radios"].to<JsonArray>().add<JsonObject>();
+    r2["id"] = "radio2";
+    r2["radio"] = radio2;
+    r2["mode"] = "rx";
+    r2["mediamesh"] = true;
+    r2["temporary"] = false;
   }
 
   const bool has_conn_health = conn_health.slots_up >= 0 || conn_health.slots_total >= 0 ||
@@ -126,7 +137,8 @@ int MQTTPayloadBuilder::buildPacketMessage(
   int path_hash_size,
   size_t max_path_bytes,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  const char* radio_id
 ) {
   doc.clear();
   JsonObject root = doc.to<JsonObject>();
@@ -189,6 +201,13 @@ int MQTTPayloadBuilder::buildPacketMessage(
     }
   }
 
+  // Heard or sent on radio2: tag it the way Keymind Cascade does.
+  if (radio_id != nullptr) {
+    const bool tx = direction && strcmp(direction, "tx") == 0;
+    root[tx ? "tx_radio_id" : "rx_radio_id"] = radio_id;
+    root["mediamesh"] = true;
+  }
+
   return serializeComplete(root, buffer, buffer_size);
 }
 
@@ -199,7 +218,8 @@ int MQTTPayloadBuilder::buildRawMessage(
   const char* timestamp,
   const char* raw,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  const char* radio_id
 ) {
   doc.clear();
   JsonObject root = doc.to<JsonObject>();
@@ -209,6 +229,10 @@ int MQTTPayloadBuilder::buildRawMessage(
   root["timestamp"] = timestamp;
   root["type"] = "RAW";
   root["data"] = raw;
+  if (radio_id != nullptr) {
+    root["rx_radio_id"] = radio_id;
+    root["mediamesh"] = true;
+  }
 
   return serializeComplete(root, buffer, buffer_size);
 }

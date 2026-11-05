@@ -144,6 +144,15 @@ struct MQTTPrefs {
   // WiFi TX power cap in whole dBm; 0 follows the build's MQTT_WIFI_TX_POWER
   // (see WifiTxPowerPolicy). Runtime only, like display_timeout_secs.
   uint8_t wifi_tx_power;
+
+  // Receive-only second radio profile (radio2, see Radio2Profile.h). Stored as
+  // integers so JSON never round-trips floats. Runtime only, like
+  // display_timeout_secs.
+  uint8_t radio2_mode;        // radio2::Mode: 0 off, 1 rx
+  uint32_t radio2_freq_khz;
+  uint32_t radio2_bw_hz;
+  uint8_t radio2_sf;
+  uint8_t radio2_cr;
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {

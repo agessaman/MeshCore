@@ -56,6 +56,8 @@ public:
   bool isSendComplete() override { return true; }
   void onSendFinished() override { _send_started = 0; }
   bool isInRecvMode() const override { return true; }
+  // radio2 (observer): nothing to retune on the emulator's radio. 0 = done.
+  int8_t retuneRecv(float, float, uint8_t, uint8_t) { return 0; }
 
   // --- mesh::Radio overrides with useful sim values ---
   int getNoiseFloor() const override { return -110; }

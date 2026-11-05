@@ -121,6 +121,20 @@ void RadioLibWrapper::startRecv() {
   }
 }
 
+RadioLibWrapper::RetuneResult RadioLibWrapper::retuneRecv(float freq, float bw, uint8_t sf, uint8_t cr) {
+  if (state != STATE_RX || isReceivingPacket()) return RETUNE_BUSY;
+  _radio->standby();
+  if (state & STATE_INT_READY) {
+    // A packet finished just before standby. Leave the flag: recvRaw() reads it
+    // on these settings and restarts receive.
+    return RETUNE_BUSY;
+  }
+  setParams(freq, bw, sf, cr);
+  state = STATE_IDLE;
+  startRecv();
+  return isInRecvMode() ? RETUNE_OK : RETUNE_FAILED;
+}
+
 bool RadioLibWrapper::isInRecvMode() const {
   return (state & ~STATE_INT_READY) == STATE_RX;
 }

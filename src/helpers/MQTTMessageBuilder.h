@@ -95,7 +95,8 @@ public:
     int packets_sent = -1,
     int packets_received = -1,
     const char* repeat = nullptr,
-    const MQTTConnHealth& conn_health = MQTTConnHealth()
+    const MQTTConnHealth& conn_health = MQTTConnHealth(),
+    const char* radio2 = nullptr
   );
 
   /**
@@ -143,7 +144,8 @@ public:
     int path_hop_count,
     int path_hash_size,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    const char* radio_id = nullptr
   );
 
   /**
@@ -164,7 +166,8 @@ public:
     const char* timestamp,
     const char* raw,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    const char* radio_id = nullptr
   );
 
   // Neighbors table entry + JSON builder. The layout logic lives in the pure,
@@ -215,7 +218,8 @@ public:
     const char* origin_id,
     Timezone* timezone,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    const char* radio_id = nullptr
   );
 
   static int buildPacketJSONFromRaw(
@@ -231,7 +235,8 @@ public:
     float score,
     Timezone* timezone,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    const char* radio_id = nullptr
   );
 
   /**
@@ -251,7 +256,8 @@ public:
     const char* origin_id,
     Timezone* timezone,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    const char* radio_id = nullptr
   );
 
 private:

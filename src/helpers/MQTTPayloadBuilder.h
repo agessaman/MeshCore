@@ -67,7 +67,8 @@ public:
     int packets_sent = -1,
     int packets_received = -1,
     const char* repeat = nullptr,
-    const MQTTConnHealth& conn_health = MQTTConnHealth()
+    const MQTTConnHealth& conn_health = MQTTConnHealth(),
+    const char* radio2 = nullptr
   );
 
   static int buildPacketMessage(
@@ -92,7 +93,8 @@ public:
     int path_hash_size,
     size_t max_path_bytes,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    const char* radio_id = nullptr
   );
 
   static int buildRawMessage(
@@ -102,7 +104,8 @@ public:
     const char* timestamp,
     const char* raw,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    const char* radio_id = nullptr
   );
 
   struct NeighborsMessageEntry {

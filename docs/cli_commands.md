@@ -680,6 +680,23 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 
 ---
 
+#### View or change the second radio profile (radio2)
+**Usage:**
+- `get radio2`
+- `set radio2 <setting>`
+- `get radio2.status`
+
+**Parameters:**
+- `setting`: `mediamesh`, `mediamesh-range`, `off`, or `<freq>,<bw>,<sf>,<cr>[,rx]`
+
+**Default:** `off`
+
+**Note:** Repeater observer builds only. Receive-only: the radio alternates between its
+own settings and radio2, and publishes what it hears on radio2 without routing or
+repeating it. See "Second Radio Profile (radio2)" in `MQTT_IMPLEMENTATION.md`.
+
+---
+
 #### View or change the radio watchdog interval
 **Usage:**
 - `get radio.watchdog`

@@ -58,13 +58,14 @@ int MQTTMessageBuilder::buildStatusMessage(
   int packets_sent,
   int packets_received,
   const char* repeat,
-  const MQTTConnHealth& conn_health
+  const MQTTConnHealth& conn_health,
+  const char* radio2
 ) {
   return MQTTPayloadBuilder::buildStatusMessage(
       doc, origin, origin_id, model, firmware_version, radio, client_version,
       status, timestamp, buffer, buffer_size, battery_mv, uptime_secs, errors,
       queue_len, noise_floor, tx_air_secs, rx_air_secs, recv_errors, internal_heap,
-      packets_sent, packets_received, repeat, conn_health);
+      packets_sent, packets_received, repeat, conn_health, radio2);
 }
 
 int MQTTMessageBuilder::buildPacketMessage(
@@ -88,12 +89,13 @@ int MQTTMessageBuilder::buildPacketMessage(
   int path_hop_count,
   int path_hash_size,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  const char* radio_id
 ) {
   return MQTTPayloadBuilder::buildPacketMessage(
       doc, origin, origin_id, timestamp, direction, time, date, len, packet_type,
       route, payload_len, raw, snr, rssi, score, hash, path_bytes, path_hop_count,
-      path_hash_size, MAX_PATH_SIZE, buffer, buffer_size);
+      path_hash_size, MAX_PATH_SIZE, buffer, buffer_size, radio_id);
 }
 
 int MQTTMessageBuilder::buildRawMessage(
@@ -103,10 +105,11 @@ int MQTTMessageBuilder::buildRawMessage(
   const char* timestamp,
   const char* raw,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  const char* radio_id
 ) {
   return MQTTPayloadBuilder::buildRawMessage(
-      doc, origin, origin_id, timestamp, raw, buffer, buffer_size);
+      doc, origin, origin_id, timestamp, raw, buffer, buffer_size, radio_id);
 }
 
 int MQTTMessageBuilder::buildNeighborsMessage(
@@ -157,7 +160,8 @@ int MQTTMessageBuilder::buildPacketJSON(
   const char* origin_id,
   Timezone* timezone,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  const char* radio_id
 ) {
   if (!packet) return 0;
   
@@ -217,7 +221,7 @@ int MQTTMessageBuilder::buildPacketJSON(
     has_path ? packet->path : nullptr,
     has_path ? packet->getPathHashCount() : 0,
     has_path ? packet->getPathHashSize() : 0,
-    buffer, buffer_size
+    buffer, buffer_size, radio_id
   );
 }
 
@@ -234,7 +238,8 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
   float score,
   Timezone* timezone,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  const char* radio_id
 ) {
   if (!packet || !raw_data || raw_len <= 0) return 0;
   
@@ -294,7 +299,7 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
     has_path ? packet->path : nullptr,
     has_path ? packet->getPathHashCount() : 0,
     has_path ? packet->getPathHashSize() : 0,
-    buffer, buffer_size
+    buffer, buffer_size, radio_id
   );
 }
 
@@ -305,7 +310,8 @@ int MQTTMessageBuilder::buildRawJSON(
   const char* origin_id,
   Timezone* timezone,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  const char* radio_id
 ) {
   if (!packet) return 0;
 
@@ -319,7 +325,7 @@ int MQTTMessageBuilder::buildRawJSON(
   char raw_hex[WIRE_HEX_SCRATCH_SIZE];
   packetToHex(packet, raw_hex, sizeof(raw_hex));
 
-  return buildRawMessage(doc, origin, origin_id, timestamp, raw_hex, buffer, buffer_size);
+  return buildRawMessage(doc, origin, origin_id, timestamp, raw_hex, buffer, buffer_size, radio_id);
 }
 
 const char* MQTTMessageBuilder::getRouteTypeString(int route_type) {

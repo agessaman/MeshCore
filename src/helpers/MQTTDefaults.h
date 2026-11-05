@@ -115,6 +115,13 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;
   prefs->display_flip = 0;
   prefs->network_setup_complete = 0;
+
+  // radio2 is off until set (`set radio2 mediamesh`).
+  prefs->radio2_mode = 0;
+  prefs->radio2_freq_khz = 0;
+  prefs->radio2_bw_hz = 0;
+  prefs->radio2_sf = 0;
+  prefs->radio2_cr = 0;
 }
 
 #endif // WITH_MQTT_BRIDGE

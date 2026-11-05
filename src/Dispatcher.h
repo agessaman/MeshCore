@@ -184,6 +184,12 @@ protected:
   virtual void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) { }   // custom hook
 
   virtual void logRx(Packet* packet, int len, float score) { }   // hooks for custom logging
+  // Called for each received packet after the logging hooks. Return false to
+  // stop there: the packet is logged and published but never routed or repeated.
+  virtual bool shouldRouteRecv(Packet* packet) { return true; }
+  // Return false to hold queued sends for now, e.g. while the radio is listening
+  // on other settings. They go out on a later loop.
+  virtual bool isReadyToSend() { return true; }
   virtual void logTx(Packet* packet, int len) { }
   virtual void logTxFail(Packet* packet, int len) { }
   virtual const char* getLogDateTime() { return ""; }

@@ -19,6 +19,7 @@
 #include "NetworkLink.h"
 #include "WifiPowerSavePolicy.h"     // one powersave value->mode/name mapping
 #include "WifiTxPowerPolicy.h"       // wifi.txpower parsing and dBm formatting
+#include "Radio2Profile.h"           // radio2 parsing and replies
 #include <Utils.h>
 #include <climits>
 #include <new>
@@ -119,6 +120,7 @@ static bool valueTooLong(const char* val, size_t bufsize, char* reply, const cha
 static bool isObserverPrefsSetCommand(const char* config) {
   return strncmp(config, "snmp", 4) == 0 ||
       strncmp(config, "radio.watchdog", 14) == 0 ||
+      strncmp(config, "radio2", 6) == 0 ||
       strncmp(config, "mqtt", 4) == 0 ||
       strncmp(config, "wifi.", 5) == 0 ||
       strncmp(config, "timezone", 8) == 0 ||
@@ -248,6 +250,37 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     _mqtt_prefs.snmp_enabled = memcmp(&config[5], "on", 2) == 0;
     if (!persistObserverPrefs(reply)) return true;
     strcpy(reply, "OK - restart to apply");
+  } else if (memcmp(config, "radio2 ", 7) == 0 && !_callbacks->supportsRadio2()) {
+    strcpy(reply, "Error: radio2 is not supported on this firmware");
+  } else if (memcmp(config, "radio2 ", 7) == 0) {
+    Radio2Params params;
+    switch (radio2::parse(&config[7], params)) {
+      case radio2::PARSE_OFF:
+        _mqtt_prefs.radio2_mode = radio2::MODE_OFF;
+        if (!persistObserverPrefs(reply)) return true;
+        strcpy(reply, "OK - radio2 off");
+        break;
+      case radio2::PARSE_OK:
+        if (params.freq == _prefs->freq && params.bw == _prefs->bw &&
+            params.sf == _prefs->sf && params.cr == _prefs->cr) {
+          strcpy(reply, "Error: radio2 matches radio");
+          break;
+        }
+        _mqtt_prefs.radio2_mode = radio2::MODE_RX;
+        _mqtt_prefs.radio2_freq_khz = radio2::freqToKhz(params.freq);
+        _mqtt_prefs.radio2_bw_hz = radio2::bwToHz(params.bw);
+        _mqtt_prefs.radio2_sf = params.sf;
+        _mqtt_prefs.radio2_cr = params.cr;
+        if (!persistObserverPrefs(reply)) return true;
+        strcpy(reply, "OK - radio2 rx (receive only)");
+        break;
+      case radio2::PARSE_TX_UNSUPPORTED:
+        strcpy(reply, "Error: radio2 is receive-only on observer firmware; use rx");
+        break;
+      default:
+        strcpy(reply, "Error: use radio2 off|mediamesh|mediamesh-range|f,bw,sf,cr[,rx]");
+        break;
+    }
   } else if (memcmp(config, "radio.watchdog ", 15) == 0) {
     const char* val = &config[15];
     bool all_digits = (*val != '\0');
@@ -948,6 +981,14 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     strcpy(reply, _mqtt_prefs.snmp_enabled ? "> on" : "> off");
   } else if (memcmp(config, "radio.watchdog", 14) == 0) {
     sprintf(reply, "> %d", (uint32_t)_mqtt_prefs.radio_watchdog_minutes);
+  } else if (memcmp(config, "radio2.status", 13) == 0) {
+    if (!_callbacks->formatRadio2Status(reply, 160)) strcpy(reply, "> off");
+  } else if (memcmp(config, "radio2", 6) == 0 &&
+             (config[6] == '\0' || config[6] == '\n' || config[6] == '\r')) {
+    radio2::formatReply(reply, 64,
+        _callbacks->supportsRadio2() && _mqtt_prefs.radio2_mode == radio2::MODE_RX,
+        radio2::fromStored(_mqtt_prefs.radio2_freq_khz, _mqtt_prefs.radio2_bw_hz,
+                           _mqtt_prefs.radio2_sf, _mqtt_prefs.radio2_cr));
   } else if (memcmp(config, "display.timeout", 15) == 0) {
     sprintf(reply, "> %d", (uint32_t)_mqtt_prefs.display_timeout_secs);
   } else if (memcmp(config, "display.flip", 12) == 0) {

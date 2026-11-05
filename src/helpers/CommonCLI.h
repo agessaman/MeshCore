@@ -311,6 +311,11 @@ public:
   virtual void clearStats() = 0;
   virtual void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) = 0;
 
+  // Receive-only radio2 (Radio2Profile.h): only nodes that run its scanner
+  // accept `set radio2`; others reply that it is not supported.
+  virtual bool supportsRadio2() const { return false; }
+  virtual bool formatRadio2Status(char* reply, size_t reply_size) { return false; }
+
   virtual void startRegionsLoad() {
     // no op by default
   }

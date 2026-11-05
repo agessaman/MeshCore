@@ -269,6 +269,10 @@ void Dispatcher::checkRecv() {
     }
     #endif
     logRx(pkt, pkt->getRawLength(), score);   // hook for custom logging
+    if (!shouldRouteRecv(pkt)) {
+      _mgr->free(pkt);
+      return;
+    }
 
     if (pkt->isRouteFlood()) {
       n_recv_flood++;
@@ -319,6 +323,7 @@ void Dispatcher::checkSend() {
   }
   
   if (!millisHasNowPassed(next_tx_time)) return;
+  if (!isReadyToSend()) return;
   if (_radio->isReceiving()) {
     if (cad_busy_start == 0) {
       cad_busy_start = _ms->getMillis();   // record when CAD busy state started

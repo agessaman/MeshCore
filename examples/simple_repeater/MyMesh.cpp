@@ -535,6 +535,14 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
     Serial.print(" RAW: ");
     mesh::Utils::printHex(Serial, raw, len);
     Serial.println();
+#ifdef WITH_MQTT_BRIDGE
+    // Marks a packet heard on radio2, between its RAW and RX lines, the way
+    // Keymind Cascade does, so serial log readers (meshcoretomqtt) can tag it.
+    if (_radio2.current() == 1) {
+      Serial.print(getLogDateTime());
+      Serial.println(" RADIO: radio2");
+    }
+#endif
   }
 #endif
 
@@ -554,7 +562,11 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #endif
 #ifdef WITH_MQTT_BRIDGE
   // MQTT bridge: always feed RX packets — bridge decides based on mqtt.rx setting
-  if (bridge) bridge->onPacketReceived(pkt);
+  if (_radio2.current() == 1) _radio2.noteHeard();
+  if (bridge) {
+    bridge->setRxRadio2(_radio2.current() == 1);
+    bridge->onPacketReceived(pkt);
+  }
 #elif defined(WITH_BRIDGE)
   // Non-MQTT bridge (ESP-NOW): use bridge.source setting
   if (_prefs.bridge_pkt_src == 1) {
@@ -1756,6 +1768,9 @@ void MyMesh::loop() {
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing runs in a separate FreeRTOS task on Core 0, so we don't call bridge.loop() here
   mesh::Mesh::loop();
+#ifdef WITH_MQTT_BRIDGE
+  loopRadio2();
+#endif
 
 #ifdef WITH_MQTT_BRIDGE
   // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
@@ -1791,12 +1806,18 @@ void MyMesh::loop() {
   if (set_radio_at && millisHasNowPassed(set_radio_at)) { // apply pending (temporary) radio params
     set_radio_at = 0;                                     // clear timer
     radio_driver.setParams(pending_freq, pending_bw, pending_sf, pending_cr);
+#ifdef WITH_MQTT_BRIDGE
+    _radio2.notePrimary(micros());   // tempradio owns the radio until it reverts
+#endif
     MESH_DEBUG_PRINTLN("Temp radio params");
   }
 
   if (revert_radio_at && millisHasNowPassed(revert_radio_at)) { // revert radio params to orig
     revert_radio_at = 0;                                        // clear timer
     radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+#ifdef WITH_MQTT_BRIDGE
+    _radio2.notePrimary(micros());
+#endif
     MESH_DEBUG_PRINTLN("Radio params restored");
   }
 
@@ -2409,3 +2430,64 @@ bool MyMesh::hasPendingWork() const {
 #endif
   return _mgr->getOutboundCount(0xFFFFFFFF) > 0;
 }
+
+#ifdef WITH_MQTT_BRIDGE
+// ---- receive-only radio2 ----------------------------------------------------
+
+void MyMesh::radio2Retune(uint8_t profile) {
+  const Radio2Params& p = _radio2.params(profile);
+  const uint32_t start = micros();
+  // RadioLibWrapper::RetuneResult (or SimRadio's int8_t): 0 ok, 1 busy, -1 failed.
+  const int8_t result = static_cast<int8_t>(radio_driver.retuneRecv(p.freq, p.bw, p.sf, p.cr));
+  const uint32_t end = micros();
+  _radio2.onRetune(profile, static_cast<Radio2Scanner::RetuneResult>(result), end, end - start);
+}
+
+void MyMesh::loopRadio2() {
+  const MQTTPrefs* obs = _cli.getObserverPrefs();
+  Radio2Params primary;
+  primary.freq = _prefs.freq;
+  primary.bw = _prefs.bw;
+  primary.sf = _prefs.sf;
+  primary.cr = _prefs.cr;
+  _radio2.configure(obs->radio2_mode == radio2::MODE_RX, primary,
+                    radio2::fromStored(obs->radio2_freq_khz, obs->radio2_bw_hz,
+                                       obs->radio2_sf, obs->radio2_cr));
+  if (bridge) bridge->setRadio2Active(_radio2.enabled());
+
+  // tempradio: stay on our own settings while its CLI reply goes out, then
+  // leave the radio alone until it reverts.
+  if (set_radio_at) {
+    if (_radio2.current() != 0) radio2Retune(0);
+    return;
+  }
+  if (revert_radio_at) return;
+
+  const bool can_leave = _mgr->getOutboundCount(_ms->getMillis()) == 0;
+  const int target = _radio2.step(micros(), can_leave);
+  if (target >= 0) radio2Retune((uint8_t)target);
+}
+
+bool MyMesh::isReadyToSend() {
+  if (revert_radio_at && !set_radio_at) return true;   // tempradio's settings, not radio2's
+  if (_radio2.current() != 0) radio2Retune(0);
+  return _radio2.current() == 0;
+}
+
+bool MyMesh::formatRadio2Status(char* reply, size_t reply_size) {
+  if (!_radio2.configured()) {
+    snprintf(reply, reply_size, "> off");
+    return true;
+  }
+  const radio2::Schedule& s = _radio2.schedule();
+  snprintf(reply, reply_size,
+           "> %s; heard=%lu switches=%lu busy=%lu fail=%lu max=%luus listen_us=%lu,%lu%s",
+           _radio2.faulted() ? "stopped (retune failures)" : "rx",
+           (unsigned long)_radio2.heard(), (unsigned long)_radio2.switches(),
+           (unsigned long)_radio2.busy(), (unsigned long)_radio2.failures(),
+           (unsigned long)_radio2.switchMaxUs(),
+           (unsigned long)s.listen_us[0], (unsigned long)s.listen_us[1],
+           s.fits ? "" : "; WARN slow switch");
+  return true;
+}
+#endif

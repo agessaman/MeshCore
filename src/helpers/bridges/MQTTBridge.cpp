@@ -1,4 +1,5 @@
 #include "MQTTBridge.h"
+#include "../Radio2Profile.h"
 #include "MQTTErrorLabels.h"
 #include "../WifiPowerSavePolicy.h"
 #include "../MQTTConnectionPolicy.h"
@@ -3134,6 +3135,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
   char origin_id[65];
   char timestamp[40];
   char radio_info[64];
+  char radio2_info[48];
 
   // Status timestamp: UTC with explicit +00:00 offset, same as packet/raw JSON
   // `timestamp` (system clock is UTC — SNTP offset 0; prefs Timezone is separate).
@@ -3186,7 +3188,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
-    collectConnHealth()
+    collectConnHealth(),
+    radio2StatusRadio(radio2_info, sizeof(radio2_info))
   );
 
   if (len > 0) {
@@ -3631,6 +3634,14 @@ void MQTTBridge::loop() {
 // Packet handling
 // ---------------------------------------------------------------------------
 
+const char* MQTTBridge::radio2StatusRadio(char* buf, size_t buf_size) const {
+  if (!_radio2_active || _obs->radio2_mode != radio2::MODE_RX) return nullptr;
+  radio2::formatStatusRadio(buf, buf_size,
+      radio2::fromStored(_obs->radio2_freq_khz, _obs->radio2_bw_hz,
+                         _obs->radio2_sf, _obs->radio2_cr));
+  return buf;
+}
+
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
   if (!_initialized || !_obs->mqtt_packets_enabled || !_obs->mqtt_rx_enabled) return;
 
@@ -3776,7 +3787,8 @@ void MQTTBridge::processPacketQueue() {
                                           packet_eligible,
                                           queued.has_raw_data ? queued.raw_data : nullptr,
                                           queued.has_raw_data ? queued.raw_len  : 0,
-                                          queued.snr, queued.rssi);
+                                          queued.snr, queued.rssi,
+                                          queued.radio2 ? "radio2" : nullptr);
     taskYIELD();  // allow higher-priority tasks to run between packet publishes
 
     // Publish raw if enabled (live from prefs so `set mqtt.raw` applies without
@@ -3784,7 +3796,8 @@ void MQTTBridge::processPacketQueue() {
     bool raw_eligible = false;
     bool raw_published = false;
     if (_obs->mqtt_raw_enabled) {
-      raw_published = publishRaw(&queued.packet_copy, raw_eligible);
+      raw_published = publishRaw(&queued.packet_copy, raw_eligible,
+                                 queued.radio2 ? "radio2" : nullptr);
     }
 
     // Decide intentional completion once across the entire queue item. An
@@ -3911,14 +3924,16 @@ void MQTTBridge::processPacketQueue() {
                                           packet_eligible,
                                           queued.has_raw_data ? queued.raw_data : nullptr,
                                           queued.has_raw_data ? queued.raw_len  : 0,
-                                          queued.snr, queued.rssi);
+                                          queued.snr, queued.rssi,
+                                          queued.radio2 ? "radio2" : nullptr);
     // No taskYIELD() on non-ESP32 platforms (non-FreeRTOS, cooperative scheduling not needed)
 
     // Live from prefs so `set mqtt.raw` applies without a bridge restart.
     bool raw_eligible = false;
     bool raw_published = false;
     if (_obs->mqtt_raw_enabled) {
-      raw_published = publishRaw(&queued.packet_copy, raw_eligible);
+      raw_published = publishRaw(&queued.packet_copy, raw_eligible,
+                                 queued.radio2 ? "radio2" : nullptr);
     }
 
     // Decide intentional completion once across the entire queue item. An
@@ -4063,6 +4078,7 @@ bool MQTTBridge::publishStatus() {
   char origin_id[65];
   char timestamp[40];
   char radio_info[64];
+  char radio2_info[48];
 
   // Status timestamp: UTC with explicit +00:00 offset, same as packet/raw JSON
   // `timestamp` (system clock is UTC — SNTP offset 0; prefs Timezone is separate).
@@ -4115,7 +4131,8 @@ bool MQTTBridge::publishStatus() {
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
-    collectConnHealth()
+    collectConnHealth(),
+    radio2StatusRadio(radio2_info, sizeof(radio2_info))
   );
 
   if (len > 0) {
@@ -4147,7 +4164,7 @@ bool MQTTBridge::publishStatus() {
 bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 bool& has_eligible_target,
                                 const uint8_t* raw_data, int raw_len,
-                                float snr, float rssi) {
+                                float snr, float rssi, const char* radio_id) {
   has_eligible_target = false;
   if (!packet) return false;
 
@@ -4229,14 +4246,14 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
       _json_scratch_doc,
       raw_data, raw_len, packet, is_tx, _origin, origin_id,
-      snr, rssi, score, _timezone, active_buffer, active_buffer_size
+      snr, rssi, score, _timezone, active_buffer, active_buffer_size, radio_id
     );
   } else if (!is_tx && _last_raw_data && _last_raw_len > 0 && (millis() - _last_raw_timestamp) < 1000) {
     float score = _radio ? _radio->packetScore(_last_snr, _last_raw_len) : NAN;
     len = MQTTMessageBuilder::buildPacketJSONFromRaw(
       _json_scratch_doc,
       _last_raw_data, _last_raw_len, packet, is_tx, _origin, origin_id,
-      _last_snr, _last_rssi, score, _timezone, active_buffer, active_buffer_size
+      _last_snr, _last_rssi, score, _timezone, active_buffer, active_buffer_size, radio_id
     );
   } else {
     // Reconstruct wire-format bytes from packet (same as MQTTMessageBuilder::packetToHex).
@@ -4253,12 +4270,12 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
       len = MQTTMessageBuilder::buildPacketJSONFromRaw(
         _json_scratch_doc,
         reconstructed, rlen, packet, is_tx, _origin, origin_id,
-        snr, rssi, score, _timezone, active_buffer, active_buffer_size
+        snr, rssi, score, _timezone, active_buffer, active_buffer_size, radio_id
       );
     } else {
       len = MQTTMessageBuilder::buildPacketJSON(
         _json_scratch_doc,
-        packet, is_tx, _origin, origin_id, _timezone, active_buffer, active_buffer_size
+        packet, is_tx, _origin, origin_id, _timezone, active_buffer, active_buffer_size, radio_id
       );
     }
   }
@@ -4288,7 +4305,8 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   return false;
 }
 
-bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
+bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target,
+                            const char* radio_id) {
   has_eligible_target = false;
   if (!packet) return false;
 
@@ -4323,7 +4341,7 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
 
   int len = MQTTMessageBuilder::buildRawJSON(
     _json_scratch_doc,
-    packet, _origin, origin_id, _timezone, active_buffer, active_buffer_size
+    packet, _origin, origin_id, _timezone, active_buffer, active_buffer_size, radio_id
   );
 
   if (len > 0) {
@@ -4426,6 +4444,8 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   queued.is_tx = is_tx;
   queued.snr = 0.0f;
   queued.rssi = 0.0f;
+  queued.radio2 = !is_tx && _staged_radio2;
+  if (!is_tx) _staged_radio2 = false;
 
   // Consume staged raw data (written by storeRawRadioData() on Core 1, same call sequence).
   // No mutex needed — both sites run on Core 1 before xQueueSend() crosses the core boundary.
@@ -4494,6 +4514,8 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   queued.is_tx = is_tx;
   queued.snr = 0.0f;
   queued.rssi = 0.0f;
+  queued.radio2 = !is_tx && _staged_radio2;
+  if (!is_tx) _staged_radio2 = false;
 
   if (!is_tx && _staged_raw_valid) {
     if (_staged_raw_len <= (int)sizeof(queued.raw_data)) {

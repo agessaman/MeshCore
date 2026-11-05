@@ -388,6 +388,34 @@ packet, interrupt, or successful TX for that long, the firmware restarts receive
 This recovers radios that stop reporting interrupts without a reboot. On meshes that are
 silent for long stretches, raise the interval or set `0`.
 
+### Second Radio Profile (radio2)
+
+Repeater observers can also listen on a second LoRa setting, such as MediaMesh, and
+publish what they hear there. The one radio alternates between the node's own settings
+and radio2, so nothing new is needed in hardware.
+
+| Command | Purpose |
+|---------|---------|
+| `set radio2 mediamesh` | Listen on MediaMesh (911.150 MHz, 250 kHz, SF7, CR5) |
+| `set radio2 mediamesh-range` | MediaMesh at 125 kHz |
+| `set radio2 <freq>,<bw>,<sf>,<cr>[,rx]` | Any other setting |
+| `set radio2 off` | Listen on the node's own settings only (default) |
+| `get radio2` | Current setting, e.g. `> 911.150,250.000,7,5,rx,32` or `> off` |
+| `get radio2.status` | Packets heard, switches, measured switch time, listen windows |
+
+- **Receive only.** Packets heard on radio2 are logged and published, never routed or
+  repeated, and nothing is transmitted on radio2. `rxtx` is rejected.
+- **Timing.** The radio spends a short visit on whichever setting has longer symbols and
+  the rest on the other, sized so a packet on either setting still finds the radio back
+  before its preamble ends. It uses Keymind Cascade's radio2 timing, which MediaMesh
+  senders size their preambles for. The switch time is measured on the device.
+- **Sends** always go out on the node's own settings: the radio returns first.
+- **`tempradio`** takes priority. radio2 pauses until the temporary settings revert.
+- Room-server observers do not run radio2 and reply that it is not supported.
+
+The commands, the serial `U RADIO: radio2` line, and the MQTT keys below match Keymind
+Cascade's radio2, so analyzers and tools treat both firmwares the same way.
+
 ### Bridge
 
 | Command | Purpose |
@@ -464,6 +492,12 @@ All timestamps are UTC with an explicit `+00:00` offset.
 `stats` and its fields are omitted when no value is available. Packet counts are totals
 since boot.
 
+While radio2 is listening, status also lists it; `radio` stays the node's own setting:
+
+```json
+"radios": [{ "id": "radio2", "radio": "911.150000,250.0,7,5", "mode": "rx", "mediamesh": true, "temporary": false }]
+```
+
 ### Packet
 
 ```json
@@ -493,6 +527,8 @@ since boot.
   ×1000 (0-1000), the same number the serial RX log prints.
 - `path` appears on direct-route packets: one lowercase hex token per hop, matching
   [meshcore-packet-capture](https://github.com/agessaman/meshcore-packet-capture).
+- A packet heard on radio2 adds `"rx_radio_id": "radio2"` and `"mediamesh": true`
+  (also on its raw message). Packets on the node's own settings are unchanged.
 
 ### Raw
 

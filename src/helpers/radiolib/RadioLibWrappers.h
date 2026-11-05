@@ -55,6 +55,12 @@ public:
   }
 
   virtual void setParams(float freq, float bw, uint8_t sf, uint8_t cr) = 0;
+
+  enum RetuneResult : int8_t { RETUNE_OK = 0, RETUNE_BUSY = 1, RETUNE_FAILED = -1 };
+  // Move a listening radio to other LoRa settings and keep receiving (radio2).
+  // Returns RETUNE_BUSY, changing nothing, while a packet is arriving or one is
+  // waiting to be read, so a packet is always read on the settings that heard it.
+  RetuneResult retuneRecv(float freq, float bw, uint8_t sf, uint8_t cr);
   uint32_t getRngSeed();
   void setTxPower(int8_t dbm);
 
