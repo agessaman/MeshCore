@@ -31,6 +31,7 @@
 #include "bridges/MQTTBridge.h"
 #include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
+#include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
 #include "MQTTPacketFilter.h"
 #include "MQTTTopicRouter.h"   // mqttSlotIata() — a slot's effective region code
 #endif
@@ -398,9 +399,14 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.neighbors ", 15) == 0) {
     // The mesh loop reads this live, so no bridge restart is needed; enabling it
     // triggers a discovery on the next eligible loop pass.
-    _mqtt_prefs.mqtt_neighbors_enabled = memcmp(&config[15], "on", 2) == 0;
-    if (!persistObserverPrefs(reply)) return true;
-    strcpy(reply, "OK");
+    uint8_t mode;
+    if (!mqttNeighborsParseMode(&config[15], &mode)) {
+      strcpy(reply, "Error: use auto, on, or off");
+    } else {
+      _mqtt_prefs.mqtt_neighbors_enabled = mode;
+      if (!persistObserverPrefs(reply)) return true;
+      strcpy(reply, "OK");
+    }
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0 ||
              memcmp(config, "mqtt.neighbors ", 15) == 0) {
@@ -1001,7 +1007,12 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     uint32_t hours = (_mqtt_prefs.mqtt_neighbors_interval + 3599999) / 3600000;
     sprintf(reply, "> %u hours (%lu ms)", (unsigned)hours, (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
   } else if (memcmp(config, "mqtt.neighbors", 14) == 0) {
-    sprintf(reply, "> %s", _mqtt_prefs.mqtt_neighbors_enabled ? "on" : "off");
+    if (_mqtt_prefs.mqtt_neighbors_enabled == MQTT_NEIGHBORS_AUTO) {
+      sprintf(reply, "> auto (%s)",
+              mqttNeighborsCollectionEnabled(&_mqtt_prefs, RUNTIME_MQTT_SLOTS) ? "active" : "inactive");
+    } else {
+      sprintf(reply, "> %s", mqttNeighborsModeName(_mqtt_prefs.mqtt_neighbors_enabled));
+    }
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval", 23) == 0 ||
              memcmp(config, "mqtt.neighbors", 14) == 0) {

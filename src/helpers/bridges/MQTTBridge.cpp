@@ -4,6 +4,7 @@
 #include "../MQTTConnectionPolicy.h"
 #include "../NtpValidation.h"
 #include "../MQTTMessageBuilder.h"
+#include "../MQTTNeighborsPolicy.h"
 #include "../MQTTPacketQueuePolicy.h"
 #include "../MQTTReplyFormat.h"
 #include "../MQTTRuntimeBufferLifecycle.h"
@@ -309,7 +310,7 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Periodic neighbors: time to next publish + how the last one went.
-  if (obs && obs->mqtt_neighbors_enabled) {
+  if (mqttNeighborsCollectionEnabled(obs, RUNTIME_MQTT_SLOTS)) {
     char when[16];
     switch (b->_neighbors_phase.load(std::memory_order_relaxed)) {
       case NBR_ACTIVE: strcpy(when, "active"); break;
@@ -797,6 +798,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   // std::atomic has no value-initializing default ctor pre-C++20, so set them here.
   _neighbors_json_buffer = nullptr;
   _neighbors_publish_len = 0;
+  _neighbors_publish_all_slots = true;
   _neighbors_publish_pending.store(false, std::memory_order_relaxed);
   _neighbors_last_result.store(NBR_RESULT_NONE, std::memory_order_relaxed);
   _neighbors_phase.store(NBR_SCHEDULED, std::memory_order_relaxed);
@@ -4354,7 +4356,7 @@ void MQTTBridge::setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_
   _neighbors_secs_until_next.store(secs_until_next, std::memory_order_relaxed);
 }
 
-void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
+void MQTTBridge::requestPublishNeighbors(const char* json, size_t len, bool all_slots) {
   if (!json || len == 0) return;
   // Drop a new snapshot while one is still being published (Core 0 clears the
   // flag when done). Acquire pairs with the task loop's release store.
@@ -4379,6 +4381,7 @@ void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
   memcpy(_neighbors_json_buffer, json, len);
   _neighbors_json_buffer[len] = '\0';
   _neighbors_publish_len = len;
+  _neighbors_publish_all_slots = all_slots;
   _neighbors_publish_pending.store(true, std::memory_order_release);
 }
 
@@ -4390,8 +4393,12 @@ bool MQTTBridge::publishNeighbors() {
 
   bool published = false;
   char topic[128];
+  const uint8_t mode = _obs ? _obs->mqtt_neighbors_enabled : MQTT_NEIGHBORS_AUTO;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+      if (!_neighbors_publish_all_slots && !mqttNeighborsSlotSelected(mode, _slots[i].preset)) {
+        continue;
+      }
       // Slots that cannot form a neighbors topic are skipped here.
       if (buildTopicForSlot(i, MSG_NEIGHBORS, topic, sizeof(topic))) {
         // Neighbor snapshots are periodically refreshed. Publish synchronously

@@ -11,6 +11,7 @@
 #include <helpers/OtaChannel.h>
 #if defined(WITH_MQTT_NEIGHBORS)
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
+#include <helpers/MQTTNeighborsPolicy.h>
 #endif
 
 /* ------------------------------ Config -------------------------------- */
@@ -1114,6 +1115,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   neighbor_discover_active = false;
   neighbor_table_refresh_active = false;
   neighbor_table_refresh_periodic = false;
+  neighbor_discover_periodic = false;
   neighbor_discover_until = 0;
   neighbor_discover_request = NULL;
   next_neighbors_publish = 0;
@@ -1740,7 +1742,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         sprintf(reply, "OK - scopes queued (%us discovery remaining)", remaining_secs);
         MESH_DEBUG_PRINTLN("Neighbor scopes queued behind active discovery (%us remaining)", remaining_secs);
       }
-    } else if (!startNeighborDiscover(reply)) {
+    } else if (!startNeighborDiscover(reply, false)) {
       // reply already set by startNeighborDiscover
     }
 #elif defined(WITH_MQTT_BRIDGE)
@@ -1869,7 +1871,8 @@ void MyMesh::loop() {
   //   stage 1 - zero-hop node-discover refreshes the neighbour table (60s window)
   //   stage 2 - anon-regions scope query per neighbour (startNeighborDiscover)
   // then the table JSON is published and the next cycle is rescheduled.
-  bool periodic_neighbors_enabled = _cli.getObserverPrefs()->mqtt_neighbors_enabled;
+  bool periodic_neighbors_enabled =
+      mqttNeighborsCollectionEnabled(_cli.getObserverPrefs(), RUNTIME_MQTT_SLOTS);
   if (neighbor_discover_active) {
     loopNeighborDiscover();
   } else if (neighbor_table_refresh_active) {
@@ -1886,7 +1889,7 @@ void MyMesh::loop() {
       neighbor_table_refresh_periodic = false;
       char tmp_reply[80];
       const char* origin_str = was_periodic ? "periodic" : "manual";
-      if (startNeighborDiscover(tmp_reply)) {
+      if (startNeighborDiscover(tmp_reply, was_periodic)) {
         MESH_DEBUG_PRINTLN("MQTT %s %s", origin_str, tmp_reply);
       } else {
         if (periodic_neighbors_enabled) {
@@ -2254,7 +2257,7 @@ void MyMesh::finishNeighborDiscover() {
       neighbor_discover_truncated);
 
     if (json_len > 0 && bridge) {
-      bridge->requestPublishNeighbors(json_buf, (size_t)json_len);
+      bridge->requestPublishNeighbors(json_buf, (size_t)json_len, !neighbor_discover_periodic);
     }
   }
 
@@ -2270,7 +2273,7 @@ void MyMesh::finishNeighborDiscover() {
   neighbor_discover_truncated = false;
   neighbor_discover_until = 0;
   neighbor_discover_request = NULL;
-  if (_cli.getObserverPrefs()->mqtt_neighbors_enabled) {
+  if (mqttNeighborsCollectionEnabled(_cli.getObserverPrefs(), RUNTIME_MQTT_SLOTS)) {
     next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
   }
 }
@@ -2345,7 +2348,7 @@ bool MyMesh::neighborDiscoverReady(char* reply) {
 
 // Snapshot the neighbor table newest-first. loopNeighborDiscover() emits one
 // anon-regions query at a time so hidden responders do not reply as a burst.
-bool MyMesh::startNeighborDiscover(char* reply) {
+bool MyMesh::startNeighborDiscover(char* reply, bool periodic) {
   if (neighbor_discover_active) {
     strcpy(reply, "Err - neighbor discover already active");
     return false;
@@ -2387,6 +2390,7 @@ bool MyMesh::startNeighborDiscover(char* reply) {
 
   neighbor_discover_next = 0;
   resetNeighborDiscoverJsonBudget();
+  neighbor_discover_periodic = periodic;
   neighbor_discover_active = true;
   neighbor_discover_until = 0;
   neighbor_discover_request = NULL;

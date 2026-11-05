@@ -3,6 +3,7 @@
 #include <helpers/ConfigSerializer.h>
 #include <helpers/MQTTObserverValidation.h>
 #include <helpers/MQTTPresets.h>
+#include <helpers/MQTTNeighborsPolicy.h>
 #include <helpers/MQTTPrefsStorage.h>
 #include <helpers/WifiPowerSavePolicy.h>
 #include <helpers/WifiTxPowerPolicy.h>
@@ -154,7 +155,10 @@ class MQTTPrefsSerializer : public ConfigSerializer {
         : _prefs(prefs), _enabled(prefs->mqtt_neighbors_enabled),
           _interval_ms(static_cast<int32_t>(prefs->mqtt_neighbors_interval)) {}
     void apply(bool* repaired) {
-      if (_enabled < 0 || _enabled > 1) { _enabled = 0; *repaired = true; }
+      if (_enabled < 0 || _enabled > MQTT_NEIGHBORS_MODE_MAX) {
+        _enabled = MQTT_NEIGHBORS_AUTO;
+        *repaired = true;
+      }
       if (_interval_ms < static_cast<int32_t>(MQTT_NEIGHBORS_MIN_INTERVAL_MS) ||
           _interval_ms > static_cast<int32_t>(MQTT_NEIGHBORS_MAX_INTERVAL_MS)) {
         _interval_ms = static_cast<int32_t>(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS);

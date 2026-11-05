@@ -440,8 +440,6 @@ body.tab-cli{padding-bottom:0}
         <span class="tgl"><input type="checkbox" data-k="mqtt.rx"><u></u></span></div>
       <div class="sw"><span><b>Drop bad advert signatures</b><i>Skip received adverts that fail verification. Off keeps RF corruption visible to collectors</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.advert.verify"><u></u></span></div>
-      <div class="sw"><span><b>Publish neighbors</b><i>Periodic neighbor table + scopes (PSRAM boards only)</i></span>
-        <span class="tgl"><input type="checkbox" data-k="mqtt.neighbors"><u></u></span></div>
       <div class="row" style="margin-top:6px">
         <div class="f"><label>Transmitted packets</label>
           <select data-k="mqtt.tx"><option value="off">Off</option><option value="on">All TX</option><option value="advert">Own adverts only</option></select>
@@ -449,6 +447,9 @@ body.tab-cli{padding-bottom:0}
         <div class="f"><label>Status interval (min)</label><input type="number" data-k="mqtt.interval" min="1" max="60"></div>
       </div>
       <div class="row" style="margin-top:6px">
+        <div class="f"><label>Publish neighbors</label>
+          <select data-k="mqtt.neighbors"><option value="auto">Auto (brokers that ask for it)</option><option value="on">All brokers</option><option value="off">Off</option></select>
+          <div class="hint">Periodic neighbor table + scopes (PSRAM boards only).</div></div>
         <div class="f"><label>Neighbors interval (hours)</label><input type="number" data-k="mqtt.neighbors.interval" min="12" max="336">
           <div class="hint">How often to publish the neighbor table (12-336, default 24).</div></div>
       </div>
@@ -720,7 +721,7 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"mqtt.raw":return q.raw?"on":"off";case"mqtt.tx":return q.tx;case"mqtt.rx":return q.rx?"on":"off";
     case"mqtt.advert.verify":return q.advert_verify?"on":"off";
     case"mqtt.interval":return String(q.interval);
-    case"mqtt.neighbors":return q.neighbors?"on":"off";case"mqtt.neighbors.interval":return String(q.neighbors_interval);
+    case"mqtt.neighbors":return typeof q.neighbors=="string"?q.neighbors:q.neighbors?"on":"off";case"mqtt.neighbors.interval":return String(q.neighbors_interval);
     case"mqtt.ntp":return q.ntp;
     case"mqtt.owner":return q.owner;case"mqtt.email":return q.email;
     case"timezone":return q.timezone;case"timezone.offset":return String(q.timezone_offset);
@@ -1592,7 +1593,7 @@ var CLI_KEYS=[
   ["mqtt.advert.verify","Drop received adverts with bad signatures",0,"on|off"],
   ["mqtt.tx","Publish packets this node sends",0,"off|on|advert"],
   ["mqtt.interval","Status publish interval {1-60 min}",0],
-  ["mqtt.neighbors","Publish the neighbour table (PSRAM boards)",0,"on|off"],
+  ["mqtt.neighbors","Publish the neighbour table (PSRAM boards)",0,"auto|on|off"],
   ["mqtt.neighbors.interval","Neighbour publish interval {12-336 hours}",0],
   ["mqtt.owner","Owner public key {64-hex-char-key}",0],
   ["mqtt.email","Owner email address",0],

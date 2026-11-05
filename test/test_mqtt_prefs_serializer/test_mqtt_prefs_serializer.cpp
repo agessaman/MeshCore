@@ -287,7 +287,7 @@ TEST(MQTTPrefsSerializer, RepairsSemanticRanges) {
   InputStream input(
       "{version:1,wifi:{power_save:9},time:{utc_offset:99},"
       "mqtt:{tx_enabled:7,status:{enabled:3,interval_ms:10},"
-      "neighbors:{enabled:2,interval_ms:100},slot1:{port:-1,packet_filter:-2}},"
+      "neighbors:{enabled:3,interval_ms:100},slot1:{port:-1,packet_filter:-2}},"
       "radio:{watchdog_min:121},alert:{rate_limit_min:1}}");
   MQTTPrefsSerializer serializer(&prefs);
   ASSERT_TRUE(serializer.loadSerial(input));
@@ -298,6 +298,7 @@ TEST(MQTTPrefsSerializer, RepairsSemanticRanges) {
   EXPECT_EQ(-7, prefs.timezone_offset);
   EXPECT_EQ(2, prefs.mqtt_tx_enabled);
   EXPECT_EQ(300000u, prefs.mqtt_status_interval);
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO, prefs.mqtt_neighbors_enabled);
   EXPECT_EQ(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS, prefs.mqtt_neighbors_interval);
   EXPECT_EQ(0, prefs.mqtt_slot_port[0]);
   EXPECT_EQ(0xffff, prefs.mqtt_slot_packet_filter[0]);
@@ -481,6 +482,27 @@ TEST(MQTTPrefsSerializer, WifiTxPowerRoundTripsDefaultsAndRepairs) {
     ASSERT_TRUE(bogus_serializer.apply(&repaired)) << bogus_text;
     EXPECT_TRUE(repaired) << bogus_text;
     EXPECT_EQ(WifiTxPowerPolicy::kBoardDefault, prefs.wifi_tx_power) << bogus_text;
+  }
+}
+
+TEST(MQTTPrefsSerializer, NeighborsModeDefaultsAutoAndRoundTripsEveryMode) {
+  EXPECT_EQ(MQTT_NEIGHBORS_AUTO, defaults().mqtt_neighbors_enabled);
+  for (uint8_t mode : {MQTT_NEIGHBORS_AUTO, MQTT_NEIGHBORS_ON, MQTT_NEIGHBORS_OFF}) {
+    MQTTPrefs source = defaults();
+    source.mqtt_neighbors_enabled = mode;
+    OutputStream output;
+    MQTTPrefsSerializer writer(&source);
+    ASSERT_TRUE(writer.saveSerial(output));
+
+    MQTTPrefs loaded = defaults();
+    loaded.mqtt_neighbors_enabled = 0xff;
+    InputStream input(output.text());
+    MQTTPrefsSerializer reader(&loaded);
+    ASSERT_TRUE(reader.loadSerial(input));
+    bool repaired = true;
+    ASSERT_TRUE(reader.apply(&repaired));
+    EXPECT_FALSE(repaired) << (int)mode;
+    EXPECT_EQ(mode, loaded.mqtt_neighbors_enabled);
   }
 }
 

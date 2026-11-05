@@ -90,6 +90,15 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   it in pool — and a starved pool sets `doc.overflowed()`, which drops the entire publish
   instead of truncating it. `NEIGHBORS_MAX_PUBLISH_ENTRIES` (20 without PSRAM) keeps the
   pool inside a single block.
+- **Mode and per-preset opt-in** (`MQTTNeighborsPolicy.h`): `mqtt_neighbors_enabled` holds
+  a mode, 0 = auto, 1 = on, 2 = off. 0 used to mean off, so nodes that never changed it
+  move to auto on upgrade; older firmware repairs 2 to 0, so a rollback leaves it off.
+  `mqttNeighborsCollectionEnabled()` gates the mesh loop's periodic cycle: on always runs
+  it, auto only while a stored slot preset passes `mqttPresetNameWantsNeighbors()`
+  (`MQTTPresetPolicy.h`, keyed by name so `MQTTPresets.h` stays identical across
+  channels). `startNeighborDiscover(reply, periodic)` records the origin and the
+  snapshot carries it to the bridge: manual snapshots reach every connected slot, and
+  periodic ones only the slots `mqttNeighborsSlotSelected()` picks.
 - **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into the
   persistent buffer (`NEIGHBORS_JSON_BUFFER_SIZE`, PSRAM where available) and sets
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)

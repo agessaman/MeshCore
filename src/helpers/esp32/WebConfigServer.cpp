@@ -15,6 +15,7 @@
 #include <helpers/CommonCLI.h>
 #include <helpers/NetworkLink.h>
 #include <helpers/MQTTPacketFilter.h>
+#include <helpers/MQTTNeighborsPolicy.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
 #include <helpers/WifiPowerSavePolicy.h>
@@ -983,7 +984,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     mqtt["rx"] = (bool)_obs->mqtt_rx_enabled;
     mqtt["advert_verify"] = (bool)_obs->mqtt_advert_verify;
     mqtt["interval"] = _obs->mqtt_status_interval / 60000;  // CLI takes minutes
-    mqtt["neighbors"] = (bool)_obs->mqtt_neighbors_enabled;
+    mqtt["neighbors"] = mqttNeighborsModeName(_obs->mqtt_neighbors_enabled);
     mqtt["neighbors_interval"] = _obs->mqtt_neighbors_interval / 3600000UL;  // CLI takes hours
     mqtt["timezone"] = (const char*)_obs->timezone_string;
     mqtt["timezone_offset"] = _obs->timezone_offset;
