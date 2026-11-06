@@ -53,8 +53,15 @@ extern "C" {
 #define SENSOR_RST_PIN (32 + 15)
 
 
-#define PIN_GPS_TX (0 + 8)
-#define PIN_GPS_RX (0 + 7)
+// GPS UART. Naming follows the MeshCore convention used by the other variants:
+// PIN_GPS_TX is the line the GPS drives (bits TOWARDS the CPU) and PIN_GPS_RX is
+// the line the CPU drives (bits TOWARDS the GPS). EnvironmentSensorManager calls
+// Serial1.setPins(PIN_GPS_TX, PIN_GPS_RX), so these must follow that convention.
+// NOTE: Heltec's RC52 pinout and schematic label P0.08 "nRF_TX" and P0.07
+// "nRF_RX", which reads the opposite way. Meshtastic's heltec-rc52 variant also
+// puts the CPU's receive line on P0.08, so that is what we use here.
+#define PIN_GPS_TX (0 + 8)   // P0.08
+#define PIN_GPS_RX (0 + 7)   // P0.07
 #define PIN_GPS_EN (32 + 9)
 #define PIN_GPS_PPS (32 + 1)
 #define PIN_GPS_RESET (32 + 6)
@@ -64,8 +71,8 @@ extern "C" {
 #define GPS_THREAD_INTERVAL 50
 #define PERIPHERAL_WARMUP_MS 100
 
-#define PIN_SERIAL1_RX PIN_GPS_RX
-#define PIN_SERIAL1_TX PIN_GPS_TX
+#define PIN_SERIAL1_RX PIN_GPS_TX  // bits coming FROM the GPS
+#define PIN_SERIAL1_TX PIN_GPS_RX  // bits going TOWARDS the GPS
 
 #define PIN_TFT_CS        (32 + 4)
 #define PIN_TFT_RST       (0 + 10)
