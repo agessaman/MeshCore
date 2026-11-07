@@ -36,6 +36,7 @@ public:
 
   const MQTTPrefs* prefs() const { return _config.prefs(); }
   bool isBridgeRunning() const;
+  int queueSize() const;
   // Slots currently connected / configured, for the UI. -1 when not running.
   int connectedSlots() const;
   int configuredSlots() const;

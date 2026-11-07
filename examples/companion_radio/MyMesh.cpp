@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/StatsFormatHelper.h>
 
 #include <Arduino.h> // needed for PlatformIO
 #ifdef ENABLE_WIFI_INTERFACE
@@ -2106,16 +2107,24 @@ void MyMesh::enterCLIRescue() {
   Serial.println("========= CLI Rescue =========");
 }
 
+int MyMesh::getDiagQueueSize() {
+#ifdef WITH_MQTT_BRIDGE
+  return _observer.queueSize();
+#else
+  return 0;
+#endif
+}
+
+void MyMesh::formatDiagRadio(char* reply) {
+  StatsFormatHelper::formatRadioDiag(reply, _radio, radio_driver, *_ms, _err_flags, hasOutbound());
+}
+
 bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
   while (*command == ' ') command++; // skip leading spaces
 
-#ifdef WITH_MQTT_BRIDGE
   bool prefixed = false;
-#endif
   if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
-#ifdef WITH_MQTT_BRIDGE
     prefixed = true;
-#endif
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
     *reply = 0;
@@ -2133,19 +2142,22 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     return true;
   }
 
-#ifdef WITH_MQTT_BRIDGE
-  // Observer settings (mqtt*, wifi.ssid/pwd, timezone, ...) live in /mqtt.json.
-  // Reached from the USB console, the app's CLI and remote admin alike. Callers'
-  // reply buffers hold 161 bytes, 3 fewer after a reflected prefix.
+  // Shared fork diagnostics and, on observer builds, observer settings (mqtt*,
+  // wifi.ssid/pwd, timezone, ...) in /mqtt.json. Reached from the USB console,
+  // the app's CLI and remote admin alike. Callers' reply buffers hold 161 bytes,
+  // 3 fewer after a reflected prefix.
   {
-    char obs_reply[161];
-    obs_reply[0] = 0;
-    if (_observer.handleCommand(sender_timestamp, command, obs_reply)) {
-      StrHelper::strncpy(reply, obs_reply, prefixed ? sizeof(obs_reply) - 3 : sizeof(obs_reply));
+    char sub_reply[161];
+    sub_reply[0] = 0;
+    bool handled = NodeDiagCLI::handleCommand(sender_timestamp, command, sub_reply, *this);
+#ifdef WITH_MQTT_BRIDGE
+    if (!handled) handled = _observer.handleCommand(sender_timestamp, command, sub_reply);
+#endif
+    if (handled) {
+      StrHelper::strncpy(reply, sub_reply, prefixed ? sizeof(sub_reply) - 3 : sizeof(sub_reply));
       return true;
     }
   }
-#endif
 
   if (strcmp(command, "reboot") == 0) {
     board.reboot(); // doesn't return

@@ -68,6 +68,7 @@
 
 #include <helpers/BaseChatMesh.h>
 #include <helpers/TransportKeyStore.h>
+#include <helpers/NodeDiagCLI.h>
 #ifdef WITH_MQTT_BRIDGE
 #include <helpers/CompanionObserver.h>
 #endif
@@ -90,7 +91,7 @@ struct AdvertPath {
   uint8_t path[MAX_PATH_SIZE];
 };
 
-class MyMesh : public BaseChatMesh, public DataStoreHost
+class MyMesh : public BaseChatMesh, public DataStoreHost, public NodeDiagHost
 #ifdef WITH_MQTT_BRIDGE
   , public MQTTBridgeHost
 #endif
@@ -132,6 +133,10 @@ public:
   void enterCLIRescue();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
+
+  // NodeDiagHost (memory, stats-radio-diag)
+  int getDiagQueueSize() override;
+  void formatDiagRadio(char* reply) override;
 
 #ifdef WITH_MQTT_BRIDGE
   const CompanionObserver& getObserver() const { return _observer; }

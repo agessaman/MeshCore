@@ -8,9 +8,6 @@
 #include "NetworkHostname.h"
 #include "NetworkLink.h"
 #include "TxtDataHelpers.h"
-#ifdef ESP_PLATFORM
-#include <esp_heap_caps.h>
-#endif
 
 CompanionObserver::CompanionObserver(mesh::MainBoard& board, MQTTBridgeHost& host,
                                      const char* firmware_version, const char* build_date)
@@ -106,18 +103,6 @@ bool CompanionObserver::handleCommand(uint32_t sender_timestamp, const char* com
   // sender_timestamp 0 means a local console; remote admin gets secrets masked.
   if (memcmp(command, "set ", 4) == 0) return _config.handleSetCmd(sender_timestamp, &command[4], reply);
   if (memcmp(command, "get ", 4) == 0) return _config.handleGetCmd(sender_timestamp, &command[4], reply);
-  if (strcmp(command, "memory") == 0) {   // same format as the repeater's command
-#ifdef ESP_PLATFORM
-    snprintf(reply, 161, "Free: %d, Min: %d, Max: %d, Queue: %d, IntFree: %d, IntMax: %d, PSRAM: %d/%d",
-             (int)ESP.getFreeHeap(), (int)ESP.getMinFreeHeap(), (int)ESP.getMaxAllocHeap(),
-             _bridge ? _bridge->getQueueSize() : 0,
-             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-             (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-             (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
-    return true;
-#endif
-  }
   if (memcmp(command, "ota", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
     strcpy(reply, "Err - OTA not supported on companion observer");
     return true;
@@ -125,6 +110,10 @@ bool CompanionObserver::handleCommand(uint32_t sender_timestamp, const char* com
   char buf[161];
   StrHelper::strncpy(buf, command, sizeof(buf));
   return _config.handleCommand(sender_timestamp, buf, reply);
+}
+
+int CompanionObserver::queueSize() const {
+  return _bridge ? _bridge->getQueueSize() : 0;
 }
 
 bool CompanionObserver::isBridgeRunning() const {

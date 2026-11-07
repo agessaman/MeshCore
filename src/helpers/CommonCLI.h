@@ -9,6 +9,7 @@
 #include <helpers/ConfigSerializer.h>
 #include <helpers/CommonRadioPrefs.h>
 #include <helpers/DynamicConfigSerializer.h>
+#include <helpers/NodeDiagCLI.h>
 
 #if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
 #define WITH_BRIDGE
@@ -392,6 +393,16 @@ class CommonCLI {
   RegionMap* _region_map;
   ClientACL* _acl;
   char tmp[PRV_KEY_SIZE*2 + 4];
+  // Hands CommonCLICallbacks to the shared diagnostic commands (NodeDiagCLI).
+  class DiagHost : public NodeDiagHost {
+    CommonCLI* _cli;
+  public:
+    explicit DiagHost(CommonCLI* cli) : _cli(cli) { }
+    int getDiagQueueSize() override { return _cli->_callbacks->getQueueSize(); }
+    void formatDiagRadio(char* reply) override { _cli->_callbacks->formatRadioDiagReply(reply); }
+  };
+  DiagHost _diag_host;
+
 #ifdef WITH_MQTT_BRIDGE
   // Hands CommonCLICallbacks and this CLI's NodePrefs to ObserverConfig.
   class ObserverHost : public ObserverCallbacks {
@@ -431,7 +442,8 @@ class CommonCLI {
 
 public:
   CommonCLI(mesh::MainBoard& board, mesh::RTCClock& rtc, SensorManager& sensors, RegionMap& region_map, ClientACL& acl, NodePrefs* prefs, CommonCLICallbacks* callbacks)
-      : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks)
+      : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks),
+        _diag_host(this)
 #ifdef WITH_MQTT_BRIDGE
       , _observer_host(this), _observer(&board, &_observer_host, &prefs->ota_channel)
 #endif
