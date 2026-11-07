@@ -327,9 +327,11 @@ private:
 
 #if defined(ESP32) && defined(BOARD_HAS_PSRAM) && defined(WITH_MQTT_BRIDGE)
   // Observer builds need internal DRAM for WiFi and MQTT slots; the mesh
-  // object (contacts, offline queue) lives in PSRAM instead. See main.cpp.
+  // object (contacts, offline queue) lives in PSRAM instead, constructed at the
+  // start of setup() because Arduino only brings PSRAM up after static init.
   #define COMPANION_MESH_IN_PSRAM 1
-extern MyMesh& the_mesh;
+extern MyMesh* g_companion_mesh;
+#define the_mesh (*g_companion_mesh)
 #else
 extern MyMesh the_mesh;
 #endif
