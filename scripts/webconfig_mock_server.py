@@ -60,7 +60,7 @@ BATCH_PENDING_SECS = 0.8             # how long POST->done takes, to exercise po
 SCAN_SECS = 0.8
 
 # Destination buffer sizes (chars, minus the NUL) — mirrors the MQTTPrefs fields
-# the firmware validates in CommonCLI_Observer.cpp.
+# the firmware validates in ObserverCLI.cpp.
 LEN_LIMITS = {
     "name": 31, "wifi.ssid": 31, "wifi.pwd": 63, "mqtt.origin": 31,
     "mqtt.email": 63, "mqtt.ntp": 63, "timezone": 31, "snmp.community": 23,

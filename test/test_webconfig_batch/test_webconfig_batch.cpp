@@ -222,7 +222,7 @@ TEST(WebConfigBatch, CliReadIsDoneOnlyOnceEveryResultHasBeenHandedOver) {
 }
 
 // Every string below is a literal lifted from CommonCLI.cpp /
-// CommonCLI_Observer.cpp. Testing only for an "Err" prefix passed five of these
+// ObserverCLI.cpp. Testing only for an "Err" prefix passed five of these
 // off as success, which both coloured them green and let a queued reboot go
 // ahead after them.
 TEST(WebConfigBatch, CliFailureRepliesAreRecognisedInEveryShapeCommonCLIEmits) {

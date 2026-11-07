@@ -1030,7 +1030,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #ifdef WITH_MQTT_BRIDGE
   if (_prefs.bridge_enabled) {
     // Defer construction to avoid static init crashes on ESP32 classic
-    bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
+    bridge = new MQTTBridge(this, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
     if (bridge) {
       // Set device public key for MQTT topics
       char device_id[65];
@@ -1885,7 +1885,7 @@ void MyMesh::resetNeighborDiscoverJsonBudget() {
     self_default_scope_buf[sizeof(self_default_scope_buf) - 1] = 0;
   }
   MQTTBridge::getEffectiveMqttOrigin(
-    &_prefs, _cli.getObserverPrefs(),
+    _prefs.node_name, _cli.getObserverPrefs(),
     neighbor_discover_origin, sizeof(neighbor_discover_origin));
 
   char self_pubkey_hex[65];

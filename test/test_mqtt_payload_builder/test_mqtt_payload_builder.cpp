@@ -118,6 +118,21 @@ TEST(MQTTPayloadBuilder, StatusReportsConnectionHealthWhenSupplied) {
   EXPECT_EQ(16116, stats["heap_largest"].as<int>());
 }
 
+TEST(MQTTPayloadBuilder, StatusRoleFollowsRepeatAndIsOmittedWhenNull) {
+  JsonDocument scratch;
+  char buffer[768];
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, "off", MQTTConnHealth(), "companion");
+  ASSERT_GT(len, 0);
+  EXPECT_NE(nullptr, strstr(buffer, "\"repeat\":\"off\",\"role\":\"companion\""));
+
+  len = buildMinimalStatus(scratch, buffer, sizeof(buffer));
+  ASSERT_GT(len, 0);
+  EXPECT_EQ(nullptr, strstr(buffer, "\"role\""));
+}
+
 TEST(MQTTPayloadBuilder, StatusReportsConnectFailuresAndBreakerOnlyWhenNonZero) {
   JsonDocument scratch;
   char buffer[1024];

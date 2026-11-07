@@ -1,17 +1,14 @@
-// CommonCLI_Observer.cpp — fork-owned observer/MQTT/WiFi/timezone/alert/SNMP CLI
-// command handling, split out of CommonCLI.cpp so the upstream-tracked file carries
-// only two small delegation hooks. These are CommonCLI member functions, so they
-// retain full access to _prefs/_callbacks/_board/savePrefs() with no re-plumbing.
-//
-// Behavior is intentionally identical to the previously-inlined branches. NOTE:
-// the entire body of each set/get handler here is compiled under WITH_MQTT_BRIDGE
-// (see the #ifdef at the top of each), so on an observer build without the bridge
-// the WiFi/timezone/alert/SNMP commands compile out too — they are not guarded
-// independently of the MQTT commands. Each handler returns true if it recognized
-// the command, false to fall through to the base get/set parser in CommonCLI.cpp.
+// ObserverCLI.cpp — observer/MQTT/WiFi/timezone/alert/SNMP CLI command handling.
+// ObserverConfig members, so any observer host (repeater, room server, companion)
+// can serve the same commands over the same /mqtt.json. Host-specific actions go
+// through ObserverCallbacks. Each handler returns true if it recognized the
+// command, false to fall through to the host's own get/set parser.
 
 #include <Arduino.h>
-#include "CommonCLI.h"
+#include "ObserverConfig.h"
+
+#ifdef WITH_MQTT_BRIDGE
+#include "CommonCLI.h"   // StrHelper and shared CLI helpers
 #include "OtaChannel.h"
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
@@ -210,7 +207,7 @@ static void formatMQTTPresetListReply(char* reply, size_t reply_size, int start)
 }
 #endif
 
-bool CommonCLI::persistObserverPrefs(char* reply) {
+bool ObserverConfig::persistObserverPrefs(char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   if (_callbacks->saveObserverPrefs()) return true;
   if (_observer_prefs_rollback != nullptr) {
@@ -230,7 +227,14 @@ bool CommonCLI::persistObserverPrefs(char* reply) {
 #endif
 }
 
-bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
+bool ObserverConfig::persistWithRollback(const MQTTPrefs* rollback, char* reply) {
+  _observer_prefs_rollback = rollback;
+  const bool ok = persistObserverPrefs(reply);
+  _observer_prefs_rollback = nullptr;
+  return ok;
+}
+
+bool ObserverConfig::handleSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   const bool needs_snapshot = isObserverPrefsSetCommand(config);
   ObserverPrefsRollbackScope rollback_scope(
@@ -960,7 +964,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 #endif
 }
 
-bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
+bool ObserverConfig::handleGetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   bool handled = true;
   if (memcmp(config, "snmp.community", 14) == 0) {
@@ -976,7 +980,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #ifdef WITH_MQTT_BRIDGE
   } else if (memcmp(config, "mqtt.origin", 11) == 0) {
     char effective_origin[32];
-    MQTTBridge::getEffectiveMqttOrigin(_prefs, &_mqtt_prefs, effective_origin, sizeof(effective_origin));
+    MQTTBridge::getEffectiveMqttOrigin(_callbacks->getObserverNodeName(), &_mqtt_prefs, effective_origin, sizeof(effective_origin));
     sprintf(reply, "> %s", effective_origin);
   } else if (memcmp(config, "mqtt.iata", 9) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.mqtt_iata);
@@ -1288,7 +1292,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #endif
 }
 
-bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply) {
+bool ObserverConfig::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   if (memcmp(command, "tls.bundletest ", 15) == 0) {
 #ifdef ESP_PLATFORM
@@ -1347,7 +1351,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only
       // costs a single TLS handshake (no large JSON doc) — which fits alongside
       // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
-      _board->otaFromManifest(ota_resolve_base(_prefs->ota_channel), _callbacks->getFirmwareVer(), true, reply);
+      _board->otaFromManifest(ota_resolve_base(*_ota_channel), _callbacks->getFirmwareVer(), true, reply);
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
       // schedule the real update — which tears the bridge down, flashes, and
@@ -1355,7 +1359,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // returns true iff so; otherwise it leaves the explanation (up to date /
       // cable flash / error) in reply, which we send without disturbing the
       // bridge or misleading the user with a "Beginning update..." that no-ops.
-      if (_board->otaFromManifest(ota_resolve_base(_prefs->ota_channel), _callbacks->getFirmwareVer(), true, reply)) {
+      if (_board->otaFromManifest(ota_resolve_base(*_ota_channel), _callbacks->getFirmwareVer(), true, reply)) {
         // reply now holds "update available: <cur> -> <target> (N behind|new base)",
         // where <target> is "vX.Y.Z.B (hash)". Pull <target> out for a friendlier
         // start message. The "-> " ... trailing " (" framing is produced by
@@ -1401,15 +1405,15 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     while (*arg == ' ') arg++;
     if (*arg == 0) {
       snprintf(reply, 160, "channel: %s (build: %s), base %s",
-               ota_channel_name(_prefs->ota_channel), ota_native_channel_name(),
-               ota_resolve_base(_prefs->ota_channel));
+               ota_channel_name(*_ota_channel), ota_native_channel_name(),
+               ota_resolve_base(*_ota_channel));
     } else {
       uint8_t ch;
       if (!ota_parse_channel(arg, &ch)) {
         strcpy(reply, "ERR: usage ota branch [prod|beta|default] (aliases: stable, dev)");
       } else {
-        _prefs->ota_channel = ch;
-        savePrefs();
+        *_ota_channel = ch;
+        _callbacks->saveNodePrefs();
         snprintf(reply, 160, "channel set to %s, base %s; run ota update to switch",
                  ota_channel_name(ch), ota_resolve_base(ch));
       }
@@ -1465,3 +1469,5 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
   return false;
 #endif
 }
+
+#endif  // WITH_MQTT_BRIDGE

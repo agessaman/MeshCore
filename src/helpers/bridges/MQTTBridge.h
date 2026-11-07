@@ -2,6 +2,7 @@
 
 #include "MeshCore.h"
 #include "helpers/bridges/BridgeBase.h"
+#include "helpers/bridges/MQTTBridgeHost.h"
 #include "helpers/NetworkLink.h"
 #include <PsychicMqttClient.h>
 #include <WiFi.h>
@@ -645,12 +646,14 @@ private:
   MQTTLifecycle::Coordinator _lifecycle;
 
   // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
-  // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
+  // _host supplies the node fields (name, radio params, forwarding, role); the
+  // BridgeBase NodePrefs pointer is unused (null) for this bridge.
   MQTTPrefs* _obs = nullptr;
+  MQTTBridgeHost* _host = nullptr;
   NetworkLink* _network = nullptr;
 
 public:
-  MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
+  MQTTBridge(MQTTBridgeHost *host, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
 
   void begin() override;
   void end() override;
@@ -808,7 +811,7 @@ public:
    *  reconfiguration. Safe to call before begin(). */
   static int getMaxActiveSlots();
   /** Resolved origin for MQTT JSON: node_name when mqtt_origin is empty, else mqtt_origin (with quote stripping). */
-  static void getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* buf, size_t buf_size);
+  static void getEffectiveMqttOrigin(const char* node_name, const MQTTPrefs* obs, char* buf, size_t buf_size);
   static const char* effectiveNtpPrimary(const MQTTPrefs* obs);
   /** Sync system clock via NTP. force=true bypasses the 5s post-sync rate limit.
    *  primary_only=true tests just the effective primary server (no fallback walk) so a

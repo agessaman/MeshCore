@@ -250,27 +250,9 @@ public:
 
 #ifdef WITH_MQTT_BRIDGE
 #include <helpers/MQTTPrefsStorage.h>
+#include <helpers/ObserverConfig.h>
 static_assert(MQTT_PREFS_SLOT_COUNT == MAX_MQTT_SLOTS,
               "MQTT prefs layout and slot count must change together");
-
-// Observer settings captured from the trailing block of an old-format /com_prefs
-// (fork firmware that predates the NodePrefs -> MQTTPrefs split). loadPrefsInt()
-// fills this in when it detects the old file layout; loadMQTTPrefs() then applies
-// the values one-time if the loaded /mqtt_prefs predates the appended observer
-// fields, so SNMP/watchdog/alert config survives the firmware upgrade.
-struct LegacyObserverTail {
-  bool valid = false;
-  uint8_t snmp_enabled;
-  char snmp_community[24];
-  uint8_t radio_watchdog_minutes;
-  uint8_t alert_enabled;
-  char alert_psk_hex[33];
-  uint16_t alert_wifi_minutes;
-  uint16_t alert_mqtt_minutes;
-  uint16_t alert_min_interval_min;
-  char alert_hashtag[24];
-  char alert_region[31];
-};
 #endif
 
 class CommonCLICallbacks {
@@ -401,12 +383,6 @@ public:
   }
 };
 
-#ifdef WITH_MQTT_BRIDGE
-namespace MQTTPrefsAtomicStore {
-class LegacyUpgradeGate;
-}
-#endif
-
 class CommonCLI {
   mesh::RTCClock* _rtc;
   NodePrefs* _prefs;
@@ -417,48 +393,49 @@ class CommonCLI {
   ClientACL* _acl;
   char tmp[PRV_KEY_SIZE*2 + 4];
 #ifdef WITH_MQTT_BRIDGE
-  MQTTPrefs _mqtt_prefs;
-  // Points at a per-command snapshot only while an observer setter is running.
-  // persistObserverPrefs() uses it to undo RAM mutations when flash commit fails.
-  const MQTTPrefs* _observer_prefs_rollback = nullptr;
-  LegacyObserverTail _legacy_tail;
-  // /mqtt.json is newer, corrupt, or temporarily unreadable. The in-memory prefs
-  // run on defaults and saveMQTTPrefs() must not overwrite the source file.
-  bool _mqtt_prefs_hold = false;
-  // A failed publish could not be undone, so the next boot may still come up
-  // with the value that was refused. persistObserverPrefs() must not call that
-  // a rollback. Latched for the boot: the artifact left behind also makes every
-  // later transaction fail to begin, so the condition cannot clear itself.
-  bool _observer_save_indeterminate = false;
+  // Hands CommonCLICallbacks and this CLI's NodePrefs to ObserverConfig.
+  class ObserverHost : public ObserverCallbacks {
+    CommonCLI* _cli;
+  public:
+    explicit ObserverHost(CommonCLI* cli) : _cli(cli) { }
+    const char* getObserverNodeName() override { return _cli->_prefs->node_name; }
+    void saveNodePrefs() override { _cli->savePrefs(); }
+    bool saveObserverPrefs() override { return _cli->_callbacks->saveObserverPrefs(); }
+    const char* getFirmwareVer() override { return _cli->_callbacks->getFirmwareVer(); }
+    void restartBridge() override { _cli->_callbacks->restartBridge(); }
+    void restartBridgeSlot(int slot) override { _cli->_callbacks->restartBridgeSlot(slot); }
+    bool beginDeferredOtaUpdate() override { return _cli->_callbacks->beginDeferredOtaUpdate(); }
+    bool syncMqttNtp() override { return _cli->_callbacks->syncMqttNtp(); }
+    bool isMqttBridgeRunning() override { return _cli->_callbacks->isMqttBridgeRunning(); }
+    bool startWebConfig(bool force_ap, char* reply) override { return _cli->_callbacks->startWebConfig(force_ap, reply); }
+    bool stopWebConfig(char* reply) override { return _cli->_callbacks->stopWebConfig(reply); }
+    bool runMqttNtpDiag(char* reply, size_t reply_size, bool verbose) override {
+      return _cli->_callbacks->runMqttNtpDiag(reply, reply_size, verbose);
+    }
+    void onAlertConfigChanged() override { _cli->_callbacks->onAlertConfigChanged(); }
+    bool sendAlertText(const char* text) override { return _cli->_callbacks->sendAlertText(text); }
+  };
+  ObserverHost _observer_host;
+  ObserverConfig _observer;
 #endif
   bool _com_prefs_needs_upgrade = false;  // old-format legacy prefs detected; rewrite once after load
 
   mesh::RTCClock* getRTCClock() { return _rtc; }
   void savePrefs();
   void loadPrefsInt(FILESYSTEM* _fs, const char* filename);
-#ifdef WITH_MQTT_BRIDGE
-  void loadMQTTPrefs(FILESYSTEM* fs, MQTTPrefsAtomicStore::LegacyUpgradeGate* legacy_upgrade);
-  bool saveMQTTPrefs(FILESYSTEM* fs);
-#endif
 
   void handleRegionCmd(char* command, char* reply);
   void handleGetCmd(uint32_t sender_timestamp, char* command, char* reply);
   void handleSetCmd(uint32_t sender_timestamp, char* command, char* reply);
 
-  // Observer/MQTT/WiFi/timezone/alert/SNMP CLI handling lives in the fork-owned
-  // CommonCLI_Observer.cpp to keep these branches out of the upstream-tracked
-  // CommonCLI.cpp. Each returns true if it recognized (handled) the command, or
-  // false to fall through to the base get/set parsing.
-  bool handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply);
-  bool handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply);
-  bool persistObserverPrefs(char* reply);
-  // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
-  // also live in CommonCLI_Observer.cpp; returns true if it handled the command.
-  bool handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply);
 
 public:
   CommonCLI(mesh::MainBoard& board, mesh::RTCClock& rtc, SensorManager& sensors, RegionMap& region_map, ClientACL& acl, NodePrefs* prefs, CommonCLICallbacks* callbacks)
-      : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks) { }
+      : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks)
+#ifdef WITH_MQTT_BRIDGE
+      , _observer_host(this), _observer(&board, &_observer_host, &prefs->ota_channel)
+#endif
+      { }
 
   void loadPrefs(FILESYSTEM* _fs);
   // Node preferences and observer preferences are separate transactions.
@@ -471,7 +448,7 @@ public:
   // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt.json.
   // Exposed so the app can hand it to MQTTBridge/AlertReporter, which read these
   // fields directly (they no longer live in NodePrefs).
-  MQTTPrefs* getObserverPrefs() const { return const_cast<MQTTPrefs*>(&_mqtt_prefs); }
-  bool saveObserverPrefs(FILESYSTEM* fs) { return saveMQTTPrefs(fs); }
+  MQTTPrefs* getObserverPrefs() const { return const_cast<ObserverConfig&>(_observer).prefs(); }
+  bool saveObserverPrefs(FILESYSTEM* fs) { return _observer.saveMQTTPrefs(fs); }
 #endif
 };

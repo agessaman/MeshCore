@@ -92,6 +92,9 @@ struct NeighbourInfo {
 #define PACKET_LOG_FILE  "/packet_log"
 
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks
+#ifdef WITH_MQTT_BRIDGE
+  , public MQTTBridgeHost
+#endif
 #ifdef WITH_WEBCONFIG
     , public WebConfigServer::Callbacks
 #endif
@@ -359,6 +362,16 @@ public:
 
   mesh::LocalIdentity& getSelfId() override { return self_id; }
 
+#ifdef WITH_MQTT_BRIDGE
+  // MQTTBridgeHost
+  const char* getObserverNodeName() const override { return _prefs.node_name; }
+  void getObserverRadioParams(float& freq, float& bw, uint8_t& sf, uint8_t& cr) const override {
+    freq = _prefs.freq; bw = _prefs.bw; sf = _prefs.sf; cr = _prefs.cr;
+  }
+  bool isObserverForwarding() const override { return !_prefs.disable_fwd; }
+  const char* getObserverRole() const override { return "repeater"; }
+#endif
+
   void saveIdentity(const mesh::LocalIdentity& new_id) override;
   void clearStats() override;
 
@@ -369,7 +382,7 @@ public:
   void setBridgeState(bool enable) override {
     if (!bridge) {
 #ifdef WITH_MQTT_BRIDGE
-      bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
+      bridge = new MQTTBridge(this, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
 #endif
       if (!bridge) return;
     }

@@ -132,7 +132,7 @@ lib_deps =
 | `src/helpers/SNMPAgent.h` | SNMP agent wrapper class declaration |
 | `src/helpers/SNMPAgent.cpp` | OID registration and stats update implementation |
 | `src/helpers/CommonCLI.h` | `MQTTPrefs` (`snmp_enabled`, `snmp_community`) |
-| `src/helpers/CommonCLI_Observer.cpp` | CLI commands |
+| `src/helpers/ObserverCLI.cpp` | CLI commands |
 | `src/helpers/bridges/MQTTBridge.cpp` | SNMP loop integration in `mqttTaskLoop()` |
 | `examples/simple_repeater/MyMesh.cpp` | Radio stats push and agent initialization |
 

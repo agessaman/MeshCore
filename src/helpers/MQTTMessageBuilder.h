@@ -69,6 +69,7 @@ public:
    * @param internal_heap Internal heap free bytes (optional, -1 to omit)
    * @param repeat Repeat/forwarding status ("on" or "off"); nullptr omits the field
    * @param conn_health MQTT slot connection health; defaults omit every field
+   * @param role Observer host role ("repeater", "room_server", "companion"); omitted when null
    * @return Length of JSON string, or 0 on error
    */
   static int buildStatusMessage(
@@ -95,7 +96,8 @@ public:
     int packets_sent = -1,
     int packets_received = -1,
     const char* repeat = nullptr,
-    const MQTTConnHealth& conn_health = MQTTConnHealth()
+    const MQTTConnHealth& conn_health = MQTTConnHealth(),
+    const char* role = nullptr
   );
 
   /**

@@ -36,10 +36,10 @@
 #endif
 
 // Effective MQTT origin: empty mqtt_origin follows node_name; otherwise mqtt_origin override (quotes stripped).
-static void applyEffectiveOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* dest, size_t dest_size) {
-  if (!np || !obs || !dest || dest_size == 0) return;
+static void applyEffectiveOrigin(const char* node_name, const MQTTPrefs* obs, char* dest, size_t dest_size) {
+  if (!node_name || !obs || !dest || dest_size == 0) return;
   if (obs->mqtt_origin[0] == '\0') {
-    strncpy(dest, np->node_name, dest_size - 1);
+    strncpy(dest, node_name, dest_size - 1);
   } else {
     strncpy(dest, obs->mqtt_origin, dest_size - 1);
   }
@@ -96,17 +96,17 @@ const char* MQTTBridge::effectiveNtpPrimary(const MQTTPrefs* obs) {
 }
 
 void MQTTBridge::refreshOriginFromPrefs() {
-  if (!_prefs) return;
-  applyEffectiveOrigin(_prefs, _obs, _origin, sizeof(_origin));
+  if (!_host) return;
+  applyEffectiveOrigin(_host->getObserverNodeName(), _obs, _origin, sizeof(_origin));
 }
 
-void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* buf, size_t buf_size) {
+void MQTTBridge::getEffectiveMqttOrigin(const char* node_name, const MQTTPrefs* obs, char* buf, size_t buf_size) {
   if (!buf || buf_size == 0) return;
-  if (!np || !obs) {
+  if (!node_name || !obs) {
     buf[0] = '\0';
     return;
   }
-  applyEffectiveOrigin(np, obs, buf, buf_size);
+  applyEffectiveOrigin(node_name, obs, buf, buf_size);
 }
 
 static bool isNetworkConfigValid(const MQTTPrefs* obs) {
@@ -700,9 +700,10 @@ static inline uint32_t mqttStopTimeoutForSlots(int slots) {
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
-MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
-    : BridgeBase(prefs, mgr, rtc),
+MQTTBridge::MQTTBridge(MQTTBridgeHost *host, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
+    : BridgeBase(nullptr, mgr, rtc),
       _obs(obs),
+      _host(host),
       _network(&activeNetworkLink()),
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
@@ -3143,8 +3144,11 @@ void MQTTBridge::publishStatusToSlot(int index) {
   gettimeofday(&now_tv, nullptr);
   MQTTMessageBuilder::formatIsoTimestampForMqtt(now_tv.tv_sec, now_tv.tv_usec, _timezone, timestamp, sizeof(timestamp));
 
+  float radio_freq = 0, radio_bw = 0;
+  uint8_t radio_sf = 0, radio_cr = 0;
+  _host->getObserverRadioParams(radio_freq, radio_bw, radio_sf, radio_cr);
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
-           _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
+           radio_freq, radio_bw, radio_sf, radio_cr);
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
   origin_id[sizeof(origin_id) - 1] = '\0';
@@ -3187,8 +3191,9 @@ void MQTTBridge::publishStatusToSlot(int index) {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    _prefs->disable_fwd ? "off" : "on",
-    collectConnHealth()
+    _host->isObserverForwarding() ? "on" : "off",
+    collectConnHealth(),
+    _host->getObserverRole()
   );
 
   if (len > 0) {
@@ -4072,8 +4077,11 @@ bool MQTTBridge::publishStatus() {
   gettimeofday(&now_tv, nullptr);
   MQTTMessageBuilder::formatIsoTimestampForMqtt(now_tv.tv_sec, now_tv.tv_usec, _timezone, timestamp, sizeof(timestamp));
 
+  float radio_freq = 0, radio_bw = 0;
+  uint8_t radio_sf = 0, radio_cr = 0;
+  _host->getObserverRadioParams(radio_freq, radio_bw, radio_sf, radio_cr);
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
-           _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
+           radio_freq, radio_bw, radio_sf, radio_cr);
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
   origin_id[sizeof(origin_id) - 1] = '\0';
@@ -4116,8 +4124,9 @@ bool MQTTBridge::publishStatus() {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    _prefs->disable_fwd ? "off" : "on",
-    collectConnHealth()
+    _host->isObserverForwarding() ? "on" : "off",
+    collectConnHealth(),
+    _host->getObserverRole()
   );
 
   if (len > 0) {
