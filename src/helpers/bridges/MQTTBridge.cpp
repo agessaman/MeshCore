@@ -5288,6 +5288,9 @@ void MQTTBridge::setIATA(const char* iata) {
 }
 
 void MQTTBridge::setDeviceID(const char* device_id) {
+  // A new identity (key import) needs a new v1_<pubkey> JWT username; it is
+  // rebuilt lazily from the identity when empty. Called while the bridge is stopped.
+  if (strncmp(_device_id, device_id, sizeof(_device_id) - 1) != 0) _jwt_username[0] = '\0';
   strncpy(_device_id, device_id, sizeof(_device_id) - 1);
   _device_id[sizeof(_device_id) - 1] = '\0';
   MQTT_DEBUG_PRINTLN("Device ID set to: %s", _device_id);
