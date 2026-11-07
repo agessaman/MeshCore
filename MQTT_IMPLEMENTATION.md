@@ -173,9 +173,11 @@ on the companion side keeps every repeater setting.
 **Not on the companion observer yet:** neighbors publication, SNMP, OTA updates, the
 web configuration portal and fault alerts.
 
-**Heltec V3 (no PSRAM):** one active broker slot, 150 contacts and a 32-message offline
-queue, so the contact table, WiFi and TLS fit in internal RAM. PSRAM boards (V4, Xiao
-S3 WIO) keep the normal companion limits (350 contacts) and five active slots.
+**Heltec V3 (no PSRAM):** two active broker slots, like the repeater observer, with
+150 contacts and a 32-message offline queue so the contact table, WiFi and TLS fit in
+internal RAM (about 50 KB free with both slots up and the app connected). PSRAM boards
+(V4, Xiao S3 WIO) keep the normal companion limits (350 contacts) and five active
+slots, with the companion's contact table in PSRAM.
 
 ## CLI Commands
 
