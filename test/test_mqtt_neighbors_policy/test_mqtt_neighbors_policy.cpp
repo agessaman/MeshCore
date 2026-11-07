@@ -50,7 +50,8 @@ TEST(MQTTNeighborsPolicy, RejectsUnknownModesWithoutTouchingTheOutput) {
 }
 
 TEST(MQTTNeighborsPolicy, OptInPresets) {
-  for (const char* name : {"cascadiamesh", "chimesh", "comchan", "meshmapper"}) {
+  for (const char* name : {"cascadiamesh", "chimesh", "comchan", "meshat.se", "meshmapper",
+                           "rflab", "virginiamesh"}) {
     ASSERT_NE(nullptr, findMQTTPreset(name)) << name;  // a renamed preset would silently drop out
     EXPECT_TRUE(mqttPresetWantsNeighbors(findMQTTPreset(name))) << name;
   }
@@ -68,7 +69,7 @@ TEST(MQTTNeighborsPolicy, OptInCountMatchesTheTable) {
   for (int i = 0; i < MQTT_PRESET_COUNT; i++) {
     if (mqttPresetWantsNeighbors(&MQTT_PRESETS[i])) opted_in++;
   }
-  EXPECT_EQ(4, opted_in);  // every name in the opt-in list resolves to exactly one preset
+  EXPECT_EQ(7, opted_in);  // every name in the opt-in list resolves to exactly one preset
 }
 
 TEST(MQTTNeighborsPolicy, AutoCollectsOnlyWithAnOptedInSlot) {

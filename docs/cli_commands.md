@@ -1256,7 +1256,8 @@ region save
 
 **Parameters:**
 - `auto`: run the periodic cycle only while a slot uses a preset whose broker asks for
-  neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshmapper`) or is set with
+  neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshat.se`, `meshmapper`,
+  `rflab`, `virginiamesh`) or is set with
   `mqtt<N>.neighbors on`, and publish it only to those slots
 - `on`: periodically discover neighbor scopes and publish the neighbor table to every
   connected slot's `neighbors` topic
