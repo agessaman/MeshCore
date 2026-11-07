@@ -1,7 +1,8 @@
 # MQTT Observer Firmware
 
-Observer firmware turns a MeshCore repeater or room server into an uplink that publishes
-the packets it hears to up to six MQTT brokers.
+Observer firmware turns a MeshCore repeater, room server or companion radio into an uplink
+that publishes the packets it hears to up to six MQTT brokers. For the companion build see
+[Companion Observer](#companion-observer).
 
 ## Quick Start Guide
 
@@ -133,6 +134,48 @@ ESP32-S3 boards without PSRAM that set `-D MQTT_NEIGHBORS_WITHOUT_PSRAM=1` (Helt
 RAK3112, Heltec Tracker v1.1/v2). Those builds cap the table at 20 entries and spend about
 7.4 KB of static DRAM (9.6 KB on room servers) plus up to 13 KB per publish, from the same
 heap TLS uses. Classic ESP32 builds leave it off.
+
+## Companion Observer
+
+The companion observer firmware is a companion radio and an MQTT observer in one image:
+the MeshCore app connects over WiFi (TCP port 5000) while heard packets go to the
+configured brokers. Builds: `heltec_v4_companion_observer_wifi` and
+`Heltec_v3_companion_observer_wifi`. Status messages carry `"role": "companion"`.
+
+**Configuring.** Observer commands (`set mqtt1.preset ...`, `set wifi.ssid ...`,
+`set wifi.pwd ...`, `set mqtt.iata ...`, `get mqtt.status`, ...) work from the USB
+serial console (115200 baud), from the app's CLI, and from remote admin by contacts
+allowed CLI access. WiFi credentials live in `/mqtt.json`; reboot after changing them.
+On first boot a WiFi SSID saved by the plain companion firmware is copied into
+`/mqtt.json` if it has none.
+
+**Switching between companion and repeater observer.** Both firmwares read the same
+`/mqtt.json` and identity, so after reflashing either way the node keeps its brokers,
+slots, IATA, WiFi, timezone and public key, and reconnects without setup. Node name
+and radio settings also carry over. Each firmware keeps its other settings in
+`/prefs.json` and drops keys it does not know when it saves (upstream behavior). After
+the companion has saved its settings, a repeater flashed back comes up with its
+role-specific settings at build defaults, **including the admin password
+(`password`)**, guest password, owner info, advert intervals and flood limits. Set the
+admin password again before relying on remote admin.
+
+Packet forwarding is one setting both firmwares share (`repeat.disable` in
+`/prefs.json`), with opposite defaults:
+
+- A companion flashed over a forwarding repeater starts with client repeat **on**. Turn
+  it off in the app's radio settings if the node should only observe.
+- A repeater flashed over a companion that saved its settings starts with forwarding
+  **off** unless client repeat was on. Run `set repeat on` after flashing back.
+
+Settings are only rewritten when something is changed, so a round trip with no changes
+on the companion side keeps every repeater setting.
+
+**Not on the companion observer yet:** neighbors publication, SNMP, OTA updates, the
+web configuration portal and fault alerts.
+
+**Heltec V3 (no PSRAM):** one active broker slot, 150 contacts and a 32-message offline
+queue, so the contact table, WiFi and TLS fit in internal RAM. The V4 keeps the normal
+companion limits (350 contacts) and five active slots.
 
 ## CLI Commands
 
@@ -457,6 +500,7 @@ All timestamps are UTC with an explicit `+00:00` offset.
   "radio": "radio_info",
   "client_version": "meshcore/{firmware_version}",
   "repeat": "on|off",
+  "role": "repeater|room_server|companion",
   "stats": {
     "battery_mv": 4100,
     "uptime_secs": 3600,
@@ -474,7 +518,7 @@ All timestamps are UTC with an explicit `+00:00` offset.
 ```
 
 `stats` and its fields are omitted when no value is available. Packet counts are totals
-since boot.
+since boot. `role` names the firmware hosting the observer; older firmware omits it.
 
 ### Packet
 
