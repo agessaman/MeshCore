@@ -41,7 +41,8 @@ static inline bool mqttPresetEnforcesTokenExp(const MQTTPresetDef* preset) {
 static inline bool mqttPresetNameWantsNeighbors(const char* name) {
   if (!name) return false;  // custom and none never match: opt in with mqtt.neighbors on
   static const char* const kWantsNeighbors[] = {
-    "cascadiamesh", "chimesh", "comchan", "meshmapper",
+    "cascadiamesh", "chimesh", "comchan", "meshat.se", "meshmapper", "rflab",
+    "virginiamesh",
   };
   for (const char* wanted : kWantsNeighbors) {
     if (strcmp(name, wanted) == 0) return true;

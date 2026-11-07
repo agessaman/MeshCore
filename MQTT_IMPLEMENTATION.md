@@ -111,6 +111,7 @@ that slot, see [Per-slot region codes](#per-slot-region-codes)).
 | `sacmesh` | `wss://mqtt.sacmesh.org:443/` | JWT | |
 | `upstatemesh` | `wss://mqtt.upst8me.sh:443/mqtt` | JWT | |
 | `comchan` | `wss://obs.comchan.net:443/` | JWT | |
+| `virginiamesh` | `wss://mqtt.virginiamesh.com:8883` | none | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 
@@ -429,7 +430,8 @@ when periodic neighbors run. Which slots get the periodic snapshot:
 - `mqttN.neighbors on` or `off` decides for that slot.
 - `mqttN.neighbors auto` (the default) follows the node: `mqtt.neighbors on` sends to
   the slot; `mqtt.neighbors auto` (the default) sends only if the slot's preset asks
-  for neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshmapper`).
+  for neighbor data (`cascadiamesh`, `chimesh`, `comchan`, `meshat.se`, `meshmapper`,
+  `rflab`, `virginiamesh`).
 - `mqtt.neighbors off` stops periodic snapshots on every slot.
 
 The periodic cycle runs only while at least one slot would receive it. A manual
