@@ -130,7 +130,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 40;
+static const int MQTT_PRESET_COUNT = 41;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -186,6 +186,8 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "upstatemesh",   "wss://mqtt.upst8me.sh:443/mqtt",          "mqtt.upst8me.sh",                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     // Comchan (Central Texas). JWT; LE Gen-Y RSA chain (YR1 → Root YR → X1) anchors at ISRG Root X1.
     { "comchan",       "wss://obs.comchan.net:443/",              "obs.comchan.net",                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // Virginia Mesh. No auth; LE Gen-Y ECDSA chain (YE2 → Root YE → X2) anchors at ISRG Root X1.
+    { "virginiamesh",  "wss://mqtt.virginiamesh.com:8883",       nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found
