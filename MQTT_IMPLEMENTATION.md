@@ -139,8 +139,8 @@ heap TLS uses. Classic ESP32 builds leave it off.
 
 The companion observer firmware is a companion radio and an MQTT observer in one image:
 the MeshCore app connects over WiFi (TCP port 5000) while heard packets go to the
-configured brokers. Builds: `heltec_v4_companion_observer_wifi` and
-`Heltec_v3_companion_observer_wifi`. Status messages carry `"role": "companion"`.
+configured brokers. Builds: `heltec_v4_companion_observer_wifi`,
+`Heltec_v3_companion_observer_wifi` and `Xiao_S3_WIO_companion_observer_wifi`. Status messages carry `"role": "companion"`.
 
 **Configuring.** Observer commands (`set mqtt1.preset ...`, `set wifi.ssid ...`,
 `set wifi.pwd ...`, `set mqtt.iata ...`, `get mqtt.status`, ...) work from the USB
@@ -174,8 +174,8 @@ on the companion side keeps every repeater setting.
 web configuration portal and fault alerts.
 
 **Heltec V3 (no PSRAM):** one active broker slot, 150 contacts and a 32-message offline
-queue, so the contact table, WiFi and TLS fit in internal RAM. The V4 keeps the normal
-companion limits (350 contacts) and five active slots.
+queue, so the contact table, WiFi and TLS fit in internal RAM. PSRAM boards (V4, Xiao
+S3 WIO) keep the normal companion limits (350 contacts) and five active slots.
 
 ## CLI Commands
 
