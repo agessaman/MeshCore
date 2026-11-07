@@ -114,7 +114,20 @@ MultiSerialInterface interface_manager;
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
+#ifdef COMPANION_MESH_IN_PSRAM
+#include <esp_heap_caps.h>
+#include <new>
+static MyMesh* allocMesh() {
+  void* mem = heap_caps_malloc(sizeof(MyMesh), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (mem == nullptr) mem = malloc(sizeof(MyMesh));   // board fitted without PSRAM
+  if (mem == nullptr) abort();
+  memset(mem, 0, sizeof(MyMesh));   // match the zero-init a static object gets
+  return new (mem) MyMesh(radio_driver, fast_rng, rtc_clock, tables, store);
+}
+MyMesh& the_mesh = *allocMesh();
+#else
 MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store);
+#endif
 
 /* END GLOBAL OBJECTS */
 

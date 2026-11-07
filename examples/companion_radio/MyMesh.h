@@ -320,4 +320,11 @@ private:
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
 };
 
+#if defined(ESP32) && defined(BOARD_HAS_PSRAM) && defined(WITH_MQTT_BRIDGE)
+  // Observer builds need internal DRAM for WiFi and MQTT slots; the mesh
+  // object (contacts, offline queue) lives in PSRAM instead. See main.cpp.
+  #define COMPANION_MESH_IN_PSRAM 1
+extern MyMesh& the_mesh;
+#else
 extern MyMesh the_mesh;
+#endif
