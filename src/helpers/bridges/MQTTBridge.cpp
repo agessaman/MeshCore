@@ -436,6 +436,20 @@ bool MQTTBridge::getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out) 
   return true;
 }
 
+bool MQTTBridge::getSlotCounts(int* connected, int* enabled) {
+  if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) return false;
+  const MQTTBridge* b = s_mqtt_bridge_instance;
+  int up = 0, on = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (!b->_slots[i].enabled) continue;
+    on++;
+    if (b->_slots[i].connected) up++;
+  }
+  if (connected) *connected = up;
+  if (enabled) *enabled = on;
+  return true;
+}
+
 #ifndef MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM
 #define MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM 2
 #endif

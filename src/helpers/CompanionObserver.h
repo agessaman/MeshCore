@@ -30,8 +30,9 @@ public:
   void onRawRx(const uint8_t* raw, int len, float snr, float rssi);
 
   // Observer CLI (get/set mqtt.*, wifi.*, timezone, ...). Returns true when the
-  // command was recognized; `reply` must hold at least 161 bytes.
-  bool handleCommand(const char* command, char* reply);
+  // command was recognized; `reply` must hold at least 161 bytes. sender_timestamp
+  // is 0 for local consoles (USB, app) and the sender's clock for remote admin.
+  bool handleCommand(uint32_t sender_timestamp, const char* command, char* reply);
 
   const MQTTPrefs* prefs() const { return _config.prefs(); }
   bool isBridgeRunning() const;

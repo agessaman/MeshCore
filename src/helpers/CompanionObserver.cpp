@@ -22,6 +22,12 @@ void CompanionObserver::loadPrefs(FILESYSTEM* fs, const char* import_ssid, const
 
   MQTTPrefs* obs = _config.prefs();
   if (!_config.isHeld() && obs->wifi_ssid[0] == 0 && import_ssid && import_ssid[0]) {
+    if (strlen(import_ssid) >= sizeof(obs->wifi_ssid)) {
+      // A truncated SSID would silently join nothing; leave it for the user.
+      Serial.printf("Observer: companion WiFi SSID longer than %u chars, not adopted; "
+                    "set wifi.ssid/wifi.pwd\n", (unsigned)(sizeof(obs->wifi_ssid) - 1));
+      return;
+    }
     StrHelper::strncpy(obs->wifi_ssid, import_ssid, sizeof(obs->wifi_ssid));
     StrHelper::strncpy(obs->wifi_password, import_pwd ? import_pwd : "", sizeof(obs->wifi_password));
     if (_config.saveMQTTPrefs(fs)) {
@@ -93,16 +99,17 @@ void CompanionObserver::onRawRx(const uint8_t* raw, int len, float snr, float rs
   if (_bridge) _bridge->storeRawRadioData(raw, len, snr, rssi);
 }
 
-bool CompanionObserver::handleCommand(const char* command, char* reply) {
-  if (memcmp(command, "set ", 4) == 0) return _config.handleSetCmd(0, &command[4], reply);
-  if (memcmp(command, "get ", 4) == 0) return _config.handleGetCmd(0, &command[4], reply);
+bool CompanionObserver::handleCommand(uint32_t sender_timestamp, const char* command, char* reply) {
+  // sender_timestamp 0 means a local console; remote admin gets secrets masked.
+  if (memcmp(command, "set ", 4) == 0) return _config.handleSetCmd(sender_timestamp, &command[4], reply);
+  if (memcmp(command, "get ", 4) == 0) return _config.handleGetCmd(sender_timestamp, &command[4], reply);
   if (memcmp(command, "ota", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
     strcpy(reply, "Err - OTA not supported on companion observer");
     return true;
   }
   char buf[161];
   StrHelper::strncpy(buf, command, sizeof(buf));
-  return _config.handleCommand(0, buf, reply);
+  return _config.handleCommand(sender_timestamp, buf, reply);
 }
 
 bool CompanionObserver::isBridgeRunning() const {
@@ -110,23 +117,13 @@ bool CompanionObserver::isBridgeRunning() const {
 }
 
 int CompanionObserver::connectedSlots() const {
-  if (!isBridgeRunning()) return -1;
-  int n = 0;
-  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
-    MQTTBridge::SlotStatusSnapshot s;
-    if (MQTTBridge::getSlotStatusSnapshot(i, &s) && strcmp(s.state, "ok") == 0) n++;
-  }
-  return n;
+  int up = 0;
+  return MQTTBridge::getSlotCounts(&up, nullptr) ? up : -1;
 }
 
 int CompanionObserver::configuredSlots() const {
-  if (!isBridgeRunning()) return -1;
-  int n = 0;
-  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
-    MQTTBridge::SlotStatusSnapshot s;
-    if (MQTTBridge::getSlotStatusSnapshot(i, &s)) n++;
-  }
-  return n;
+  int enabled = 0;
+  return MQTTBridge::getSlotCounts(nullptr, &enabled) ? enabled : -1;
 }
 
 bool CompanionObserver::saveObserverPrefs() {

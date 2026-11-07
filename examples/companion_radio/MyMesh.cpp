@@ -1574,6 +1574,9 @@ void MyMesh::handleCmdFrame(size_t len) {
           // re-load contacts, to invalidate ecdh shared_secrets
           resetContacts();
           _store->loadContacts(this);
+#ifdef WITH_MQTT_BRIDGE
+          _observer.restartBridge();   // device ID and JWT username come from the key
+#endif
         } else {
           writeErrFrame(ERR_CODE_FILE_IO_ERROR);
         }
@@ -2137,7 +2140,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
   {
     char obs_reply[161];
     obs_reply[0] = 0;
-    if (_observer.handleCommand(command, obs_reply)) {
+    if (_observer.handleCommand(sender_timestamp, command, obs_reply)) {
       StrHelper::strncpy(reply, obs_reply, prefixed ? sizeof(obs_reply) - 3 : sizeof(obs_reply));
       return true;
     }

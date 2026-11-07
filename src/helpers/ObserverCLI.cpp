@@ -730,7 +730,7 @@ bool ObserverConfig::handleSetCmd(uint32_t sender_timestamp, const char* config,
         }
       }
     } else {
-      sprintf(reply, "unknown config: %s", config);
+      snprintf(reply, 160, "unknown config: %s", config);
     }
   } else if (memcmp(config, "mqtt.analyzer.us ", 17) == 0) {
     const int slot = 0;
@@ -1123,7 +1123,7 @@ bool ObserverConfig::handleGetCmd(uint32_t sender_timestamp, const char* config,
     } else if (memcmp(subcmd, "diag", 4) == 0) {
       MQTTBridge::formatSlotDiagReply(reply, 160, slot);
     } else {
-      sprintf(reply, "??: %s", config);
+      snprintf(reply, 160, "??: %s", config);
     }
   } else if (memcmp(config, "wifi.ssid", 9) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.wifi_ssid);

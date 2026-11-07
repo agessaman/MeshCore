@@ -849,6 +849,10 @@ public:
     uint16_t filter_mask;
   };
   static bool getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out);
+  /** Enabled and connected slot counts from flags only (never touches a slot's
+   *  client, which the MQTT task may delete), so safe to poll from a UI loop.
+   *  Returns false when the bridge is not running. */
+  static bool getSlotCounts(int* connected, int* enabled);
   /** True when the selected network is configured and at least one MQTT slot can run. */
   static bool isConfigValid(const MQTTPrefs* obs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);

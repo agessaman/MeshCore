@@ -38,7 +38,8 @@ bool CommonRadioPrefs::handleCommand(const char* command, uint32_t sender_timest
   }
   if (memcmp(command, "set radio ", 10) == 0) {
     char tmp[132];
-    strcpy(tmp, &command[10]);
+    strncpy(tmp, &command[10], sizeof(tmp) - 1);   // CLI lines can exceed tmp
+    tmp[sizeof(tmp) - 1] = 0;
     const char *parts[4];
     int num = mesh::Utils::parseTextParts(tmp, parts, 4);
     float freq  = num > 0 ? strtof(parts[0], nullptr) : 0.0f;
