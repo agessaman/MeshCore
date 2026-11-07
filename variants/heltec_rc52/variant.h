@@ -95,7 +95,7 @@ extern "C" {
 #define PIN_SPI_MOSI (0 + 22)
 #define PIN_SPI_SCK  (0 + 25)
 
-#define PIN_SPI1_MISO (-1)
+#define PIN_SPI1_MISO (0)   // 0 maps to 0xff in g_ADigitalPinMap, ie NRFX_SPIM_PIN_NOT_USED
 #define PIN_SPI1_MOSI PIN_TFT_SDA
 #define PIN_SPI1_SCK  PIN_TFT_SCL
 

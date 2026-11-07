@@ -12,7 +12,9 @@ const uint32_t g_ADigitalPinMap[] = {
 
 static void resetOptionalPin(int pin)
 {
-  if (pin >= 0) nrf_gpio_cfg_default(pin);
+  // PIN_SPI1_MISO uses 0 as the "no MISO" sentinel (g_ADigitalPinMap[0] == 0xff).
+  // nrf_gpio_cfg_default(0) would configure P0.00/XL1, the 32.768 kHz crystal pin.
+  if (pin > 0) nrf_gpio_cfg_default(pin);
 }
 
 void initVariant()
