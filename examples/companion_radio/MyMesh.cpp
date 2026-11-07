@@ -288,7 +288,20 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
   return _prefs.multi_acks;
 }
 
+#ifdef WITH_MQTT_BRIDGE
+void MyMesh::logRx(mesh::Packet* pkt, int len, float score) {
+  _observer.onPacketRx(pkt);
+}
+
+void MyMesh::logTx(mesh::Packet* pkt, int len) {
+  _observer.onPacketTx(pkt);
+}
+#endif
+
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#ifdef WITH_MQTT_BRIDGE
+  _observer.onRawRx(raw, len, snr, rssi);
+#endif
   if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {
     int i = 0;
     out_frame[i++] = PUSH_CODE_LOG_RX_DATA;
@@ -899,7 +912,11 @@ void MyMesh::onSendTimeout() {}
 
 MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store)
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
-      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _listener(NULL), _iter(0) {
+      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _listener(NULL), _iter(0)
+#ifdef WITH_MQTT_BRIDGE
+      , _observer(board, *this, FIRMWARE_VERSION, FIRMWARE_BUILD_DATE)
+#endif
+{
   _iter_started = false;
   _cli_rescue = false;
   cli_command[0] = 0;
@@ -1012,6 +1029,14 @@ void MyMesh::begin() {
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
   // NOTE: no FEM LNA wiring here — companion has its own NodePrefs without
   // radio_fem_rxgain, matching upstream (which also doesn't wire companion).
+
+#ifdef WITH_MQTT_BRIDGE
+  // /mqtt.json is shared with the repeater observer, so a node reflashed between
+  // roles keeps its MQTT/WiFi setup. Only the stored companion SSID is adopted,
+  // never the compile-time WIFI_SSID placeholder.
+  _observer.loadPrefs(_store->getPrimaryFS(), _prefs.wifi_ssid, _prefs.wifi_pwd);
+  _observer.begin(this, _radio, _ms, _mgr, getRTCClock(), &self_id);
+#endif
 }
 
 const char *MyMesh::getNodeName() {
@@ -2081,7 +2106,13 @@ void MyMesh::enterCLIRescue() {
 bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
   while (*command == ' ') command++; // skip leading spaces
 
+#ifdef WITH_MQTT_BRIDGE
+  bool prefixed = false;
+#endif
   if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
+#ifdef WITH_MQTT_BRIDGE
+    prefixed = true;
+#endif
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
     *reply = 0;
@@ -2098,6 +2129,20 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     if (_prefs.isDirty()) { savePrefs(); }
     return true;
   }
+
+#ifdef WITH_MQTT_BRIDGE
+  // Observer settings (mqtt*, wifi.ssid/pwd, timezone, ...) live in /mqtt.json.
+  // Reached from the USB console, the app's CLI and remote admin alike. Callers'
+  // reply buffers hold 161 bytes, 3 fewer after a reflected prefix.
+  {
+    char obs_reply[161];
+    obs_reply[0] = 0;
+    if (_observer.handleCommand(command, obs_reply)) {
+      StrHelper::strncpy(reply, obs_reply, prefixed ? sizeof(obs_reply) - 3 : sizeof(obs_reply));
+      return true;
+    }
+  }
+#endif
 
   if (strcmp(command, "reboot") == 0) {
     board.reboot(); // doesn't return
@@ -2148,6 +2193,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     sprintf(reply, "> %s", _prefs.wifi_pwd);
     return true;
   }
+#ifndef WITH_MQTT_BRIDGE   // observer builds keep WiFi in /mqtt.json; these edit unused prefs
   if (strcmp(command, "set wifi.clear") == 0) {
     _prefs.wifi_ssid[0] = 0;
     _prefs.wifi_pwd[0] = 0;
@@ -2169,6 +2215,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     sprintf(reply, "> %d", _prefs.wifi_enabled);
     return true;
   }
+#endif
   if (strcmp(command, "get wifi.status") == 0) {
     strcpy(reply, WiFi.status() == WL_CONNECTED ? "> connected" : "> disconnected");
     return true;
@@ -2416,14 +2463,18 @@ void MyMesh::checkSerialInterface() {
 
 void MyMesh::loop() {
   BaseChatMesh::loop();
+#ifdef WITH_MQTT_BRIDGE
+  _observer.loop();
+#endif
 
   if (_cli_rescue) {
     checkCLIRescueCmd();
   } else {
     checkSerialInterface();
-#if defined(ENABLE_WIFI_INTERFACE) && defined(RP2040_PLATFORM) && !defined(ENABLE_USB_INTERFACE)
+#if defined(ENABLE_WIFI_INTERFACE) && (defined(RP2040_PLATFORM) || defined(WITH_MQTT_BRIDGE)) && !defined(ENABLE_USB_INTERFACE)
     // RP2040 WiFi builds are headless and have no way into the rescue CLI (that needs a
-    // display + long-press), so serve config commands on the otherwise unused USB serial
+    // display + long-press), so serve config commands on the otherwise unused USB serial.
+    // Observer WiFi builds do the same so the observer can be configured over USB.
     checkCLIRescueCmd();
 #endif
   }

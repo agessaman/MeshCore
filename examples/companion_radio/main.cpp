@@ -211,7 +211,13 @@ void setup() {
 #endif
 
 // add wifi interface
-#ifdef ENABLE_WIFI_INTERFACE
+#if defined(ENABLE_WIFI_INTERFACE) && defined(WITH_MQTT_BRIDGE)
+  // The observer's network link owns WiFi (credentials in /mqtt.json, joined by
+  // the MQTT task). The app's TCP server is started from loop() once the link
+  // has an address, since sockets cannot be opened before the stack is up.
+  board.setInhibitSleep(true);
+  interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+#elif defined(ENABLE_WIFI_INTERFACE)
   // use wifi ssid and password from prefs if ssid is not empty, otherwise use the build flag defaults
   if (the_mesh.getNodePrefs()->wifi_ssid[0]) {
     strcpy(wifi_ssid, the_mesh.getNodePrefs()->wifi_ssid);
@@ -308,7 +314,17 @@ void loop() {
 #endif
   }
 
-#ifdef ENABLE_WIFI_INTERFACE
+#if defined(ENABLE_WIFI_INTERFACE) && defined(WITH_MQTT_BRIDGE)
+  {
+    // (Re)open the listener whenever the link comes up; begin() is a no-op once listening.
+    bool wifi_up = WiFi.status() == WL_CONNECTED;
+    if (wifi_up && !wifi_was_connected) {
+      wifi_interface.begin(TCP_PORT);
+      WIFI_DEBUG_PRINTLN("connected, listening on %s:%d", WiFi.localIP().toString().c_str(), TCP_PORT);
+    }
+    wifi_was_connected = wifi_up;
+  }
+#elif defined(ENABLE_WIFI_INTERFACE)
   if (wifi_enabled) {
     // RP2040 has no WiFi event callbacks, so poll the link state instead
   #if defined(RP2040_PLATFORM)

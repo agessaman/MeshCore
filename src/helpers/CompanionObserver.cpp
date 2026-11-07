@@ -1,0 +1,158 @@
+#include "CompanionObserver.h"
+
+#ifdef WITH_MQTT_BRIDGE
+
+#include <Arduino.h>
+#include "bridges/MQTTBridge.h"
+#include "MQTTPrefsAtomicStore.h"
+#include "NetworkHostname.h"
+#include "NetworkLink.h"
+#include "TxtDataHelpers.h"
+
+CompanionObserver::CompanionObserver(mesh::MainBoard& board, MQTTBridgeHost& host,
+                                     const char* firmware_version, const char* build_date)
+    : _board(board), _host(host), _firmware_version(firmware_version), _build_date(build_date),
+      _config(&board, this, &_ota_channel) { }
+
+void CompanionObserver::loadPrefs(FILESYSTEM* fs, const char* import_ssid, const char* import_pwd) {
+  _fs = fs;
+  // No legacy /com_prefs on a companion, so nothing waits on the gate.
+  MQTTPrefsAtomicStore::LegacyUpgradeGate legacy_upgrade(false);
+  _config.loadMQTTPrefs(fs, &legacy_upgrade);
+
+  MQTTPrefs* obs = _config.prefs();
+  if (!_config.isHeld() && obs->wifi_ssid[0] == 0 && import_ssid && import_ssid[0]) {
+    StrHelper::strncpy(obs->wifi_ssid, import_ssid, sizeof(obs->wifi_ssid));
+    StrHelper::strncpy(obs->wifi_password, import_pwd ? import_pwd : "", sizeof(obs->wifi_password));
+    if (_config.saveMQTTPrefs(fs)) {
+      Serial.printf("Observer: adopted companion WiFi '%s' into /mqtt.json\n", obs->wifi_ssid);
+    }
+  }
+}
+
+void CompanionObserver::begin(mesh::Dispatcher* dispatcher, mesh::Radio* radio, mesh::MillisecondClock* ms,
+                              mesh::PacketManager* mgr, mesh::RTCClock* rtc, mesh::LocalIdentity* identity) {
+  _dispatcher = dispatcher;
+  _radio = radio;
+  _ms = ms;
+  _identity = identity;
+
+  MQTTPrefs* obs = _config.prefs();
+#ifdef ESP_PLATFORM
+  // Same bring-up order as the repeater observer: cap TX power before the first
+  // association, and name the DHCP lease on boot-owned links.
+  NetworkLink& link = activeNetworkLink();
+  link.setWifiTxPower(obs->wifi_tx_power);
+  if (link.isAutomatic()) {
+    char hostname[NetworkHostname::kBufferSize];
+    NetworkHostname::build(hostname, sizeof(hostname), _host.getObserverNodeName(),
+                           identity->pub_key, PUB_KEY_SIZE);
+    link.setHostname(hostname);
+    link.bootstrap(obs->wifi_ssid, obs->wifi_password, NETWORK_ETHERNET_BOOT_WAIT_MS);
+  }
+#endif
+
+  // Deferred construction, as in the repeater (static init crashes on ESP32 classic).
+  _bridge = new MQTTBridge(&_host, obs, mgr, rtc, identity);
+  startBridge();
+}
+
+void CompanionObserver::startBridge() {
+  if (!_bridge) return;
+  char device_id[65];
+  mesh::Utils::toHex(device_id, _identity->pub_key, PUB_KEY_SIZE);
+  _bridge->setDeviceID(device_id);
+  _bridge->setFirmwareVersion(_firmware_version);
+  _bridge->setBoardModel(_board.getManufacturerName());
+  _bridge->setBuildDate(_build_date);
+  _bridge->setStatsSources(_dispatcher, _radio, &_board, _ms);
+  _bridge->begin();
+  _resume_pending = !_bridge->isRunning() && _bridge->isStopUnproven();
+}
+
+void CompanionObserver::loop() {
+  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
+  if (_bridge && _bridge->stopAcknowledgedLate()) {
+    _bridge->pollLateStopAck();
+    if (_resume_pending) {
+      Serial.println("MQTT: stop acknowledged late - resuming bridge");
+      startBridge();
+    }
+  }
+}
+
+void CompanionObserver::onPacketRx(mesh::Packet* pkt) {
+  if (_bridge) _bridge->onPacketReceived(pkt);
+}
+
+void CompanionObserver::onPacketTx(mesh::Packet* pkt) {
+  if (_bridge) _bridge->sendPacket(pkt);
+}
+
+void CompanionObserver::onRawRx(const uint8_t* raw, int len, float snr, float rssi) {
+  if (_bridge) _bridge->storeRawRadioData(raw, len, snr, rssi);
+}
+
+bool CompanionObserver::handleCommand(const char* command, char* reply) {
+  if (memcmp(command, "set ", 4) == 0) return _config.handleSetCmd(0, &command[4], reply);
+  if (memcmp(command, "get ", 4) == 0) return _config.handleGetCmd(0, &command[4], reply);
+  if (memcmp(command, "ota", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
+    strcpy(reply, "Err - OTA not supported on companion observer");
+    return true;
+  }
+  char buf[161];
+  StrHelper::strncpy(buf, command, sizeof(buf));
+  return _config.handleCommand(0, buf, reply);
+}
+
+bool CompanionObserver::isBridgeRunning() const {
+  return _bridge && _bridge->isRunning();
+}
+
+int CompanionObserver::connectedSlots() const {
+  if (!isBridgeRunning()) return -1;
+  int n = 0;
+  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
+    MQTTBridge::SlotStatusSnapshot s;
+    if (MQTTBridge::getSlotStatusSnapshot(i, &s) && strcmp(s.state, "ok") == 0) n++;
+  }
+  return n;
+}
+
+int CompanionObserver::configuredSlots() const {
+  if (!isBridgeRunning()) return -1;
+  int n = 0;
+  for (int i = 0; i < MAX_MQTT_SLOTS; i++) {
+    MQTTBridge::SlotStatusSnapshot s;
+    if (MQTTBridge::getSlotStatusSnapshot(i, &s)) n++;
+  }
+  return n;
+}
+
+bool CompanionObserver::saveObserverPrefs() {
+  return _fs && _config.saveMQTTPrefs(_fs);
+}
+
+void CompanionObserver::restartBridge() {
+  if (!_bridge || !_bridge->isRunning()) return;
+  _bridge->end();
+  startBridge();
+}
+
+void CompanionObserver::restartBridgeSlot(int slot) {
+  if (!_bridge || !_bridge->isRunning()) return;
+  if (slot < 0 || slot >= MAX_MQTT_SLOTS) return;
+  _bridge->setSlotPreset(slot, _config.prefs()->mqtt_slot_preset[slot]);
+}
+
+bool CompanionObserver::syncMqttNtp() {
+  if (!_bridge || !_bridge->isRunning()) return false;
+  return _bridge->requestForcedNtpSync(0);
+}
+
+bool CompanionObserver::runMqttNtpDiag(char* reply, size_t reply_size, bool verbose) {
+  if (!_bridge || !_bridge->isRunning()) return false;
+  return _bridge->ntpDiag(reply, reply_size, verbose);
+}
+
+#endif  // WITH_MQTT_BRIDGE

@@ -317,6 +317,13 @@ public:
         #else
         display.drawTextCentered(display.width() / 2, 43, "< Connected >");
         #endif
+#if defined(WITH_MQTT_BRIDGE) && !defined(UI_SHOW_CLOCK)
+      } else if (the_mesh.getObserver().configuredSlots() > 0) {  // MQTT observer uplink
+        display.setTextSize(1);
+        snprintf(tmp, sizeof(tmp), "MQTT %d/%d up", the_mesh.getObserver().connectedSlots(),
+                 the_mesh.getObserver().configuredSlots());
+        display.drawTextCentered(display.width() / 2, 43, tmp);
+#endif
       } else if (the_mesh.getBLEPin() != 0) { // BT pin
         display.setColor(UIColor::warning_txt);
         sprintf(tmp, "Pin:%d", the_mesh.getBLEPin());

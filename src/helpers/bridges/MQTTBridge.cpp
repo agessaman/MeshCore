@@ -436,14 +436,19 @@ bool MQTTBridge::getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out) 
   return true;
 }
 
+#ifndef MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM
+#define MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM 2
+#endif
+
 int MQTTBridge::getMaxActiveSlots() {
   // Each WSS/TLS connection needs ~40KB for mbedTLS buffers. Without PSRAM even
-  // 3 concurrent connections would exhaust internal heap, so cap at 2; with
-  // PSRAM cap at 5 (6 configurable but 5 active max).
+  // 3 concurrent connections would exhaust internal heap, so cap at 2 (less on
+  // builds that spend internal RAM elsewhere); with PSRAM cap at 5 (6
+  // configurable but 5 active max).
 #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  return psramFound() ? 5 : 2;
+  return psramFound() ? 5 : MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM;
 #else
-  return 2;
+  return MQTT_MAX_ACTIVE_SLOTS_NO_PSRAM;
 #endif
 }
 
