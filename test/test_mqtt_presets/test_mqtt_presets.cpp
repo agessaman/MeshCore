@@ -155,8 +155,9 @@ TEST(MQTTPresets, WcmeshIsJwtWithIsrgRootX1) {
   EXPECT_FALSE(mqttPresetUsesDevicePubkeyUsername(p));
 }
 
-TEST(MQTTPresets, MeshcoreAnalyzerIsJwtWithGtsRootR4) {
-  const MQTTPresetDef* p = findMQTTPreset("meshcore-analyzer");
+TEST(MQTTPresets, MeshcoreAnalyzerEuIsJwtWithGtsRootR4) {
+  EXPECT_EQ(nullptr, findMQTTPreset("meshcore-analyzer"));
+  const MQTTPresetDef* p = findMQTTPreset("meshcore-analyzer-eu");
   ASSERT_NE(nullptr, p);
   EXPECT_EQ(MQTT_AUTH_JWT, p->auth_type);
   EXPECT_EQ(MQTT_TOPIC_MESHCORE, p->topic_style);

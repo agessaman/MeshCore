@@ -88,25 +88,100 @@ TEST(MQTTConnectionPolicy, ThirdFailureAtMaximumTripsWithoutAnotherHandshake) {
 }
 
 TEST(MQTTConnectionPolicy, CircuitBreakerProbeHasExactThirtyMinuteBoundary) {
-  EXPECT_FALSE(Policy::circuitBreakerProbeDue(1799999U, 0U));
-  EXPECT_TRUE(Policy::circuitBreakerProbeDue(1800000U, 0U));
+  const uint32_t probe = Policy::kCircuitBreakerProbeMs;
+  EXPECT_EQ(1800000U, probe);
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(1799999U, 0U, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(1800000U, 0U, probe));
 
   const uint32_t last = std::numeric_limits<uint32_t>::max() - 899999U;
-  EXPECT_FALSE(Policy::circuitBreakerProbeDue(899999U, last));
-  EXPECT_TRUE(Policy::circuitBreakerProbeDue(900000U, last));
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(899999U, last, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(900000U, last, probe));
+}
+
+TEST(MQTTConnectionPolicy, BreakerProbeMinutesAcceptOnlyTenToThirty) {
+  EXPECT_FALSE(Policy::breakerProbeMinutesValid(9));
+  EXPECT_TRUE(Policy::breakerProbeMinutesValid(10));
+  EXPECT_TRUE(Policy::breakerProbeMinutesValid(30));
+  EXPECT_FALSE(Policy::breakerProbeMinutesValid(31));
+  EXPECT_FALSE(Policy::breakerProbeMinutesValid(-1));
+
+  EXPECT_EQ(600000U, Policy::breakerProbeMs(10));
+  EXPECT_EQ(1800000U, Policy::breakerProbeMs(30));
+  // Corrupt or zeroed values never shorten the probe below the floor.
+  EXPECT_EQ(Policy::kCircuitBreakerProbeMs, Policy::breakerProbeMs(0));
+  EXPECT_EQ(Policy::kCircuitBreakerProbeMs, Policy::breakerProbeMs(5));
+  EXPECT_EQ(Policy::kCircuitBreakerProbeMs, Policy::breakerProbeMs(255));
+}
+
+TEST(MQTTConnectionPolicy, BreakerProbeMinutesParseRejectsJunkAndOverflow) {
+  uint8_t minutes = 0;
+  EXPECT_TRUE(Policy::parseBreakerProbeMinutes("10", &minutes));
+  EXPECT_EQ(10, minutes);
+  EXPECT_TRUE(Policy::parseBreakerProbeMinutes("030", &minutes));
+  EXPECT_EQ(30, minutes);
+  for (const char* bad : {"", "9", "31", "0", "-10", "15m", " 15", "15 ", "1.5",
+                          "0010", "4294967306", "266"}) {
+    minutes = 77;
+    EXPECT_FALSE(Policy::parseBreakerProbeMinutes(bad, &minutes)) << bad;
+    EXPECT_EQ(77, minutes) << bad;
+  }
+  EXPECT_FALSE(Policy::parseBreakerProbeMinutes(nullptr, &minutes));
+}
+
+TEST(MQTTConnectionPolicy, ConfiguredBreakerIntervalIsWrapSafe) {
+  const uint32_t probe = Policy::breakerProbeMs(10);
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(599999U, 0U, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(600000U, 0U, probe));
+
+  const uint32_t last = std::numeric_limits<uint32_t>::max() - 99999U;
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(499999U, last, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(500000U, last, probe));
 }
 
 TEST(MQTTConnectionPolicy, LinkRecoveryMakesCurrentBackoffDueImmediately) {
   const uint32_t now = 1234U;
-  const uint32_t last = Policy::immediateRetryLastAttempt(now, false, 4, 2);
+  const uint32_t probe = Policy::kCircuitBreakerProbeMs;
+  const uint32_t last = Policy::immediateRetryLastAttempt(now, false, 4, 2, probe);
   EXPECT_TRUE(Policy::reconnectDue(now, last, 4, 2));
-  EXPECT_FALSE(Policy::circuitBreakerProbeDue(now, last));
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(now, last, probe));
 }
 
 TEST(MQTTConnectionPolicy, LinkRecoveryMakesBreakerProbeDueWithoutClearingIt) {
   const uint32_t now = 1234U;
-  const uint32_t last = Policy::immediateRetryLastAttempt(now, true, 5, 2);
-  EXPECT_TRUE(Policy::circuitBreakerProbeDue(now, last));
+  for (uint8_t minutes : {(uint8_t)10, (uint8_t)30}) {
+    const uint32_t probe = Policy::breakerProbeMs(minutes);
+    const uint32_t last = Policy::immediateRetryLastAttempt(now, true, 5, 2, probe);
+    EXPECT_TRUE(Policy::circuitBreakerProbeDue(now, last, probe)) << (int)minutes;
+  }
+}
+
+// One failure short of the breaker, an ordinary due check trips without a
+// handshake. The first retry after link recovery must still connect.
+TEST(MQTTConnectionPolicy, LinkRecoveryRetryAtThresholdAttemptsInsteadOfTripping) {
+  Policy::BackoffAdvance recovery = Policy::advanceBackoffForLinkRecovery(5, 2);
+  EXPECT_EQ(5, recovery.reconnect_backoff);
+  EXPECT_EQ(3, recovery.max_backoff_failures);
+  EXPECT_FALSE(recovery.circuit_breaker_tripped);
+  EXPECT_TRUE(recovery.should_reconnect);
+
+  // The failure still counts: the next ordinary due attempt trips.
+  Policy::BackoffAdvance next = Policy::advanceBackoff(recovery.reconnect_backoff,
+                                                       recovery.max_backoff_failures);
+  EXPECT_TRUE(next.circuit_breaker_tripped);
+  EXPECT_FALSE(next.should_reconnect);
+}
+
+TEST(MQTTConnectionPolicy, LinkRecoveryRetryBelowThresholdMatchesOrdinaryAdvance) {
+  for (uint8_t backoff = 0; backoff <= 5; ++backoff) {
+    for (uint8_t failures = 0; failures < 2; ++failures) {
+      Policy::BackoffAdvance ordinary = Policy::advanceBackoff(backoff, failures);
+      Policy::BackoffAdvance recovery = Policy::advanceBackoffForLinkRecovery(backoff, failures);
+      EXPECT_EQ(ordinary.reconnect_backoff, recovery.reconnect_backoff);
+      EXPECT_EQ(ordinary.max_backoff_failures, recovery.max_backoff_failures);
+      EXPECT_EQ(ordinary.circuit_breaker_tripped, recovery.circuit_breaker_tripped);
+      EXPECT_EQ(ordinary.should_reconnect, recovery.should_reconnect);
+    }
+  }
 }
 
 TEST(MQTTConnectionPolicy, JwtLifetimeUsesCappedPerSlotStagger) {

@@ -112,7 +112,7 @@ that slot, see [Per-slot region codes](#per-slot-region-codes)).
 | `upstatemesh` | `wss://mqtt.upst8me.sh:443/mqtt` | JWT | |
 | `comchan` | `wss://obs.comchan.net:443/` | JWT | |
 | `virginiamesh` | `wss://mqtt.virginiamesh.com:8883` | none | |
-| `meshcore-analyzer` | `wss://mqtt.meshcore-analyzer.eu:443` | JWT | |
+| `meshcore-analyzer-eu` | `wss://mqtt.meshcore-analyzer.eu:443` | JWT | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 
@@ -274,6 +274,7 @@ it has no effect there. An empty or invalid override falls back to `mqtt.iata`.
 | `get/set mqtt.interval <1-60>` | Status interval, minutes | 5 |
 | `get/set mqtt.neighbors auto\|on\|off` | Periodic neighbors publish (neighbors builds); `auto` only for presets that ask for it | auto |
 | `get/set mqtt.neighbors.interval <12-336>` | Neighbors interval, hours | 24 |
+| `get/set mqtt.breaker.interval <10-30>` | Minutes between retries once a slot stops reconnecting | 30 |
 | `get/set mqtt.ntp <host\|none>` | Primary NTP server; `set` syncs once to test it | `pool.ntp.org` |
 | `get mqtt.ntp.diag` | Probe every NTP server without changing the clock | |
 | `get/set mqtt.owner <64 hex>` | Owner public key for JWT (`get` is serial only) | |
@@ -550,7 +551,7 @@ since boot.
 ## Behavior
 
 **Connections.** Each slot reconnects with exponential backoff, then drops to a slow
-periodic retry. Packets queue while a slot is down. When the network route changes
+periodic retry (`mqtt.breaker.interval`, default 30 min). Packets queue while a slot is down. When the network route changes
 (Ethernet to WiFi or back), every slot disconnects cleanly and retries at once on the new
 route. Each medium keeps its own DHCP DNS servers.
 

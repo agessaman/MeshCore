@@ -373,6 +373,19 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     _mqtt_prefs.mqtt_advert_verify = memcmp(&config[19], "on", 2) == 0 ? 1 : 0;
     if (!persistObserverPrefs(reply)) return true;
     strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.breaker.interval ", 22) == 0) {
+    uint8_t minutes = 0;
+    if (!MQTTConnectionPolicy::parseBreakerProbeMinutes(&config[22], &minutes)) {
+      sprintf(reply, "Error: breaker interval must be between %u-%u minutes",
+              (unsigned)MQTTConnectionPolicy::kBreakerProbeMinMinutes,
+              (unsigned)MQTTConnectionPolicy::kBreakerProbeMaxMinutes);
+    } else {
+      _mqtt_prefs.mqtt_breaker_probe_min = minutes;
+      if (!persistObserverPrefs(reply)) return true;
+      // Published to the bridge only once saved, so a rolled-back value never applies.
+      MQTTBridge::setBreakerProbeMinutes(minutes);
+      sprintf(reply, "OK - breaker probe every %u minutes", (unsigned)minutes);
+    }
   } else if (memcmp(config, "mqtt.interval ", 14) == 0) {
     uint32_t minutes = _atoi(&config[14]);
     if (minutes >= 1 && minutes <= 60) {
@@ -1012,6 +1025,9 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     sprintf(reply, "> %s", _mqtt_prefs.mqtt_rx_enabled ? "on" : "off");
   } else if (memcmp(config, "mqtt.advert.verify", 18) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.mqtt_advert_verify ? "on" : "off");
+  } else if (memcmp(config, "mqtt.breaker.interval", 21) == 0) {
+    sprintf(reply, "> %u minutes",
+            (unsigned)(MQTTConnectionPolicy::breakerProbeMs(_mqtt_prefs.mqtt_breaker_probe_min) / 60000UL));
   } else if (memcmp(config, "mqtt.interval", 13) == 0) {
     uint32_t minutes = (_mqtt_prefs.mqtt_status_interval + 29999) / 60000;
     sprintf(reply, "> %u minutes (%lu ms)", minutes, (unsigned long)_mqtt_prefs.mqtt_status_interval);

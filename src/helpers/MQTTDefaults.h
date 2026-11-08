@@ -6,6 +6,7 @@
 #include <MeshCore.h>
 #include "CommonCLI.h"
 #include "MQTTPacketFilter.h"
+#include "MQTTConnectionPolicy.h"
 #include "MQTTNeighborsPolicy.h"
 #include "MQTTPresets.h"
 
@@ -71,6 +72,7 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_rx_enabled = 1;
   prefs->mqtt_advert_verify = 0;
   prefs->mqtt_status_interval = 300000;
+  prefs->mqtt_breaker_probe_min = MQTTConnectionPolicy::kBreakerProbeDefaultMinutes;
   prefs->wifi_power_save = 1;
   prefs->wifi_tx_power = 0;  // board default
 
