@@ -1152,9 +1152,16 @@ void MQTTBridge::begin() {
   _lifecycle.requestStart();    // Stopped -> Starting (startTask() is a no-op here)
   _lifecycle.onTaskStarted();   // Starting -> Running
 
+  _breaker_probe_min.store(_obs->mqtt_breaker_probe_min, std::memory_order_relaxed);
   _initialized = true;
   s_mqtt_bridge_instance = this;
   MQTT_DEBUG_PRINTLN("MQTT Bridge initialized");
+}
+
+void MQTTBridge::setBreakerProbeMinutes(uint8_t minutes) {
+  if (s_mqtt_bridge_instance != nullptr) {
+    s_mqtt_bridge_instance->_breaker_probe_min.store(minutes, std::memory_order_relaxed);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2636,6 +2643,9 @@ void MQTTBridge::maintainSlotConnections() {
 void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted) {
   MQTTSlot& slot = _slots[index];
 
+  // Up may re-arm the flag after onConnect cleared it; a live connection never keeps it.
+  if (slot.connected) slot.link_retry_pending = false;
+
   // Forgive past failures only after the connection has proven stable.
   // 2 minutes covers at least one keepalive round-trip (keepalive is 75 s),
   // so a link that can't survive a single keepalive period never resets the
@@ -2844,7 +2854,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
 
   // Periodic probe for circuit-breaker-tripped slots (recovery from transient outages)
   // Attempts a single reconnect every mqtt.breaker.interval minutes (default 30)
-  const uint32_t probe_ms = MQTTConnectionPolicy::breakerProbeMs(_obs->mqtt_breaker_probe_min);
+  const uint32_t probe_ms = MQTTConnectionPolicy::breakerProbeMs(
+      _breaker_probe_min.load(std::memory_order_relaxed));
   if (slot.circuit_breaker_tripped && !reconnect_attempted) {
     unsigned long probe_elapsed = MQTTConnectionPolicy::elapsedMs(
         static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_reconnect_attempt));
@@ -3442,7 +3453,8 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
   }
 
   if (actions.retry_disconnected_slots_now) {
-    const uint32_t probe_ms = MQTTConnectionPolicy::breakerProbeMs(_obs->mqtt_breaker_probe_min);
+    const uint32_t probe_ms = MQTTConnectionPolicy::breakerProbeMs(
+      _breaker_probe_min.load(std::memory_order_relaxed));
     // Link recovery gets one immediate attempt without forgiving broker
     // failures earned on the same route. A medium switch is a new connection
     // epoch, so only that transition clears the old route's ladder/breaker.

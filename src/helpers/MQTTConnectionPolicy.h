@@ -96,6 +96,21 @@ static inline bool breakerProbeMinutesValid(int32_t minutes) {
   return minutes >= kBreakerProbeMinMinutes && minutes <= kBreakerProbeMaxMinutes;
 }
 
+// Parses CLI minutes; rejects non-digits and anything over three digits so a
+// huge value cannot wrap into range.
+static inline bool parseBreakerProbeMinutes(const char* text, uint8_t* out) {
+  if (text == nullptr || out == nullptr || *text == '\0') return false;
+  uint32_t value = 0;
+  int digits = 0;
+  for (const char* p = text; *p; ++p) {
+    if (*p < '0' || *p > '9' || ++digits > 3) return false;
+    value = value * 10U + static_cast<uint32_t>(*p - '0');
+  }
+  if (!breakerProbeMinutesValid(static_cast<int32_t>(value))) return false;
+  *out = static_cast<uint8_t>(value);
+  return true;
+}
+
 // Out-of-range stored values fall back to the default interval.
 static inline uint32_t breakerProbeMs(uint8_t minutes) {
   return breakerProbeMinutesValid(minutes) ? minutes * 60000UL : kCircuitBreakerProbeMs;

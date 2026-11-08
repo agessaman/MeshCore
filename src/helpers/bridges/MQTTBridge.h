@@ -16,6 +16,7 @@
 #include "helpers/AlertFaultPolicy.h"
 #include "helpers/MQTTEffectiveConfig.h"
 #include "helpers/MQTTClientState.h"
+#include "helpers/MQTTConnectionPolicy.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -485,6 +486,8 @@ private:
   static const unsigned long CONFIG_WARNING_INTERVAL = 300000; // Log every 5 minutes max
 
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
+  // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
+  std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
 
   // Optional pointers for collecting stats internally (set by mesh if available)
   mesh::Dispatcher* _dispatcher;  // For air times and errors
@@ -833,6 +836,8 @@ public:
   /** On-demand publish-health + heap snapshot for `get mqtt.stats` (per-slot ok/err,
    *  outbox size, free/max heap, queue depth). */
   static void formatMqttStatsReply(char* buf, size_t bufsize);
+  /** Apply a saved mqtt.breaker.interval to the running bridge. */
+  static void setBreakerProbeMinutes(uint8_t minutes);
   /** Structured per-slot snapshot for the webconfig stats endpoint. Same state
    *  logic as formatMqttStatusReply, same cross-task read semantics. Returns
    *  false when the bridge is not running, the index is out of range, or the

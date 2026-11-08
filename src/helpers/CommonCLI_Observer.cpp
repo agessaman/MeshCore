@@ -374,20 +374,16 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     if (!persistObserverPrefs(reply)) return true;
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.breaker.interval ", 22) == 0) {
-    // Read live by the bridge; the next probe uses the new interval.
-    const char* val = &config[22];
-    bool all_digits = (*val != '\0');
-    for (const char* sp = val; *sp; sp++) {
-      if (*sp < '0' || *sp > '9') { all_digits = false; break; }
-    }
-    const uint32_t minutes = all_digits ? _atoi(val) : 0;
-    if (!all_digits || !MQTTConnectionPolicy::breakerProbeMinutesValid(minutes)) {
+    uint8_t minutes = 0;
+    if (!MQTTConnectionPolicy::parseBreakerProbeMinutes(&config[22], &minutes)) {
       sprintf(reply, "Error: breaker interval must be between %u-%u minutes",
               (unsigned)MQTTConnectionPolicy::kBreakerProbeMinMinutes,
               (unsigned)MQTTConnectionPolicy::kBreakerProbeMaxMinutes);
     } else {
-      _mqtt_prefs.mqtt_breaker_probe_min = static_cast<uint8_t>(minutes);
+      _mqtt_prefs.mqtt_breaker_probe_min = minutes;
       if (!persistObserverPrefs(reply)) return true;
+      // Published to the bridge only once saved, so a rolled-back value never applies.
+      MQTTBridge::setBreakerProbeMinutes(minutes);
       sprintf(reply, "OK - breaker probe every %u minutes", (unsigned)minutes);
     }
   } else if (memcmp(config, "mqtt.interval ", 14) == 0) {

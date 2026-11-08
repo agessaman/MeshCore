@@ -113,6 +113,21 @@ TEST(MQTTConnectionPolicy, BreakerProbeMinutesAcceptOnlyTenToThirty) {
   EXPECT_EQ(Policy::kCircuitBreakerProbeMs, Policy::breakerProbeMs(255));
 }
 
+TEST(MQTTConnectionPolicy, BreakerProbeMinutesParseRejectsJunkAndOverflow) {
+  uint8_t minutes = 0;
+  EXPECT_TRUE(Policy::parseBreakerProbeMinutes("10", &minutes));
+  EXPECT_EQ(10, minutes);
+  EXPECT_TRUE(Policy::parseBreakerProbeMinutes("030", &minutes));
+  EXPECT_EQ(30, minutes);
+  for (const char* bad : {"", "9", "31", "0", "-10", "15m", " 15", "15 ", "1.5",
+                          "0010", "4294967306", "266"}) {
+    minutes = 77;
+    EXPECT_FALSE(Policy::parseBreakerProbeMinutes(bad, &minutes)) << bad;
+    EXPECT_EQ(77, minutes) << bad;
+  }
+  EXPECT_FALSE(Policy::parseBreakerProbeMinutes(nullptr, &minutes));
+}
+
 TEST(MQTTConnectionPolicy, ConfiguredBreakerIntervalIsWrapSafe) {
   const uint32_t probe = Policy::breakerProbeMs(10);
   EXPECT_FALSE(Policy::circuitBreakerProbeDue(599999U, 0U, probe));
