@@ -25,6 +25,8 @@ on:
       - 'LICENSE'
       - '.vscode/**'
       - '.claude/**'
+      # Host unit tests and their mocks are never compiled into firmware.
+      - 'test/**'
       # Throwaway build worktrees never affect the binaries.
       - '.build-wt-*'
       - '.build-wt-*/**'
