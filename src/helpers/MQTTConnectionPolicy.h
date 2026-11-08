@@ -10,7 +10,12 @@ namespace MQTTConnectionPolicy {
 
 static const uint32_t kReconnectGuardMs = 15000UL;
 static const uint32_t kStableResetMs = 120000UL;
-static const uint32_t kCircuitBreakerProbeMs = 1800000UL;
+// Breaker probe interval in minutes (mqtt.breaker.interval). The floor stays
+// above the 5-minute top backoff rung so a tripped slot still retries less often.
+static const uint8_t kBreakerProbeMinMinutes = 10;
+static const uint8_t kBreakerProbeMaxMinutes = 30;
+static const uint8_t kBreakerProbeDefaultMinutes = 30;
+static const uint32_t kCircuitBreakerProbeMs = kBreakerProbeDefaultMinutes * 60000UL;
 static const uint32_t kRenewalThrottleMs = 60000UL;
 static const uint32_t kSlotStaggerMs = 3000UL;
 static const uint8_t kMaxFailuresAtMaxBackoff = 3;
@@ -87,8 +92,29 @@ static inline BackoffAdvance advanceBackoff(uint8_t reconnect_backoff,
   return result;
 }
 
-static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt) {
-  return elapsedMs(now, last_attempt) >= kCircuitBreakerProbeMs;
+static inline bool breakerProbeMinutesValid(int32_t minutes) {
+  return minutes >= kBreakerProbeMinMinutes && minutes <= kBreakerProbeMaxMinutes;
+}
+
+// Out-of-range stored values fall back to the default interval.
+static inline uint32_t breakerProbeMs(uint8_t minutes) {
+  return breakerProbeMinutesValid(minutes) ? minutes * 60000UL : kCircuitBreakerProbeMs;
+}
+
+static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt,
+                                          uint32_t probe_ms) {
+  return elapsedMs(now, last_attempt) >= probe_ms;
+}
+
+// The first reconnect after the link returns always makes a real attempt. The
+// failures it would count may have been the link's, so it advances the ladder
+// but cannot trip the breaker; the next ordinary due attempt can.
+static inline BackoffAdvance advanceBackoffForLinkRecovery(uint8_t reconnect_backoff,
+                                                           uint8_t max_backoff_failures) {
+  BackoffAdvance result = advanceBackoff(reconnect_backoff, max_backoff_failures);
+  result.circuit_breaker_tripped = false;
+  result.should_reconnect = true;
+  return result;
 }
 
 // Move a disconnected slot's deadline to "due now" after the physical link
@@ -98,9 +124,10 @@ static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt) {
 static inline uint32_t immediateRetryLastAttempt(uint32_t now,
                                                 bool circuit_breaker_tripped,
                                                 uint8_t reconnect_backoff,
-                                                uint8_t slot_index) {
+                                                uint8_t slot_index,
+                                                uint32_t probe_ms) {
   const uint32_t delay = circuit_breaker_tripped
-      ? kCircuitBreakerProbeMs
+      ? probe_ms
       : reconnectDelayMs(reconnect_backoff, slot_index);
   return now - delay;
 }

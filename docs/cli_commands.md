@@ -1319,6 +1319,20 @@ region save
 
 ---
 
+#### View or change the MQTT reconnect probe interval (MQTT observer only)
+**Usage:**
+- `get mqtt.breaker.interval`
+- `set mqtt.breaker.interval <minutes>`
+
+**Parameters:**
+- `minutes`: how often a slot that has stopped reconnecting tries its broker again (10–30)
+
+**Default:** `30` (minutes)
+
+> **Note:** A disconnected slot retries after 10 s, 30 s, 1 min, 2 min, then every 5 min. After three more failed 5-minute retries it stops and waits this interval between single attempts. This setting does not change how often WiFi reconnects (every 5 min at most). When WiFi reconnects, each disconnected slot retries right away. Takes effect immediately; out-of-range values are rejected.
+
+---
+
 #### View or change the NTP server (MQTT observer only)
 **Usage:**
 - `get mqtt.ntp`

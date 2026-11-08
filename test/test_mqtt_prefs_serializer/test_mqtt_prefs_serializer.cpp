@@ -80,6 +80,7 @@ static MQTTPrefs defaults() {
   prefs.mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
   prefs.display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;
   prefs.display_flip = 0;
+  prefs.mqtt_breaker_probe_min = MQTTConnectionPolicy::kBreakerProbeDefaultMinutes;
   strcpy(prefs.snmp_community, "public");
   for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
     strcpy(prefs.mqtt_slot_preset[i], "none");
@@ -482,6 +483,54 @@ TEST(MQTTPrefsSerializer, WifiTxPowerRoundTripsDefaultsAndRepairs) {
     ASSERT_TRUE(bogus_serializer.apply(&repaired)) << bogus_text;
     EXPECT_TRUE(repaired) << bogus_text;
     EXPECT_EQ(WifiTxPowerPolicy::kBoardDefault, prefs.wifi_tx_power) << bogus_text;
+  }
+}
+
+// Files from older firmware have no breaker_min; they keep the 30-minute
+// default without a repair write.
+TEST(MQTTPrefsSerializer, BreakerIntervalRoundTripsDefaultsAndRepairs) {
+  MQTTPrefs source = defaults();
+  EXPECT_EQ(MQTTConnectionPolicy::kBreakerProbeDefaultMinutes, source.mqtt_breaker_probe_min);
+  for (uint8_t minutes : {(uint8_t)10, (uint8_t)17, (uint8_t)30}) {
+    source.mqtt_breaker_probe_min = minutes;
+    OutputStream output;
+    MQTTPrefsSerializer writer(&source);
+    ASSERT_TRUE(writer.saveSerial(output)) << (int)minutes;
+
+    MQTTPrefs loaded = defaults();
+    loaded.mqtt_breaker_probe_min = 20;
+    InputStream input(output.text());
+    MQTTPrefsSerializer reader(&loaded);
+    ASSERT_TRUE(reader.loadSerial(input)) << (int)minutes;
+    bool repaired = false;
+    ASSERT_TRUE(reader.apply(&repaired)) << (int)minutes;
+    EXPECT_FALSE(repaired) << (int)minutes;
+    EXPECT_EQ(minutes, loaded.mqtt_breaker_probe_min);
+  }
+
+  MQTTPrefs legacy = defaults();
+  InputStream old_file("{version:1,mqtt:{origin:\"node\",advert_verify:0}}");
+  MQTTPrefsSerializer legacy_serializer(&legacy);
+  ASSERT_TRUE(legacy_serializer.loadSerial(old_file));
+  bool repaired = false;
+  ASSERT_TRUE(legacy_serializer.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(MQTTConnectionPolicy::kBreakerProbeDefaultMinutes, legacy.mqtt_breaker_probe_min);
+
+  for (const char* bogus_text : {"{version:1,mqtt:{breaker_min:0}}",
+                                 "{version:1,mqtt:{breaker_min:9}}",
+                                 "{version:1,mqtt:{breaker_min:31}}",
+                                 "{version:1,mqtt:{breaker_min:-5}}"}) {
+    MQTTPrefs prefs = defaults();
+    prefs.mqtt_breaker_probe_min = 12;
+    InputStream bogus(bogus_text);
+    MQTTPrefsSerializer bogus_serializer(&prefs);
+    ASSERT_TRUE(bogus_serializer.loadSerial(bogus)) << bogus_text;
+    repaired = false;
+    ASSERT_TRUE(bogus_serializer.apply(&repaired)) << bogus_text;
+    EXPECT_TRUE(repaired) << bogus_text;
+    EXPECT_EQ(MQTTConnectionPolicy::kBreakerProbeDefaultMinutes, prefs.mqtt_breaker_probe_min)
+        << bogus_text;
   }
 }
 
