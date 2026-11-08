@@ -155,6 +155,19 @@ TEST(MQTTPresets, WcmeshIsJwtWithIsrgRootX1) {
   EXPECT_FALSE(mqttPresetUsesDevicePubkeyUsername(p));
 }
 
+TEST(MQTTPresets, MeshcoreAnalyzerIsJwtWithGtsRootR4) {
+  const MQTTPresetDef* p = findMQTTPreset("meshcore-analyzer");
+  ASSERT_NE(nullptr, p);
+  EXPECT_EQ(MQTT_AUTH_JWT, p->auth_type);
+  EXPECT_EQ(MQTT_TOPIC_MESHCORE, p->topic_style);
+  EXPECT_STREQ("wss://mqtt.meshcore-analyzer.eu:443", p->server_url);
+  EXPECT_STREQ("mqtt.meshcore-analyzer.eu", p->jwt_audience);
+  EXPECT_EQ(GTS_ROOT_R4, p->ca_cert);
+  EXPECT_NE(ISRG_ROOT_X1, p->ca_cert);
+  EXPECT_FALSE(mqttPresetNeedsSlotCredentials(p));
+  EXPECT_FALSE(mqttPresetUsesDevicePubkeyUsername(p));
+}
+
 // ---- slot count constants -------------------------------------------------
 
 TEST(MQTTPresets, SlotCountsAreSane) {
