@@ -112,7 +112,7 @@ that slot, see [Per-slot region codes](#per-slot-region-codes)).
 | `upstatemesh` | `wss://mqtt.upst8me.sh:443/mqtt` | JWT | |
 | `comchan` | `wss://obs.comchan.net:443/` | JWT | |
 | `virginiamesh` | `wss://mqtt.virginiamesh.com:8883` | none | |
-| `meshcore-analyzer` | `wss://mqtt.meshcore-analyzer.eu:443` | JWT | |
+| `meshcore-analyzer-eu` | `wss://mqtt.meshcore-analyzer.eu:443` | JWT | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 

@@ -189,7 +189,7 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     // Virginia Mesh. No auth; LE Gen-Y ECDSA chain (YE2 → Root YE → X2) anchors at ISRG Root X1.
     { "virginiamesh",  "wss://mqtt.virginiamesh.com:8883",       nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     // EU MeshCore Analyzer. JWT; leaf → GTS WE1 → GTS Root R4 (same PEM as GTS_ROOT_R4).
-    { "meshcore-analyzer", "wss://mqtt.meshcore-analyzer.eu:443", "mqtt.meshcore-analyzer.eu",     GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "meshcore-analyzer-eu", "wss://mqtt.meshcore-analyzer.eu:443", "mqtt.meshcore-analyzer.eu",     GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found
