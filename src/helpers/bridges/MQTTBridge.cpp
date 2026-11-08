@@ -1769,6 +1769,8 @@ bool MQTTBridge::ensureSlotClient(int index) {
     _slots[index].connected_at_ms = millis();
     _slots[index].circuit_breaker_tripped = false;
     _slots[index].link_retry_pending = false;
+    // After connected=true: a reader that sees the new count also sees connected.
+    __atomic_fetch_add(&_slots[index].connect_count, 1U, __ATOMIC_RELEASE);
     _slots[index].last_tls_err = 0;
     _slots[index].last_tls_stack_err = 0;
     _slots[index].last_sock_errno = 0;
@@ -2891,7 +2893,9 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       const uint8_t backoff_before = slot.reconnect_backoff;
       const uint8_t failures_before = slot.max_backoff_failures;
       const bool breaker_before = slot.circuit_breaker_tripped;
-      const bool link_retry = slot.link_retry_pending;
+      // A connect since the flag was armed means this retry no longer follows link recovery.
+      const bool link_retry = slot.link_retry_pending &&
+          __atomic_load_n(&slot.connect_count, __ATOMIC_ACQUIRE) == slot.link_retry_connects;
       slot.link_retry_pending = false;
       MQTTConnectionPolicy::BackoffAdvance advance = link_retry
           ? MQTTConnectionPolicy::advanceBackoffForLinkRecovery(
@@ -3459,6 +3463,9 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
     // failures earned on the same route. A medium switch is a new connection
     // epoch, so only that transition clears the old route's ladder/breaker.
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      // Sampled before the connected check so an onConnect racing this loop
+      // invalidates the flag armed below.
+      const uint32_t connects = __atomic_load_n(&_slots[i].connect_count, __ATOMIC_ACQUIRE);
       if (_slots[i].enabled && _slots[i].initial_connect_done && !_slots[i].connected) {
         if (actions.reset_reconnect_backoff) {
           _slots[i].reconnect_backoff = 0;
@@ -3466,6 +3473,7 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
           _slots[i].circuit_breaker_tripped = false;
         }
         _slots[i].link_retry_pending = !_slots[i].circuit_breaker_tripped;
+        _slots[i].link_retry_connects = connects;
         _slots[i].last_reconnect_attempt = MQTTConnectionPolicy::immediateRetryLastAttempt(
             static_cast<uint32_t>(now), _slots[i].circuit_breaker_tripped,
             _slots[i].reconnect_backoff, static_cast<uint8_t>(i), probe_ms);

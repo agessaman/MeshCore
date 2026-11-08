@@ -170,6 +170,8 @@ private:
     uint8_t max_backoff_failures;   // consecutive failures at max backoff level
     bool circuit_breaker_tripped;   // true = stop reconnecting until reconfigured
     bool link_retry_pending;        // next reconnect follows link recovery; it cannot trip the breaker
+    uint32_t connect_count;         // onConnect callbacks since boot (release/acquire with connected)
+    uint32_t link_retry_connects;   // connect_count when link_retry_pending was armed
     unsigned long connected_at_ms;  // millis() of last successful connect (0 = not connected);
                                     // gates the stability-based backoff reset in maintenance
     unsigned long last_reconnect_attempt;
