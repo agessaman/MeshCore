@@ -550,9 +550,12 @@ bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* curr
 #endif
   uclient.setTimeout(20000);
 
+  // HTTPUpdate overrides the client timeout with its own (default 8 s), shorter than
+  // a cold CDN/GitHub fetch of the .bin; size it here instead.
+  HTTPUpdate httpUpdate(30000);
+
   // Console progress to the USB serial (always on; MESH_DEBUG is off on the default
-  // observer profile). Non-capturing lambdas + a file-static decile, so the global
-  // httpUpdate object never holds a dangling reference after this function returns.
+  // observer profile). Non-capturing lambdas + a file-static decile.
   static int ota_progress_decile;
   ota_progress_decile = -1;
   httpUpdate.onProgress([](int cur, int total) {
