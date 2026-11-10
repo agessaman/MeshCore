@@ -39,6 +39,23 @@ static inline bool reconnectGuardActive(uint32_t now, uint32_t last_reconnect) {
   return elapsedMs(now, last_reconnect) < kReconnectGuardMs;
 }
 
+// First setup (last_attempt == 0) is due immediately. A stamped failure waits
+// retry_interval_ms. last_cross_slot_ms == 0 means no handshake was armed, so
+// it does not borrow reconnectGuardActive's epoch rule and hold the first slot
+// for 15 s of uptime. already_attempted_this_pass is the one-setup budget.
+static inline bool deferredSlotSetupDue(uint32_t now, uint32_t last_attempt,
+                                        uint32_t retry_interval_ms,
+                                        uint32_t last_cross_slot_ms,
+                                        bool already_attempted_this_pass) {
+  if (already_attempted_this_pass) return false;
+  if (last_cross_slot_ms != 0 &&
+      reconnectGuardActive(now, last_cross_slot_ms)) {
+    return false;
+  }
+  if (last_attempt == 0) return true;
+  return elapsedMs(now, last_attempt) >= retry_interval_ms;
+}
+
 static inline bool stableConnection(uint32_t now, uint32_t connected_at) {
   return connected_at != 0 && elapsedMs(now, connected_at) >= kStableResetMs;
 }

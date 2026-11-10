@@ -575,6 +575,7 @@ private:
   // (uninitialised client, failed config transaction) is not a broker fault and
   // must not advance this slot's backoff ladder — see maintainSlotConnection().
   esp_err_t reconnectSlotClient(int index);
+  void beginDeferredSlotSetup();       // Arm one-slot setup after NTP; clear a stale guard if none are up
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot

@@ -13,6 +13,37 @@ TEST(MQTTConnectionPolicy, ElapsedTimeHandlesNormalAndWrappedClocks) {
   EXPECT_EQ(150U, Policy::elapsedMs(50U, before_wrap));
 }
 
+TEST(MQTTConnectionPolicy, DeferredSetupStartsImmediatelyWhenNothingWasAttempted) {
+  // reconnectGuardActive(now, 0) is true for the first 15 s of uptime. An unset
+  // cross-slot stamp must not borrow that and hold the first slot.
+  EXPECT_TRUE(Policy::reconnectGuardActive(1000U, 0U));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, 0U, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(0U, 0U, 60000U, 0U, false));
+}
+
+TEST(MQTTConnectionPolicy, DeferredSetupSpacesLaterSlotsWithTheReconnectGuard) {
+  const uint32_t armed = 5000U;
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 0U, 60000U, armed, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(armed + 15000U, 0U, 60000U, armed, false));
+}
+
+TEST(MQTTConnectionPolicy, DeferredSetupRetryWaitsOutItsOwnInterval) {
+  // An unset stamp is not a boot-time deadline, even just before the interval.
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(59999U, 0U, 60000U, 0U, false));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(64999U, 5000U, 60000U, 0U, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(65000U, 5000U, 60000U, 0U, false));
+}
+
+TEST(MQTTConnectionPolicy, DeferredSetupRetryIsWrapSafeAndOnePerPass) {
+  const uint32_t last = std::numeric_limits<uint32_t>::max() - 999U;
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(58999U, last, 60000U, 0U, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(59000U, last, 60000U, 0U, false));
+  // The one-setup budget blocks even a never-attempted slot.
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, 0U, true));
+  // A clear retry still loses to a guard armed earlier in the pass.
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(65000U, 5000U, 60000U, 65000U, false));
+}
+
 TEST(MQTTConnectionPolicy, CrossSlotReconnectGuardHasExactBoundary) {
   EXPECT_TRUE(Policy::reconnectGuardActive(14999U, 0U));
   EXPECT_FALSE(Policy::reconnectGuardActive(15000U, 0U));
