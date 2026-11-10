@@ -909,16 +909,15 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 
 void MQTTBridge::allocateRuntimeBuffers() {
   #if defined(BOARD_HAS_PSRAM)
-  // Keep each allocation independent. A nullptr is deliberately retained on
-  // failure: status/packet publish paths already use stack fallbacks, and the
-  // next begin() will retry only the missing buffer.
+  // Keep each allocation independent. A nullptr is retained on failure: publish
+  // paths skip without a buffer, and the next begin() retries only the missing one.
   _last_raw_data = static_cast<uint8_t*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
       _last_raw_data, LAST_RAW_DATA_SIZE, psram_malloc));
   _json_scratch_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
       _json_scratch_buffer, PUBLISH_JSON_BUFFER_SIZE, psram_malloc));
   MQTT_DEBUG_PRINTLN("Runtime buffers: raw=%s json=%s",
       _last_raw_data ? "PSRAM" : "unavailable",
-      _json_scratch_buffer ? "PSRAM" : "stack fallback");
+      _json_scratch_buffer ? "PSRAM" : "unavailable");
   #endif
 
   // The neighbors JSON buffer is NOT allocated here — requestPublishNeighbors()
@@ -3284,12 +3283,9 @@ void MQTTBridge::publishStatusToSlot(int index) {
   // function is reached solely via the _status_publish_pending consumer in
   // mqttTaskLoop, never from the onConnect callback thread — see A2), so the accesses
   // are serialized and need no mutex.
-  #if defined(BOARD_HAS_PSRAM)
-  char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
-  char* json_buffer = (_json_scratch_buffer != nullptr) ? _json_scratch_buffer : fallback_status_buffer;
-  #else
+  // A missing scratch buffer means its allocation failed at begin(); skip instead of building on the stack.
   char* json_buffer = _json_scratch_buffer;
-  #endif
+  if (json_buffer == nullptr) return;
 
   char origin_id[65];
   char timestamp[40];
@@ -4223,12 +4219,9 @@ bool MQTTBridge::publishStatus() {
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
   // _json_scratch_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
-  #if defined(BOARD_HAS_PSRAM)
-  char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
-  char* json_buffer = (_json_scratch_buffer != nullptr) ? _json_scratch_buffer : fallback_status_buffer;
-  #else
+  // A missing scratch buffer means its allocation failed at begin(); skip instead of building on the stack.
   char* json_buffer = _json_scratch_buffer;
-  #endif
+  if (json_buffer == nullptr) return false;
   char origin_id[65];
   char timestamp[40];
   char radio_info[64];
@@ -4367,22 +4360,13 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   }
   #endif
 
-  // Use pre-allocated buffer; stack fallback only when PSRAM heap alloc may be null.
-#if defined(BOARD_HAS_PSRAM)
-  char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];
-  char* active_buffer;
-  size_t active_buffer_size;
-  if (_json_scratch_buffer != nullptr) {
-    active_buffer = _json_scratch_buffer;
-    active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
-  } else {
-    active_buffer = json_buffer_stack;
-    active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
-  }
-#else
+  // A missing scratch buffer means its allocation failed at begin(); count the skip instead of building on the stack.
   char* active_buffer = _json_scratch_buffer;
   const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
-#endif
+  if (active_buffer == nullptr) {
+    _skipped_publishes++;
+    return false;
+  }
   char origin_id[65];
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
@@ -4472,21 +4456,13 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
 
   refreshOriginFromPrefs();
 
-#if defined(BOARD_HAS_PSRAM)
-  char json_buffer_stack[PUBLISH_JSON_BUFFER_SIZE];
-  char* active_buffer;
-  size_t active_buffer_size;
-  if (_json_scratch_buffer != nullptr) {
-    active_buffer = _json_scratch_buffer;
-    active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
-  } else {
-    active_buffer = json_buffer_stack;
-    active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
-  }
-#else
+  // A missing scratch buffer means its allocation failed at begin(); count the skip instead of building on the stack.
   char* active_buffer = _json_scratch_buffer;
   const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
-#endif
+  if (active_buffer == nullptr) {
+    _skipped_publishes++;
+    return false;
+  }
   char origin_id[65];
 
   strncpy(origin_id, _device_id, sizeof(origin_id) - 1);
