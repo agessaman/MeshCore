@@ -196,7 +196,7 @@ build_firmware() {
   # Deliberately injected here rather than declared in variants/*/platformio.ini
   # (where it used to be duplicated 28 times), for symmetry with OTA_VARIANT and
   # so a plain `pio run` leaves BOTH macros undefined — which is what makes
-  # ESP32Board.cpp's "ERR: OTA not configured (build via build.sh)" guard fire on
+  # ESP32ManifestOTA.cpp's "ERR: OTA not configured (build via build.sh)" guard fire on
   # dev builds. Do not add a default in a header: that would silently arm OTA on
   # locally built firmware. Note that PLATFORMIO_BUILD_FLAGS cannot reliably
   # override a -D coming from build_flags (SCons reorders -U/-D), which is why
