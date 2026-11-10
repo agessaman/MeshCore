@@ -154,13 +154,17 @@ bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_
   // The TLS handshake (cert-bundle verify) + JSON parse / HTTPUpdate use far more
   // stack than the ~8 KB loop task offers — especially when reached via the deep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
-  // dedicated 24 KB-stack task and block here until it finishes. The big stack is
-  // freed when the task exits; on a successful update the chip reboots inside it.
+  // dedicated task and block here until it finishes. The stack is freed when the
+  // task exits; on a successful update the chip reboots inside it.
+  // `ota check` is plain HTTP, so it takes the smaller stack.
+  static const uint32_t kOtaCheckTaskStack = 8192;
+  static const uint32_t kOtaUpdateTaskStack = 24576;
   NetworkLink& network = activeNetworkLink();
   network.lockSwitching();
   OtaTaskArgs args = { this, manifest_base, current_ver, dry_run, reply, false, false };
   TaskHandle_t handle = nullptr;
-  BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
+  const uint32_t stack_bytes = dry_run ? kOtaCheckTaskStack : kOtaUpdateTaskStack;
+  BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", stack_bytes, &args, 5, &handle, 1);
   if (ok != pdPASS) {
     network.unlockSwitching();
     strcpy(reply, "ERR: OTA task spawn failed");
