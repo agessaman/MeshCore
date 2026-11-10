@@ -779,7 +779,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
       _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
       _ntp_force_requested(false), _ntp_force_done(false), _ntp_force_result(false),
-      _ntp_diag_requested(false), _ntp_diag_done(false), _ntp_diag_count(0),
+      _ntp_diag_count(0),
       // Default to UTC; setRules() will be called from syncTimeWithNTP when a
       // non-UTC timezone string is configured. Timezone has no default ctor,
       // so we must pass rules here.
@@ -861,8 +861,12 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   _ntp_force_result = false;
 
   // Reset CLI-requested NTP diagnostic handshake
-  _ntp_diag_requested = false;
-  _ntp_diag_done = false;
+  _ntp_diag_request_id.store(0, std::memory_order_relaxed);
+  _ntp_diag_running_id.store(0, std::memory_order_relaxed);
+  _ntp_diag_completed_id.store(0, std::memory_order_relaxed);
+  _ntp_diag_seq.store(0, std::memory_order_relaxed);
+  _ntp_diag_started_ms.store(0, std::memory_order_relaxed);
+  _ntp_diag_completed_ms.store(0, std::memory_order_relaxed);
   _ntp_diag_count = 0;
 
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -1253,6 +1257,12 @@ void MQTTBridge::end() {
   // Stop new diagnostic reads through the singleton before teardown begins.
   s_mqtt_bridge_instance = nullptr;
 
+  // A pending diagnostic cannot outlive the task that services it. Drop the
+  // request and mark any in-flight probe as no longer running, so a later read
+  // (or the next run) does not wait on a probe that will never complete.
+  _ntp_diag_request_id.store(0, std::memory_order_release);
+  _ntp_diag_running_id.store(0, std::memory_order_release);
+
   // Size the stop timeout to the work about to happen: each enabled slot's
   // mbedTLS/wss client takes ~5-6 s to disconnect + destroy, sequentially (Phase
   // 0 hardware characterization). A flat bound force-killed healthy multi-slot
@@ -1579,12 +1589,19 @@ void MQTTBridge::mqttTaskLoop() {
       _ntp_force_done = true;  // set last so the waiter sees a consistent result
     }
 
-    // Process a CLI-requested NTP connectivity diagnostic (queued from Core 1).
-    // Probe-only — never touches the system clock.
-    if (_ntp_diag_requested) {
-      _ntp_diag_requested = false;
-      runNtpDiagProbe();
-      _ntp_diag_done = true;  // set last so the waiter sees populated results
+    // Service a CLI-requested NTP connectivity diagnostic (queued from Core 1).
+    // Probe-only — never touches the system clock. The reader does not wait: it
+    // returns immediately and picks up the snapshot on its next read.
+    {
+      const uint32_t wanted = _ntp_diag_request_id.load(std::memory_order_acquire);
+      if (wanted != 0 && wanted != _ntp_diag_completed_id.load(std::memory_order_relaxed)) {
+        // Publish the start time before the id so a reader that sees the id also
+        // sees the time.
+        _ntp_diag_started_ms.store((uint32_t)millis(), std::memory_order_relaxed);
+        _ntp_diag_running_id.store(wanted, std::memory_order_release);
+        runNtpDiagProbe();
+        _ntp_diag_running_id.store(0, std::memory_order_release);
+      }
     }
 
     // Deferred slot setup: wait until NTP is synced so JWT tokens get valid timestamps.
@@ -5076,49 +5093,147 @@ void MQTTBridge::runNtpDiagProbe() {
   int count = 0;
   fillNtpServerList(_obs, servers, count);
 
+  // Probe into a local table so a reader can still copy the previous snapshot
+  // while this probe runs.
+  NtpDiagResult results[kMaxNtpServers];
+  bool completed = true;
+  int probed = 0;
   for (int i = 0; i < count; i++) {
+    // Do not make a cooperative stop wait out the remaining probes.
+    #ifdef ESP_PLATFORM
+    if (_stop_requested.load(std::memory_order_acquire)) {
+      completed = false;
+      break;
+    }
+    #endif
     // Same validated probe the real sync uses, so the diagnostic answers the
     // question an operator is actually asking: would this server be trusted?
     uint32_t epoch = 0;
     const char* why = nullptr;
     bool ok = probeNtpServer(servers[i], kNtpMinValidEpoch, &epoch, &why);
-    NtpDiagResult& r = _ntp_diag_results[i];
+    NtpDiagResult& r = results[i];
     strncpy(r.server, servers[i], sizeof(r.server) - 1);
     r.server[sizeof(r.server) - 1] = '\0';
     r.ok = ok;
     r.epoch = ok ? epoch : 0;
     r.why = why;   // static literal from NtpValidation/probeNtpServer
+    probed++;
   }
-  _ntp_diag_count = count;
+
+  // Odd while writing, even when the table is complete: readers copy between two
+  // equal even reads, so they never see a half-updated table. One writer, no lock.
+  _ntp_diag_seq.fetch_add(1, std::memory_order_acq_rel);   // -> odd: writing
+  if (completed) {
+    for (int i = 0; i < probed; i++) _ntp_diag_results[i] = results[i];
+    _ntp_diag_count = probed;
+    _ntp_diag_completed_ms.store((uint32_t)millis(), std::memory_order_relaxed);
+    _ntp_diag_completed_id.store(_ntp_diag_running_id.load(std::memory_order_relaxed),
+                                 std::memory_order_release);
+  } else {
+    // A probe cut short by a stop is not a result: discard the snapshot.
+    _ntp_diag_count = 0;
+    _ntp_diag_completed_id.store(0, std::memory_order_release);
+  }
+  _ntp_diag_seq.fetch_add(1, std::memory_order_acq_rel);   // -> even: readable
 }
 
-bool MQTTBridge::ntpDiag(char* reply, size_t reply_size, bool verbose) {
-  if (!isRunning() || reply == nullptr || reply_size == 0) return false;
-
-  // Marshal the probe onto the MQTT task (Core 0); clear the completion flag first.
-  _ntp_diag_done = false;
-  _ntp_diag_requested = true;
-
-  unsigned long start = millis();
-  while (!_ntp_diag_done) {
-    if (millis() - start >= 30000) {
-      snprintf(reply, reply_size, "Error: NTP diag timed out");
-      return true;
+// Copies the published snapshot, or reports that one is being written. See the
+// sequence counter in runNtpDiagProbe().
+bool MQTTBridge::copyNtpDiagSnapshot(NtpDiagResult* out, int* count_out,
+                                     uint32_t* completed_id_out, uint32_t* age_ms_out) const {
+  for (int attempt = 0; attempt < 3; attempt++) {
+    const uint32_t seq_before = _ntp_diag_seq.load(std::memory_order_acquire);
+    if (seq_before & 1u) {
+      #ifdef ESP_PLATFORM
+      vTaskDelay(pdMS_TO_TICKS(20));
+      #endif
+      continue;   // a probe is publishing right now
     }
-    vTaskDelay(pdMS_TO_TICKS(50));
+    const int n = _ntp_diag_count;
+    for (int i = 0; i < n && i < kMaxNtpServers; i++) out[i] = _ntp_diag_results[i];
+    const uint32_t id = _ntp_diag_completed_id.load(std::memory_order_relaxed);
+    const uint32_t completed_ms = _ntp_diag_completed_ms.load(std::memory_order_relaxed);
+    if (_ntp_diag_seq.load(std::memory_order_acquire) != seq_before) continue;   // torn: retry
+    *count_out = n;
+    *completed_id_out = id;
+    *age_ms_out = (uint32_t)millis() - completed_ms;
+    return true;
+  }
+  return false;
+}
+
+// Reports the last completed probe and requests a fresh one when that snapshot
+// is missing or stale; returns without waiting for the probe.
+bool MQTTBridge::ntpDiag(char* reply, size_t reply_size, bool verbose) {
+  if (!isRunning() || _stop_requested.load(std::memory_order_acquire) ||
+      reply == nullptr || reply_size == 0) {
+    return false;
+  }
+
+  NtpDiagResult snapshot[kMaxNtpServers];
+  int count = 0;
+  uint32_t completed_id = 0;
+  uint32_t age_ms = 0;
+  const bool have_snapshot =
+      copyNtpDiagSnapshot(snapshot, &count, &completed_id, &age_ms) && completed_id != 0;
+
+  uint32_t running = _ntp_diag_running_id.load(std::memory_order_acquire);
+  uint32_t requested = _ntp_diag_request_id.load(std::memory_order_relaxed);
+  // The probe that produced the snapshot may still be marked running for an instant
+  // after it published; do not report it as a second, newer probe.
+  if (have_snapshot && running == completed_id) running = 0;
+
+  // Ask for a fresh probe when nothing is running and what we have is stale (or
+  // missing). Repeated reads inside the refresh window reuse the snapshot rather
+  // than queueing probe after probe.
+  bool started_probe = false;
+  if (running == 0 && (!have_snapshot || age_ms >= kNtpDiagRefreshMs)) {
+    requested = requested + 1;
+    if (requested == 0) requested = 1;   // 0 means "never asked"
+    _ntp_diag_request_id.store(requested, std::memory_order_release);
+    started_probe = true;
+  }
+
+  // The snapshot is identified by the request id it belongs to and its age, so a
+  // completion that lands late cannot be mistaken for the answer to a newer read.
+  char snapshot_label[40] = "";
+  if (have_snapshot) {
+    const uint32_t secs = age_ms / 1000;
+    char age[16];
+    if (secs < 60) snprintf(age, sizeof(age), "%lus ago", (unsigned long)secs);
+    else if (secs < 3600) snprintf(age, sizeof(age), "%lum ago", (unsigned long)(secs / 60));
+    else snprintf(age, sizeof(age), "%luh ago", (unsigned long)(secs / 3600));
+    snprintf(snapshot_label, sizeof(snapshot_label), "#%lu %s",
+             (unsigned long)completed_id, age);
+  }
+
+  char probe_note[64] = "";
+  if (running != 0) {
+    snprintf(probe_note, sizeof(probe_note), "probe #%lu running (%lus)",
+             (unsigned long)running,
+             (unsigned long)(((uint32_t)millis() -
+                              _ntp_diag_started_ms.load(std::memory_order_relaxed)) / 1000));
+  } else if (started_probe) {
+    snprintf(probe_note, sizeof(probe_note), "probe #%lu started", (unsigned long)requested);
+  }
+
+  if (!have_snapshot) {
+    snprintf(reply, reply_size, "> NTP diag: %s - read again in a few seconds",
+             probe_note[0] ? probe_note : "no result yet");
+    return true;
   }
 
   int ok_count = 0;
-  for (int i = 0; i < _ntp_diag_count; i++) {
-    if (_ntp_diag_results[i].ok) ok_count++;
+  for (int i = 0; i < count; i++) {
+    if (snapshot[i].ok) ok_count++;
   }
 
   if (verbose) {
     // Detailed table to the serial console; reply carries a short summary (the operator
     // sees the table above the "-> <reply>" line). Mirrors the dumpLogFile() convention.
-    Serial.printf("NTP diag - %d server(s):\r\n", _ntp_diag_count);
-    for (int i = 0; i < _ntp_diag_count; i++) {
-      const NtpDiagResult& r = _ntp_diag_results[i];
+    Serial.printf("NTP diag %s - %d server(s):\r\n", snapshot_label, count);
+    for (int i = 0; i < count; i++) {
+      const NtpDiagResult& r = snapshot[i];
       if (r.ok) {
         time_t t = (time_t)r.epoch;
         struct tm tmv;
@@ -5130,20 +5245,25 @@ bool MQTTBridge::ntpDiag(char* reply, size_t reply_size, bool verbose) {
         Serial.printf("  %-20s FAIL  %s\r\n", r.server, r.why ? r.why : "no reply");
       }
     }
-    snprintf(reply, reply_size, "> NTP diag: %d/%d OK (see console)", ok_count, _ntp_diag_count);
+    if (probe_note[0]) {
+      snprintf(reply, reply_size, "> NTP diag %s: %d/%d OK (%s) (see console)",
+               snapshot_label, ok_count, count, probe_note);
+    } else {
+      snprintf(reply, reply_size, "> NTP diag %s: %d/%d OK (see console)",
+               snapshot_label, ok_count, count);
+    }
   } else {
-    // Compact "<server> ok|fail" list for LoRa, bounded to reply_size.
-    size_t used = 0;
-    reply[0] = '\0';
-    for (int i = 0; i < _ntp_diag_count; i++) {
-      const NtpDiagResult& r = _ntp_diag_results[i];
-      int n = snprintf(reply + used, reply_size - used, "%s%s %s",
-                       used ? "\n" : "", r.server, r.ok ? "ok" : "fail");
-      if (n < 0 || (size_t)n >= reply_size - used) {
-        reply[used] = '\0';  // out of room — truncate cleanly
-        break;
-      }
-      used += (size_t)n;
+    // Compact list for LoRa: "#N <age>[(probe note)]" then one "<server> ok|fail"
+    // per line, bounded to reply_size.
+    int pos = 0;
+    if (probe_note[0]) {
+      replyAppendf(reply, reply_size, &pos, "%s (%s)", snapshot_label, probe_note);
+    } else {
+      replyAppendf(reply, reply_size, &pos, "%s", snapshot_label);
+    }
+    for (int i = 0; i < count; i++) {
+      const NtpDiagResult& r = snapshot[i];
+      replyAppendf(reply, reply_size, &pos, "\n%s %s", r.server, r.ok ? "ok" : "fail");
     }
   }
   return true;

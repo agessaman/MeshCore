@@ -311,13 +311,17 @@ private:
   volatile bool _ntp_force_done;
   volatile bool _ntp_force_result;
 
-  // CLI-requested NTP connectivity diagnostic, marshalled onto the MQTT task (Core 0)
-  // with the same handshake as the forced sync. Probe-only: it queries each server and
-  // records the reported time but never sets the system clock or the RTC, so the
-  // system clock is left untouched. Results are written by the task and read by the CLI
-  // thread once _ntp_diag_done is set.
-  volatile bool _ntp_diag_requested;
-  volatile bool _ntp_diag_done;
+  // CLI-requested NTP connectivity diagnostic. Probe-only: it records each server's
+  // reported time but never sets the system clock or the RTC. A read reports the last
+  // completed probe and asks the MQTT task (Core 0) for a fresh one when the snapshot is
+  // missing or stale, so the caller never waits. _ntp_diag_seq is odd while the task
+  // publishes, which lets a reader copy a consistent table.
+  std::atomic<uint32_t> _ntp_diag_request_id{0};    // bumped by a reader wanting fresh results
+  std::atomic<uint32_t> _ntp_diag_running_id{0};    // id the MQTT task is probing for (0 = idle)
+  std::atomic<uint32_t> _ntp_diag_completed_id{0};  // id the published snapshot belongs to
+  std::atomic<uint32_t> _ntp_diag_seq{0};           // odd while the snapshot is being written
+  std::atomic<uint32_t> _ntp_diag_started_ms{0};    // when the running probe began
+  std::atomic<uint32_t> _ntp_diag_completed_ms{0};  // when the snapshot was published
   struct NtpDiagResult {
     char     server[64];
     bool     ok;
@@ -329,6 +333,8 @@ private:
   };
   NtpDiagResult _ntp_diag_results[kMaxNtpServers];
   int _ntp_diag_count;
+  // How stale a snapshot may be before a read asks for a fresh probe.
+  static const uint32_t kNtpDiagRefreshMs = 30000;
 
   // Cooperative-shutdown handshake. The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
@@ -609,6 +615,10 @@ private:
   bool isAnySlotConnected();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
   void runNtpDiagProbe();  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  // Copies the published diag snapshot on the caller's task. False when the task
+  // was publishing throughout the attempt.
+  bool copyNtpDiagSnapshot(NtpDiagResult* out, int* count_out,
+                           uint32_t* completed_id_out, uint32_t* age_ms_out) const;
   // One validated NTP exchange with one server on a fresh ephemeral socket.
   // Core 0 only; never touches the clock. *why receives a static reason literal.
   bool probeNtpServer(const char* server, uint32_t min_epoch,

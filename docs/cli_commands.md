@@ -1423,10 +1423,10 @@ Covers serial NMEA receivers (`MicroNMEALocationProvider`).
 **Usage:**
 - `get mqtt.ntp.diag`
 
-**Description:** Probes every configured NTP server (the custom primary, if set, plus the built-in fallbacks) and reports whether each responds. This is a pure connectivity diagnostic — it does **not** change the system clock.
+**Description:** Probes every configured NTP server (the custom primary, if set, plus the built-in fallbacks) and reports whether each responds. This is a pure connectivity diagnostic — it does **not** change the system clock. The command returns immediately: it reports the last completed probe and starts a fresh one in the background when the results are missing or more than 30 seconds old. A read taken while a probe is running says so; read again a few seconds later for the fresh results.
 
 - **Serial console:** prints a detailed table with each server's reported UTC time (or `FAIL`).
-- **Over LoRa:** returns a compact `<server> ok|fail` list, one per line.
+- **Over LoRa:** returns the probe number and its age, then a compact `<server> ok|fail` list, one per line.
 
 Requires WiFi connected and the MQTT bridge running.
 
