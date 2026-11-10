@@ -17,6 +17,7 @@
 #include "helpers/MQTTEffectiveConfig.h"
 #include "helpers/MQTTClientState.h"
 #include "helpers/MQTTConnectionPolicy.h"
+#include "helpers/ObserverBuildDefaults.h"
 #include <atomic>
 
 #ifdef WITH_SNMP
