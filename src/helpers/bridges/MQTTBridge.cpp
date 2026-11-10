@@ -196,6 +196,17 @@ static void* psram_realloc(void* ptr, size_t new_size) {
 #endif
 }
 
+// Install the PSRAM-backed mbedTLS allocator once per boot; the setting lasts for the process.
+static void installTlsAllocatorOnce() {
+  static bool installed = false;
+  if (installed) return;
+  installed = true;
+#if defined(BOARD_HAS_PSRAM)
+  mbedtls_platform_set_calloc_free(psram_calloc, psram_free);
+  MQTT_DEBUG_PRINTLN("mbedTLS allocator redirected to PSRAM");
+#endif
+}
+
 // Shared JSON document pools follow the same PSRAM-first policy as the bridge's
 // text buffers. ArduinoJson calls reallocate() when shrinking its pool list and
 // asserts the result is non-null for a shrink, which both branches above satisfy.
@@ -939,6 +950,9 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("PSRAM: not configured for this board (no BOARD_HAS_PSRAM)");
   #endif
 
+  // Install the TLS allocator before the bridge task exists, so no TLS session depends on NTP ordering.
+  installTlsAllocatorOnce();
+
   // Limit active slots based on available memory (see getMaxActiveSlots()).
   _max_active_slots = getMaxActiveSlots();
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
@@ -1515,13 +1529,6 @@ void MQTTBridge::mqttTaskLoop() {
     // This avoids wasted TLS handshakes that get rejected due to bad token times.
     if (_ntp_synced && !_slots_setup_done) {
       _slots_setup_done = true;
-
-      // Redirect mbedTLS allocations to PSRAM to save ~40KB internal heap per TLS connection.
-      // This is critical when running 3 concurrent WSS connections.
-      #if defined(BOARD_HAS_PSRAM)
-      mbedtls_platform_set_calloc_free(psram_calloc, psram_free);
-      MQTT_DEBUG_PRINTLN("mbedTLS allocator redirected to PSRAM");
-      #endif
 
       MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots (max %d active)...", _max_active_slots);
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
