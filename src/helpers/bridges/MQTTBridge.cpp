@@ -700,6 +700,11 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
 static const uint32_t MQTT_STOP_TIMEOUT_BASE_MS     = 5000;   // fixed teardown overhead
 static const uint32_t MQTT_STOP_TIMEOUT_PER_SLOT_MS = 8000;   // ~5-6 s measured + headroom
 
+// Pause after a clean stop; an allocation right behind teardown has crashed octal-PSRAM boards.
+#ifndef MQTT_POST_STOP_SETTLE_MS
+  #define MQTT_POST_STOP_SETTLE_MS 300
+#endif
+
 // Slot-scaled cooperative-stop timeout. `slots` is the number of MQTT slots that
 // will be torn down (enabled/connected); clamped to >=1 so a zero-slot bridge
 // still budgets for the base teardown.
@@ -1253,6 +1258,8 @@ void MQTTBridge::end() {
                        (unsigned long)_lifecycle.stopTimeoutMs());
   } else {
     MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (clean)");
+    // Let deferred task cleanup finish before any caller allocates again.
+    vTaskDelay(pdMS_TO_TICKS(MQTT_POST_STOP_SETTLE_MS));
   }
 }
 
