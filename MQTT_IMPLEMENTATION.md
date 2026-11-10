@@ -411,6 +411,7 @@ restart. See [MQTT_SNMP.md](MQTT_SNMP.md).
 | `get mqtt.status` | Each slot's state; while periodic neighbors run, `nbr: <next>/<last>` |
 | `get mqttN.diag` | Last error for slot N (TLS, socket, clock) and its filter |
 | `get mqtt.stats` | Heap, queue depth, outbox, drops, `filt=`, `badsig=` |
+| `get mqtt.stacks` | Free stack bytes per task: `b=` bridge, `l=` loop, `a=` async_tcp, `mN=` slot N client task |
 | `get mqtt.config.valid` | `valid` when the saved MQTT settings pass validation |
 | `memory` | Heap, internal RAM, largest free block, PSRAM |
 | `tls.bundletest <host[:port]>` | Test a TLS handshake against the built-in certificate bundle |

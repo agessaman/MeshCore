@@ -69,6 +69,8 @@ public:
    * @param internal_heap Internal heap free bytes (optional, -1 to omit)
    * @param repeat Repeat/forwarding status ("on" or "off"); nullptr omits the field
    * @param conn_health MQTT slot connection health; defaults omit every field
+   * @param heap_min Smallest free internal heap since boot (optional, -1 to omit)
+   * @param reset_reason Short token for the reset that booted this image; nullptr omits it
    * @return Length of JSON string, or 0 on error
    */
   static int buildStatusMessage(
@@ -95,7 +97,9 @@ public:
     int packets_sent = -1,
     int packets_received = -1,
     const char* repeat = nullptr,
-    const MQTTConnHealth& conn_health = MQTTConnHealth()
+    const MQTTConnHealth& conn_health = MQTTConnHealth(),
+    int heap_min = -1,
+    const char* reset_reason = nullptr
   );
 
   /**

@@ -91,6 +91,8 @@ TEST(MQTTPayloadBuilder, StatusIncludesRepeatAndEveryRequestedStatistic) {
   EXPECT_EQ(180864, stats["internal_heap"].as<int>());
   EXPECT_EQ(31, stats["packets_sent"].as<int>());
   EXPECT_EQ(47, stats["packets_received"].as<int>());
+  EXPECT_FALSE(stats["heap_min"].is<JsonVariant>());
+  EXPECT_FALSE(stats["reset_reason"].is<JsonVariant>());
 }
 
 TEST(MQTTPayloadBuilder, StatusReportsConnectionHealthWhenSupplied) {
@@ -158,6 +160,33 @@ TEST(MQTTPayloadBuilder, StatusReportsConnectFailuresAndBreakerOnlyWhenNonZero) 
   EXPECT_FALSE(healthy_stats["mqtt_slots_breaker"].is<JsonVariant>());
 }
 
+TEST(MQTTPayloadBuilder, StatusReportsResetReasonAndMinimumHeap) {
+  JsonDocument scratch;
+  char buffer[1024];
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), 4096, "panic");
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  ASSERT_FALSE(stats.isNull());
+  EXPECT_EQ(4096, stats["heap_min"].as<int>());
+  EXPECT_STREQ("panic", stats["reset_reason"].as<const char*>());
+
+  // Zero is a real minimum (the heap was exhausted). An empty token is not a reason.
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), 0, ""), 0);
+  JsonDocument zero_min;
+  ASSERT_FALSE(deserializeJson(zero_min, buffer));
+  EXPECT_EQ(0, zero_min["stats"]["heap_min"].as<int>());
+  EXPECT_FALSE(zero_min["stats"]["reset_reason"].is<JsonVariant>());
+}
+
 // Zero counters with nothing else supplied must not create an empty stats object.
 TEST(MQTTPayloadBuilder, StatusOmitsStatsWhenOnlyZeroCountersSupplied) {
   JsonDocument scratch;
@@ -209,6 +238,7 @@ TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
 // isValidName() rejects [ ] / \ : , ? * but ALLOWS '"', so a node name of 31 quotes
 // is legal and every one escapes to two bytes — that is the true worst case for the
 // only free-text field an operator controls.
+// heap_min shares heap_largest's 8388608 ceiling; the longest reset token is "deepsleep".
 TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
   constexpr size_t kStatusJsonBufferSize = 1024;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
   const std::string origin(31, '"');                 // _origin[32], worst-case escaping
@@ -234,7 +264,7 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
       buffer, sizeof(buffer),
       4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
       8388608, 2147483647, 2147483647,
-      "off", health);
+      "off", health, 8388608, "deepsleep");
 
   ASSERT_GT(len, 0) << "worst-case status payload overflowed the " << kStatusJsonBufferSize
                     << "-byte production buffer; serializeComplete() returns 0 and the "
@@ -242,6 +272,10 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
                        "stop silently";
   EXPECT_LT(static_cast<size_t>(len), kStatusJsonBufferSize - 32)
       << "less than 32 bytes of headroom left in the status buffer (len=" << len << ")";
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
+  EXPECT_STREQ("deepsleep", parsed["stats"]["reset_reason"].as<const char*>());
 }
 
 TEST(MQTTPayloadBuilder, StatusOmissionSentinelsRemainOmitted) {

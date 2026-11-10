@@ -46,7 +46,9 @@ int MQTTPayloadBuilder::buildStatusMessage(
   int packets_sent,
   int packets_received,
   const char* repeat,
-  const MQTTConnHealth& conn_health
+  const MQTTConnHealth& conn_health,
+  int heap_min,
+  const char* reset_reason
 ) {
   doc.clear();
   JsonObject root = doc.to<JsonObject>();
@@ -67,9 +69,11 @@ int MQTTPayloadBuilder::buildStatusMessage(
       conn_health.worst_outage_secs >= 0 || conn_health.heap_largest >= 0 ||
       conn_health.connect_failures > 0 || conn_health.slots_breaker > 0;
 
+  const bool has_reset_reason = reset_reason != nullptr && reset_reason[0] != '\0';
   if (battery_mv >= 0 || uptime_secs >= 0 || errors >= 0 || queue_len >= 0 ||
       noise_floor > -999 || tx_air_secs >= 0 || rx_air_secs >= 0 || recv_errors >= 0 ||
-      internal_heap >= 0 || packets_sent >= 0 || packets_received >= 0 || has_conn_health) {
+      internal_heap >= 0 || heap_min >= 0 || has_reset_reason ||
+      packets_sent >= 0 || packets_received >= 0 || has_conn_health) {
     JsonObject stats = root["stats"].to<JsonObject>();
 
     if (battery_mv >= 0) stats["battery_mv"] = battery_mv;
@@ -84,6 +88,8 @@ int MQTTPayloadBuilder::buildStatusMessage(
     if (recv_errors >= 0) stats["recv_errors"] = recv_errors;
     if (internal_heap >= 0) stats["internal_heap"] = internal_heap;
     if (conn_health.heap_largest >= 0) stats["heap_largest"] = conn_health.heap_largest;
+    if (heap_min >= 0) stats["heap_min"] = heap_min;
+    if (has_reset_reason) stats["reset_reason"] = reset_reason;
     if (conn_health.slots_up >= 0) stats["mqtt_slots_up"] = conn_health.slots_up;
     if (conn_health.slots_total >= 0) stats["mqtt_slots_total"] = conn_health.slots_total;
     // Emitted only during an outage of known duration, so the steady-state payload

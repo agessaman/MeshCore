@@ -1010,6 +1010,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       start = (int)_atoi(start_arg);
     }
     formatMQTTPresetListReply(reply, 160, start);
+  } else if (memcmp(config, "mqtt.stacks", 11) == 0) {
+    MQTTBridge::formatMqttStacksReply(reply, 160);
   } else if (memcmp(config, "mqtt.stats", 10) == 0) {
     MQTTBridge::formatMqttStatsReply(reply, 160);
   } else if (memcmp(config, "mqtt.status", 11) == 0) {

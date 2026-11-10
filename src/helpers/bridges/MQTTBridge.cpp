@@ -28,6 +28,7 @@
 #include <esp_tls.h>
 #include <esp_random.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -340,6 +341,60 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
     replyAppendf(buf, bufsize, &pos, ", nbr: %s/%s", when, last);
   }
 #endif
+}
+
+// Records the calling task's own free-stack bytes; safe from any task because nothing else is dereferenced.
+void MQTTBridge::noteSlotTaskStack(int index) {
+#ifdef ESP_PLATFORM
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
+  _stack_free_slot[index].store((uint32_t)uxTaskGetStackHighWaterMark(nullptr),
+                                std::memory_order_relaxed);
+#else
+  (void)index;
+#endif
+}
+
+// Free-stack bytes per task for `get mqtt.stacks`: b=bridge, l=loop, a=async_tcp, mN=slot N client task.
+void MQTTBridge::formatMqttStacksReply(char* buf, size_t bufsize) {
+  if (buf == nullptr || bufsize == 0) return;
+  buf[0] = '\0';
+  int pos = 0;
+  int shown = 0;
+  replyAppendf(buf, bufsize, &pos, "> stk");
+#ifdef ESP_PLATFORM
+  MQTTBridge* b = s_mqtt_bridge_instance;
+  const bool running = b != nullptr && b->_initialized;
+  if (running) {
+    uint32_t v = b->_stack_free_bridge.load(std::memory_order_relaxed);
+    if (v != 0) {
+      replyAppendf(buf, bufsize, &pos, " b=%u", (unsigned)v);
+      shown++;
+    }
+  }
+  // A task can only measure itself here, so the loop mark appears for loop-task callers.
+  const char* self = pcTaskGetName(nullptr);
+  if (self != nullptr && strcmp(self, "loopTask") == 0) {
+    replyAppendf(buf, bufsize, &pos, " l=%u", (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+    shown++;
+  }
+#if INCLUDE_xTaskGetHandle
+  // async_tcp is never deleted once created, so its handle stays valid.
+  TaskHandle_t async_tcp = xTaskGetHandle("async_tcp");
+  if (async_tcp != nullptr) {
+    replyAppendf(buf, bufsize, &pos, " a=%u", (unsigned)uxTaskGetStackHighWaterMark(async_tcp));
+    shown++;
+  }
+#endif
+  if (running) {
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      uint32_t v = b->_stack_free_slot[i].load(std::memory_order_relaxed);
+      if (!b->_slots[i].enabled || v == 0) continue;
+      replyAppendf(buf, bufsize, &pos, " m%d=%u", i + 1, (unsigned)v);
+      shown++;
+    }
+  }
+#endif
+  if (shown == 0) replyAppendf(buf, bufsize, &pos, " n/a");
 }
 
 // On-demand publish-health + heap snapshot for the `get mqtt.stats` CLI command.
@@ -1585,6 +1640,13 @@ void MQTTBridge::mqttTaskLoop() {
       }
     }
 
+    // Sample this task's stack headroom about once a second for `get mqtt.stacks`.
+    static uint32_t last_stack_sample_ms = 0;
+    if ((uint32_t)(millis() - last_stack_sample_ms) >= 1000) {
+      last_stack_sample_ms = millis();
+      _stack_free_bridge.store((uint32_t)uxTaskGetStackHighWaterMark(nullptr), std::memory_order_relaxed);
+    }
+
     // Maintain slot connections (token renewal, reconnect with backoff)
     maintainSlotConnections();
 
@@ -1751,6 +1813,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
   slot.client->setAutoReconnect(false);  // we handle reconnect with our own backoff
 
   slot.client->onConnect([this, index](bool sessionPresent) {
+    noteSlotTaskStack(index);
     // A CONNECT started before this slot was disabled or reconfigured can still
     // complete afterwards. Accepting it marked a slot connected that the
     // operator had switched off, scheduled its status publish, and published
@@ -1801,6 +1864,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
     _status_publish_pending[index] = true;
   });
   slot.client->onDisconnect([this, index](bool sessionPresent) {
+    noteSlotTaskStack(index);
     MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
     // Ended an attempt that never reached onConnect. A deliberate stop clears the flag
     // first; a bounced live session is still marked connected until this handler runs,
@@ -1826,6 +1890,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
     updateCachedConnectionStatus();
   });
   slot.client->onError([this, index](esp_mqtt_error_codes error) {
+    noteSlotTaskStack(index);
     _slots[index].last_tls_err = error.esp_tls_last_esp_err;
     _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
     _slots[index].last_sock_errno = error.esp_transport_sock_errno;
@@ -3137,6 +3202,42 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
                                    topic_buf, buf_size);
 }
 
+#ifdef ESP_PLATFORM
+// Short token for the reset that booted this image. Same code `get pwrmgt.bootreason` reads.
+static const char* resetReasonToken(uint32_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "ext";
+    case ESP_RST_SW:        return "sw";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int_wdt";
+    case ESP_RST_TASK_WDT:  return "task_wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_UNKNOWN:
+    default:                return "unknown";
+  }
+}
+
+// Fixed for this boot, so the first status publish resolves it and later ones reuse it.
+static const char* cachedResetReason(mesh::MainBoard* board) {
+  static const char* token = nullptr;
+  if (token == nullptr) {
+    uint32_t reason = board ? board->getResetReason()
+                            : static_cast<uint32_t>(esp_reset_reason());
+    token = resetReasonToken(reason);
+  }
+  return token;
+}
+#else
+static const char* cachedResetReason(mesh::MainBoard* board) {
+  (void)board;
+  return nullptr;
+}
+#endif
+
 void MQTTBridge::publishStatusToSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
@@ -3219,6 +3320,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
 
   // Internal heap free (for diagnosing repeater hangs from internal heap exhaustion)
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  int heap_min = (int)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
     _json_scratch_doc,
@@ -3228,7 +3330,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
-    collectConnHealth()
+    collectConnHealth(),
+    heap_min, cachedResetReason(_board)
   );
 
   if (len > 0) {
@@ -4155,6 +4258,7 @@ bool MQTTBridge::publishStatus() {
 
   // Internal heap free (for diagnosing repeater hangs from internal heap exhaustion)
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  int heap_min = (int)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
 
   int len = MQTTMessageBuilder::buildStatusMessage(
     _json_scratch_doc,
@@ -4164,7 +4268,8 @@ bool MQTTBridge::publishStatus() {
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
-    collectConnHealth()
+    collectConnHealth(),
+    heap_min, cachedResetReason(_board)
   );
 
   if (len > 0) {

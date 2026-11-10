@@ -491,6 +491,10 @@ private:
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
   // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
   std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
+  // Free-stack bytes each task last measured for itself; 0 = no sample yet.
+  std::atomic<uint32_t> _stack_free_bridge{0};
+  std::atomic<uint32_t> _stack_free_slot[RUNTIME_MQTT_SLOTS] = {};
+  void noteSlotTaskStack(int index);
 
   // Optional pointers for collecting stats internally (set by mesh if available)
   mesh::Dispatcher* _dispatcher;  // For air times and errors
@@ -839,6 +843,8 @@ public:
   /** On-demand publish-health + heap snapshot for `get mqtt.stats` (per-slot ok/err,
    *  outbox size, free/max heap, queue depth). */
   static void formatMqttStatsReply(char* buf, size_t bufsize);
+  /** Free-stack bytes per task for `get mqtt.stacks`. */
+  static void formatMqttStacksReply(char* buf, size_t bufsize);
   /** Apply a saved mqtt.breaker.interval to the running bridge. */
   static void setBreakerProbeMinutes(uint8_t minutes);
   /** Structured per-slot snapshot for the webconfig stats endpoint. Same state
