@@ -56,6 +56,17 @@ static inline bool deferredSlotSetupDue(uint32_t now, uint32_t last_attempt,
   return elapsedMs(now, last_attempt) >= retry_interval_ms;
 }
 
+// One reconfigure per pass. A request that does not open a connection is not
+// held for the handshake guard; a connecting one is, so the caller can arm
+// that guard and the next request waits its turn.
+static inline bool slotReconfigureDue(bool pending, bool opens_connection,
+                                     uint32_t now_ms, uint32_t last_connect_attempt_ms,
+                                     bool already_applied_this_pass) {
+  if (!pending || already_applied_this_pass) return false;
+  if (!opens_connection) return true;
+  return !reconnectGuardActive(now_ms, last_connect_attempt_ms);
+}
+
 static inline bool stableConnection(uint32_t now, uint32_t connected_at) {
   return connected_at != 0 && elapsedMs(now, connected_at) >= kStableResetMs;
 }

@@ -44,6 +44,34 @@ TEST(MQTTConnectionPolicy, DeferredSetupRetryIsWrapSafeAndOnePerPass) {
   EXPECT_FALSE(Policy::deferredSlotSetupDue(65000U, 5000U, 60000U, 65000U, false));
 }
 
+TEST(MQTTConnectionPolicy, ConnectingReconfigureWaitsForTheReconnectGuard) {
+  EXPECT_FALSE(Policy::slotReconfigureDue(false, true, 20000U, 0U, false));
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 20000U, 0U, true));
+  // Guard epoch: last attempt 0 blocks a connect for the first 15 s of uptime.
+  EXPECT_TRUE(Policy::reconnectGuardActive(14999U, 0U));
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 14999U, 0U, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, true, 15000U, 0U, false));
+
+  const uint32_t armed = 80000U;
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, armed + 14999U, armed, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, true, armed + 15000U, armed, false));
+}
+
+TEST(MQTTConnectionPolicy, DisableReconfigureIsNotHeldByTheReconnectGuard) {
+  const uint32_t armed = 80000U;
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, false, armed + 1U, armed, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, false, 1U, 0U, false));
+  // Still one per pass, and a clear flag is not invented.
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, false, armed + 1U, armed, true));
+  EXPECT_FALSE(Policy::slotReconfigureDue(false, false, armed + 15000U, armed, false));
+}
+
+TEST(MQTTConnectionPolicy, ReconfigureGuardBoundaryIsWrapSafe) {
+  const uint32_t last = std::numeric_limits<uint32_t>::max() - 9999U;
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 4999U, last, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, true, 5000U, last, false));
+}
+
 TEST(MQTTConnectionPolicy, CrossSlotReconnectGuardHasExactBoundary) {
   EXPECT_TRUE(Policy::reconnectGuardActive(14999U, 0U));
   EXPECT_FALSE(Policy::reconnectGuardActive(15000U, 0U));

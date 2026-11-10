@@ -1315,6 +1315,7 @@ void MQTTBridge::end() {
   // cannot be turned into a second task over the same state.
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) _slot_reconfigure_pending[i] = false;
   s_stop_unproven = _lifecycle.isStopUnproven();
   if (_lifecycle.isStopUnproven()) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge stop UNPROVEN after %lu ms: task did not acknowledge. "
@@ -1487,7 +1488,9 @@ void MQTTBridge::mqttTaskLoop() {
     // trampoline (vTaskDelete(nullptr)).
     if (_stop_requested.load(std::memory_order_acquire)) {
       MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop - tearing down clients on Core 0");
+      // Drop queued reconfigures so shutdown does not start a handshake.
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+        _slot_reconfigure_pending[i] = false;
         teardownSlot(i);
       }
       destroySlotClients();
@@ -1610,14 +1613,8 @@ void MQTTBridge::mqttTaskLoop() {
       beginDeferredSlotSetup();
     }
 
-    // Process pending slot reconfigures (queued from CLI on Core 1)
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slot_reconfigure_pending[i]) {
-        _slot_reconfigure_pending[i] = false;
-        MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)", i + 1, _obs->mqtt_slot_preset[i]);
-        applySlotPreset(i, _obs->mqtt_slot_preset[i]);
-      }
-    }
+    // One queued reconfigure per pass. A multi-slot save must not handshake them all at once.
+    applyPendingSlotReconfigures();
 
     // Publish on-connect status for slots whose onConnect callback fired since
     // the last loop. Raised on the esp-mqtt event task, consumed here on the
@@ -3450,6 +3447,61 @@ bool MQTTBridge::isAnySlotConnected() {
   return false;
 }
 
+bool MQTTBridge::pendingReconfigureConnects(int index) const {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS || !_obs) return false;
+  const char* name = _obs->mqtt_slot_preset[index];
+  if (!name || name[0] == '\0' || strcmp(name, MQTT_PRESET_NONE) == 0) return false;
+  // A full cap tears the slot down and does not call setupSlot.
+  if (!canActivateSlot(index)) return false;
+  if (strcmp(name, MQTT_PRESET_CUSTOM) == 0) {
+    return customEndpointComplete(_obs->mqtt_slot_host[index], _obs->mqtt_slot_port[index]);
+  }
+  const MQTTPresetDef* preset = findMQTTPreset(name);
+  if (!preset) return false;
+  if (preset->topic_style == MQTT_TOPIC_MESHRANK &&
+      _obs->mqtt_slot_token[index][0] == '\0') {
+    return false;
+  }
+  if (mqttPresetNeedsSlotUsername(preset) &&
+      _obs->mqtt_slot_username[index][0] == '\0') {
+    return false;
+  }
+  if (mqttPresetNeedsSlotPassword(preset) &&
+      _obs->mqtt_slot_password[index][0] == '\0') {
+    return false;
+  }
+  if (preset->topic_style == MQTT_TOPIC_MESHCORE) {
+    // applySlotPreset copies the prefs IATA before the ready check.
+    const char* pref = mqttSlotIata(_obs->mqtt_iata, _obs->mqtt_slot_iata[index]);
+    const bool pref_ok = pref && pref[0] != '\0' && strcmp(pref, "XXX") != 0;
+    if (!isSlotIATAValid(index) && !pref_ok) return false;
+  }
+  return true;
+}
+
+void MQTTBridge::applyPendingSlotReconfigures() {
+  const unsigned long now_ms = millis();
+  bool applied_this_pass = false;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (!_slot_reconfigure_pending[i]) continue;
+    const bool opens = pendingReconfigureConnects(i);
+    if (!MQTTConnectionPolicy::slotReconfigureDue(
+            true, opens,
+            static_cast<uint32_t>(now_ms),
+            static_cast<uint32_t>(_last_slot_reconnect_ms),
+            applied_this_pass)) {
+      continue; // stays pending for a later pass
+    }
+    _slot_reconfigure_pending[i] = false;
+    MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)",
+                       i + 1, _obs->mqtt_slot_preset[i]);
+    applySlotPreset(i, _obs->mqtt_slot_preset[i]);
+    applied_this_pass = true;
+    // Same stamp a reconnect writes, so the next pending connect waits 15 s.
+    if (opens) _last_slot_reconnect_ms = millis();
+  }
+}
+
 void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
 
@@ -3457,6 +3509,7 @@ void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   // Set a flag so the MQTT task picks it up on its next loop iteration.
   #ifdef ESP_PLATFORM
   if (_mqtt_task_handle != nullptr) {
+    // Already pending still applies once; a second request just updates prefs.
     _slot_reconfigure_pending[slot_index] = true;
     MQTT_DEBUG_PRINTLN("MQTT%d reconfigure queued (preset: %s)", slot_index + 1, preset_name);
     return;
@@ -3720,13 +3773,8 @@ void MQTTBridge::loop() {
     beginDeferredSlotSetup();
   }
 
-  // Process pending slot reconfigures
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slot_reconfigure_pending[i]) {
-      _slot_reconfigure_pending[i] = false;
-      applySlotPreset(i, _obs->mqtt_slot_preset[i]);
-    }
-  }
+  // One queued reconfigure per pass, same rule as the ESP32 task.
+  applyPendingSlotReconfigures();
 
   // Maintain slot connections (token renewal, reconnect with backoff)
   maintainSlotConnections();
