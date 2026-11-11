@@ -2640,9 +2640,9 @@ void MQTTBridge::beginDeferredSlotSetup() {
 }
 
 void MQTTBridge::maintainSlotConnections() {
-  // Renewal and reconnect need an identity and a link. The first setup does not:
-  // it used to run from the task loop as soon as NTP synced, link or not.
-  const bool can_maintain = _identity != nullptr && _network->isConnected();
+  // Renewal and reconnect need an identity and a link; a first setup needs only the link.
+  const bool link_up = _network->isConnected();
+  const bool can_maintain = _identity != nullptr && link_up;
   if (!can_maintain && !_slots_setup_done) return;
 
   unsigned long now_millis = millis();
@@ -2691,7 +2691,9 @@ void MQTTBridge::maintainSlotConnections() {
     if (!_slots[i].initial_connect_done) {
       if (!_slots_setup_done) continue;
       const bool first_attempt = _slots[i].last_reconnect_attempt == 0;
-      // Retries keep the old link/identity gate. The first attempt does not.
+      // A client made with the link down cannot connect and would arm the guard for nothing.
+      if (!link_up) continue;
+      // Retries also keep the identity gate.
       if (!first_attempt && !can_maintain) continue;
 
       // A ready lower slot still waiting on its first setup has not taken a seat yet.
