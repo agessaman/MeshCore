@@ -405,7 +405,9 @@ class WiFiNetworkLink final : public NetworkLinkBase {
       }
     }
 
-    if ((uint32_t)(now_ms - _last_status_check) <= 10000) {
+    // Report the up edge at once: a poll-delayed one lands mid slot startup and stalls the next slot.
+    const bool up_edge = connected && !_last_connected;
+    if (!up_edge && (uint32_t)(now_ms - _last_status_check) <= 10000) {
       if (connected && outage().down) noteConnected(now_ms);
       return NetworkTransition::None;
     }
