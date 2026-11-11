@@ -196,6 +196,7 @@ class Deduper:
         self.nodes = OrderedDict()
         self.node_capacity = min(MAX_NODES, max(1, node_capacity))
         self.sequence = 0
+        self.snapshot_sequence = 0
 
     def _put_node(self, node_id: str, state: NodeState) -> None:
         self.nodes[node_id] = state
@@ -217,9 +218,13 @@ class Deduper:
             return False
         return event.uptime_secs < expected - BOOT_TOLERANCE_SECS
 
-    def prepare(self, event: ParsedStatus):
+    def prepare(self, event: ParsedStatus, retained: bool = False):
         previous = self.nodes.get(event.node_id)
         reboot = previous is None or self._rebooted(previous, event)
+        if (retained and previous is not None and reboot
+                and (previous.boot_id is None or event.boot_id is None)):
+            # Keep the timing anchor until a fresh status resolves stale replay.
+            return None, previous
         reported = set() if reboot else set(previous.reported)
         available = set(event.report_kinds)
         if event.crash is not None:
@@ -357,6 +362,7 @@ def load_state(deduper: Deduper, output_path: str) -> None:
                 raise ValueError('invalid node key')
             deduper._put_node(node, state_from_dict(value))
         deduper.sequence = seq
+        deduper.snapshot_sequence = seq
     except FileNotFoundError:
         pass
     except (ValueError, TypeError, KeyError, RecursionError) as error:
@@ -386,14 +392,9 @@ def load_state(deduper: Deduper, output_path: str) -> None:
                 continue
 
 
-def save_state(deduper: Deduper, path: str, event: ParsedStatus, state: NodeState) -> None:
-    nodes = deduper.nodes.copy()
-    nodes[event.node_id] = state
-    nodes.move_to_end(event.node_id)
-    while len(nodes) > deduper.node_capacity:
-        nodes.popitem(last=False)
-    saved = dict(version=1, sequence=deduper.sequence + 1,
-                 nodes=[[key, asdict(value)] for key, value in nodes.items()])
+def save_state(deduper: Deduper, path: str) -> None:
+    saved = dict(version=1, sequence=deduper.sequence,
+                 nodes=[[key, asdict(value)] for key, value in deduper.nodes.items()])
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path + '.state.tmp', 'w', encoding='ascii') as handle:
         json.dump(saved, handle, ensure_ascii=True, allow_nan=False, separators=(',', ':'))
@@ -451,14 +452,37 @@ class Counters:
 class Collector:
     """Transport-independent glue: parse, dedup, append, count."""
 
-    def __init__(self, deduper: Deduper, output_path: str, max_bytes: int, max_payload: int) -> None:
+    def __init__(self, deduper: Deduper, output_path: str, max_bytes: int, max_payload: int,
+                 snapshot_interval: float = 60, monotonic=None) -> None:
         self.deduper = deduper
         self.output_path = output_path
         self.max_bytes = max_bytes
         self.max_payload = max_payload
         self.counters = Counters()
+        self.snapshot_interval = snapshot_interval
+        self.monotonic = monotonic or time.monotonic
+        self.last_snapshot = self.monotonic()
 
-    def handle(self, topic: str, payload: bytes, received_at: Optional[datetime] = None) -> Optional[dict]:
+    def flush_state(self, force: bool = False) -> None:
+        if self.deduper.sequence == self.deduper.snapshot_sequence:
+            return
+        if not force and self.monotonic() - self.last_snapshot < self.snapshot_interval:
+            return
+        save_state(self.deduper, self.output_path)
+        self.deduper.snapshot_sequence = self.deduper.sequence
+        self.last_snapshot = self.monotonic()
+
+    def wait(self, stop, delay: float) -> None:
+        deadline = self.monotonic() + delay
+        while not stop.is_set():
+            self.flush_state()
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                return
+            stop.wait(min(1.0, remaining))
+
+    def handle(self, topic: str, payload: bytes, received_at: Optional[datetime] = None,
+               retained: bool = False) -> Optional[dict]:
         self.counters.count("seen")
         event = None
         if len(payload) <= self.max_payload:
@@ -467,11 +491,10 @@ class Collector:
             self.counters.count("malformed")
             self.counters.maybe_log()
             return None
-        record, state = self.deduper.prepare(event)
+        record, state = self.deduper.prepare(event, retained)
         if state is not self.deduper.nodes.get(event.node_id):
             if record is not None:
                 append_record(self.output_path, record, self.max_bytes)
-            save_state(self.deduper, self.output_path, event, state)
             self.deduper.commit(event, state)
         if record is None:
             self.counters.count("discarded")
@@ -502,6 +525,7 @@ class Config:
     max_payload: int = 65536
     node_cache: int = 20000
     backoff_max: int = 60
+    snapshot_interval: int = 60
 
 
 class ConfigError(Exception):
@@ -551,6 +575,7 @@ def load_config(require_host: bool) -> Config:
     config.max_payload = min(MAX_PAYLOAD, _env_int("OBSERVER_CRASH_MAX_PAYLOAD", MAX_PAYLOAD))
     config.node_cache = min(MAX_NODES, _env_int("OBSERVER_CRASH_NODE_CACHE", MAX_NODES))
     config.backoff_max = _env_int("OBSERVER_CRASH_BACKOFF_MAX", 60)
+    config.snapshot_interval = _env_int("OBSERVER_CRASH_SNAPSHOT_INTERVAL", 60)
     if not config.client_id:
         config.client_id = "observer-crash-collector-" + secrets.token_hex(4)
 
@@ -571,14 +596,26 @@ def load_config(require_host: bool) -> Config:
 def run_stdin(config: Config) -> int:
     deduper = Deduper(config.node_cache)
     load_state(deduper, config.output)
-    collector = Collector(deduper, config.output, config.max_bytes, config.max_payload)
-    for raw in bounded_lines(sys.stdin.buffer, config.max_payload + 130):
-        if raw is None or b'\t' not in raw:
-            collector.counters.count('seen')
-            collector.counters.count('malformed')
-            continue
-        topic, payload = raw.rstrip(b'\r\n').split(b'\t', 1)
-        collector.handle(topic.decode('ascii', errors='replace'), payload)
+    collector = Collector(deduper, config.output, config.max_bytes, config.max_payload, config.snapshot_interval)
+    def request_stop(signum, frame):
+        raise KeyboardInterrupt
+    handlers = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        try:
+            for raw in bounded_lines(sys.stdin.buffer, config.max_payload + 130):
+                collector.flush_state()
+                if raw is None or b'\t' not in raw:
+                    collector.counters.count('seen')
+                    collector.counters.count('malformed')
+                    continue
+                topic, payload = raw.rstrip(b'\r\n').split(b'\t', 1)
+                collector.handle(topic.decode('ascii', errors='replace'), payload)
+        except KeyboardInterrupt:
+            pass
+        collector.flush_state(force=True)
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
     log('stdin seen=%d kept=%d discarded=%d malformed=%d' % (
         collector.counters.seen, collector.counters.kept,
         collector.counters.discarded, collector.counters.malformed))
@@ -589,7 +626,7 @@ class SetupTimeout(Exception):
     pass
 
 
-def connect_bounded(client, config: Config, stop, timeout: float = 8.0) -> bool:
+def connect_bounded(client, config: Config, stop, timeout: float = 8.0, tick=None) -> bool:
     done = threading.Event()
     succeeded = []
 
@@ -604,6 +641,8 @@ def connect_bounded(client, config: Config, stop, timeout: float = 8.0) -> bool:
     threading.Thread(target=setup, daemon=True).start()
     deadline = time.monotonic() + timeout
     while not done.is_set():
+        if tick is not None:
+            tick()
         if stop.wait(0.05):
             return False
         if time.monotonic() >= deadline:
@@ -646,11 +685,13 @@ class Subscription:
         self.failed = True
 
     def on_message(self, client, userdata, message):
-        self.collector.handle(message.topic, message.payload)
+        self.collector.handle(message.topic, message.payload, retained=message.retain)
 
     def pump(self, client, stop, timeout: float = 8.0) -> None:
         deadline = time.monotonic() + timeout
         while not stop.is_set() and not self.failed:
+            if self.collector is not None:
+                self.collector.flush_state()
             if not self.ready and time.monotonic() >= deadline:
                 log('MQTT subscription handshake timed out')
                 break
@@ -703,7 +744,7 @@ def run_mqtt(config: Config, mqtt_module=None, stop=None) -> int:
         signal.signal(signal.SIGINT, request_stop)
     deduper = Deduper(config.node_cache)
     load_state(deduper, config.output)
-    collector = Collector(deduper, config.output, config.max_bytes, config.max_payload)
+    collector = Collector(deduper, config.output, config.max_bytes, config.max_payload, config.snapshot_interval)
     backoff = 1.0
     log('starting MQTT collector')
     while not stop.is_set():
@@ -712,7 +753,7 @@ def run_mqtt(config: Config, mqtt_module=None, stop=None) -> int:
         started = time.monotonic()
         connected = False
         try:
-            connected = connect_bounded(client, config, stop)
+            connected = connect_bounded(client, config, stop, tick=collector.flush_state)
             if connected and not stop.is_set():
                 subscription.pump(client, stop)
         except SetupTimeout:
@@ -730,8 +771,9 @@ def run_mqtt(config: Config, mqtt_module=None, stop=None) -> int:
         if subscription.ready and time.monotonic() - started >= 30:
             backoff = 1.0
         delay = min(config.backoff_max, backoff)
-        stop.wait(delay / 2 + random.uniform(0, delay / 2))
+        collector.wait(stop, delay / 2 + random.uniform(0, delay / 2))
         backoff = min(config.backoff_max, backoff * 2)
+    collector.flush_state(force=True)
     return 0
 
 

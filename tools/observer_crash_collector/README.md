@@ -34,15 +34,25 @@ Boot evidence, strongest first:
 3. Device timestamps are context only. NTP steps and 1970 timestamps do not
    affect detection. Reset/self-heal tuple changes alone never prove a reboot.
 
-Receive times use the collector host's UTC clock, including across restarts;
-keep that clock synchronized. Without boot IDs, missing uptime, reordered
-statuses, uptime regressions from other causes, and wrap-boundary reboots are
+### Limits
+
+The collector requires a synchronized host clock, including across restarts;
+the unit orders startup after `time-sync.target`. Without boot IDs, missing
+uptime, reordered statuses, uptime regressions from other causes, and wrap-boundary reboots are
 ambiguous. A reboot during downtime is detectable only if its uptime regresses
 against the receive-time prediction; a higher-than-predicted uptime is not
 proof. A new boot with byte-identical payload is indistinguishable from replay.
 Cloned keys cannot be separated. Evicted node history can count replay again.
 Whole boots missed while disconnected cannot be recovered from QoS 0 or from
 retention of only the latest status.
+
+A hard kill loses the last snapshot interval's non-event observations, but saved
+receive time and uptime remain a consistent pair and newer available event records
+restore reported kinds. A newer retained payload can falsely imply a reboot after
+a long gap, so that decision is deferred, preserving the old anchor until a fresh
+status arrives, unless boot IDs resolve it. This can delay counting or miss a
+retained-only boot; unflagged stale traffic, byte-identical boots, and history
+rotated away before a snapshot remain ambiguous.
 
 ## Storage and bounds
 
@@ -72,12 +82,15 @@ one bounded storage error and exit 1 for systemd to restart.
 `<output>.state` is an atomically replaced JSON snapshot, version 1, containing
 a global sequence and an LRU list of `[node_key, evidence]` pairs. Evidence is
 last receive time, uptime, optional boot ID, last payload SHA-256, and reported
-kinds. Every changed accepted status persists this evidence, including normal
-statuses; this intentionally adds state-file writes. Identical replay does not.
+kinds. Changed accepted statuses advance memory without copying the node map.
+While dirty, the network pump, connection waits, and stdin processing write at
+most one snapshot per `OBSERVER_CRASH_SNAPSHOT_INTERVAL` (default 60 seconds),
+using a monotonic clock; SIGTERM, SIGINT, and stdin EOF force a final dirty flush.
 An event carries `state_seq` and `boot_evidence` so startup can replay an append
 that preceded a failed snapshot replacement. Events and state are not a single
-filesystem transaction; a failed write is not acknowledged in memory. Older
-collector events can seed weaker evidence until new statuses arrive.
+filesystem transaction; an event is acknowledged after its successful append,
+independently of snapshots. Older collector events can seed weaker evidence until
+new statuses arrive.
 
 The LRU has at most 20,000 fixed-size node keys and bounded evidence values.
 State and temporary snapshots are bounded independently of event rotation.
@@ -109,6 +122,7 @@ All settings use environment variables:
 | `MAX_PAYLOAD` | 65536 | Payload byte limit, capped at 65536 |
 | `NODE_CACHE` | 20000 | Node capacity, capped at 20000 |
 | `BACKOFF_MAX` | 60 | Reconnect delay cap in seconds |
+| `SNAPSHOT_INTERVAL` | 60 | Minimum seconds between periodic dirty snapshots |
 
 Enable TLS when sending credentials over an untrusted network. Credentials do
 not appear in logs, records, or command arguments. `collector.env.example`

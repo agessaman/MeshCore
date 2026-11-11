@@ -50,6 +50,7 @@ class FileTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = os.path.join(self.temp.name, 'events.jsonl')
         self.clock = BASE
+        self.elapsed = 0
         self.logs = io.StringIO()
         self.redirect = contextlib.redirect_stderr(self.logs)
         self.redirect.__enter__()
@@ -59,13 +60,14 @@ class FileTests(unittest.TestCase):
     def make_collector(self, capacity=20, max_bytes=1000000):
         deduper = collector.Deduper(capacity)
         collector.load_state(deduper, self.path)
-        return collector.Collector(deduper, self.path, max_bytes, 65536)
+        return collector.Collector(deduper, self.path, max_bytes, 65536, monotonic=lambda: self.elapsed)
 
-    def send(self, data=None, after=0, topic=TOPIC, counter=None):
+    def send(self, data=None, after=0, topic=TOPIC, counter=None, retained=False):
+        self.elapsed = after
         self.clock = BASE + timedelta(seconds=after)
         clock = types.SimpleNamespace(now=lambda tz: self.clock, fromisoformat=datetime.fromisoformat)
         with patch.object(collector, 'datetime', clock):
-            return (counter or self.counter).handle(topic, data if data is not None else payload())
+            return (counter or self.counter).handle(topic, data if data is not None else payload(), retained=retained)
 
     def records(self):
         return list(collector.read_records(self.path))
@@ -188,11 +190,200 @@ class FileTests(unittest.TestCase):
     def test_restart_restores_latest_non_event_evidence(self):
         self.send()
         self.send(payload(uptime=370), after=300)
+        self.counter.flush_state(force=True)
         restarted = self.make_collector()
         state = restarted.deduper.nodes[NODE_A]
         self.assertEqual(370, state.uptime_secs)
         self.assertEqual((BASE + timedelta(seconds=300)).timestamp(), state.receive_time)
         self.assertEqual(64, len(state.digest))
+
+    def test_snapshot_interval_batches_distinct_statuses(self):
+        class NoCopyNodes(collector.OrderedDict):
+            def copy(self):
+                raise AssertionError('per-message map copy')
+        self.counter.deduper.nodes = NoCopyNodes()
+        with patch.object(collector, 'save_state', wraps=collector.save_state) as save:
+            for index in range(100):
+                node = '%064x' % index
+                self.send(changed(payload(crash=None, reason='sw'), origin_id=node), after=index / 2,
+                          topic=TOPIC.replace(NODE_A, node))
+                self.counter.flush_state()
+            save.assert_not_called()
+            self.elapsed = 60
+            self.counter.flush_state()
+            self.assertEqual(1, save.call_count)
+            self.send(payload(uptime=130, reason='sw', crash=None), after=61)
+            self.counter.flush_state()
+            self.assertEqual(1, save.call_count)
+            self.assertEqual(130, self.counter.deduper.nodes[NODE_A].uptime_secs)
+            self.elapsed = 120
+            self.counter.flush_state()
+            self.assertEqual(2, save.call_count)
+            self.elapsed = 180
+            self.counter.flush_state()
+            self.assertEqual(2, save.call_count)
+
+    def test_snapshot_shutdown_flushes_dirty_state_once(self):
+        self.send(payload(reason='sw', crash=None))
+        with patch.object(collector, 'save_state', wraps=collector.save_state) as save:
+            self.counter.flush_state()
+            save.assert_not_called()
+            self.counter.flush_state(force=True)
+            self.counter.flush_state(force=True)
+            self.assertEqual(1, save.call_count)
+        self.assertEqual(70, self.make_collector().deduper.nodes[NODE_A].uptime_secs)
+
+    def test_snapshot_interval_configuration(self):
+        with patch.dict(os.environ, {'OBSERVER_CRASH_SNAPSHOT_INTERVAL': '17'}):
+            self.assertEqual(17, collector.load_config(False).snapshot_interval)
+        with patch.dict(os.environ, {'OBSERVER_CRASH_SNAPSHOT_INTERVAL': '0'}):
+            with self.assertRaises(collector.ConfigError):
+                collector.load_config(False)
+        self.assertEqual(60, collector.Config().snapshot_interval)
+
+    def test_stale_snapshot_replays_newer_event_kinds(self):
+        self.send(payload(uptime=1000, reason='poweron', crash=None))
+        self.counter.flush_state(force=True)
+        self.send(payload(uptime=5, crash=None), after=10)
+        self.send(payload(uptime=15), after=20)
+        restarted = self.make_collector()
+        self.assertEqual(('crash', 'reset'), restarted.deduper.nodes[NODE_A].reported)
+        self.assertIsNone(self.send(payload(uptime=15), after=3600, counter=restarted, retained=True))
+        self.assertIsNone(self.send(payload(uptime=3895), after=3900, counter=restarted))
+        record = self.send(payload(uptime=10, reason='sw', crash=None,
+                                   selfheal='all_slots_down', selfheal_n=1), after=4000, counter=restarted)
+        self.assertEqual(['selfheal'], record['kinds'])
+        self.assertEqual([['reset'], ['crash'], ['selfheal']], [record['kinds'] for record in self.records()])
+
+    def test_stale_snapshot_retained_replay_preserves_anchor(self):
+        for index, (uptime, repeat, fresh) in enumerate(((70, 90, 3970), (4294960, 12, 3892))):
+            with self.subTest(uptime=uptime):
+                self.path = os.path.join(self.temp.name, 'stale-%d.jsonl' % index)
+                self.elapsed = 0
+                self.counter = self.make_collector()
+                self.send(payload(uptime=uptime))
+                self.counter.flush_state(force=True)
+                data = changed(payload(uptime=repeat), timestamp='1970-01-01T00:00:00Z')
+                self.assertIsNone(self.send(data, after=20))
+                restarted = self.make_collector()
+                self.assertIsNone(self.send(data, after=3600, counter=restarted, retained=True))
+                self.assertEqual(BASE.timestamp(), restarted.deduper.nodes[NODE_A].receive_time)
+                self.assertIsNone(self.send(payload(uptime=fresh), after=3900, counter=restarted))
+                record = self.send(payload(uptime=10), after=4000, counter=restarted)
+                self.assertEqual(['crash', 'reset'], record['kinds'])
+                self.assertEqual(2, len(self.records()))
+
+    def test_stale_snapshot_retained_new_boot_waits_for_fresh_status(self):
+        self.send()
+        self.counter.flush_state(force=True)
+        restarted = self.make_collector()
+        self.assertIsNone(self.send(payload(uptime=100), after=3600, counter=restarted, retained=True))
+        record = self.send(payload(uptime=400), after=3900, counter=restarted)
+        self.assertEqual(['crash', 'reset'], record['kinds'])
+        self.assertEqual(CRASH, record['crash'])
+        self.assertEqual(2, len(self.records()))
+
+    def test_retained_different_boot_id_is_immediate(self):
+        self.send(payload(boot_id='aa'))
+        self.counter.flush_state(force=True)
+        restarted = self.make_collector()
+        record = self.send(payload(boot_id='bb'), after=3600, counter=restarted, retained=True)
+        self.assertEqual(['crash', 'reset'], record['kinds'])
+
+    def test_idle_network_pump_flushes_snapshot(self):
+        self.send(payload(crash=None, reason='sw'))
+        stop = threading.Event()
+        def step(client):
+            self.elapsed += 30
+            if self.elapsed == 90:
+                stop.set()
+            return 0
+        client = FakeClient([step, step, step])
+        session = collector.Subscription(client, collector.Config(), self.counter)
+        session.ready = True
+        with patch.object(collector, 'save_state', wraps=collector.save_state) as save:
+            session.pump(client, stop)
+            self.assertEqual(1, save.call_count)
+        self.assertEqual(70, self.make_collector().deduper.nodes[NODE_A].uptime_secs)
+
+    def test_connection_setup_ticks_snapshot_scheduler(self):
+        self.send(payload(crash=None, reason='sw'))
+        release = threading.Event()
+        self.addCleanup(release.set)
+        client = FakeClient()
+        client.connect = lambda *args: 0 if release.wait(3) else 1
+        def tick():
+            self.elapsed = 60
+            self.counter.flush_state()
+            release.set()
+        self.assertTrue(collector.connect_bounded(client, collector.Config(), threading.Event(), tick=tick))
+        self.assertTrue(os.path.exists(self.path + '.state'))
+
+    def test_consistent_retained_status_advances_memory(self):
+        self.send()
+        self.assertIsNone(self.send(payload(uptime=90), after=20, retained=True))
+        self.assertEqual(90, self.counter.deduper.nodes[NODE_A].uptime_secs)
+
+    def test_stdin_signals_flush_snapshot(self):
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig):
+                path = os.path.join(self.temp.name, 'stdin-%d.jsonl' % sig)
+                process = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(HERE), 'collector.py'), '--stdin'],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=dict(os.environ, OBSERVER_CRASH_OUTPUT=path))
+                try:
+                    process.stdin.write(TOPIC.encode() + b'\t' + payload() + b'\n')
+                    process.stdin.flush()
+                    self.assertIn(b'kept crash,reset', process.stderr.readline())
+                    self.assertFalse(os.path.exists(path + '.state'))
+                    process.send_signal(sig)
+                    self.assertEqual(0, process.wait(timeout=3))
+                    with open(path + '.state') as handle:
+                        self.assertEqual(70, json.load(handle)['nodes'][0][1]['uptime_secs'])
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate()
+
+    def test_mqtt_signals_flush_snapshot(self):
+        program = r"""
+import json, sys, time, types
+import collector as c
+class Client:
+    sent = False
+    def loop(self, **kwargs):
+        if not self.sent:
+            self.sent = True
+            doc = dict(origin_id='a'*64, stats=dict(uptime_secs=70, reset_reason='sw'))
+            self.on_message(self, None, types.SimpleNamespace(topic='meshcore/LAX/'+ 'a'*64 + '/status',
+                payload=json.dumps(doc).encode(), retain=False))
+            print('status handled', file=sys.stderr, flush=True)
+        time.sleep(0.02)
+        return 0
+    def disconnect(self):
+        return 0
+c.bounded_client = lambda *args: Client()
+c.connect_bounded = lambda *args, **kwargs: True
+sys.exit(c.run_mqtt(c.Config(output=sys.argv[1]), types.SimpleNamespace(CallbackAPIVersion=2)))
+"""
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig):
+                path = os.path.join(self.temp.name, 'mqtt-%d.jsonl' % sig)
+                env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE))
+                process = subprocess.Popen([sys.executable, '-c', program, path],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                try:
+                    self.assertEqual(b'starting MQTT collector\n', process.stderr.readline())
+                    self.assertEqual(b'status handled\n', process.stderr.readline())
+                    self.assertFalse(os.path.exists(path + '.state'))
+                    process.send_signal(sig)
+                    self.assertEqual(0, process.wait(timeout=3))
+                    with open(path + '.state') as handle:
+                        self.assertEqual(70, json.load(handle)['nodes'][0][1]['uptime_secs'])
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate()
 
     def test_retained_replay_after_long_gap(self):
         data = changed(payload(), timestamp=None)
@@ -212,9 +403,12 @@ class FileTests(unittest.TestCase):
         self.assertEqual(1, len(self.records()))
 
     def test_event_recovery_after_snapshot_failure(self):
-        with patch.object(collector, 'save_state', side_effect=OSError('ENOSPC')):
+        with patch.object(collector, 'save_state', side_effect=OSError('ENOSPC')) as save:
+            self.assertIsNotNone(self.send())
+            save.assert_not_called()
             with self.assertRaises(OSError):
-                self.send()
+                self.counter.flush_state(force=True)
+        self.assertIsNone(self.send())
         restarted = self.make_collector()
         self.assertIsNone(self.send(counter=restarted))
         self.assertEqual(1, len(self.records()))
@@ -325,6 +519,7 @@ class FileTests(unittest.TestCase):
             self.send(data, topic='meshcore/LAX/%s/status' % node, counter=counter)
         self.assertEqual(3, len(counter.deduper.nodes))
         self.assertTrue(all(len(key) == 64 for key in counter.deduper.nodes))
+        counter.flush_state(force=True)
         self.assertLess(os.path.getsize(self.path + '.state'), 2000)
 
     def test_evicted_history_can_be_counted_again(self):
@@ -499,6 +694,8 @@ class FileTests(unittest.TestCase):
         self.assertEqual([['crash', 'reset'], ['crash', 'reset'], ['selfheal']],
                          [record['kinds'] for record in records])
         self.assertEqual(records[0]['crash'], records[1]['crash'])
+        with open(self.path + '.state') as handle:
+            self.assertEqual(10, json.load(handle)['nodes'][0][1]['uptime_secs'])
 
     def test_stdin_bounds_and_password_nondisclosure(self):
         env = dict(os.environ, OBSERVER_CRASH_OUTPUT=self.path, OBSERVER_CRASH_PASSWORD='do-not-log')

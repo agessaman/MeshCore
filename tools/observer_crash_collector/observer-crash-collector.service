@@ -1,7 +1,7 @@
 [Unit]
 Description=MeshCore observer MQTT crash report collector
-After=network-online.target
-Wants=network-online.target
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 Type=simple
