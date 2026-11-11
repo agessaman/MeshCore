@@ -275,6 +275,7 @@ it has no effect there. An empty or invalid override falls back to `mqtt.iata`.
 | `get/set mqtt.neighbors auto\|on\|off` | Periodic neighbors publish (neighbors builds); `auto` only for presets that ask for it | auto |
 | `get/set mqtt.neighbors.interval <12-336>` | Neighbors interval, hours | 24 |
 | `get/set mqtt.breaker.interval <10-30>` | Minutes between retries once a slot stops reconnecting | 30 |
+| `get/set mqtt.selfheal on\|off` | Reboot when MQTT is stuck in a state only a reboot clears; `get` shows the last cause and count | on |
 | `get/set mqtt.ntp <host\|none>` | Primary NTP server; `set` syncs once to test it | `pool.ntp.org` |
 | `get mqtt.ntp.diag` | Probe every NTP server without changing the clock; returns immediately and reports the last completed probe | |
 | `get/set mqtt.owner <64 hex>` | Owner public key for JWT (`get` is serial only) | |
@@ -555,6 +556,15 @@ since boot.
 periodic retry (`mqtt.breaker.interval`, default 30 min). Packets queue while a slot is down. When the network route changes
 (Ethernet to WiFi or back), every slot disconnects cleanly and retries at once on the new
 route. Each medium keeps its own DHCP DNS servers.
+
+**Self-heal.** With `mqtt.selfheal on`, the node alerts and reboots 1 min later when a
+bridge stop never completes (10 min), an MQTT client cannot be stopped (30 min), or every
+slot is down for 2 h while an NTP reply in the last hour shows the internet is reachable.
+Slots refused by their broker do not count. It waits for 30 min of uptime, doubles the
+hold per consecutive self-heal reboot (up to 8x), and only alerts after 5 in a row. Until
+a slot stays connected for 10 min, the status payload carries `selfheal` (cause) and
+`selfheal_n` (count) next to `reset_reason`. While no slot is connected, the bridge
+probes NTP about every 20 min without changing the clock.
 
 **Ethernet (ThinkNode M7).** The observer uses Ethernet when it has a DHCP lease at boot,
 otherwise WiFi, and switches at runtime. Without a cable, boot waits about 1 s for
