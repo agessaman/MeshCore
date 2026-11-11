@@ -575,9 +575,13 @@ route. Each medium keeps its own DHCP DNS servers.
 **Self-heal.** With `mqtt.selfheal on`, the node alerts and reboots 1 min later when a
 bridge stop never completes (10 min), an MQTT client cannot be stopped (30 min), or every
 slot is down for 2 h while an NTP reply in the last hour shows the internet is reachable.
+The all-slots-down hold adds up to 30 min of per-node random delay, chosen once at boot.
 Slots refused by their broker do not count. It waits for 30 min of uptime, doubles the
-hold per consecutive self-heal reboot (up to 8x), and only alerts after 5 in a row. Until
-a slot stays connected for 10 min, the status payload carries `selfheal`
+hold per consecutive self-heal reboot (up to 8x), and only alerts after 5 in a row.
+All-slots-down gets one reboot per outage, and only if no self-heal reboot of any cause
+has occurred since the last healthy period; after that it only alerts. Ten healthy
+minutes resets the count and re-arms all-slots-down, either with a connected slot or
+with the bridge deliberately off and clean. Until then, the status payload carries `selfheal`
 (`stop_unproven`, `client_quarantined` or `all_slots_down`) and `selfheal_n` (count) next
 to `reset_reason`. While no slot is connected, the bridge
 probes NTP about every 20 min without changing the clock.

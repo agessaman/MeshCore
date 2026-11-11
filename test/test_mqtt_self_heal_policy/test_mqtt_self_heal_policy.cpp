@@ -56,6 +56,7 @@ TEST(MQTTSelfHealPolicy, DefaultsMatchTheAgreedThresholds) {
   EXPECT_EQ(60 * kMin, cfg.evidence_max_age_ms);
   EXPECT_EQ(3, cfg.max_backoff_shift);
   EXPECT_EQ(5, cfg.max_consecutive);
+  EXPECT_EQ(1, cfg.all_down_max_reboots);
 }
 
 TEST(MQTTSelfHealPolicy, HealthyNodeNeverActs) {
@@ -369,6 +370,145 @@ TEST(MQTTSelfHealPolicy, RebootLimitAlertsOnceAndNeverReboots) {
   }
 }
 
+TEST(MQTTSelfHealPolicy, AllSlotsDownRebootsAtCountZero) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  h.tick(AllDown(start));
+  Heal::Result r = h.tick(AllDown(start + 120 * kMin));
+  ASSERT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_EQ(Heal::Cause::AllSlotsDown, r.cause);
+  EXPECT_FALSE(r.reboot_suppressed);
+  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(start + 121 * kMin - 1)).action);
+  r = h.tick(AllDown(start + 121 * kMin));
+  EXPECT_EQ(Heal::Action::Reboot, r.action);
+  EXPECT_EQ(Heal::Cause::AllSlotsDown, r.cause);
+}
+
+TEST(MQTTSelfHealPolicy, AllSlotsDownAlertsOnceWithoutRebootAfterAnySelfHealReboot) {
+  for (uint8_t count = 1; count <= 5; count++) {
+    SCOPED_TRACE(count);
+    Harness h;
+    h.consecutive = count;
+    const uint32_t start = 40 * kMin;
+    const uint32_t hold = Heal::requiredHoldMs(h.cfg, Heal::Cause::AllSlotsDown, count);
+    h.tick(AllDown(start));
+    EXPECT_EQ(Heal::Action::None, h.tick(AllDown(start + hold - 1)).action);
+    Heal::Result r = h.tick(AllDown(start + hold));
+    ASSERT_EQ(Heal::Action::Alert, r.action);
+    EXPECT_EQ(Heal::Cause::AllSlotsDown, r.cause);
+    EXPECT_TRUE(r.reboot_suppressed);
+    for (uint32_t t = hold + kMin; t <= 7UL * 24 * 60 * kMin; t += kMin) {
+      EXPECT_EQ(Heal::Action::None, h.tick(AllDown(start + t)).action);
+    }
+  }
+}
+
+TEST(MQTTSelfHealPolicy, AllSlotsDownRebootAllowanceIsConfigurable) {
+  Harness h;
+  h.consecutive = 1;
+  h.cfg.all_down_max_reboots = 2;
+  const uint32_t start = 40 * kMin;
+  h.tick(AllDown(start));
+  Heal::Result r = h.tick(AllDown(start + 240 * kMin));
+  EXPECT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_FALSE(r.reboot_suppressed);
+  EXPECT_EQ(Heal::Action::Reboot, h.tick(AllDown(start + 241 * kMin)).action);
+
+  Harness disabled;
+  disabled.cfg.all_down_max_reboots = 0;
+  disabled.tick(AllDown(start));
+  r = disabled.tick(AllDown(start + 120 * kMin));
+  EXPECT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_TRUE(r.reboot_suppressed);
+  EXPECT_EQ(Heal::Action::None, disabled.tick(AllDown(start + 121 * kMin)).action);
+}
+
+TEST(MQTTSelfHealPolicy, StuckClientCausesKeepTheirFiveRebootLimit) {
+  for (Heal::Cause cause : {Heal::Cause::StopUnproven, Heal::Cause::ClientQuarantined}) {
+    for (uint8_t count = 1; count <= 5; count++) {
+      SCOPED_TRACE(Heal::causeLabel(cause));
+      SCOPED_TRACE(count);
+      Harness h;
+      h.consecutive = count;
+      const uint32_t start = 40 * kMin;
+      Heal::Inputs in = cause == Heal::Cause::StopUnproven ? Unproven(start) : Healthy(start);
+      in.client_quarantined = cause == Heal::Cause::ClientQuarantined;
+      h.tick(in);
+      const uint32_t hold = Heal::requiredHoldMs(h.cfg, cause, count);
+      in.now_ms = start + hold - 1;
+      EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+      in.now_ms++;
+      Heal::Result r = h.tick(in);
+      EXPECT_EQ(Heal::Action::Alert, r.action);
+      EXPECT_EQ(cause, r.cause);
+      EXPECT_EQ(count == 5, r.reboot_suppressed);
+      in.now_ms += h.cfg.alert_grace_ms - 1;
+      EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+      in.now_ms++;
+      r = h.tick(in);
+      EXPECT_EQ(count == 5 ? Heal::Action::None : Heal::Action::Reboot, r.action);
+      if (count < 5) EXPECT_EQ(cause, r.cause);
+    }
+  }
+}
+
+TEST(MQTTSelfHealPolicy, SuppressedAllSlotsDownCannotBlockAStuckClientReboot) {
+  for (Heal::Cause cause : {Heal::Cause::StopUnproven, Heal::Cause::ClientQuarantined}) {
+    Harness h;
+    h.consecutive = 1;
+    const uint32_t start = 40 * kMin;
+    h.tick(AllDown(start));
+    Heal::Inputs in = AllDown(start + 240 * kMin);
+    Heal::Result r = h.tick(in);
+    ASSERT_EQ(Heal::Action::Alert, r.action);
+    ASSERT_TRUE(r.reboot_suppressed);
+    in.stop_unproven = cause == Heal::Cause::StopUnproven;
+    in.client_quarantined = cause == Heal::Cause::ClientQuarantined;
+    h.tick(in);
+    in.now_ms += Heal::requiredHoldMs(h.cfg, cause, h.consecutive);
+    r = h.tick(in);
+    EXPECT_EQ(Heal::Action::Alert, r.action);
+    EXPECT_EQ(cause, r.cause);
+    EXPECT_FALSE(r.reboot_suppressed);
+    in.now_ms += h.cfg.alert_grace_ms;
+    r = h.tick(in);
+    EXPECT_EQ(Heal::Action::Reboot, r.action);
+    EXPECT_EQ(cause, r.cause);
+  }
+}
+
+TEST(MQTTSelfHealPolicy, PendingRebootOutranksASuppressedAllSlotsDownAlert) {
+  Harness h;
+  h.consecutive = 1;
+  h.cfg.all_slots_down_ms = h.cfg.stop_unproven_ms;
+  Heal::Inputs in = AllDown(40 * kMin);
+  in.stop_unproven = true;
+  h.tick(in);
+  in.now_ms += 20 * kMin;
+  EXPECT_EQ(Heal::Cause::StopUnproven, h.tick(in).cause);
+  in.now_ms += h.cfg.alert_grace_ms;
+  Heal::Result r = h.tick(in);
+  EXPECT_EQ(Heal::Action::Reboot, r.action);
+  EXPECT_EQ(Heal::Cause::StopUnproven, r.cause);
+}
+
+TEST(MQTTSelfHealPolicy, HealthyCounterResetRearmsAllSlotsDown) {
+  Harness h;
+  h.consecutive = 1;
+  const uint32_t start = 40 * kMin;
+  h.tick(AllDown(start));
+  EXPECT_TRUE(h.tick(AllDown(start + 240 * kMin)).reboot_suppressed);
+  h.tick(Healthy(start + 241 * kMin));
+  EXPECT_EQ(Heal::Action::ClearBootCounter, h.tick(Healthy(start + 251 * kMin)).action);
+  h.consecutive = 0;
+  const uint32_t again = start + 252 * kMin;
+  h.tick(AllDown(again));
+  Heal::Result r = h.tick(AllDown(again + 120 * kMin));
+  EXPECT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_FALSE(r.reboot_suppressed);
+  EXPECT_EQ(Heal::Action::Reboot, h.tick(AllDown(again + 121 * kMin)).action);
+}
+
 TEST(MQTTSelfHealPolicy, HealthyPeriodClearsBootCounterOnce) {
   Harness h;
   h.consecutive = 2;
@@ -470,6 +610,12 @@ TEST(MQTTSelfHealPolicy, AlertTextNamesCauseAndOutcome) {
   r.reboot_suppressed = true;
   Heal::formatAlert(r, cfg, buf, sizeof(buf));
   EXPECT_STREQ("MQTT self-heal: stop unproven for 10m, reboot limit reached", buf);
+
+  r.cause = Heal::Cause::AllSlotsDown;
+  r.held_ms = UINT32_MAX;
+  char suppressed[80];
+  EXPECT_LT(Heal::formatAlert(r, cfg, suppressed, sizeof(suppressed)), (int)sizeof(suppressed));
+  EXPECT_STREQ("MQTT self-heal: all slots down for 71582m, reboot limit reached", suppressed);
 }
 
 }  // namespace

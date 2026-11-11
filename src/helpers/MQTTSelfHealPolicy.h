@@ -50,6 +50,7 @@ struct Config {
   uint32_t evidence_max_age_ms;  // oldest NTP reply that still proves the internet is reachable
   uint8_t max_backoff_shift;   // hold time doubles per consecutive reboot, up to this
   uint8_t max_consecutive;     // stop rebooting after this many without recovery
+  uint8_t all_down_max_reboots;  // all-slots-down reboot allowance since last healthy
 };
 
 // A late stop ack and the breaker probe both resolve well inside these windows,
@@ -65,6 +66,7 @@ static inline Config defaultConfig() {
   c.evidence_max_age_ms = 60UL * 60UL * 1000UL;
   c.max_backoff_shift = 3;
   c.max_consecutive = 5;
+  c.all_down_max_reboots = 1;
   return c;
 }
 
@@ -158,6 +160,11 @@ static inline bool causePresent(const Inputs& in, const Config& cfg, Cause c) {
   }
 }
 
+static inline bool rebootSuppressed(const Config& cfg, Cause c, uint8_t consecutive_reboots) {
+  return consecutive_reboots >= cfg.max_consecutive ||
+         (c == Cause::AllSlotsDown && consecutive_reboots >= cfg.all_down_max_reboots);
+}
+
 static inline Result tick(State& st, const Inputs& in, const Config& cfg,
                           uint8_t consecutive_reboots) {
   Result r{};
@@ -206,10 +213,10 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
   }
   if (!st.uptime_ok) return r;
 
-  bool suppressed = consecutive_reboots >= cfg.max_consecutive;
-
   // A pending reboot outranks a new alert so the grace timer cannot be starved.
-  for (uint8_t i = 0; i < kCauseCount && !suppressed; i++) {
+  for (uint8_t i = 0; i < kCauseCount; i++) {
+    Cause c = (Cause)(i + 1);
+    if (rebootSuppressed(cfg, c, consecutive_reboots)) continue;
     if (!st.active[i] || !st.alerted[i]) continue;
     if ((uint32_t)(in.now_ms - st.alerted_ms[i]) >= cfg.alert_grace_ms) {
       r.action = Action::Reboot;
@@ -229,7 +236,7 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
       r.action = Action::Alert;
       r.cause = c;
       r.held_ms = held;
-      r.reboot_suppressed = suppressed;
+      r.reboot_suppressed = rebootSuppressed(cfg, c, consecutive_reboots);
       return r;
     }
   }
