@@ -50,6 +50,7 @@ public:
   virtual void restartBridge() {}
   virtual void restartBridgeSlot(int slot) { (void)slot; restartBridge(); }
   virtual bool beginDeferredOtaUpdate() { return false; }
+  virtual bool isDeferredOtaUpdatePending() { return false; }
   virtual bool syncMqttNtp() { return false; }
   virtual bool isMqttBridgeRunning() { return false; }
   virtual bool startWebConfig(bool force_ap, char* reply) { (void)force_ap; (void)reply; return false; }

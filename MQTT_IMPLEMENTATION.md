@@ -363,7 +363,7 @@ Observer builds update themselves from the release manifest on observer.gessaman
 
 | Command | Purpose |
 |---------|---------|
-| `ota check` | Report whether a newer build exists. Does not flash |
+| `ota check` | Start a background check or read its cached result and age. Does not flash |
 | `ota update` | Download and flash the newer build, then reboot (about 30 s offline) |
 | `ota branch` | Show the selected channel, the channel this build came from, and the manifest URL |
 | `ota branch prod` | Follow production (alias `stable`) |
@@ -377,11 +377,20 @@ Observer builds update themselves from the release manifest on observer.gessaman
 
 ```bash
 ota branch beta
-ota check     # update available: v1.18.0.3 (...) -> v1.18.0.7 (...) (channel switch)
+ota check     # check started; read again in a few seconds
+ota check     # [2s ago] update available: v1.18.0.3 (...) -> v1.18.0.7 (...) (channel switch)
 ota update
 ```
 
-`ota check` replies:
+`ota check` returns immediately. The first read starts a short-lived background task;
+read again in a few seconds for the result, prefixed with its age. Reads reuse the
+cache for 60 seconds, then return the cached result while starting one refresh.
+Errors are cached too. Changing channels requires a result for that channel.
+The bridge stays up, and a check does not defer MQTT self-heal. `ota update`
+refuses while a check runs; retry after it finishes.
+Checks are refused while an accepted update is pending or executing.
+
+Cached `ota check` replies include:
 
 - `up to date: <version>`
 - `update available: <current> -> <new> (<n> behind | new base | channel switch)`

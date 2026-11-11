@@ -43,6 +43,8 @@ on:
       # Throwaway build worktrees never affect the binaries.
       - '.build-wt-*'
       - '.build-wt-*/**'
+      # The crash collector runs on a host and is never compiled into firmware.
+      - 'tools/observer_crash_collector/**'
 
 # Own group: serialize beta builds against each other only. Concurrency groups are
 # repo-wide, not per-branch, so sharing one with the production workflows let an

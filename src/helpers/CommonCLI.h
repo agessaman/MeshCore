@@ -354,6 +354,7 @@ public:
   virtual bool beginDeferredOtaUpdate() {
     return false;
   };
+  virtual bool isDeferredOtaUpdatePending() { return false; }
 
   virtual int getQueueSize() {
     return 0; // no op by default
@@ -446,6 +447,7 @@ class CommonCLI {
     void restartBridge() override { _cli->_callbacks->restartBridge(); }
     void restartBridgeSlot(int slot) override { _cli->_callbacks->restartBridgeSlot(slot); }
     bool beginDeferredOtaUpdate() override { return _cli->_callbacks->beginDeferredOtaUpdate(); }
+    bool isDeferredOtaUpdatePending() override { return _cli->_callbacks->isDeferredOtaUpdatePending(); }
     bool syncMqttNtp() override { return _cli->_callbacks->syncMqttNtp(); }
     bool isMqttBridgeRunning() override { return _cli->_callbacks->isMqttBridgeRunning(); }
     bool startWebConfig(bool force_ap, char* reply) override { return _cli->_callbacks->startWebConfig(force_ap, reply); }

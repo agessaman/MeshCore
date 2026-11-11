@@ -400,6 +400,7 @@ public:
   void prepareBridgeStart(MQTTBridge* b, bool restart);
   void setAlertBridge(MQTTBridge* b) { _alerter.setBridge(b); }
   bool flashFromManifest(char* reply);
+  bool isDeferredOtaUpdatePending() override { return _bridge_ctl.otaPending(_ota_update_at); }
   void rebootForSelfHeal() { _cli.getBoard()->reboot(); }
   bool isOtaInProgress() {
     return _ota_update_at != 0 || _cli.getBoard()->isOTAPortalOpen() ||

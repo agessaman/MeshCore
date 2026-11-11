@@ -5690,10 +5690,11 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
 
   // Bound how long a synchronous QoS0 publish (see publishToSlot) can block the MQTT
   // task on a stalled/half-open socket before esp-mqtt aborts the write. Default is 10s;
-  // 2.5s lets a first stall resolve fast (write fails → slot flips to disconnected →
+  // 3.5s lets a first stall resolve fast (write fails → slot flips to disconnected →
   // subsequent packets skip it) without holding up publishing to the other slots. Mesh
   // RX (Core 1) and the WiFi/TCP stack are unaffected by this block regardless.
-  client->setNetworkTimeout(2500);
+  // It also bounds the TCP connect; lwIP resends a lost SYN 2.5-3.0 s after the first.
+  client->setNetworkTimeout(3500);
 
   // Dormant safety net: cap the esp-mqtt outbox for any residual async QoS0 path. QoS0
   // packets now publish synchronously (store=false, no outbox), so this normally never

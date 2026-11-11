@@ -169,6 +169,8 @@ public:
   bool isOTAPortalOpen() const override;
   void maintainOTAUpdate(uint32_t now_ms) override;
   bool otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) override;
+  // current_ver must have static lifetime, like FIRMWARE_VERSION.
+  void otaCheck(uint8_t channel, const char* current_ver, char reply[]) override;
   // Heavy body (TLS + JSON / HTTPUpdate). Runs in a dedicated large-stack task
   // spawned by otaFromManifest() — public only so that task entry point can call
   // it; not meant to be invoked directly.

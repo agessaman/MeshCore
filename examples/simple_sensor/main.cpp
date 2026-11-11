@@ -154,6 +154,7 @@ void loop() {
     command[0] = 0;  // reset command buffer
   }
 
+  board.maintainOTAUpdate(millis());   // run the deferred restart armed by "start ota"
   board.loop();   // let the board feed its watchdog, run periodic housekeeping
 
   the_mesh.loop();
