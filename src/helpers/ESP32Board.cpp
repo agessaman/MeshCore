@@ -158,6 +158,17 @@ bool ESP32Board::isOTAPortalOpen() const {
 }
 
 void ESP32Board::maintainOTAUpdate(uint32_t now_ms) {
+  bool client_closed = false;
+  uint32_t armed_ms = 0;
+  if (AsyncElegantOTA.restartArmed(armed_ms, client_closed)) {
+    if (NetworkPolicy::manualOtaRestartDue(now_ms, armed_ms, client_closed)) {
+      Serial.println("OTA: restarting after upload reply");
+      Serial.flush();
+      ESP.restart();
+    }
+    return;
+  }
+
   if (!ota_server_running || Update.isRunning()) return;
   if (!NetworkPolicy::manualOtaTimeoutDue(now_ms, ota_started_at, false)) return;
   char reply[160];
