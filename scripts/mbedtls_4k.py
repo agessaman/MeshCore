@@ -1,7 +1,7 @@
 """Link the reduced-TLS mbedTLS archives, and prove they were actually linked.
 
-Opt in per build with MESHCORE_REDUCED_TLS=1. Off by default, so an ordinary build
-needs no 6 MB artifact and behaves exactly as before.
+Use MESHCORE_REDUCED_TLS=auto for non-PSRAM MQTT observers, or 1 to force it.
+Off by default, so an ordinary build needs no artifact and behaves as before.
 
     MESHCORE_REDUCED_TLS=1 pio run -e Heltec_v3_repeater_observer_mqtt
 
@@ -28,6 +28,7 @@ from our directory.
 """
 Import("env")
 
+import atexit
 import hashlib
 import os
 import sys
@@ -35,7 +36,18 @@ import sys
 REQUIRED = ("libmbedcrypto.a", "libmbedtls_2.a", "libmbedtls.a", "libmbedx509.a")
 
 
+_summary_printed = False
+
+
+def _summary(status):
+    global _summary_printed
+    if not _summary_printed:
+        print("reduced-TLS: %s: %s" % (env.subst("$PIOENV"), status))
+        _summary_printed = True
+
+
 def _fail(msg):
+    _summary("not applied (validation failed)")
     print("\n*** reduced-TLS build failed ***", file=sys.stderr)
     print(msg, file=sys.stderr)
     print(
@@ -99,21 +111,42 @@ def _framework_lib_dir(platform, arch):
     return None
 
 
-if os.environ.get("MESHCORE_REDUCED_TLS", "") not in ("1", "true", "yes"):
+mode = os.environ.get("MESHCORE_REDUCED_TLS")
+if mode is None:
     Return()
+atexit.register(_summary, "not applied (linker map check did not run)")
+if mode not in ("auto", "1", "true", "yes"):
+    _summary("not applied (disabled)")
+    Return()
+
+if mode == "auto":
+    # Pre scripts run before ProcessProgramDeps populates CPPDEFINES.
+    flags = [env.BoardConfig().get("build.extra_flags", []),
+             env.GetProjectOption("build_flags", [])]
+    parsed = env.ParseFlags(flags).get("CPPDEFINES", [])
+    defines = {item[0] if isinstance(item, (tuple, list)) else item for item in parsed}
+    if "WITH_MQTT_BRIDGE" not in defines:
+        _summary("not applied (not an observer)")
+        Return()
+    if "BOARD_HAS_PSRAM" in defines:
+        _summary("not applied (PSRAM)")
+        Return()
 
 project_dir = env.subst("$PROJECT_DIR")
 arch = env.BoardConfig().get("build.mcu", "")
 if not arch:
     _fail("could not determine board MCU, so cannot pick an archive set")
 
+wanted, stock, manifest_platform = _manifest(project_dir, arch)
+if not wanted:
+    if mode == "auto":
+        _summary("not applied (no archives for %s)" % arch)
+        Return()
+    _fail("manifest has no entries for arch '%s'" % arch)
+
 staged = os.path.join(project_dir, ".mbedtls-4k", arch)
 if not os.path.isdir(staged):
     _fail("no archives for %s at %s" % (arch, staged))
-
-wanted, stock, manifest_platform = _manifest(project_dir, arch)
-if not wanted:
-    _fail("manifest has no entries for arch '%s'" % arch)
 
 for name in REQUIRED:
     archive = os.path.join(staged, name)
@@ -167,13 +200,14 @@ for name in REQUIRED:
 if manifest_platform and manifest_platform != platform_id:
     # Hashes are the check; the version string is orientation. Identical archives
     # under a renamed platform are not a compatibility problem.
-    print("reduced-TLS: manifest says %s, installed is %s — archives match, so this is "
+    print("mbedTLS: manifest says %s, installed is %s — archives match, so this is "
           "only a stale label" % (manifest_platform, platform_id))
 
 # Prepend so these satisfy mbedTLS symbols ahead of the framework's own copies:
 # the linker takes each archive member from the first archive that resolves it.
 env.Prepend(LIBPATH=[staged])
-print("reduced-TLS: linking mbedTLS from %s (verified)" % staged)
+env.AppendUnique(CPPDEFINES=[("MQTT_TLS_OUT_RECORD_LEN", 4096)])
+_map_verified = False
 
 
 def _verify_map(source, target, env):
@@ -186,6 +220,9 @@ def _verify_map(source, target, env):
     """
     # Derive the map name from PROGNAME rather than hardcoding firmware.map, so a
     # renamed program cannot leave us inspecting a stale or absent file.
+    global _map_verified
+    if _map_verified:
+        return
     map_path = os.path.join(env.subst("$BUILD_DIR"),
                             env.subst("${PROGNAME}") + ".map")
     if not os.path.isfile(map_path):
@@ -197,6 +234,7 @@ def _verify_map(source, target, env):
         print("Cannot prove the reduced-TLS archives were linked. Ensure the env "
               "emits a map (-Wl,-Map), or unset MESHCORE_REDUCED_TLS.",
               file=sys.stderr)
+        _summary("not applied (linker map verification failed)")
         env.Exit(1)
         return
     # The map records whatever the linker was given, which for a -L hit is a path
@@ -223,6 +261,7 @@ def _verify_map(source, target, env):
               file=sys.stderr)
         for path in sorted(stray):
             print("  " + path, file=sys.stderr)
+        _summary("not applied (linker map verification failed)")
         env.Exit(1)
         return
     # Every required archive must appear. Seeing only some of them means the rest
@@ -235,10 +274,24 @@ def _verify_map(source, target, env):
         print("  missing: " + ", ".join(missing), file=sys.stderr)
         print("Either the map format changed or mbedTLS was resolved elsewhere; "
               "the reduced buffers cannot be assumed.", file=sys.stderr)
+        _summary("not applied (linker map verification failed)")
         env.Exit(1)
         return
-    print("reduced-TLS: confirmed all %d archives linked from %s"
+    _map_verified = True
+    print("mbedTLS: confirmed all %d archives linked from %s"
           % (len(REQUIRED), staged))
+    _summary("active")
 
 
-env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", _verify_map)
+# ESP32's builder renames the default program after pre scripts run.
+program_name = env.subst("${PROGNAME}")
+if program_name == "program":
+    program_name = "firmware"
+program_path = os.path.join(env.subst("$BUILD_DIR"), program_name)
+env.AddPostAction(program_path + ".elf", _verify_map)
+
+# Check cached links too, before producing or reusing the binary.
+verify = env.Alias("verify_reduced_tls", program_path + ".elf", _verify_map)
+env.AlwaysBuild(verify)
+env.Depends(program_path + ".bin", verify)
+env.Default(verify)

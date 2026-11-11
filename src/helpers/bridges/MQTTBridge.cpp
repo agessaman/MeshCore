@@ -1016,6 +1016,10 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("PSRAM: not configured for this board (no BOARD_HAS_PSRAM)");
   #endif
 
+  #ifdef MQTT_TLS_OUT_RECORD_LEN
+  MQTT_DEBUG_PRINTLN("TLS outbound record: %d bytes (reduced)", MQTT_TLS_OUT_RECORD_LEN);
+  #endif
+
   // Install the TLS allocator before the bridge task exists, so no TLS session depends on NTP ordering.
   installTlsAllocatorOnce();
 

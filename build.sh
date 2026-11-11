@@ -41,6 +41,7 @@ Build all kiss radio firmwares
 $ sh build.sh build-kiss-radio-firmwares
 
 Environment Variables:
+  MESHCORE_REDUCED_TLS=0: Disables reduced TLS for observer release builds (default: auto).
   DISABLE_DEBUG=1: Disables all debug logging flags (MESH_DEBUG, MESH_PACKET_LOGGING, etc.)
                    If not set, debug flags from variant platformio.ini files are used.
 
@@ -218,6 +219,15 @@ build_firmware() {
 
   # disable debug flags if requested
   disable_debug_flags
+
+  # Scope the observer default to this target, including the merged binary.
+  case "$1" in
+    *observer*)
+      scripts/fetch_mbedtls_4k.sh --all
+      local MESHCORE_REDUCED_TLS="${MESHCORE_REDUCED_TLS-auto}"
+      export MESHCORE_REDUCED_TLS
+      ;;
+  esac
 
   # build firmware target
   pio run -e $1
