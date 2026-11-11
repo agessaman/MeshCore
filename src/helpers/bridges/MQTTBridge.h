@@ -315,7 +315,7 @@ private:
   // reported time but never sets the system clock or the RTC. A read reports the last
   // completed probe and asks the MQTT task (Core 0) for a fresh one when the snapshot is
   // missing or stale, so the caller never waits. _ntp_diag_seq is odd while the task
-  // publishes, which lets a reader copy a consistent table.
+  // publishes. The table copy is a short critical section.
   std::atomic<uint32_t> _ntp_diag_request_id{0};    // bumped by a reader wanting fresh results
   std::atomic<uint32_t> _ntp_diag_running_id{0};    // id the MQTT task is probing for (0 = idle)
   std::atomic<uint32_t> _ntp_diag_completed_id{0};  // id the published snapshot belongs to
@@ -333,6 +333,10 @@ private:
   };
   NtpDiagResult _ntp_diag_results[kMaxNtpServers];
   int _ntp_diag_count;
+#ifdef ESP_PLATFORM
+  // Snapshot memcpy only. Network probes stay outside this lock.
+  mutable portMUX_TYPE _ntp_diag_mux = portMUX_INITIALIZER_UNLOCKED;
+#endif
   // How stale a snapshot may be before a read asks for a fresh probe.
   static const uint32_t kNtpDiagRefreshMs = 30000;
 
@@ -418,7 +422,8 @@ private:
   // failed. See the worst-case test in test_mqtt_payload_builder.
   // Raised to 1152 for the self-heal fields, which left 20 bytes at the maxima; the
   // status build has no stack fallback any more, so this costs no RAM.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 1152;
+  // 1280 keeps a maximum-width crash field on that same payload.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1280;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
   // The status `crash` fragment is formatted into the scratch tail past the status JSON.
@@ -427,6 +432,7 @@ private:
                 "crash fragment must fit in the scratch tail");
   #if defined(BOARD_HAS_PSRAM)
   char* _json_scratch_buffer;
+  unsigned long _json_scratch_retry_ms;  // 0 = eligible; else millis() of the last try
   #else
   char _json_scratch_buffer[PUBLISH_JSON_BUFFER_SIZE];
   #endif
@@ -670,6 +676,8 @@ private:
   // transient heap shortage costs only the publishes that need the missing one.
   void allocateRuntimeBuffers();
   void releaseRuntimeBuffers();
+  // PSRAM only: the inline non-PSRAM buffer cannot be null.
+  void retryPublishScratchIfMissing();
 
   // --- Cooperative lifecycle (Phase 5) ---------------------------------------
   // The pure state machine, bounded stop timeout, and OTA barrier live in
