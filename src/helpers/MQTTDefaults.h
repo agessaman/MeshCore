@@ -73,6 +73,7 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_advert_verify = 0;
   prefs->mqtt_status_interval = 300000;
   prefs->mqtt_breaker_probe_min = MQTTConnectionPolicy::kBreakerProbeDefaultMinutes;
+  prefs->mqtt_selfheal_enabled = 0;  // opt-in
   prefs->wifi_power_save = 1;
   prefs->wifi_tx_power = 0;  // board default
 

@@ -311,13 +311,17 @@ private:
   volatile bool _ntp_force_done;
   volatile bool _ntp_force_result;
 
-  // CLI-requested NTP connectivity diagnostic, marshalled onto the MQTT task (Core 0)
-  // with the same handshake as the forced sync. Probe-only: it queries each server and
-  // records the reported time but never sets the system clock or the RTC, so the
-  // system clock is left untouched. Results are written by the task and read by the CLI
-  // thread once _ntp_diag_done is set.
-  volatile bool _ntp_diag_requested;
-  volatile bool _ntp_diag_done;
+  // CLI-requested NTP connectivity diagnostic. Probe-only: it records each server's
+  // reported time but never sets the system clock or the RTC. A read reports the last
+  // completed probe and asks the MQTT task (Core 0) for a fresh one when the snapshot is
+  // missing or stale, so the caller never waits. _ntp_diag_seq is odd while the task
+  // publishes. The table copy is a short critical section.
+  std::atomic<uint32_t> _ntp_diag_request_id{0};    // bumped by a reader wanting fresh results
+  std::atomic<uint32_t> _ntp_diag_running_id{0};    // id the MQTT task is probing for (0 = idle)
+  std::atomic<uint32_t> _ntp_diag_completed_id{0};  // id the published snapshot belongs to
+  std::atomic<uint32_t> _ntp_diag_seq{0};           // odd while the snapshot is being written
+  std::atomic<uint32_t> _ntp_diag_started_ms{0};    // when the running probe began
+  std::atomic<uint32_t> _ntp_diag_completed_ms{0};  // when the snapshot was published
   struct NtpDiagResult {
     char     server[64];
     bool     ok;
@@ -329,6 +333,28 @@ private:
   };
   NtpDiagResult _ntp_diag_results[kMaxNtpServers];
   int _ntp_diag_count;
+#ifdef ESP_PLATFORM
+  // Snapshot memcpy only. Network probes stay outside this lock.
+  mutable portMUX_TYPE _ntp_diag_mux = portMUX_INITIALIZER_UNLOCKED;
+#endif
+  // How stale a snapshot may be before a read asks for a fresh probe.
+  static const uint32_t kNtpDiagRefreshMs = 30000;
+
+  // millis() of the last NTP reply that passed validation (0 = none); any probe sets it.
+  std::atomic<uint32_t> _ntp_reply_ms{0};
+  // Bridge-task-only: last reachability probe made while no slot was connected.
+  uint32_t _last_reachability_probe_ms = 0;
+  static const uint32_t kReachabilityProbeIntervalMs = 20UL * 60UL * 1000UL;
+  uint8_t _reachability_server_idx = 0;  // bridge-task-only: next server, one per round
+
+  // Bit i set while slot i is connected; one atomic word so a reader never sees a torn scan.
+  std::atomic<uint8_t> _connected_mask{0};
+  static_assert(RUNTIME_MQTT_SLOTS <= 8, "_connected_mask holds one bit per slot");
+  void noteSlotConnected(int index, bool up) {
+    const uint8_t bit = (uint8_t)(1u << index);
+    if (up) _connected_mask.fetch_or(bit, std::memory_order_release);
+    else _connected_mask.fetch_and((uint8_t)~bit, std::memory_order_release);
+  }
 
   // Cooperative-shutdown handshake. The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
@@ -394,11 +420,19 @@ private:
   // entirely. Raised to 1024: no extra RAM while status serializes into the shared scratch
   // buffer, but +256 B of bridge-task stack in the fallback used if the PSRAM allocation
   // failed. See the worst-case test in test_mqtt_payload_builder.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
+  // Raised to 1152 for the self-heal fields, which left 20 bytes at the maxima; the
+  // status build has no stack fallback any more, so this costs no RAM.
+  // 1280 keeps a maximum-width crash field on that same payload.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1280;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
+  // The status `crash` fragment is formatted into the scratch tail past the status JSON.
+  static const size_t STATUS_CRASH_FRAGMENT_SIZE = 160;
+  static_assert(STATUS_JSON_BUFFER_SIZE + STATUS_CRASH_FRAGMENT_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
+                "crash fragment must fit in the scratch tail");
   #if defined(BOARD_HAS_PSRAM)
   char* _json_scratch_buffer;
+  unsigned long _json_scratch_retry_ms;  // 0 = eligible; else millis() of the last try
   #else
   char _json_scratch_buffer[PUBLISH_JSON_BUFFER_SIZE];
   #endif
@@ -489,8 +523,13 @@ private:
   static const unsigned long CONFIG_WARNING_INTERVAL = 300000; // Log every 5 minutes max
 
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
+  int8_t _guard_armed_by_slot;             // slot whose first setup armed that guard; -1 = anything else
   // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
   std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
+  // Free-stack bytes each task last measured for itself; 0 = no sample yet.
+  std::atomic<uint32_t> _stack_free_bridge{0};
+  std::atomic<uint32_t> _stack_free_slot[RUNTIME_MQTT_SLOTS] = {};
+  void noteSlotTaskStack(int index);
 
   // Optional pointers for collecting stats internally (set by mesh if available)
   mesh::Dispatcher* _dispatcher;  // For air times and errors
@@ -565,6 +604,9 @@ private:
   // (uninitialised client, failed config transaction) is not a broker fault and
   // must not advance this slot's backoff ladder — see maintainSlotConnection().
   esp_err_t reconnectSlotClient(int index);
+  void beginDeferredSlotSetup();       // Arm one-slot setup after NTP; clear a stale guard if none are up
+  bool pendingReconfigureConnects(int index) const; // predicts a connect so the request waits for the guard
+  void applyPendingSlotReconfigures(); // Apply at most one queued reconfigure; connecting ones honor the guard
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
@@ -604,7 +646,13 @@ private:
   void dequeuePacket();
   bool isAnySlotConnected();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
-  void runNtpDiagProbe();  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  void runNtpDiagProbe(uint32_t probe_id);  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  // Probe one server per call, rotating, to keep reachability evidence fresh; never sets the clock. Core 0 only.
+  void probeNtpReachability();
+  // Copies the published diag snapshot on the caller's task. False when the task
+  // was publishing throughout the attempt.
+  bool copyNtpDiagSnapshot(NtpDiagResult* out, int* count_out,
+                           uint32_t* completed_id_out, uint32_t* age_ms_out) const;
   // One validated NTP exchange with one server on a fresh ephemeral socket.
   // Core 0 only; never touches the clock. *why receives a static reason literal.
   bool probeNtpServer(const char* server, uint32_t min_epoch,
@@ -624,11 +672,12 @@ private:
   void getClientVersion(char* buffer, size_t buffer_size) const;
   void logMemoryStatus();
   void refreshOriginFromPrefs();
-  // begin()/end()-scoped PSRAM buffers. Each allocation is independent so a
-  // transient heap shortage degrades to the existing stack fallback instead
-  // of making the bridge unusable.
+  // begin()/end()-scoped PSRAM buffers. Each allocation is independent, so a
+  // transient heap shortage costs only the publishes that need the missing one.
   void allocateRuntimeBuffers();
   void releaseRuntimeBuffers();
+  // PSRAM only: the inline non-PSRAM buffer cannot be null.
+  void retryPublishScratchIfMissing();
 
   // --- Cooperative lifecycle (Phase 5) ---------------------------------------
   // The pure state machine, bounded stop timeout, and OTA barrier live in
@@ -674,7 +723,7 @@ public:
    * @param preset_name Preset name: "analyzer-us", "analyzer-eu", "nz-analyzer", "meshmapper", "custom", "none"
    */
   void setSlotPreset(int slot_index, const char* preset_name);
-  void applySlotPreset(int slot_index, const char* preset_name);
+  bool applySlotPreset(int slot_index, const char* preset_name); // true when a connection attempt started
 
   /**
    * Configure custom broker settings for a slot. Only applies when the
@@ -774,6 +823,20 @@ public:
   // still explain why a stopped bridge will not come back without a reboot.
   static bool stopUnprovenLatched();
 
+  // Self-heal sampling from the loop task: plain reads of state the bridge task owns.
+  static const uint32_t kNoNtpEvidence = UINT32_MAX;
+  // ms since the last validated NTP reply, or kNoNtpEvidence.
+  uint32_t ntpEvidenceAgeMs() const;
+  bool anyClientQuarantined() const;
+  bool isNetworkUp() const { return _network && _network->isConnected(); }
+  uint8_t enabledSlotCount() const;
+  // Enabled, configured slots whose last failure was not a broker refusal.
+  uint8_t candidateSlotCount() const;
+  // One atomic load, not a scan, so a sample cannot miss a slot that was always up.
+  uint8_t connectedSlotCount() const {
+    return (uint8_t)__builtin_popcount(_connected_mask.load(std::memory_order_acquire));
+  }
+
   static unsigned long getWifiConnectedAtMillis();
 
   /**
@@ -839,6 +902,8 @@ public:
   /** On-demand publish-health + heap snapshot for `get mqtt.stats` (per-slot ok/err,
    *  outbox size, free/max heap, queue depth). */
   static void formatMqttStatsReply(char* buf, size_t bufsize);
+  /** Free-stack bytes per task for `get mqtt.stacks`. */
+  static void formatMqttStacksReply(char* buf, size_t bufsize);
   /** Apply a saved mqtt.breaker.interval to the running bridge. */
   static void setBreakerProbeMinutes(uint8_t minutes);
   /** Structured per-slot snapshot for the webconfig stats endpoint. Same state

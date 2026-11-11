@@ -71,6 +71,7 @@ public:
   }
   virtual bool stopOTAUpdate(char* reply) { (void)reply; return false; }
   virtual bool isOTAUpdateInProgress() const { return false; }
+  virtual bool isOTAPortalOpen() const { return false; }
   virtual void maintainOTAUpdate(uint32_t now_ms) { (void)now_ms; }
   // Pull-based OTA: fetch the firmware build for this variant from a baked-in manifest and flash it.
   // current_ver is the running firmware version string (used to skip if already up to date); when

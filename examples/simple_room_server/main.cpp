@@ -2,6 +2,7 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#include <helpers/CrashReport.h>
 
 #ifdef ETHERNET_ENABLED
   #define ETHERNET_CLI_BANNER "MeshCore Room Server CLI"
@@ -32,6 +33,7 @@ void setup() {
   delay(1000);
 
   board.begin();
+  CrashReport::captureAtBoot();
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();

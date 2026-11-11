@@ -50,35 +50,38 @@ private:
   static size_t base64UrlEncode(const uint8_t* input, size_t inputLen, char* output, size_t outputSize);
   
   /**
-   * Create JWT header
-   * 
-   * @param output Output buffer
-   * @param outputSize Size of output buffer
-   * @return Length of header, or 0 on error
+   * Check the signature hex that follows the header.payload prefix in a finished token
+   *
+   * @param identity Identity whose public key signed the token
+   * @param token Token holding header.payload.signatureHex
+   * @param signingLen Length of the header.payload prefix
+   * @return true if the signature verifies
    */
-  static size_t createHeader(char* output, size_t outputSize);
+  static bool verifyTokenSignature(const mesh::Identity& identity, const char* token, size_t signingLen);
   
   /**
    * Create JWT payload
    * 
-   * @param publicKey Public key in hex format
+   * @param publicKey Raw public key (PUB_KEY_SIZE bytes), encoded as uppercase hex
    * @param audience Audience string
    * @param issuedAt Issued at timestamp
    * @param expiresIn Expiration time in seconds (0 for no expiration)
    * @param output Output buffer
    * @param outputSize Size of output buffer
+   * @param maxLen Longest encoded payload the caller can accept (output is left untouched if exceeded)
    * @param owner Optional owner public key in hex format (nullptr if not set)
    * @param client Optional client string (nullptr if not set)
    * @param email Optional email address (nullptr if not set)
    * @return Length of payload, or 0 on error
    */
   static size_t createPayload(
-    const char* publicKey,
+    const uint8_t* publicKey,
     const char* audience,
     unsigned long issuedAt,
     unsigned long expiresIn,
     char* output,
     size_t outputSize,
+    size_t maxLen,
     const char* owner = nullptr,
     const char* client = nullptr,
     const char* email = nullptr
