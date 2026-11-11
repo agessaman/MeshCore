@@ -69,7 +69,9 @@ public:
     const char* repeat = nullptr,
     const MQTTConnHealth& conn_health = MQTTConnHealth(),
     int heap_min = -1,
-    const char* reset_reason = nullptr
+    const char* reset_reason = nullptr,
+    const char* crash_json = nullptr,
+    bool* crash_included = nullptr
   );
 
   static int buildPacketMessage(

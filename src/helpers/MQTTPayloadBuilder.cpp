@@ -48,8 +48,11 @@ int MQTTPayloadBuilder::buildStatusMessage(
   const char* repeat,
   const MQTTConnHealth& conn_health,
   int heap_min,
-  const char* reset_reason
+  const char* reset_reason,
+  const char* crash_json,
+  bool* crash_included
 ) {
+  if (crash_included != nullptr) *crash_included = false;
   doc.clear();
   JsonObject root = doc.to<JsonObject>();
 
@@ -105,6 +108,17 @@ int MQTTPayloadBuilder::buildStatusMessage(
     if (conn_health.slots_breaker > 0) {
       stats["mqtt_slots_breaker"] = conn_health.slots_breaker;
     }
+  }
+
+  // Pre-formatted JSON object; dropped rather than lose the whole status when it does not fit.
+  if (crash_json != nullptr && crash_json[0] != '\0' &&
+      root["crash"].set(serialized(crash_json))) {
+    int len = serializeComplete(root, buffer, buffer_size);
+    if (len > 0) {
+      if (crash_included != nullptr) *crash_included = true;
+      return len;
+    }
+    root.remove("crash");
   }
 
   return serializeComplete(root, buffer, buffer_size);
