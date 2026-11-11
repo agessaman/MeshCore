@@ -153,6 +153,10 @@ bool ESP32Board::isOTAUpdateInProgress() const {
   return ota_server_running && Update.isRunning();
 }
 
+bool ESP32Board::isOTAPortalOpen() const {
+  return ota_server_running;
+}
+
 void ESP32Board::maintainOTAUpdate(uint32_t now_ms) {
   if (!ota_server_running || Update.isRunning()) return;
   if (!NetworkPolicy::manualOtaTimeoutDue(now_ms, ota_started_at, false)) return;
@@ -170,6 +174,9 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
   return false;
 }
 bool ESP32Board::isOTAUpdateInProgress() const {
+  return false;
+}
+bool ESP32Board::isOTAPortalOpen() const {
   return false;
 }
 void ESP32Board::maintainOTAUpdate(uint32_t now_ms) {

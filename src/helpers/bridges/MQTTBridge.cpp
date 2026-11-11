@@ -1348,6 +1348,7 @@ void MQTTBridge::pollLateStopAck() {
   if (!_stop_acked.load(std::memory_order_acquire)) return;
   MQTT_DEBUG_PRINTLN("MQTT task acknowledged its stop late - releasing withheld resources");
   _lifecycle.onTaskStopped();   // StopUnproven -> Stopped: releaseResources()
+  vTaskDelay(pdMS_TO_TICKS(MQTT_POST_STOP_SETTLE_MS));
   s_stop_unproven = false;
 #endif
 }

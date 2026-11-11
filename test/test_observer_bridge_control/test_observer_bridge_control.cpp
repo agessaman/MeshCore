@@ -144,7 +144,9 @@ struct FakeHost {
   }
   void rebootForSelfHeal() { calls.push_back("reboot"); }
   bool ota = false;
-  bool isOtaInProgress() { return ota; }
+  uint32_t ota_update_at = 0;
+  bool portal_open = false;
+  bool isOtaInProgress() { return ota_update_at != 0 || portal_open || ota; }
 };
 
 using Ctl = ObserverBridgeControl<FakeBridge, FakeLog, FakeHealPlatform>;
@@ -167,8 +169,8 @@ protected:
 
 }  // namespace
 
-TEST(ObserverBridgeControlSize, FlagsFitInFourBytesBesideSelfHealState) {
-  EXPECT_LE(sizeof(Ctl), 4u + sizeof(Ctl::SelfHeal));
+TEST(ObserverBridgeControlSize, FlagsAndBatchClockFitInEightBytesBesideSelfHealState) {
+  EXPECT_LE(sizeof(Ctl), 8u + sizeof(Ctl::SelfHeal));
   EXPECT_LE(sizeof(Ctl::SelfHeal), 48u);
 }
 
@@ -408,6 +410,23 @@ TEST_F(ObserverBridgeControlTest, OtaIdleLatchOnlyBlocksInStrictMode) {
   EXPECT_FALSE(bridge->running);
 }
 
+TEST_F(ObserverBridgeControlTest, StrictOtaAfterExplicitLateAckPreservesTimeoutBarrier) {
+  startRunning();
+  bridge->next_stop_times_out = true;
+  ctl.setState(host, bridge, false);
+  ASSERT_FALSE(bridge->canFlashAfterStop());
+  bridge->late_acked = true;
+  ctl.poll(host, bridge);
+  ASSERT_FALSE(bridge->unproven);
+  ASSERT_TRUE(bridge->stop_timed_out);
+  host.calls.clear();
+
+  ctl.runOta(host, bridge, true);
+  EXPECT_EQ((std::vector<std::string>{"drain", "pollLateStopAck"}), host.calls);
+  EXPECT_FALSE(bridge->running);
+  EXPECT_FALSE(ctl.resumePending());
+}
+
 TEST_F(ObserverBridgeControlTest, OtaRestoresPendingResumeConsumedByItsLateAckPoll) {
   startRunning();
   bridge->next_stop_times_out = true;
@@ -576,6 +595,92 @@ TEST_F(ObserverSelfHealTest, OtaInProgressBlocksTheRebootAndNeedsAFreshAlert) {
   EXPECT_TRUE(host.calls.empty());
   pollAt(start + 32 * kMin);
   EXPECT_EQ((std::vector<std::string>{"rtc:1:stop unproven", "reboot"}), host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, ScheduledOtaBlocksDueRebootUntilFreshAlertAndGrace) {
+  makeStopUnproven();
+  pollAt(40 * kMin);
+  pollAt(50 * kMin);
+  ASSERT_EQ(1u, host.calls.size());
+  host.calls.clear();
+
+  host.ota_update_at = 51 * kMin + 2500;
+  pollAt(51 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  host.ota_update_at = 0;
+  pollAt(51 * kMin + 10000);
+  ASSERT_EQ(1u, host.calls.size());
+  EXPECT_EQ(0u, host.calls[0].find("alert:"));
+  host.calls.clear();
+  pollAt(52 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(52 * kMin + 10000);
+  EXPECT_EQ((std::vector<std::string>{"rtc:1:stop unproven", "reboot"}), host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, IdlePortalBlocksDueReboot) {
+  makeStopUnproven();
+  pollAt(40 * kMin);
+  pollAt(50 * kMin);
+  host.calls.clear();
+  host.portal_open = true;
+  pollAt(51 * kMin);
+  pollAt(60 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  host.portal_open = false;
+  pollAt(61 * kMin);
+  ASSERT_EQ(1u, host.calls.size());
+  EXPECT_EQ(0u, host.calls[0].find("alert:"));
+}
+
+TEST_F(ObserverSelfHealTest, ConfigBatchDefersRebootUntilEndAndFreshGrace) {
+  makeStopUnproven();
+  pollAt(40 * kMin);
+  pollAt(50 * kMin);
+  host.calls.clear();
+  ctl.beginConfigBatch();
+  pollAt(51 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  ctl.endConfigBatch(host, bridge, 3);
+  pollAt(51 * kMin + 10000);
+  ASSERT_EQ(1u, host.calls.size());
+  EXPECT_EQ(0u, host.calls[0].find("alert:"));
+  host.calls.clear();
+  pollAt(52 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(52 * kMin + 10000);
+  EXPECT_EQ((std::vector<std::string>{"rtc:1:stop unproven", "reboot"}), host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, AbandonedConfigBatchOnlyBlocksForTwoMinutes) {
+  makeStopUnproven();
+  pollAt(40 * kMin);
+  pollAt(50 * kMin);
+  host.calls.clear();
+  ctl.beginConfigBatch();
+  pollAt(52 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(52 * kMin);
+  ASSERT_EQ(1u, host.calls.size());
+  EXPECT_EQ(0u, host.calls[0].find("alert:"));
+  host.calls.clear();
+  pollAt(53 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"rtc:1:stop unproven", "reboot"}), host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, ConfigBatchBusyBoundSurvivesClockRollover) {
+  makeStopUnproven();
+  const uint32_t start = UINT32_MAX - 11 * kMin;
+  pollAt(start);
+  pollAt(start + 10 * kMin);
+  ASSERT_EQ(1u, host.calls.size());
+  host.calls.clear();
+  ctl.beginConfigBatch();
+  pollAt(start + 12 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(start + 12 * kMin);
+  ASSERT_EQ(1u, host.calls.size());
+  EXPECT_EQ(0u, host.calls[0].find("alert:"));
 }
 
 TEST_F(ObserverSelfHealTest, BridgeRestartDropsAllSlotsDownHoldAndPendingReboot) {

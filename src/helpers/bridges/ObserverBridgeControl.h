@@ -25,7 +25,7 @@
 //   void otaAlert(const char* msg);                       OTA milestone alert (may be a no-op)
 //   bool sendAlertText(const char* msg);                  mesh alert channel (self-heal)
 //   void rebootForSelfHeal();                             reboot through the board
-//   bool isOtaInProgress();                               an upload or flash is running
+//   bool isOtaInProgress();                               OTA scheduled, portal open, or flashing
 
 #if defined(ARDUINO)
 #include <Arduino.h>
@@ -51,6 +51,7 @@ public:
   using SelfHeal = ObserverSelfHeal<Log, SelfHealPlatform>;
 
   static const uint32_t OTA_TX_DRAIN_TIMEOUT_MS = 5000;  // bounded flush before OTA blocks the loop
+  static const uint32_t CONFIG_BATCH_BUSY_MS = 120000;
   static const int OTA_REPLY_SIZE = 160;
 
   enum OtaStep : uint8_t {
@@ -64,7 +65,7 @@ public:
   ObserverBridgeControl()
     : _resume_pending(0), _batch_active(0), _batch_restart(0), _ota_was_running(0),
       _ota_resume(0), _ota_stop_refused(0), _ota_strict_idle(0), _ota_step(OTA_IDLE),
-      _slot_restart_mask(0) {}
+      _slot_restart_mask(0), _batch_started_ms(0) {}
 
   bool resumePending() const { return _resume_pending; }
   OtaStep otaStep() const { return (OtaStep)_ota_step; }
@@ -116,6 +117,7 @@ public:
   }
 
   void beginConfigBatch() {
+    _batch_started_ms = SelfHealPlatform::nowMs();
     _batch_active = 1;
     _batch_restart = 0;
     _slot_restart_mask = 0;
@@ -151,7 +153,9 @@ public:
         setState(host, bridge, true);
       }
     }
-    _heal.poll(host, bridge, _ota_step != OTA_IDLE);
+    const bool batch_busy = _batch_active &&
+      (uint32_t)(SelfHealPlatform::nowMs() - _batch_started_ms) < CONFIG_BATCH_BUSY_MS;
+    _heal.poll(host, bridge, _ota_step != OTA_IDLE || batch_busy);
   }
 
   // Runs the deferred OTA to completion (blocking); strict_idle also refuses a stopped
@@ -246,5 +250,6 @@ private:
   uint8_t _ota_strict_idle : 1;
   uint8_t _ota_step : 3;
   uint8_t _slot_restart_mask;
+  uint32_t _batch_started_ms;
   SelfHeal _heal;
 };
