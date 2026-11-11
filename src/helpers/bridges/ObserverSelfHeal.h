@@ -12,7 +12,7 @@
 //   uint32_t nowMs();
 //   MQTTSelfHealPolicy::RtcRecord rtcLoad();
 //   void rtcStore(const MQTTSelfHealPolicy::RtcRecord&);
-// Host provides: getObserverPrefs() (mqtt_selfheal_enabled, alert_enabled),
+// Host provides: getObserverPrefs() (mqtt_selfheal_enabled, alert_enabled), getNodePrefs() (bridge_enabled),
 //   bool sendAlertText(const char*), void rebootForSelfHeal(), bool isOtaInProgress().
 // Bridge provides: isRunning, isStopUnproven, anyClientQuarantined, isNetworkUp,
 //   ntpEvidenceAgeMs, candidateSlotCount, connectedSlotCount.
@@ -94,6 +94,8 @@ private:
     const auto* obs = host.getObserverPrefs();
     MQTTSelfHealPolicy::Inputs in{};
     in.enabled = obs && obs->mqtt_selfheal_enabled;
+    const auto* np = host.getNodePrefs();
+    in.bridge_wanted = !np || np->bridge_enabled;
     in.now_ms = now;
     in.ota_in_progress = ota_active || host.isOtaInProgress();
     in.evidence_age_ms = MQTTSelfHealPolicy::kNoEvidence;

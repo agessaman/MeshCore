@@ -75,6 +75,7 @@ struct Inputs {
   bool enabled;             // operator pref
   uint32_t now_ms;          // millis()
   bool bridge_running;      // false when the operator stopped the bridge
+  bool bridge_wanted;       // operator's bridge-enabled pref
   bool stop_unproven;
   bool client_quarantined;
   bool network_up;
@@ -179,8 +180,9 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
     }
   }
 
-  bool healthy = in.bridge_running && in.connected_slots > 0 && !in.stop_unproven &&
-                 !in.client_quarantined;
+  // A bridge deliberately off and not stuck is healthy too, so the counter can clear.
+  bool healthy = !in.stop_unproven && !in.client_quarantined &&
+                 (in.bridge_wanted ? in.bridge_running && in.connected_slots > 0 : true);
   if (healthy && !st.healthy) {
     st.healthy = true;
     st.healthy_reported = false;
@@ -244,7 +246,7 @@ static inline void onBridgeRestart(State& st) {
   st.healthy_reported = false;
 }
 
-// Boot-loop limiter record kept in RTC no-init memory. A power-on leaves A power-on leaves
+// Boot-loop limiter record kept in RTC no-init memory. A power-on leaves
 // garbage there, which fails validation and reads as zero reboots.
 static const uint32_t kRtcMagic = 0x4D51534Cu;
 

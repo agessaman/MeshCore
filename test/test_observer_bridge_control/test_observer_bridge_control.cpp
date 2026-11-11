@@ -655,6 +655,19 @@ TEST_F(ObserverSelfHealTest, RebootIsSkippedWhenAFreshSampleNoLongerShowsTheCaus
   EXPECT_EQ(0, MQTTSelfHealPolicy::rtcConsecutive(FakeHealPlatform::rtc));
 }
 
+TEST_F(ObserverSelfHealTest, BridgeLeftOffDeliberatelyClearsTheCounter) {
+  FakeHealPlatform::rtc = MQTTSelfHealPolicy::rtcMake(1, MQTTSelfHealPolicy::Cause::StopUnproven);
+  host.node.bridge_enabled = 0;
+  startRunning();
+  ctl.setState(host, bridge, false);   // clean stop
+  host.calls.clear();
+  pollAt(kMin);
+  pollAt(11 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(11 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"rtc:0:none"}), host.calls);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

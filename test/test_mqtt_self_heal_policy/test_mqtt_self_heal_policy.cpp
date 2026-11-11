@@ -16,6 +16,7 @@ Heal::Inputs Healthy(uint32_t now) {
   in.enabled = true;
   in.now_ms = now;
   in.bridge_running = true;
+  in.bridge_wanted = true;
   in.network_up = true;
   in.evidence_age_ms = 5 * kMin;
   in.candidate_slots = 2;
@@ -377,6 +378,44 @@ TEST(MQTTSelfHealPolicy, HealthyPeriodClearsBootCounterOnce) {
   h.consecutive = 0;
   EXPECT_EQ(Heal::Action::None, h.tick(Healthy(12 * kMin)).action);
   EXPECT_EQ(Heal::Action::None, h.tick(Healthy(60 * kMin)).action);
+}
+
+TEST(MQTTSelfHealPolicy, BridgeDeliberatelyOffAndCleanClearsTheCounter) {
+  Harness h;
+  h.consecutive = 1;
+  Heal::Inputs in = Healthy(kMin);
+  in.bridge_wanted = false;
+  in.bridge_running = false;
+  in.connected_slots = 0;
+  h.tick(in);
+  in.now_ms = 11 * kMin - 1;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+  in.now_ms = 11 * kMin;
+  EXPECT_EQ(Heal::Action::ClearBootCounter, h.tick(in).action);
+}
+
+TEST(MQTTSelfHealPolicy, BridgeOffWithUnprovenStopIsNotHealthy) {
+  Harness h;
+  h.consecutive = 1;
+  Heal::Inputs in = Unproven(kMin);
+  in.bridge_wanted = false;
+  in.enabled = false;
+  h.tick(in);
+  in.now_ms = 60 * kMin;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+}
+
+TEST(MQTTSelfHealPolicy, WantedBridgeStillNeedsAConnectedSlot) {
+  Harness h;
+  h.consecutive = 1;
+  Heal::Inputs in = Healthy(kMin);
+  in.bridge_running = false;
+  in.connected_slots = 0;
+  h.tick(in);
+  in.now_ms = 60 * kMin;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+  h.tick(Healthy(61 * kMin));
+  EXPECT_EQ(Heal::Action::ClearBootCounter, h.tick(Healthy(71 * kMin)).action);
 }
 
 TEST(MQTTSelfHealPolicy, QuarantinedNodeIsNotHealthy) {
