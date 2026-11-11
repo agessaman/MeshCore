@@ -113,6 +113,7 @@ that slot, see [Per-slot region codes](#per-slot-region-codes)).
 | `upstatemesh` | `wss://mqtt.upst8me.sh:443/mqtt` | JWT | |
 | `comchan` | `wss://obs.comchan.net:443/` | JWT | |
 | `virginiamesh` | `wss://mqtt.virginiamesh.com:8883` | none | |
+| `meshcore-analyzer-eu` | `wss://mqtt.meshcore-analyzer.eu:443` | JWT | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 
@@ -318,8 +319,10 @@ it has no effect there. An empty or invalid override falls back to `mqtt.iata`.
 | `get/set mqtt.interval <1-60>` | Status interval, minutes | 5 |
 | `get/set mqtt.neighbors auto\|on\|off` | Periodic neighbors publish (neighbors builds); `auto` only for presets that ask for it | auto |
 | `get/set mqtt.neighbors.interval <12-336>` | Neighbors interval, hours | 24 |
+| `get/set mqtt.breaker.interval <10-30>` | Minutes between retries once a slot stops reconnecting | 30 |
+| `get/set mqtt.selfheal on\|off` | Reboot when MQTT is stuck in a state only a reboot clears; `get` shows the last cause and count | off |
 | `get/set mqtt.ntp <host\|none>` | Primary NTP server; `set` syncs once to test it | `pool.ntp.org` |
-| `get mqtt.ntp.diag` | Probe every NTP server without changing the clock | |
+| `get mqtt.ntp.diag` | Probe every NTP server without changing the clock; returns immediately and reports the last completed probe | |
 | `get/set mqtt.owner <64 hex>` | Owner public key for JWT (`get` is serial only) | |
 | `get/set mqtt.email <email>` | Owner email for JWT (`get` is serial only) | |
 | `get mqtt.presets [start]` | List presets, paged; continue from `next:<idx>` | |
@@ -454,6 +457,9 @@ restart. See [MQTT_SNMP.md](MQTT_SNMP.md).
 | `get mqtt.status` | Each slot's state; while periodic neighbors run, `nbr: <next>/<last>` |
 | `get mqttN.diag` | Last error for slot N (TLS, socket, clock) and its filter |
 | `get mqtt.stats` | Heap, queue depth, outbox, drops, `filt=`, `badsig=` |
+| `get mqtt.stacks` | Free stack bytes per task: `b=` bridge, `l=` loop, `a=` async_tcp, `mN=` slot N client task |
+| `get crash` | Last panic read from the flash core dump at boot: task, `pc`, `exc` (EXCCAUSE), `va` (EXCVADDR), ELF `sha` prefix, up to 8 backtrace PCs (`!` = corrupt backtrace); `none` if there was none |
+| `clear crash` | Erase the flash core dump and forget the record |
 | `get mqtt.config.valid` | `valid` when the saved MQTT settings pass validation |
 | `memory` | Heap, internal RAM, largest free block, PSRAM |
 | `tls.bundletest <host[:port]>` | Test a TLS handshake against the built-in certificate bundle |
@@ -521,6 +527,19 @@ All timestamps are UTC with an explicit `+00:00` offset.
 
 `stats` and its fields are omitted when no value is available. Packet counts are totals
 since boot. `role` names the firmware hosting the observer; older firmware omits it.
+
+After a panic, every status message for the rest of that boot also carries the record
+`get crash` prints, read from the flash core dump:
+
+```json
+"crash": {"task": "loopTask", "pc": "400d1a2b", "exc": 28, "va": "00000010",
+          "sha": "1a2b3c4d", "bt": "400d1a2b 400d5678 40089abc"}
+```
+
+Addresses are hex without `0x`; decode them against the ELF whose SHA-256 starts with
+`sha`. A trailing `!` in `bt` marks a corrupt backtrace. The field is dropped if it would
+overflow the status buffer. The flash dump is erased once a status carrying it has been
+published (or on `clear crash`), so it survives boots where MQTT never connects.
 
 ### Packet
 
@@ -595,9 +614,23 @@ since boot. `role` names the firmware hosting the observer; older firmware omits
 ## Behavior
 
 **Connections.** Each slot reconnects with exponential backoff, then drops to a slow
-periodic retry. Packets queue while a slot is down. When the network route changes
+periodic retry (`mqtt.breaker.interval`, default 30 min). Packets queue while a slot is down. When the network route changes
 (Ethernet to WiFi or back), every slot disconnects cleanly and retries at once on the new
 route. Each medium keeps its own DHCP DNS servers.
+
+**Self-heal.** With `mqtt.selfheal on`, the node alerts and reboots 1 min later when a
+bridge stop never completes (10 min), an MQTT client cannot be stopped (30 min), or every
+slot is down for 2 h while an NTP reply in the last hour shows the internet is reachable.
+The all-slots-down hold adds up to 30 min of per-node random delay, chosen once at boot.
+Slots refused by their broker do not count. It waits for 30 min of uptime, doubles the
+hold per consecutive self-heal reboot (up to 8x), and only alerts after 5 in a row.
+All-slots-down gets one reboot per outage, and only if no self-heal reboot of any cause
+has occurred since the last healthy period; after that it only alerts. Ten healthy
+minutes resets the count and re-arms all-slots-down, either with a connected slot or
+with the bridge deliberately off and clean. Until then, the status payload carries `selfheal`
+(`stop_unproven`, `client_quarantined` or `all_slots_down`) and `selfheal_n` (count) next
+to `reset_reason`. While no slot is connected, the bridge
+probes NTP about every 20 min without changing the clock.
 
 **Ethernet (ThinkNode M7).** The observer uses Ethernet when it has a DHCP lease at boot,
 otherwise WiFi, and switches at runtime. Without a cable, boot waits about 1 s for

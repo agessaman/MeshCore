@@ -13,6 +13,130 @@ TEST(MQTTConnectionPolicy, ElapsedTimeHandlesNormalAndWrappedClocks) {
   EXPECT_EQ(150U, Policy::elapsedMs(50U, before_wrap));
 }
 
+TEST(MQTTConnectionPolicy, DeferredSetupStartsImmediatelyWhenNothingWasAttempted) {
+  // reconnectGuardActive(now, 0) is true for the first 15 s of uptime. An unset
+  // cross-slot stamp must not borrow that and hold the first slot.
+  EXPECT_TRUE(Policy::reconnectGuardActive(1000U, 0U));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, 0U, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(0U, 0U, 60000U, 0U, false));
+}
+
+TEST(MQTTConnectionPolicy, DeferredSetupSpacesLaterSlotsWithTheReconnectGuard) {
+  const uint32_t armed = 5000U;
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 0U, 60000U, armed, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(armed + 15000U, 0U, 60000U, armed, false));
+}
+
+TEST(MQTTConnectionPolicy, DeferredSetupRetryWaitsOutItsOwnInterval) {
+  // An unset stamp is not a boot-time deadline, even just before the interval.
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(59999U, 0U, 60000U, 0U, false));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(64999U, 5000U, 60000U, 0U, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(65000U, 5000U, 60000U, 0U, false));
+}
+
+TEST(MQTTConnectionPolicy, DeferredSetupRetryIsWrapSafeAndOnePerPass) {
+  const uint32_t last = std::numeric_limits<uint32_t>::max() - 999U;
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(58999U, last, 60000U, 0U, false));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(59000U, last, 60000U, 0U, false));
+  // The one-setup budget blocks even a never-attempted slot.
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, 0U, true));
+  // A clear retry still loses to a guard armed earlier in the pass.
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(65000U, 5000U, 60000U, 65000U, false));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupHandshakeDoneTracksTheArmersAttempt) {
+  // Still negotiating, or connected with its on-connect work not yet run.
+  EXPECT_FALSE(Policy::firstSetupHandshakeDone(true, true, true, false));
+  EXPECT_FALSE(Policy::firstSetupHandshakeDone(true, true, false, true));
+  // Connected (or failed) and its completion work has run.
+  EXPECT_TRUE(Policy::firstSetupHandshakeDone(true, true, false, false));
+  // Disabled or destroyed: nothing left to finish.
+  EXPECT_TRUE(Policy::firstSetupHandshakeDone(false, true, true, true));
+  EXPECT_TRUE(Policy::firstSetupHandshakeDone(true, false, true, true));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupReleasesGuardOnceHandshakeIsDone) {
+  const uint32_t armed = 5000U;
+  const bool released = Policy::firstSetupGuardReleased(armed + 4000U, armed, true, true, true);
+  EXPECT_TRUE(released);
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(armed + 4000U, 0U, 60000U, armed, false, released));
+  // The one-setup budget still applies to a released guard.
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 4000U, 0U, 60000U, armed, true, released));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupWaitsWhileHandshakeIsRunning) {
+  const uint32_t armed = 5000U;
+  const bool released = Policy::firstSetupGuardReleased(armed + 14999U, armed, true, true, false);
+  EXPECT_FALSE(released);
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 0U, 60000U, armed, false, released));
+  // 15 s is still the upper bound.
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(armed + 15000U, 0U, 60000U, armed, false, false));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupKeepsMinimumGapAfterInstantConnect) {
+  const uint32_t armed = 5000U;
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed, armed, true, true, true));
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed + Policy::kFirstSetupMinGapMs - 1U,
+                                               armed, true, true, true));
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(armed + Policy::kFirstSetupMinGapMs,
+                                              armed, true, true, true));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupReleaseWhenArmerIsDisabledOrDestroyed) {
+  const uint32_t armed = 5000U;
+  const bool disabled_done = Policy::firstSetupHandshakeDone(false, true, true, false);
+  const bool destroyed_done = Policy::firstSetupHandshakeDone(true, false, true, false);
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(armed + 3000U, armed, true, true, disabled_done));
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(armed + 3000U, armed, true, true, destroyed_done));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupReleaseIsWrapSafe) {
+  const uint32_t armed = std::numeric_limits<uint32_t>::max() - 999U;
+  // 1999 ms after the stamp, across the wrap.
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(999U, armed, true, true, true));
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(1000U, armed, true, true, true));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, armed, false, true));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, armed, false, false));
+}
+
+TEST(MQTTConnectionPolicy, NonFirstAttemptsKeepTheFullGuard) {
+  const uint32_t armed = 5000U;
+  // A setup retry is not a first attempt.
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed + 10000U, armed, false, true, true));
+  // A guard armed by a reconnect, renewal, probe or reconfigure.
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed + 10000U, armed, true, false, true));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 0U, 60000U, armed, false, false));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 1000U, 1000U, armed, false, false));
+}
+
+TEST(MQTTConnectionPolicy, ConnectingReconfigureWaitsForTheReconnectGuard) {
+  EXPECT_FALSE(Policy::slotReconfigureDue(false, true, 20000U, 0U, false));
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 20000U, 0U, true));
+  // Guard epoch: last attempt 0 blocks a connect for the first 15 s of uptime.
+  EXPECT_TRUE(Policy::reconnectGuardActive(14999U, 0U));
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 14999U, 0U, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, true, 15000U, 0U, false));
+
+  const uint32_t armed = 80000U;
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, armed + 14999U, armed, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, true, armed + 15000U, armed, false));
+}
+
+TEST(MQTTConnectionPolicy, DisableReconfigureIsNotHeldByTheReconnectGuard) {
+  const uint32_t armed = 80000U;
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, false, armed + 1U, armed, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, false, 1U, 0U, false));
+  // Still one per pass, and a clear flag is not invented.
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, false, armed + 1U, armed, true));
+  EXPECT_FALSE(Policy::slotReconfigureDue(false, false, armed + 15000U, armed, false));
+}
+
+TEST(MQTTConnectionPolicy, ReconfigureGuardBoundaryIsWrapSafe) {
+  const uint32_t last = std::numeric_limits<uint32_t>::max() - 9999U;
+  EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 4999U, last, false));
+  EXPECT_TRUE(Policy::slotReconfigureDue(true, true, 5000U, last, false));
+}
+
 TEST(MQTTConnectionPolicy, CrossSlotReconnectGuardHasExactBoundary) {
   EXPECT_TRUE(Policy::reconnectGuardActive(14999U, 0U));
   EXPECT_FALSE(Policy::reconnectGuardActive(15000U, 0U));
@@ -88,25 +212,100 @@ TEST(MQTTConnectionPolicy, ThirdFailureAtMaximumTripsWithoutAnotherHandshake) {
 }
 
 TEST(MQTTConnectionPolicy, CircuitBreakerProbeHasExactThirtyMinuteBoundary) {
-  EXPECT_FALSE(Policy::circuitBreakerProbeDue(1799999U, 0U));
-  EXPECT_TRUE(Policy::circuitBreakerProbeDue(1800000U, 0U));
+  const uint32_t probe = Policy::kCircuitBreakerProbeMs;
+  EXPECT_EQ(1800000U, probe);
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(1799999U, 0U, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(1800000U, 0U, probe));
 
   const uint32_t last = std::numeric_limits<uint32_t>::max() - 899999U;
-  EXPECT_FALSE(Policy::circuitBreakerProbeDue(899999U, last));
-  EXPECT_TRUE(Policy::circuitBreakerProbeDue(900000U, last));
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(899999U, last, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(900000U, last, probe));
+}
+
+TEST(MQTTConnectionPolicy, BreakerProbeMinutesAcceptOnlyTenToThirty) {
+  EXPECT_FALSE(Policy::breakerProbeMinutesValid(9));
+  EXPECT_TRUE(Policy::breakerProbeMinutesValid(10));
+  EXPECT_TRUE(Policy::breakerProbeMinutesValid(30));
+  EXPECT_FALSE(Policy::breakerProbeMinutesValid(31));
+  EXPECT_FALSE(Policy::breakerProbeMinutesValid(-1));
+
+  EXPECT_EQ(600000U, Policy::breakerProbeMs(10));
+  EXPECT_EQ(1800000U, Policy::breakerProbeMs(30));
+  // Corrupt or zeroed values never shorten the probe below the floor.
+  EXPECT_EQ(Policy::kCircuitBreakerProbeMs, Policy::breakerProbeMs(0));
+  EXPECT_EQ(Policy::kCircuitBreakerProbeMs, Policy::breakerProbeMs(5));
+  EXPECT_EQ(Policy::kCircuitBreakerProbeMs, Policy::breakerProbeMs(255));
+}
+
+TEST(MQTTConnectionPolicy, BreakerProbeMinutesParseRejectsJunkAndOverflow) {
+  uint8_t minutes = 0;
+  EXPECT_TRUE(Policy::parseBreakerProbeMinutes("10", &minutes));
+  EXPECT_EQ(10, minutes);
+  EXPECT_TRUE(Policy::parseBreakerProbeMinutes("030", &minutes));
+  EXPECT_EQ(30, minutes);
+  for (const char* bad : {"", "9", "31", "0", "-10", "15m", " 15", "15 ", "1.5",
+                          "0010", "4294967306", "266"}) {
+    minutes = 77;
+    EXPECT_FALSE(Policy::parseBreakerProbeMinutes(bad, &minutes)) << bad;
+    EXPECT_EQ(77, minutes) << bad;
+  }
+  EXPECT_FALSE(Policy::parseBreakerProbeMinutes(nullptr, &minutes));
+}
+
+TEST(MQTTConnectionPolicy, ConfiguredBreakerIntervalIsWrapSafe) {
+  const uint32_t probe = Policy::breakerProbeMs(10);
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(599999U, 0U, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(600000U, 0U, probe));
+
+  const uint32_t last = std::numeric_limits<uint32_t>::max() - 99999U;
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(499999U, last, probe));
+  EXPECT_TRUE(Policy::circuitBreakerProbeDue(500000U, last, probe));
 }
 
 TEST(MQTTConnectionPolicy, LinkRecoveryMakesCurrentBackoffDueImmediately) {
   const uint32_t now = 1234U;
-  const uint32_t last = Policy::immediateRetryLastAttempt(now, false, 4, 2);
+  const uint32_t probe = Policy::kCircuitBreakerProbeMs;
+  const uint32_t last = Policy::immediateRetryLastAttempt(now, false, 4, 2, probe);
   EXPECT_TRUE(Policy::reconnectDue(now, last, 4, 2));
-  EXPECT_FALSE(Policy::circuitBreakerProbeDue(now, last));
+  EXPECT_FALSE(Policy::circuitBreakerProbeDue(now, last, probe));
 }
 
 TEST(MQTTConnectionPolicy, LinkRecoveryMakesBreakerProbeDueWithoutClearingIt) {
   const uint32_t now = 1234U;
-  const uint32_t last = Policy::immediateRetryLastAttempt(now, true, 5, 2);
-  EXPECT_TRUE(Policy::circuitBreakerProbeDue(now, last));
+  for (uint8_t minutes : {(uint8_t)10, (uint8_t)30}) {
+    const uint32_t probe = Policy::breakerProbeMs(minutes);
+    const uint32_t last = Policy::immediateRetryLastAttempt(now, true, 5, 2, probe);
+    EXPECT_TRUE(Policy::circuitBreakerProbeDue(now, last, probe)) << (int)minutes;
+  }
+}
+
+// One failure short of the breaker, an ordinary due check trips without a
+// handshake. The first retry after link recovery must still connect.
+TEST(MQTTConnectionPolicy, LinkRecoveryRetryAtThresholdAttemptsInsteadOfTripping) {
+  Policy::BackoffAdvance recovery = Policy::advanceBackoffForLinkRecovery(5, 2);
+  EXPECT_EQ(5, recovery.reconnect_backoff);
+  EXPECT_EQ(3, recovery.max_backoff_failures);
+  EXPECT_FALSE(recovery.circuit_breaker_tripped);
+  EXPECT_TRUE(recovery.should_reconnect);
+
+  // The failure still counts: the next ordinary due attempt trips.
+  Policy::BackoffAdvance next = Policy::advanceBackoff(recovery.reconnect_backoff,
+                                                       recovery.max_backoff_failures);
+  EXPECT_TRUE(next.circuit_breaker_tripped);
+  EXPECT_FALSE(next.should_reconnect);
+}
+
+TEST(MQTTConnectionPolicy, LinkRecoveryRetryBelowThresholdMatchesOrdinaryAdvance) {
+  for (uint8_t backoff = 0; backoff <= 5; ++backoff) {
+    for (uint8_t failures = 0; failures < 2; ++failures) {
+      Policy::BackoffAdvance ordinary = Policy::advanceBackoff(backoff, failures);
+      Policy::BackoffAdvance recovery = Policy::advanceBackoffForLinkRecovery(backoff, failures);
+      EXPECT_EQ(ordinary.reconnect_backoff, recovery.reconnect_backoff);
+      EXPECT_EQ(ordinary.max_backoff_failures, recovery.max_backoff_failures);
+      EXPECT_EQ(ordinary.circuit_breaker_tripped, recovery.circuit_breaker_tripped);
+      EXPECT_EQ(ordinary.should_reconnect, recovery.should_reconnect);
+    }
+  }
 }
 
 TEST(MQTTConnectionPolicy, JwtLifetimeUsesCappedPerSlotStagger) {

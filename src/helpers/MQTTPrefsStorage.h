@@ -149,6 +149,14 @@ struct MQTTPrefs {
   // mqtt.neighbors and the preset opt-in, 1 on, 2 off. Runtime only, like
   // display_timeout_secs.
   uint8_t mqtt_slot_neighbors[MQTT_PREFS_SLOT_COUNT];
+
+  // Minutes between MQTT circuit-breaker probes (mqtt.breaker.interval). Runtime
+  // only, like display_timeout_secs.
+  uint8_t mqtt_breaker_probe_min;
+
+  // Bounded self-heal reboot when MQTT is stuck (mqtt.selfheal): 1 on, 0 off (default).
+  // Runtime only, like display_timeout_secs.
+  uint8_t mqtt_selfheal_enabled;
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {

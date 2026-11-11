@@ -69,9 +69,11 @@ public:
   virtual void powerOff() override;
   void enterDeepSleep(uint32_t secs);
 
+#ifdef P_LORA_DIO_1
   uint32_t getIRQGpio() override {
     return P_LORA_DIO_1; // default for SX1262
   }
+#endif
 
   void sleep(uint32_t secs) override {
     // Skip if not allow to sleep
@@ -82,6 +84,10 @@ public:
 
     // Set GPIO wakeup
     gpio_num_t wakeupPin = (gpio_num_t)getIRQGpio();    
+    if (wakeupPin == GPIO_NUM_NC) {  // no radio IRQ pin to wake on
+      delay(1);
+      return;
+    }
 
     // Configure timer wakeup
     if (secs > 0) {
@@ -160,6 +166,7 @@ public:
   bool startOTAUpdate(const char* id, char reply[], bool force_ap = false) override;
   bool stopOTAUpdate(char* reply) override;
   bool isOTAUpdateInProgress() const override;
+  bool isOTAPortalOpen() const override;
   void maintainOTAUpdate(uint32_t now_ms) override;
   bool otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) override;
   // Heavy body (TLS + JSON / HTTPUpdate). Runs in a dedicated large-stack task
@@ -208,8 +215,11 @@ public:
   }
 };
 
-static RTC_NOINIT_ATTR uint32_t _rtc_backup_time;
-static RTC_NOINIT_ATTR uint32_t _rtc_backup_magic;
+// The time ESP32RTCClock restores after a reset, in RTC memory that a reset does
+// not clear. Defined once, in ESP32Board.cpp: the inline members below run in
+// every translation unit that uses them and must all see the same backup.
+extern uint32_t _rtc_backup_time;
+extern uint32_t _rtc_backup_magic;
 #define RTC_BACKUP_MAGIC  0xAA55CC33
 #define RTC_TIME_MIN      1772323200  // 1 Mar 2026
 

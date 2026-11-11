@@ -1092,9 +1092,16 @@ region save
 ---
 ### GPS (When GPS support is compiled in)
 
-#### View or change GPS state
+#### View GPS state
 **Usage:**
 - `gps`
+
+**Note:** Reports the requested state, receiver activity, last-fix status (last fix gives number of sats and how long ago was the fix), and mode. In periodic mode, `waiting` means the receiver is off between acquisitions; the last fix remains available. `off(hw)` means a hardware GPS switch is off.
+
+---
+
+#### Change GPS state
+**Usage:**
 - `gps <state>`
 
 **Parameters:**
@@ -1102,15 +1109,80 @@ region save
 
 **Default:** `off`
 
-**Note:** Output format:
-- `off` when the GPS hardware is disabled
-- `on, {active|deactivated}, {fix|no fix}, {sat count} sats` when the GPS hardware is enabled
+---
+
+#### View or change the GPS acquisition period
+**Usage:**
+- `gps period`
+- `gps period <value>`
+
+**Parameters:**
+- `value`: `0` for continuous tracking, or a period. The value can be postfixed with `s`, `m`, `h` or `d` to specify the unit (seconds by default).
+
+**Note:** A periodic acquisition stops after receiving a valid fix, then resumes after the configured period.
+
+---
+
+#### View the last GPS fix
+**Usage:**
+- `gps fix`
+
+**Output:**
+- `> Fix (n sat): <lat>, <lon>`: the GPS currently has a fix.
+- `> Last fix <age> ago (n sat)[, acq <time>]: <lat>, <lon>`: position of the last valid fix; `acq` is shown only while the receiver is running and shows how for how long the gps has been trying to get a fix.
+- `> No fix[, acq <time>]`: no valid fix since the node started.
+
+**Note:** Ages and durations are given in `s`, `m` or `h`.
 
 ---
 
 #### Sync this node's clock with GPS time
 **Usage:** 
 - `gps sync`
+
+---
+
+#### On demand GPS fix
+**Usage:**
+- `gps once`
+- `gps once -s`
+
+**Parameters:**
+- `-s`: also sync this node's clock with GPS time (as `gps sync`)
+
+**Note:** Starts an acquisition now. If the GPS is off, it is switched and kept on until a valid fix and then turned off.
+
+**Reply:** `OK - turning on and acquiring` (GPS was off), `OK - waking gps` (periodic mode, receiver off between acquisitions) or `OK - gps already on`. `Error, gps hw switch off` if a hardware GPS switch is off, `Error, gps once not supported`.
+
+---
+
+#### View GPS time to first fix statistics
+**Usage:**
+- `gps fix_stats`
+
+**Output:** `> ttf:<last>/<max> ok:<n> miss:<n>`: last and maximum time between a start of the GPS and its first valid fix, then the last count of consecutive starts with a fix (`ok`) or without one (`miss`).
+
+---
+
+#### View GPS diagnostics
+**Usage:**
+- `gps diag`
+
+---
+
+#### GPS anti-spoofing guard (When built with `GPS_GUARD`)
+With `GPS_GUARD`, a fix becomes the node's last fix (position, telemetry, adverts) only after it passes plausibility checks: at least `GPS_GUARD_MIN_SATS` satellites, HDOP ≤ `GPS_GUARD_MAX_HDOP10`/10, inside the optional build-time region (`GPS_GUARD_LAT_MIN/MAX`, `GPS_GUARD_LON_MIN/MAX`), within the fence around the node's configured `lat`/`lon` (if set), no jump faster than `GPS_GUARD_MAX_SPEED_KMH`, and `GPS_GUARD_STABLE_FIXES` consistent fixes in a row. An unverified position is never reported.
+
+GPS time is written to the clock only while such a fix is current, never earlier than the firmware build date, and, once the clock holds a plausible time (from the build date to 10 years after it), only within `GPS_GUARD_TIME_MAX_STEP` seconds for the first sync and within clock drift (`GPS_GUARD_TIME_DRIFT_BASE` s + `GPS_GUARD_TIME_DRIFT_PPM`) afterwards. Setting the clock manually (`time`, `clock sync`) resets that anchor. A clock outside that window (e.g. a bogus date in 2080) is corrected by the first trusted fix.
+
+Covers serial NMEA receivers (`MicroNMEALocationProvider`).
+
+**Usage:**
+- `gps guard`: status, e.g. `> ok 7sat time ok +1s`, `> rej region time rej nofix`, or `... ALERT gps-clk +3600s 75m` when a trusted fix has disagreed with the clock by the same offset for `GPS_GUARD_ALERT_MIN` minutes. While the alert is active, the offset in hours is also reported in telemetry on the next free channel.
+- `gps guard on`, `gps guard off`: turn the guard on or off (saved, default on). While off, every fix and GPS time is accepted and `gps guard` shows `off`.
+- `gps guard accept`: while an alert is active, confirm that the GPS time is right and apply it to the clock.
+- `gps fence`, `gps fence <metres>`: fence radius around the configured `lat`/`lon` (`0` = off). Default `GPS_GUARD_FENCE_M` (1000); a value set here is saved.
+- `gps ref`: the reference position; follows `set lat`, `set lon` and `gps setloc`.
 
 ---
 
@@ -1319,6 +1391,31 @@ region save
 
 ---
 
+#### View or change the MQTT reconnect probe interval (MQTT observer only)
+**Usage:**
+- `get mqtt.breaker.interval`
+- `set mqtt.breaker.interval <minutes>`
+
+**Parameters:**
+- `minutes`: how often a slot that has stopped reconnecting tries its broker again (10–30)
+
+**Default:** `30` (minutes)
+
+> **Note:** A disconnected slot retries after 10 s, 30 s, 1 min, 2 min, then every 5 min. After three more failed 5-minute retries it stops and waits this interval between single attempts. This setting does not change how often WiFi reconnects (every 5 min at most). When WiFi reconnects, each disconnected slot retries right away. Takes effect immediately; out-of-range values are rejected.
+
+---
+
+#### View or change MQTT self-heal (MQTT observer only)
+**Usage:**
+- `get mqtt.selfheal`
+- `set mqtt.selfheal <on|off>`
+
+**Default:** `off`
+
+> **Note:** When the observer is stuck in a state only a reboot clears, the node sends an alert and reboots 1 min later. The states are a bridge stop that never completed (10 min), an MQTT client that could not be stopped (30 min), and every slot down for 2 h while NTP shows the internet is reachable. The all-slots-down hold adds up to 30 min of per-node random delay, chosen once at boot. Slots refused by their broker (wrong credentials) do not count. A node must be up 30 min first, each consecutive self-heal reboot doubles the wait (up to 8x), and after 5 in a row it only alerts. All-slots-down gets one reboot per outage, and only if no self-heal reboot of any cause has occurred since the last healthy period; after that it only alerts. Ten healthy minutes resets the count and re-arms all-slots-down, either with a connected slot or with the bridge deliberately off and clean. `get` also shows the last self-heal cause and count, or `none`. The repeater keeps working in all of these states.
+
+---
+
 #### View or change the NTP server (MQTT observer only)
 **Usage:**
 - `get mqtt.ntp`
@@ -1337,12 +1434,36 @@ region save
 **Usage:**
 - `get mqtt.ntp.diag`
 
-**Description:** Probes every configured NTP server (the custom primary, if set, plus the built-in fallbacks) and reports whether each responds. This is a pure connectivity diagnostic — it does **not** change the system clock.
+**Description:** Probes every configured NTP server (the custom primary, if set, plus the built-in fallbacks) and reports whether each responds. This is a pure connectivity diagnostic — it does **not** change the system clock. The command returns immediately: it reports the last completed probe and starts a fresh one in the background when the results are missing or more than 30 seconds old. A read taken while a probe is running says so; read again a few seconds later for the fresh results.
 
 - **Serial console:** prints a detailed table with each server's reported UTC time (or `FAIL`).
-- **Over LoRa:** returns a compact `<server> ok|fail` list, one per line.
+- **Over LoRa:** returns the probe number and its age, then a compact `<server> ok|fail` list, one per line.
 
 Requires WiFi connected and the MQTT bridge running.
+
+---
+
+#### View MQTT task stack headroom (MQTT observer only)
+**Usage:**
+- `get mqtt.stacks`
+
+**Output:** `> stk b=<bytes> l=<bytes> m1=<bytes> ...`, e.g. `> stk b=4032 l=3340 m1=1668 m2=1628`. Each value is the stack high-water mark (free bytes) for the MQTT bridge task (`b=`), the main loop task (`l=`, shown when the command runs from the loop task), the AsyncTCP task when it exists (`a=`), and each enabled slot's MQTT client task (`m1=` and so on). Fields that are not available are omitted.
+
+---
+
+#### View the last crash report (MQTT observer only)
+**Usage:**
+- `get crash`
+
+**Output:** `> task=<name> pc=<hex> exc=<n> va=<hex> sha=<hex> bt=<hex> <hex> ...`, e.g. `> task=loopTask pc=42011bae exc=28 va=0000f8ba sha=1a499497 bt=42011bae 42003879 4200911a`, or `> none` when there is no dump and `> none (dump unreadable)` when a dump exists but could not be read back. After a panic the node reads the saved core dump from flash and shows the faulting task, program counter, exception cause, faulting address, the first 8 hex digits of the firmware's ELF SHA-256, and the backtrace addresses. A trailing `!` means the backtrace was flagged corrupt.
+
+---
+
+#### Erase the stored crash dump (MQTT observer only)
+**Usage:**
+- `clear crash`
+
+**Output:** `OK - crash dump cleared`, or `ERR: crash dump erase failed`. Erases the core dump from flash and drops the record. The dump is also erased automatically after the first status message that carried it.
 
 ---
 
@@ -1410,6 +1531,13 @@ Requires WiFi connected and the MQTT bridge running.
 **Note:** Returns an error on boards without power management support.
 
 ---
+
+### Repeater health history
+
+History is queried over the mesh using the sensor-compatible `0x04` min/max/average
+request; there is no history CLI command. Retention and recording interval are controlled
+by `REPEATER_HISTORY_SLOTS` and `REPEATER_HISTORY_INTERVAL_SECS` at build time.
+See [Repeater health history](repeater_history.md) for the channel mapping and flags.
 
 ### Ethernet (when Ethernet support is compiled in)
 

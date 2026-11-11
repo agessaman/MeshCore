@@ -9,8 +9,15 @@
 namespace MQTTConnectionPolicy {
 
 static const uint32_t kReconnectGuardMs = 15000UL;
+// Shortest gap between two first-time slot setups, even when one finishes instantly.
+static const uint32_t kFirstSetupMinGapMs = 2000UL;
 static const uint32_t kStableResetMs = 120000UL;
-static const uint32_t kCircuitBreakerProbeMs = 1800000UL;
+// Breaker probe interval in minutes (mqtt.breaker.interval). The floor stays
+// above the 5-minute top backoff rung so a tripped slot still retries less often.
+static const uint8_t kBreakerProbeMinMinutes = 10;
+static const uint8_t kBreakerProbeMaxMinutes = 30;
+static const uint8_t kBreakerProbeDefaultMinutes = 30;
+static const uint32_t kCircuitBreakerProbeMs = kBreakerProbeDefaultMinutes * 60000UL;
 static const uint32_t kRenewalThrottleMs = 60000UL;
 static const uint32_t kSlotStaggerMs = 3000UL;
 static const uint8_t kMaxFailuresAtMaxBackoff = 3;
@@ -32,6 +39,55 @@ static inline uint32_t elapsedMs(uint32_t now, uint32_t then) {
 
 static inline bool reconnectGuardActive(uint32_t now, uint32_t last_reconnect) {
   return elapsedMs(now, last_reconnect) < kReconnectGuardMs;
+}
+
+// First setup (last_attempt == 0) is due immediately. A stamped failure waits
+// retry_interval_ms. last_cross_slot_ms == 0 means no handshake was armed, so
+// it does not borrow reconnectGuardActive's epoch rule and hold the first slot
+// for 15 s of uptime. already_attempted_this_pass is the one-setup budget.
+// guard_released lets a first setup past the guard early (firstSetupGuardReleased).
+static inline bool deferredSlotSetupDue(uint32_t now, uint32_t last_attempt,
+                                        uint32_t retry_interval_ms,
+                                        uint32_t last_cross_slot_ms,
+                                        bool already_attempted_this_pass,
+                                        bool guard_released = false) {
+  if (already_attempted_this_pass) return false;
+  if (last_cross_slot_ms != 0 && !guard_released &&
+      reconnectGuardActive(now, last_cross_slot_ms)) {
+    return false;
+  }
+  if (last_attempt == 0) return true;
+  return elapsedMs(now, last_attempt) >= retry_interval_ms;
+}
+
+// The armer's handshake is over: it connected or failed and its on-connect work
+// ran, or the slot was disabled or lost its client.
+static inline bool firstSetupHandshakeDone(bool armer_enabled, bool armer_has_client,
+                                           bool armer_attempt_pending,
+                                           bool armer_completion_pending) {
+  if (!armer_enabled || !armer_has_client) return true;
+  return !armer_attempt_pending && !armer_completion_pending;
+}
+
+// A first setup may start before the 15 s guard expires when the guard was armed
+// by another first setup whose handshake is done, but not within kFirstSetupMinGapMs.
+// Anything else (retries, reconnects, reconfigures) keeps the full guard.
+static inline bool firstSetupGuardReleased(uint32_t now, uint32_t last_cross_slot_ms,
+                                           bool first_attempt, bool armed_by_first_setup,
+                                           bool armer_handshake_done) {
+  if (!first_attempt || !armed_by_first_setup || !armer_handshake_done) return false;
+  return elapsedMs(now, last_cross_slot_ms) >= kFirstSetupMinGapMs;
+}
+
+// One reconfigure per pass. A request that does not open a connection is not
+// held for the handshake guard; a connecting one is, so the caller can arm
+// that guard and the next request waits its turn.
+static inline bool slotReconfigureDue(bool pending, bool opens_connection,
+                                     uint32_t now_ms, uint32_t last_connect_attempt_ms,
+                                     bool already_applied_this_pass) {
+  if (!pending || already_applied_this_pass) return false;
+  if (!opens_connection) return true;
+  return !reconnectGuardActive(now_ms, last_connect_attempt_ms);
 }
 
 static inline bool stableConnection(uint32_t now, uint32_t connected_at) {
@@ -87,8 +143,44 @@ static inline BackoffAdvance advanceBackoff(uint8_t reconnect_backoff,
   return result;
 }
 
-static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt) {
-  return elapsedMs(now, last_attempt) >= kCircuitBreakerProbeMs;
+static inline bool breakerProbeMinutesValid(int32_t minutes) {
+  return minutes >= kBreakerProbeMinMinutes && minutes <= kBreakerProbeMaxMinutes;
+}
+
+// Parses CLI minutes; rejects non-digits and anything over three digits so a
+// huge value cannot wrap into range.
+static inline bool parseBreakerProbeMinutes(const char* text, uint8_t* out) {
+  if (text == nullptr || out == nullptr || *text == '\0') return false;
+  uint32_t value = 0;
+  int digits = 0;
+  for (const char* p = text; *p; ++p) {
+    if (*p < '0' || *p > '9' || ++digits > 3) return false;
+    value = value * 10U + static_cast<uint32_t>(*p - '0');
+  }
+  if (!breakerProbeMinutesValid(static_cast<int32_t>(value))) return false;
+  *out = static_cast<uint8_t>(value);
+  return true;
+}
+
+// Out-of-range stored values fall back to the default interval.
+static inline uint32_t breakerProbeMs(uint8_t minutes) {
+  return breakerProbeMinutesValid(minutes) ? minutes * 60000UL : kCircuitBreakerProbeMs;
+}
+
+static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt,
+                                          uint32_t probe_ms) {
+  return elapsedMs(now, last_attempt) >= probe_ms;
+}
+
+// The first reconnect after the link returns always makes a real attempt. The
+// failures it would count may have been the link's, so it advances the ladder
+// but cannot trip the breaker; the next ordinary due attempt can.
+static inline BackoffAdvance advanceBackoffForLinkRecovery(uint8_t reconnect_backoff,
+                                                           uint8_t max_backoff_failures) {
+  BackoffAdvance result = advanceBackoff(reconnect_backoff, max_backoff_failures);
+  result.circuit_breaker_tripped = false;
+  result.should_reconnect = true;
+  return result;
 }
 
 // Move a disconnected slot's deadline to "due now" after the physical link
@@ -98,9 +190,10 @@ static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt) {
 static inline uint32_t immediateRetryLastAttempt(uint32_t now,
                                                 bool circuit_breaker_tripped,
                                                 uint8_t reconnect_backoff,
-                                                uint8_t slot_index) {
+                                                uint8_t slot_index,
+                                                uint32_t probe_ms) {
   const uint32_t delay = circuit_breaker_tripped
-      ? kCircuitBreakerProbeMs
+      ? probe_ms
       : reconnectDelayMs(reconnect_backoff, slot_index);
   return now - delay;
 }

@@ -13,6 +13,9 @@
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
 #include <helpers/MQTTNeighborsPolicy.h>
 #endif
+#if REPEATER_HISTORY_SLOTS > 0
+#include <helpers/sensors/LPPDataHelpers.h>
+#endif
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -59,6 +62,9 @@
 #define REQ_TYPE_GET_STATUS         0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE         0x02
 #define REQ_TYPE_GET_TELEMETRY_DATA 0x03
+#if REPEATER_HISTORY_SLOTS > 0
+#define REQ_TYPE_GET_AVG_MIN_MAX 0x04
+#endif
 #define REQ_TYPE_GET_ACCESS_LIST    0x05
 #define REQ_TYPE_GET_NEIGHBOURS     0x06
 #define REQ_TYPE_GET_OWNER_INFO     0x07     // FIRMWARE_VER_LEVEL >= 2
@@ -70,17 +76,6 @@
 #define ANON_REQ_TYPE_BASIC        0x03   // just remote clock
 
 #define CLI_REPLY_DELAY_MILLIS      600
-
-// Max time to flush the outbound queue (START alert + CLI reply) before the OTA
-// teardown blocks the loop until reboot. Best-effort: exits early once the queue
-// drains (immediate on a healthy node), caps the wait on a jammed/duty-limited
-// channel so an update is never stalled indefinitely.
-#define OTA_TX_DRAIN_TIMEOUT_MS     5000
-
-// Bench mitigation for a ThinkNode M7 cache-error race between a clean MQTT
-// teardown and the OTA worker allocation. 25 ms still failed intermittently;
-// 100 ms completed five consecutive one-slot OTA cycles without a crash.
-#define OTA_MQTT_STOP_SETTLE_MS      100
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
@@ -266,6 +261,7 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
 }
 
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload, size_t payload_len) {
+  if (payload_len == 0) return 0;
   // uint32_t now = getRTCClock()->getCurrentTimeUnique();
   // memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   memcpy(reply_data, &sender_timestamp, 4); // reflect sender_timestamp back in response packet (kind of like a 'tag')
@@ -286,8 +282,8 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     stats.n_recv_direct = getNumRecvDirect();
     stats.err_events = _err_flags;
     stats.last_snr = (int16_t)(radio_driver.getLastSNR() * 4);
-    stats.n_direct_dups = ((SimpleMeshTables *)getTables())->getNumDirectDups();
-    stats.n_flood_dups = ((SimpleMeshTables *)getTables())->getNumFloodDups();
+    stats.n_direct_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumDirectDups(), 0xFFFF);
+    stats.n_flood_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumFloodDups(), 0xFFFF);
     stats.total_rx_air_time_secs = getReceiveAirTime() / 1000;
     stats.n_recv_errors = radio_driver.getPacketsRecvErrors();
     memcpy(&reply_data[4], &stats, sizeof(stats));
@@ -316,6 +312,48 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     memcpy(&reply_data[4], telemetry.getBuffer(), tlen);
     return 4 + tlen; // reply_len
   }
+#if REPEATER_HISTORY_SLOTS > 0
+  if (payload[0] == REQ_TYPE_GET_AVG_MIN_MAX && payload_len >= 11 &&
+      (sender->permissions & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_ONLY) {
+    uint32_t start_secs_ago, end_secs_ago;
+    memcpy(&start_secs_ago, &payload[1], 4);
+    memcpy(&end_secs_ago, &payload[5], 4);
+    MinMaxAvg data[8];
+    int n = 0;
+    if (payload[9] == 0 && payload[10] == 0) {
+      uint32_t now_secs = uptime_millis / 1000;
+      battery_history.calcMinMaxAvg(now_secs, start_secs_ago, end_secs_ago, &data[n++], HISTORY_BATTERY,
+                                    LPP_VOLTAGE);
+      noise_history.calcMinMaxAvg(now_secs, start_secs_ago, end_secs_ago, &data[n++], HISTORY_NOISE,
+                                  LPP_ANALOG_INPUT);
+      tx_history.calcMinMaxAvg(now_secs, start_secs_ago, end_secs_ago, &data[n++], HISTORY_TX,
+                               LPP_PERCENTAGE);
+      rx_history.calcMinMaxAvg(now_secs, start_secs_ago, end_secs_ago, &data[n++], HISTORY_RX,
+                               LPP_PERCENTAGE);
+      temperature_history.calcMinMaxAvg(now_secs, start_secs_ago, end_secs_ago, &data[n], HISTORY_TEMPERATURE,
+                                        LPP_TEMPERATURE);
+      // Unsupported temperature sensors and empty ranges have no encodable LPP value.
+      if (!isnan(data[n]._avg)) n++;
+    }
+    uint8_t ofs = 4;
+    uint32_t now = getRTCClock()->getCurrentTime();
+    memcpy(&reply_data[ofs], &now, 4);
+    ofs += 4;
+    for (int i = 0; i < n; i++) {
+      auto d = &data[i];
+      if (isnan(d->_avg)) continue;
+      reply_data[ofs++] = d->_channel;
+      reply_data[ofs++] = d->_lpp_type;
+      uint8_t sz = LPPData::getDataSize(d->_lpp_type);
+      uint32_t mult = LPPData::getMultiplier(d->_lpp_type);
+      bool is_signed = LPPData::isSigned(d->_lpp_type);
+      ofs += LPPData::putFloat(&reply_data[ofs], d->_min, sz, mult, is_signed);
+      ofs += LPPData::putFloat(&reply_data[ofs], d->_max, sz, mult, is_signed);
+      ofs += LPPData::putFloat(&reply_data[ofs], d->_avg, sz, mult, is_signed);
+    }
+    return ofs;
+  }
+#endif
   if (payload[0] == REQ_TYPE_GET_ACCESS_LIST && sender->isAdmin()) {
     uint8_t res1 = payload[1];   // reserved for future  (extra query params)
     uint8_t res2 = payload[2];
@@ -1017,6 +1055,13 @@ void MyMesh::sendNodeDiscoverReq() {
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
     : mesh::Mesh(radio, ms, rng, rtc, *createObserverPacketManager(32), tables),
+#if REPEATER_HISTORY_SLOTS > 0
+      battery_history(REPEATER_HISTORY_SLOTS, REPEATER_HISTORY_INTERVAL_SECS),
+      noise_history(REPEATER_HISTORY_SLOTS, REPEATER_HISTORY_INTERVAL_SECS),
+      tx_history(REPEATER_HISTORY_SLOTS, REPEATER_HISTORY_INTERVAL_SECS),
+      rx_history(REPEATER_HISTORY_SLOTS, REPEATER_HISTORY_INTERVAL_SECS),
+      temperature_history(REPEATER_HISTORY_SLOTS, REPEATER_HISTORY_INTERVAL_SECS),
+#endif
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       telemetry(MAX_PACKET_PAYLOAD - 4),
@@ -1032,6 +1077,12 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 {
   last_millis = 0;
   uptime_millis = 0;
+#if REPEATER_HISTORY_SLOTS > 0
+  history_last_secs = history_battery_secs = history_airtime_secs = 0;
+  history_tx_millis = history_rx_millis = 0;
+  history_battery_total = 0;
+  history_battery_count = 0;
+#endif
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
   set_radio_at = revert_radio_at = 0;
@@ -1148,6 +1199,33 @@ void MyMesh::applyNetworkHostname(const char* when) {
 }
 #endif
 
+#ifdef WITH_MQTT_BRIDGE
+// Bridge metadata applied before every begin(); SNMP is attached on a start, not a restart.
+void MyMesh::prepareBridgeStart(MQTTBridge* b, bool restart) {
+  char device_id[65];
+  mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+  MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
+  b->setDeviceID(device_id);
+  b->setFirmwareVersion(getFirmwareVer());
+  b->setBoardModel(_cli.getBoard()->getManufacturerName());
+  b->setBuildDate(getBuildDate());
+  b->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#ifdef WITH_SNMP
+  if (!restart && _cli.getObserverPrefs()->snmp_enabled) {
+    _snmp_agent.setNodeName(_prefs.node_name);
+    _snmp_agent.setFirmwareVersion(getFirmwareVer());
+    b->setSNMPAgent(&_snmp_agent);
+  }
+#else
+  (void)restart;
+#endif
+}
+
+bool MyMesh::flashFromManifest(char* reply) {
+  return _cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, reply);
+}
+#endif
+
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
   _fs = fs;
@@ -1216,43 +1294,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 
 #if defined(WITH_BRIDGE)
-  if (_prefs.bridge_enabled) {
-#ifdef WITH_MQTT_BRIDGE
-    // Defer construction to avoid static init crashes on ESP32 classic
-    bridge = new MQTTBridge(this, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
-#endif
-    if (bridge) {
-      // Set device public key for MQTT topics
-      char device_id[65];
-      mesh::LocalIdentity self_id = getSelfId();
-      mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
-      MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
-      bridge->setDeviceID(device_id);
-
-      // Set firmware version
-      bridge->setFirmwareVersion(getFirmwareVer());
-
-      // Set board model
-      bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
-
-      // Set build date
-      bridge->setBuildDate(getBuildDate());
-
-#ifdef WITH_MQTT_BRIDGE
-      // Set stats sources for automatic stats collection
-      bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
-#ifdef WITH_SNMP
-      if (_cli.getObserverPrefs()->snmp_enabled) {
-        _snmp_agent.setNodeName(_prefs.node_name);
-        _snmp_agent.setFirmwareVersion(getFirmwareVer());
-        bridge->setSNMPAgent(&_snmp_agent);
-      }
-#endif
-#endif
-
-      bridge->begin();
-    }
-  }
+  // Constructed here, not statically, to avoid static init crashes on ESP32 classic
+  if (_prefs.bridge_enabled) setBridgeState(true);
 #endif
 
   // Wire fault-alert reporter. begin() is safe regardless of bridge state.
@@ -1556,22 +1599,6 @@ bool MyMesh::stopWebConfig(char* reply) {
   return true;
 }
 
-void MyMesh::onConfigBatchEnd() {
-  _wc_batch_active = false;
-  if (_wc_restart_pending) {
-    // A full restart re-applies every slot config; drop the per-slot requests.
-    _wc_restart_pending = false;
-    _wc_slot_restart_mask = 0;
-    restartBridge();
-  } else if (_wc_slot_restart_mask) {
-    uint8_t mask = _wc_slot_restart_mask;
-    _wc_slot_restart_mask = 0;
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (mask & (1u << i)) restartBridgeSlot(i);
-    }
-  }
-}
-
 // Stats snapshot for GET /api/stats. Runs on the loop task (from tick());
 // same sources as the REQ_TYPE_GET_STATUS reply and `get mqtt.stats`.
 void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
@@ -1754,22 +1781,55 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 }
 
+#if REPEATER_HISTORY_SLOTS > 0
+void MyMesh::recordHistory() {
+  uint32_t now_secs = uptime_millis / 1000;
+  // Average periodic reads without repeatedly enabling the battery divider.
+  if (uint32_t(now_secs - history_battery_secs) >= 15) {
+    history_battery_total += board.getBattMilliVolts();
+    history_battery_count++;
+    history_battery_secs = now_secs;
+  }
+  uint32_t elapsed_secs = now_secs - history_last_secs;
+  if (elapsed_secs < REPEATER_HISTORY_INTERVAL_SECS) return;
+  // Advance the sampling grid without accumulating loop delays or replaying missed slots.
+  history_last_secs += (elapsed_secs / REPEATER_HISTORY_INTERVAL_SECS) * REPEATER_HISTORY_INTERVAL_SECS;
+  uint32_t airtime_elapsed_secs = now_secs - history_airtime_secs;
+
+  if (history_battery_count > 0) {
+    battery_history.recordData(history_last_secs, history_battery_total / history_battery_count / 1000.0f);
+  }
+  int noise_floor = _radio->getNoiseFloor();
+  if (noise_floor != 0) noise_history.recordData(history_last_secs, noise_floor);  // zero means uncalibrated
+  uint32_t tx_millis = getTotalAirTime();
+  uint32_t rx_millis = getReceiveAirTime();
+  // Counters are milliseconds; unsigned subtraction also handles their wrap.
+  tx_history.recordData(history_last_secs, uint32_t(tx_millis - history_tx_millis) / (airtime_elapsed_secs * 10.0f));
+  rx_history.recordData(history_last_secs, uint32_t(rx_millis - history_rx_millis) / (airtime_elapsed_secs * 10.0f));
+  temperature_history.recordData(history_last_secs, board.getMCUTemperature()); // ignores NaN
+  history_airtime_secs = now_secs;
+  history_tx_millis = tx_millis;
+  history_rx_millis = rx_millis;
+  history_battery_total = 0;
+  history_battery_count = 0;
+}
+#endif
+
 void MyMesh::loop() {
+  // Update before dispatching requests, including across millis() wrap.
+  uint32_t now = millis();
+  uptime_millis += uint32_t(now - last_millis);
+  last_millis = now;
+#if REPEATER_HISTORY_SLOTS > 0
+  recordHistory();
+#endif
+
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing runs in a separate FreeRTOS task on Core 0, so we don't call bridge.loop() here
   mesh::Mesh::loop();
 
 #ifdef WITH_MQTT_BRIDGE
-  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
-  // Release the withheld resources whenever that late ack lands, and restart
-  // only a bridge that is still meant to be running.
-  if (bridge && bridge->stopAcknowledgedLate()) {
-    bridge->pollLateStopAck();
-    if (_bridge_resume_pending && _prefs.bridge_enabled) {
-      Serial.println("MQTT: stop acknowledged late - resuming bridge");
-      setBridgeState(true);
-    }
-  }
+  _bridge_ctl.poll(*this, bridge);
 #endif
 
 #ifdef WITH_BRIDGE
@@ -1805,39 +1865,8 @@ void MyMesh::loop() {
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
   if (_ota_update_at && millisHasNowPassed(_ota_update_at)) { // deferred `ota update`
     _ota_update_at = 0;                                       // clear timer
-    // The "Beginning update..." reply has now gone out. Free the bridge for heap
-    // headroom, then flash: otaFromManifest reboots into the new image on success
-    // (so this never returns); on any abort (already up to date, partition change,
-    // download error) it returns and we resume the bridge.
-    Serial.println("OTA: starting update");
-    // Flush the START alert (and CLI reply) out the radio BEFORE teardown blocks
-    // the loop until reboot — otherwise a packet still queued here (busy /
-    // duty-limited channel) is lost when the flash spins the loop and reboots.
-    drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
-    setBridgeState(false);
-    // TODO: Replace this timed settle with a proven MQTT task/client/callback
-    // quiescence barrier once the teardown race's root cause is identified.
-    delay(OTA_MQTT_STOP_SETTLE_MS);
-    char ota_reply[160];
-    // OTA teardown barrier (Phase 5): only flash after a CLEAN MQTT shutdown.
-    // A timed-out/forced stop leaves mbedTLS/heap ownership uncertain — writing
-    // firmware then is the observed teardown heap-panic path — so abort and
-    // resume the bridge instead of flashing under uncertain ownership.
-    if (bridge && !bridge->canFlashAfterStop()) {
-      Serial.println("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge");
-      setBridgeState(true);
-      otaAlert(bridge->isRunning() ? "OTA aborted: MQTT stop unclean, bridge resumed"
-                                   : "OTA aborted: MQTT stop unproven, bridge resumes when it completes");
-    } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
-      Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
-      char ota_alert_msg[160];
-      snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);
-      otaAlert(ota_alert_msg);
-      setBridgeState(true);
-    }
-    // Success path: otaFromManifest() flashes and reboots into the new image
-    // (never returns), so there is no in-boot "success" alert — the START alert
-    // plus the node returning on the new version is the success signal.
+    // Strict: a stopped bridge whose last stop timed out also blocks the flash.
+    _bridge_ctl.runOta(*this, bridge, true);
   }
 #endif
 
@@ -1857,10 +1886,7 @@ void MyMesh::loop() {
     dirty_contacts_expiry = 0;
   }
 
-  // update uptime
-  uint32_t now = millis();
-  uptime_millis += now - last_millis;
-  last_millis = now;
+  now = millis();
 
 #ifdef WITH_MQTT_BRIDGE
   _alerter.onLoop(now);
