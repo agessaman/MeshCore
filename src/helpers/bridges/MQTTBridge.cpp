@@ -1598,7 +1598,7 @@ void MQTTBridge::mqttTaskLoop() {
         // sees the time.
         _ntp_diag_started_ms.store((uint32_t)millis(), std::memory_order_relaxed);
         _ntp_diag_running_id.store(wanted, std::memory_order_release);
-        runNtpDiagProbe();
+        runNtpDiagProbe(wanted);
         _ntp_diag_running_id.store(0, std::memory_order_release);
       }
     }
@@ -5064,7 +5064,7 @@ bool MQTTBridge::requestForcedNtpSync(uint32_t timeout_ms) {
 // Runs on the MQTT task (Core 0). Probes every configured NTP server for connectivity
 // and records the time each reports. Deliberately does NOT call configTime() or update
 // the RTC — this is a read-only diagnostic and must leave the system clock untouched.
-void MQTTBridge::runNtpDiagProbe() {
+void MQTTBridge::runNtpDiagProbe(uint32_t probe_id) {
   const char* servers[kMaxNtpServers];
   int count = 0;
   fillNtpServerList(_obs, servers, count);
@@ -5096,20 +5096,16 @@ void MQTTBridge::runNtpDiagProbe() {
     probed++;
   }
 
+  // A probe cut short by a stop is not a result: keep the previous snapshot intact.
+  if (!completed) return;
+
   // Odd while writing, even when the table is complete: readers copy between two
   // equal even reads, so they never see a half-updated table. One writer, no lock.
   _ntp_diag_seq.fetch_add(1, std::memory_order_acq_rel);   // -> odd: writing
-  if (completed) {
-    for (int i = 0; i < probed; i++) _ntp_diag_results[i] = results[i];
-    _ntp_diag_count = probed;
-    _ntp_diag_completed_ms.store((uint32_t)millis(), std::memory_order_relaxed);
-    _ntp_diag_completed_id.store(_ntp_diag_running_id.load(std::memory_order_relaxed),
-                                 std::memory_order_release);
-  } else {
-    // A probe cut short by a stop is not a result: discard the snapshot.
-    _ntp_diag_count = 0;
-    _ntp_diag_completed_id.store(0, std::memory_order_release);
-  }
+  for (int i = 0; i < probed; i++) _ntp_diag_results[i] = results[i];
+  _ntp_diag_count = probed;
+  _ntp_diag_completed_ms.store((uint32_t)millis(), std::memory_order_relaxed);
+  _ntp_diag_completed_id.store(probe_id, std::memory_order_release);
   _ntp_diag_seq.fetch_add(1, std::memory_order_acq_rel);   // -> even: readable
 }
 

@@ -614,7 +614,7 @@ private:
   void dequeuePacket();
   bool isAnySlotConnected();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
-  void runNtpDiagProbe();  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  void runNtpDiagProbe(uint32_t probe_id);  // Probe every server for connectivity; never sets the clock. Core 0 only.
   // Copies the published diag snapshot on the caller's task. False when the task
   // was publishing throughout the attempt.
   bool copyNtpDiagSnapshot(NtpDiagResult* out, int* count_out,
