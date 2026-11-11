@@ -77,12 +77,6 @@
 
 #define CLI_REPLY_DELAY_MILLIS      600
 
-// Max time to flush the outbound queue (START alert + CLI reply) before the OTA
-// teardown blocks the loop until reboot. Best-effort: exits early once the queue
-// drains (immediate on a healthy node), caps the wait on a jammed/duty-limited
-// channel so an update is never stalled indefinitely.
-#define OTA_TX_DRAIN_TIMEOUT_MS     5000
-
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
@@ -1205,6 +1199,33 @@ void MyMesh::applyNetworkHostname(const char* when) {
 }
 #endif
 
+#ifdef WITH_MQTT_BRIDGE
+// Bridge metadata applied before every begin(); SNMP is attached on a start, not a restart.
+void MyMesh::prepareBridgeStart(MQTTBridge* b, bool restart) {
+  char device_id[65];
+  mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
+  MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
+  b->setDeviceID(device_id);
+  b->setFirmwareVersion(getFirmwareVer());
+  b->setBoardModel(_cli.getBoard()->getManufacturerName());
+  b->setBuildDate(getBuildDate());
+  b->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#ifdef WITH_SNMP
+  if (!restart && _cli.getObserverPrefs()->snmp_enabled) {
+    _snmp_agent.setNodeName(_prefs.node_name);
+    _snmp_agent.setFirmwareVersion(getFirmwareVer());
+    b->setSNMPAgent(&_snmp_agent);
+  }
+#else
+  (void)restart;
+#endif
+}
+
+bool MyMesh::flashFromManifest(char* reply) {
+  return _cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, reply);
+}
+#endif
+
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
   _fs = fs;
@@ -1273,43 +1294,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 
 #if defined(WITH_BRIDGE)
-  if (_prefs.bridge_enabled) {
-#ifdef WITH_MQTT_BRIDGE
-    // Defer construction to avoid static init crashes on ESP32 classic
-    bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
-#endif
-    if (bridge) {
-      // Set device public key for MQTT topics
-      char device_id[65];
-      mesh::LocalIdentity self_id = getSelfId();
-      mesh::Utils::toHex(device_id, self_id.pub_key, PUB_KEY_SIZE);
-      MESH_DEBUG_PRINTLN("Setting device ID: %s", device_id);
-      bridge->setDeviceID(device_id);
-
-      // Set firmware version
-      bridge->setFirmwareVersion(getFirmwareVer());
-
-      // Set board model
-      bridge->setBoardModel(_cli.getBoard()->getManufacturerName());
-
-      // Set build date
-      bridge->setBuildDate(getBuildDate());
-
-#ifdef WITH_MQTT_BRIDGE
-      // Set stats sources for automatic stats collection
-      bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
-#ifdef WITH_SNMP
-      if (_cli.getObserverPrefs()->snmp_enabled) {
-        _snmp_agent.setNodeName(_prefs.node_name);
-        _snmp_agent.setFirmwareVersion(getFirmwareVer());
-        bridge->setSNMPAgent(&_snmp_agent);
-      }
-#endif
-#endif
-
-      bridge->begin();
-    }
-  }
+  // Constructed here, not statically, to avoid static init crashes on ESP32 classic
+  if (_prefs.bridge_enabled) setBridgeState(true);
 #endif
 
   // Wire fault-alert reporter. begin() is safe regardless of bridge state.
@@ -1613,22 +1599,6 @@ bool MyMesh::stopWebConfig(char* reply) {
   return true;
 }
 
-void MyMesh::onConfigBatchEnd() {
-  _wc_batch_active = false;
-  if (_wc_restart_pending) {
-    // A full restart re-applies every slot config; drop the per-slot requests.
-    _wc_restart_pending = false;
-    _wc_slot_restart_mask = 0;
-    restartBridge();
-  } else if (_wc_slot_restart_mask) {
-    uint8_t mask = _wc_slot_restart_mask;
-    _wc_slot_restart_mask = 0;
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (mask & (1u << i)) restartBridgeSlot(i);
-    }
-  }
-}
-
 // Stats snapshot for GET /api/stats. Runs on the loop task (from tick());
 // same sources as the REQ_TYPE_GET_STATUS reply and `get mqtt.stats`.
 void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
@@ -1859,16 +1829,7 @@ void MyMesh::loop() {
   mesh::Mesh::loop();
 
 #ifdef WITH_MQTT_BRIDGE
-  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
-  // Release the withheld resources whenever that late ack lands, and restart
-  // only a bridge that is still meant to be running.
-  if (bridge && bridge->stopAcknowledgedLate()) {
-    bridge->pollLateStopAck();
-    if (_bridge_resume_pending && _prefs.bridge_enabled) {
-      Serial.println("MQTT: stop acknowledged late - resuming bridge");
-      setBridgeState(true);
-    }
-  }
+  _bridge_ctl.poll(*this, bridge);
 #endif
 
 #ifdef WITH_BRIDGE
@@ -1904,36 +1865,8 @@ void MyMesh::loop() {
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
   if (_ota_update_at && millisHasNowPassed(_ota_update_at)) { // deferred `ota update`
     _ota_update_at = 0;                                       // clear timer
-    // The "Beginning update..." reply has now gone out. Free the bridge for heap
-    // headroom, then flash: otaFromManifest reboots into the new image on success
-    // (so this never returns); on any abort (already up to date, partition change,
-    // download error) it returns and we resume the bridge.
-    Serial.println("OTA: starting update");
-    // Flush the START alert (and CLI reply) out the radio BEFORE teardown blocks
-    // the loop until reboot — otherwise a packet still queued here (busy /
-    // duty-limited channel) is lost when the flash spins the loop and reboots.
-    drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
-    setBridgeState(false);
-    char ota_reply[160];
-    // OTA teardown barrier (Phase 5): only flash after a CLEAN MQTT shutdown.
-    // A timed-out/forced stop leaves mbedTLS/heap ownership uncertain — writing
-    // firmware then is the observed teardown heap-panic path — so abort and
-    // resume the bridge instead of flashing under uncertain ownership.
-    if (bridge && !bridge->canFlashAfterStop()) {
-      Serial.println("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge");
-      setBridgeState(true);
-      otaAlert(bridge->isRunning() ? "OTA aborted: MQTT stop unclean, bridge resumed"
-                                   : "OTA aborted: MQTT stop unproven, bridge resumes when it completes");
-    } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
-      Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
-      char ota_alert_msg[160];
-      snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);
-      otaAlert(ota_alert_msg);
-      setBridgeState(true);
-    }
-    // Success path: otaFromManifest() flashes and reboots into the new image
-    // (never returns), so there is no in-boot "success" alert — the START alert
-    // plus the node returning on the new version is the success signal.
+    // Strict: a stopped bridge whose last stop timed out also blocks the flash.
+    _bridge_ctl.runOta(*this, bridge, true);
   }
 #endif
 
