@@ -60,13 +60,15 @@ int MQTTMessageBuilder::buildStatusMessage(
   const char* repeat,
   const MQTTConnHealth& conn_health,
   int heap_min,
-  const char* reset_reason
+  const char* reset_reason,
+  const char* selfheal, int selfheal_n
 ) {
   return MQTTPayloadBuilder::buildStatusMessage(
       doc, origin, origin_id, model, firmware_version, radio, client_version,
       status, timestamp, buffer, buffer_size, battery_mv, uptime_secs, errors,
       queue_len, noise_floor, tx_air_secs, rx_air_secs, recv_errors, internal_heap,
-      packets_sent, packets_received, repeat, conn_health, heap_min, reset_reason);
+      packets_sent, packets_received, repeat, conn_health, heap_min, reset_reason,
+      selfheal, selfheal_n);
 }
 
 int MQTTMessageBuilder::buildPacketMessage(

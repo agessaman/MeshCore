@@ -406,7 +406,9 @@ private:
   // entirely. Raised to 1024: no extra RAM while status serializes into the shared scratch
   // buffer, but +256 B of bridge-task stack in the fallback used if the PSRAM allocation
   // failed. See the worst-case test in test_mqtt_payload_builder.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
+  // Raised to 1152 for the self-heal fields, which left 20 bytes at the maxima; the
+  // status build has no stack fallback any more, so this costs no RAM.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1152;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
   #if defined(BOARD_HAS_PSRAM)

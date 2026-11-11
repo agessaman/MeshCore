@@ -112,6 +112,16 @@ static inline const char* causeLabel(Cause c) {
   }
 }
 
+// Compact token for the status payload, in the style of reset_reason.
+static inline const char* causeToken(Cause c) {
+  switch (c) {
+    case Cause::StopUnproven: return "stop_unproven";
+    case Cause::ClientQuarantined: return "client_quarantined";
+    case Cause::AllSlotsDown: return "all_slots_down";
+    default: return "none";
+  }
+}
+
 static inline uint32_t baseHoldMs(const Config& cfg, Cause c) {
   switch (c) {
     case Cause::StopUnproven: return cfg.stop_unproven_ms;

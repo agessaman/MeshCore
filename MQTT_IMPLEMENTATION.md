@@ -562,8 +562,9 @@ bridge stop never completes (10 min), an MQTT client cannot be stopped (30 min),
 slot is down for 2 h while an NTP reply in the last hour shows the internet is reachable.
 Slots refused by their broker do not count. It waits for 30 min of uptime, doubles the
 hold per consecutive self-heal reboot (up to 8x), and only alerts after 5 in a row. Until
-a slot stays connected for 10 min, the status payload carries `selfheal` (cause) and
-`selfheal_n` (count) next to `reset_reason`. While no slot is connected, the bridge
+a slot stays connected for 10 min, the status payload carries `selfheal`
+(`stop_unproven`, `client_quarantined` or `all_slots_down`) and `selfheal_n` (count) next
+to `reset_reason`. While no slot is connected, the bridge
 probes NTP about every 20 min without changing the clock.
 
 **Ethernet (ThinkNode M7).** The observer uses Ethernet when it has a DHCP lease at boot,

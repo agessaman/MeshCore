@@ -71,6 +71,7 @@ public:
    * @param conn_health MQTT slot connection health; defaults omit every field
    * @param heap_min Smallest free internal heap since boot (optional, -1 to omit)
    * @param reset_reason Short token for the reset that booted this image; nullptr omits it
+   * @param selfheal Last self-heal cause and selfheal_n its consecutive count; omitted when 0
    * @return Length of JSON string, or 0 on error
    */
   static int buildStatusMessage(
@@ -99,7 +100,8 @@ public:
     const char* repeat = nullptr,
     const MQTTConnHealth& conn_health = MQTTConnHealth(),
     int heap_min = -1,
-    const char* reset_reason = nullptr
+    const char* reset_reason = nullptr,
+    const char* selfheal = nullptr, int selfheal_n = 0
   );
 
   /**

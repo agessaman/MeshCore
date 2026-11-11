@@ -4,6 +4,7 @@
 #include "../MQTTConnectionPolicy.h"
 #include "../NtpValidation.h"
 #include "../MQTTMessageBuilder.h"
+#include "../ObserverSelfHealRtc.h"
 #include "../MQTTNeighborsPolicy.h"
 #include "../MQTTPacketQueuePolicy.h"
 #include "../MQTTReplyFormat.h"
@@ -3267,6 +3268,19 @@ static const char* cachedResetReason(mesh::MainBoard* board) {
 }
 #endif
 
+#ifdef ESP_PLATFORM
+// Last self-heal reboot from the RTC record; a cleared or invalid record reports none.
+static const char* selfHealCause() {
+  const MQTTSelfHealPolicy::RtcRecord rec = ObserverSelfHealRtc::load();
+  return ObserverSelfHealRtc::lastCount(rec) > 0
+             ? MQTTSelfHealPolicy::causeToken(ObserverSelfHealRtc::lastCause(rec)) : nullptr;
+}
+static int selfHealCount() { return ObserverSelfHealRtc::lastCount(ObserverSelfHealRtc::load()); }
+#else
+static const char* selfHealCause() { return nullptr; }
+static int selfHealCount() { return 0; }
+#endif
+
 void MQTTBridge::publishStatusToSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
@@ -3357,7 +3371,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
     collectConnHealth(),
-    heap_min, cachedResetReason(_board)
+    heap_min, cachedResetReason(_board),
+    selfHealCause(), selfHealCount()
   );
 
   if (len > 0) {
@@ -4292,7 +4307,8 @@ bool MQTTBridge::publishStatus() {
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
     collectConnHealth(),
-    heap_min, cachedResetReason(_board)
+    heap_min, cachedResetReason(_board),
+    selfHealCause(), selfHealCount()
   );
 
   if (len > 0) {
