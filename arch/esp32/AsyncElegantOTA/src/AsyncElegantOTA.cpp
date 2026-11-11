@@ -50,6 +50,10 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
             }
         }
         if (_uploadRequest != request) {
+            if (_uploadRequest != nullptr || Update.isRunning() ||
+                _restartPending.load(std::memory_order_acquire)) {
+                return request->send(409, "text/plain", "OTA already running");
+            }
             return request->send(400, "text/plain", "OTA upload not accepted");
         }
         _uploadRequest = nullptr;

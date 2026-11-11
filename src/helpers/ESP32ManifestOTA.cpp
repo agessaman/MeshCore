@@ -71,8 +71,9 @@ void ESP32Board::otaCheck(uint8_t channel, const char* current_ver, char reply[]
   }
   portEXIT_CRITICAL(&ota_check_mux);
 
+  // Core 0's idle task frees the finished worker's stack and TCB.
   if (read.start && xTaskCreatePinnedToCore(ota_check_entry, "ota-check", 8192,
-                                           nullptr, 1, nullptr, 1) != pdPASS) {
+                                           nullptr, 1, nullptr, 0) != pdPASS) {
     strcpy(snapshot, "ERR: OTA task spawn failed");
     portENTER_CRITICAL(&ota_check_mux);
     memcpy(ota_check.reply, snapshot, sizeof(snapshot));
