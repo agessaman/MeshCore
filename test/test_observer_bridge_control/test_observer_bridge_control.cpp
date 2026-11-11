@@ -554,6 +554,31 @@ TEST_F(ObserverSelfHealTest, NullBridgeNeverActs) {
   EXPECT_EQ(1, MQTTSelfHealPolicy::rtcConsecutive(FakeHealPlatform::rtc));
 }
 
+// The companion observer's configuration: lifecycle sequencing without the self-heal driver.
+TEST(ObserverBridgeControlDisabledHeal, SavedPrefOnNeverActsAndLateAckStillResumes) {
+  g_log.clear();
+  FakeHost host;
+  FakeBridge* bridge = nullptr;
+  ObserverBridgeControl<FakeBridge, FakeLog, ObserverSelfHealDisabledPlatform> ctl;
+  ctl.setState(host, bridge, true);
+  ASSERT_TRUE(bridge && bridge->running);
+  bridge->next_stop_times_out = true;
+  ctl.restart(host, bridge);
+  ASSERT_TRUE(bridge->unproven);
+  ASSERT_EQ(1, host.obs.mqtt_selfheal_enabled);
+  host.calls.clear();
+
+  for (int i = 0; i < 1000; i++) ctl.poll(host, bridge);
+  EXPECT_TRUE(host.calls.empty());
+  EXPECT_TRUE(g_log.empty());
+
+  bridge->late_acked = true;
+  ctl.poll(host, bridge);
+  EXPECT_TRUE(bridge->running);
+  EXPECT_FALSE(ctl.resumePending());
+  delete bridge;
+}
+
 TEST_F(ObserverSelfHealTest, AllSlotsDownNeedsFreshEvidence) {
   startRunning();
   bridge->candidate_slots = 2;

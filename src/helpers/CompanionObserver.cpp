@@ -41,10 +41,12 @@ void CompanionObserver::begin(mesh::Dispatcher* dispatcher, mesh::Radio* radio, 
   _dispatcher = dispatcher;
   _radio = radio;
   _ms = ms;
+  _mgr = mgr;
+  _rtc = rtc;
   _identity = identity;
 
-  MQTTPrefs* obs = _config.prefs();
 #ifdef ESP_PLATFORM
+  MQTTPrefs* obs = _config.prefs();
   // Same bring-up order as the repeater observer: cap TX power before the first
   // association, and name the DHCP lease on boot-owned links.
   NetworkLink& link = activeNetworkLink();
@@ -59,32 +61,26 @@ void CompanionObserver::begin(mesh::Dispatcher* dispatcher, mesh::Radio* radio, 
 #endif
 
   // Deferred construction, as in the repeater (static init crashes on ESP32 classic).
-  _bridge = new MQTTBridge(&_host, obs, mgr, rtc, identity);
-  startBridge();
+  _bridge_ctl.setState(*this, _bridge, true);
 }
 
-void CompanionObserver::startBridge() {
-  if (!_bridge) return;
+MQTTBridge* CompanionObserver::newBridge() {
+  return new MQTTBridge(&_host, _config.prefs(), _mgr, _rtc, _identity);
+}
+
+void CompanionObserver::prepareBridgeStart(MQTTBridge* b, bool restart) {
+  (void)restart;
   char device_id[65];
   mesh::Utils::toHex(device_id, _identity->pub_key, PUB_KEY_SIZE);
-  _bridge->setDeviceID(device_id);
-  _bridge->setFirmwareVersion(_firmware_version);
-  _bridge->setBoardModel(_board.getManufacturerName());
-  _bridge->setBuildDate(_build_date);
-  _bridge->setStatsSources(_dispatcher, _radio, &_board, _ms);
-  _bridge->begin();
-  _resume_pending = !_bridge->isRunning() && _bridge->isStopUnproven();
+  b->setDeviceID(device_id);
+  b->setFirmwareVersion(_firmware_version);
+  b->setBoardModel(_board.getManufacturerName());
+  b->setBuildDate(_build_date);
+  b->setStatsSources(_dispatcher, _radio, &_board, _ms);
 }
 
 void CompanionObserver::loop() {
-  // A timed-out stop keeps the bridge down until the MQTT task acknowledges it.
-  if (_bridge && _bridge->stopAcknowledgedLate()) {
-    _bridge->pollLateStopAck();
-    if (_resume_pending) {
-      Serial.println("MQTT: stop acknowledged late - resuming bridge");
-      startBridge();
-    }
-  }
+  _bridge_ctl.poll(*this, _bridge);
 }
 
 void CompanionObserver::onPacketRx(mesh::Packet* pkt) {
@@ -147,15 +143,12 @@ bool CompanionObserver::saveObserverPrefs() {
 }
 
 void CompanionObserver::restartBridge() {
-  if (!_bridge || !_bridge->isRunning()) return;
-  _bridge->end();
-  startBridge();
+  _bridge_ctl.restart(*this, _bridge);
 }
 
 void CompanionObserver::restartBridgeSlot(int slot) {
-  if (!_bridge || !_bridge->isRunning()) return;
   if (slot < 0 || slot >= MAX_MQTT_SLOTS) return;
-  _bridge->setSlotPreset(slot, _config.prefs()->mqtt_slot_preset[slot]);
+  _bridge_ctl.restartSlot(*this, _bridge, slot);
 }
 
 bool CompanionObserver::syncMqttNtp() {

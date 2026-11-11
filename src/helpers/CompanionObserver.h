@@ -9,6 +9,7 @@
 #include <Mesh.h>
 #include <helpers/ObserverConfig.h>
 #include <helpers/bridges/MQTTBridgeHost.h>
+#include <helpers/bridges/ObserverBridgeControl.h>
 
 class MQTTBridge;
 
@@ -52,9 +53,17 @@ public:
   bool isMqttBridgeRunning() override { return isBridgeRunning(); }
   bool runMqttNtpDiag(char* reply, size_t reply_size, bool verbose) override;
 
-private:
-  void startBridge();
+  // ObserverBridgeControl host. The bridge is always wanted on a companion.
+  struct BridgeIntent { bool bridge_enabled; };
+  MQTTBridge* newBridge();
+  void prepareBridgeStart(MQTTBridge* b, bool restart);
+  void setAlertBridge(MQTTBridge*) { }
+  const BridgeIntent* getNodePrefs() const { return &_bridge_intent; }
+  MQTTPrefs* getObserverPrefs() { return _config.prefs(); }
+  void rebootForSelfHeal() { }   // unreachable: self-heal is compiled out
+  bool isOtaInProgress() { return false; }
 
+private:
   mesh::MainBoard& _board;
   MQTTBridgeHost& _host;
   const char* _firmware_version;
@@ -66,9 +75,12 @@ private:
   mesh::Dispatcher* _dispatcher = nullptr;
   mesh::Radio* _radio = nullptr;
   mesh::MillisecondClock* _ms = nullptr;
+  mesh::PacketManager* _mgr = nullptr;
+  mesh::RTCClock* _rtc = nullptr;
   mesh::LocalIdentity* _identity = nullptr;
-  // A stop timed out; restart once the MQTT task acknowledges it.
-  bool _resume_pending = false;
+  const BridgeIntent _bridge_intent{true};
+  // Same start/restart/late-ack sequencing as the repeater; self-heal compiled out.
+  ObserverBridgeControl<MQTTBridge, ObserverBridgeSerialLog, ObserverSelfHealDisabledPlatform> _bridge_ctl;
 };
 
 #endif  // WITH_MQTT_BRIDGE
