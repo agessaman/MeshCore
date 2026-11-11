@@ -804,7 +804,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #ifdef WITH_SNMP
       _snmp_agent(nullptr),
 #endif
-      _last_slot_reconnect_ms(0), _guard_armed_by_slot(-1)
+      _last_slot_reconnect_ms(0), _guard_armed_by_slot(-1), _guard_armer_first_setup(false)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _packet_queue_storage(nullptr)
@@ -2773,7 +2773,8 @@ void MQTTBridge::maintainSlotConnections() {
 
       // A first setup may follow another first setup once that one's handshake is over.
       const int armer = _guard_armed_by_slot;
-      const bool armed_by_first_setup = armer >= 0 && armer < RUNTIME_MQTT_SLOTS;
+      const bool armed_by_first_setup = armer >= 0 && armer < RUNTIME_MQTT_SLOTS &&
+          _guard_armer_first_setup;
       const bool guard_released = armed_by_first_setup &&
           MQTTConnectionPolicy::firstSetupGuardReleased(
               static_cast<uint32_t>(now_millis),
@@ -2809,6 +2810,7 @@ void MQTTBridge::maintainSlotConnections() {
           // setup_retry_this_cycle.
           _last_slot_reconnect_ms = now_millis;
           _guard_armed_by_slot = first_attempt ? static_cast<int8_t>(i) : -1;
+          _guard_armer_first_setup = first_attempt;
           reconnect_attempted_this_cycle = true;
         }
       }
@@ -3064,8 +3066,17 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   }
 
   // Reconnect with exponential backoff (for disconnected slots that already have valid config)
-  // Only one reconnect per maintenance cycle to prevent TLS handshakes from blocking other slots
-  if (!slot.connected && slot.initial_connect_done && !slot.circuit_breaker_tripped && !reconnect_attempted) {
+  // Only one reconnect per maintenance cycle to prevent TLS handshakes from blocking other slots.
+  // A handshake launched in this pass re-stamps the guard, so the release cannot let a second one through.
+  const int armer = _guard_armed_by_slot;
+  const bool guard_released = reconnect_attempted && armer >= 0 && armer < RUNTIME_MQTT_SLOTS &&
+      MQTTConnectionPolicy::reconnectGuardReleased(
+          static_cast<uint32_t>(now_millis), static_cast<uint32_t>(_last_slot_reconnect_ms), true,
+          MQTTConnectionPolicy::firstSetupHandshakeDone(
+              _slots[armer].enabled, _slots[armer].client != nullptr,
+              _slot_attempt_pending[armer], _status_publish_pending[armer]));
+  if (!slot.connected && slot.initial_connect_done && !slot.circuit_breaker_tripped &&
+      (!reconnect_attempted || guard_released)) {
     if (MQTTConnectionPolicy::reconnectDue(
             static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_reconnect_attempt),
             slot.reconnect_backoff, static_cast<uint8_t>(index))) {
@@ -3096,7 +3107,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
-      _guard_armed_by_slot = -1;
+      _guard_armed_by_slot = static_cast<int8_t>(index);
+      _guard_armer_first_setup = false;
       if (slot_uses_jwt) {
         prepareJwtReconnect(false, slot.reconnect_backoff);
       } else {

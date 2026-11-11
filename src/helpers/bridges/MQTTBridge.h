@@ -523,7 +523,8 @@ private:
   static const unsigned long CONFIG_WARNING_INTERVAL = 300000; // Log every 5 minutes max
 
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
-  int8_t _guard_armed_by_slot;             // slot whose first setup armed that guard; -1 = anything else
+  int8_t _guard_armed_by_slot;             // slot whose first setup or reconnect armed that guard; -1 = anything else
+  bool _guard_armer_first_setup;           // that handshake was a first setup
   // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
   std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
   // Free-stack bytes each task last measured for itself; 0 = no sample yet.
