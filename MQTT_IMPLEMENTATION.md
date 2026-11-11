@@ -707,6 +707,16 @@ get mqtt1.filter           # none sends no packets
 
 **JWT brokers reject the login:** check the clock with `get mqtt.ntp.diag`.
 
+**Slots connect, then drop a few seconds later and the queue stays full:** usually a weak WiFi
+uplink. The small handshake frames get through, but full-size publishes do not.
+
+```bash
+get link.status            # signal below about -70 dBm is marginal
+set wifi.txpower 20        # raise the TX power cap; `default` reverts
+```
+
+Most builds, the Station G3 included, start at the 11 dBm build default (`MQTT_WIFI_TX_POWER`).
+
 ## Fault Alerts
 
 The node can post a message on a LoRa group channel when WiFi or a broker stays down. See
