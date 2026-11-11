@@ -9,6 +9,8 @@
 namespace MQTTConnectionPolicy {
 
 static const uint32_t kReconnectGuardMs = 15000UL;
+// Shortest gap between two first-time slot setups, even when one finishes instantly.
+static const uint32_t kFirstSetupMinGapMs = 2000UL;
 static const uint32_t kStableResetMs = 120000UL;
 // Breaker probe interval in minutes (mqtt.breaker.interval). The floor stays
 // above the 5-minute top backoff rung so a tripped slot still retries less often.
@@ -43,17 +45,38 @@ static inline bool reconnectGuardActive(uint32_t now, uint32_t last_reconnect) {
 // retry_interval_ms. last_cross_slot_ms == 0 means no handshake was armed, so
 // it does not borrow reconnectGuardActive's epoch rule and hold the first slot
 // for 15 s of uptime. already_attempted_this_pass is the one-setup budget.
+// guard_released lets a first setup past the guard early (firstSetupGuardReleased).
 static inline bool deferredSlotSetupDue(uint32_t now, uint32_t last_attempt,
                                         uint32_t retry_interval_ms,
                                         uint32_t last_cross_slot_ms,
-                                        bool already_attempted_this_pass) {
+                                        bool already_attempted_this_pass,
+                                        bool guard_released = false) {
   if (already_attempted_this_pass) return false;
-  if (last_cross_slot_ms != 0 &&
+  if (last_cross_slot_ms != 0 && !guard_released &&
       reconnectGuardActive(now, last_cross_slot_ms)) {
     return false;
   }
   if (last_attempt == 0) return true;
   return elapsedMs(now, last_attempt) >= retry_interval_ms;
+}
+
+// The armer's handshake is over: it connected or failed and its on-connect work
+// ran, or the slot was disabled or lost its client.
+static inline bool firstSetupHandshakeDone(bool armer_enabled, bool armer_has_client,
+                                           bool armer_attempt_pending,
+                                           bool armer_completion_pending) {
+  if (!armer_enabled || !armer_has_client) return true;
+  return !armer_attempt_pending && !armer_completion_pending;
+}
+
+// A first setup may start before the 15 s guard expires when the guard was armed
+// by another first setup whose handshake is done, but not within kFirstSetupMinGapMs.
+// Anything else (retries, reconnects, reconfigures) keeps the full guard.
+static inline bool firstSetupGuardReleased(uint32_t now, uint32_t last_cross_slot_ms,
+                                           bool first_attempt, bool armed_by_first_setup,
+                                           bool armer_handshake_done) {
+  if (!first_attempt || !armed_by_first_setup || !armer_handshake_done) return false;
+  return elapsedMs(now, last_cross_slot_ms) >= kFirstSetupMinGapMs;
 }
 
 // One reconfigure per pass. A request that does not open a connection is not

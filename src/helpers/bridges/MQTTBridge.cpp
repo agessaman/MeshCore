@@ -801,7 +801,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #ifdef WITH_SNMP
       _snmp_agent(nullptr),
 #endif
-      _last_slot_reconnect_ms(0)
+      _last_slot_reconnect_ms(0), _guard_armed_by_slot(-1)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _packet_queue_storage(nullptr)
@@ -2628,6 +2628,7 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
 
 void MQTTBridge::beginDeferredSlotSetup() {
   _slots_setup_done = true;
+  _guard_armed_by_slot = -1;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (!_slots[i].initial_connect_done) continue;
     // A slot is already up and nothing recorded its handshake. Hold the next one.
@@ -2721,12 +2722,24 @@ void MQTTBridge::maintainSlotConnections() {
       }
       if (!canActivateSlot(i)) continue;
 
+      // A first setup may follow another first setup once that one's handshake is over.
+      const int armer = _guard_armed_by_slot;
+      const bool armed_by_first_setup = armer >= 0 && armer < RUNTIME_MQTT_SLOTS;
+      const bool guard_released = armed_by_first_setup &&
+          MQTTConnectionPolicy::firstSetupGuardReleased(
+              static_cast<uint32_t>(now_millis),
+              static_cast<uint32_t>(_last_slot_reconnect_ms),
+              first_attempt, true,
+              MQTTConnectionPolicy::firstSetupHandshakeDone(
+                  _slots[armer].enabled, _slots[armer].client != nullptr,
+                  _slot_attempt_pending[armer], _status_publish_pending[armer]));
+
       if (MQTTConnectionPolicy::deferredSlotSetupDue(
               static_cast<uint32_t>(now_millis),
               static_cast<uint32_t>(_slots[i].last_reconnect_attempt),
               static_cast<uint32_t>(SLOT_SETUP_RETRY_INTERVAL),
               static_cast<uint32_t>(_last_slot_reconnect_ms),
-              setup_retry_this_cycle)) {
+              setup_retry_this_cycle, guard_released)) {
         _slots[i].last_deferred_log_ms = 0;
         _slots[i].last_reconnect_attempt = now_millis;
         setup_retry_this_cycle = true;
@@ -2746,6 +2759,7 @@ void MQTTBridge::maintainSlotConnections() {
           // retrying at all. A failed setup launches nothing and so spends only
           // setup_retry_this_cycle.
           _last_slot_reconnect_ms = now_millis;
+          _guard_armed_by_slot = first_attempt ? static_cast<int8_t>(i) : -1;
           reconnect_attempted_this_cycle = true;
         }
       }
@@ -2882,6 +2896,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           MQTT_TRACE_HEAP("renewal:after-reconnect", index);
           reconnect_attempted = true;
           _last_slot_reconnect_ms = now_millis;
+          _guard_armed_by_slot = -1;
           MQTT_DEBUG_PRINTLN("MQTT%d int_heap=%d at token renewal reconnect", index + 1,
               (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
           MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
@@ -2982,6 +2997,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       slot.last_reconnect_attempt = now_millis;
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
+      _guard_armed_by_slot = -1;
       MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms, int_heap=%d)", index + 1, probe_elapsed,
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
@@ -3031,6 +3047,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
+      _guard_armed_by_slot = -1;
       if (slot_uses_jwt) {
         prepareJwtReconnect(false, slot.reconnect_backoff);
       } else {
@@ -3498,7 +3515,10 @@ void MQTTBridge::applyPendingSlotReconfigures() {
     applySlotPreset(i, _obs->mqtt_slot_preset[i]);
     applied_this_pass = true;
     // Same stamp a reconnect writes, so the next pending connect waits 15 s.
-    if (opens) _last_slot_reconnect_ms = millis();
+    if (opens) {
+      _last_slot_reconnect_ms = millis();
+      _guard_armed_by_slot = -1;
+    }
   }
 }
 
@@ -3686,6 +3706,7 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
       }
     }
     _last_slot_reconnect_ms = now - MQTTConnectionPolicy::kReconnectGuardMs;
+    _guard_armed_by_slot = -1;
   }
   return actions.retry_disconnected_slots_now;
 }

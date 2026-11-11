@@ -44,6 +44,71 @@ TEST(MQTTConnectionPolicy, DeferredSetupRetryIsWrapSafeAndOnePerPass) {
   EXPECT_FALSE(Policy::deferredSlotSetupDue(65000U, 5000U, 60000U, 65000U, false));
 }
 
+TEST(MQTTConnectionPolicy, FirstSetupHandshakeDoneTracksTheArmersAttempt) {
+  // Still negotiating, or connected with its on-connect work not yet run.
+  EXPECT_FALSE(Policy::firstSetupHandshakeDone(true, true, true, false));
+  EXPECT_FALSE(Policy::firstSetupHandshakeDone(true, true, false, true));
+  // Connected (or failed) and its completion work has run.
+  EXPECT_TRUE(Policy::firstSetupHandshakeDone(true, true, false, false));
+  // Disabled or destroyed: nothing left to finish.
+  EXPECT_TRUE(Policy::firstSetupHandshakeDone(false, true, true, true));
+  EXPECT_TRUE(Policy::firstSetupHandshakeDone(true, false, true, true));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupReleasesGuardOnceHandshakeIsDone) {
+  const uint32_t armed = 5000U;
+  const bool released = Policy::firstSetupGuardReleased(armed + 4000U, armed, true, true, true);
+  EXPECT_TRUE(released);
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(armed + 4000U, 0U, 60000U, armed, false, released));
+  // The one-setup budget still applies to a released guard.
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 4000U, 0U, 60000U, armed, true, released));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupWaitsWhileHandshakeIsRunning) {
+  const uint32_t armed = 5000U;
+  const bool released = Policy::firstSetupGuardReleased(armed + 14999U, armed, true, true, false);
+  EXPECT_FALSE(released);
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 0U, 60000U, armed, false, released));
+  // 15 s is still the upper bound.
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(armed + 15000U, 0U, 60000U, armed, false, false));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupKeepsMinimumGapAfterInstantConnect) {
+  const uint32_t armed = 5000U;
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed, armed, true, true, true));
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed + Policy::kFirstSetupMinGapMs - 1U,
+                                               armed, true, true, true));
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(armed + Policy::kFirstSetupMinGapMs,
+                                              armed, true, true, true));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupReleaseWhenArmerIsDisabledOrDestroyed) {
+  const uint32_t armed = 5000U;
+  const bool disabled_done = Policy::firstSetupHandshakeDone(false, true, true, false);
+  const bool destroyed_done = Policy::firstSetupHandshakeDone(true, false, true, false);
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(armed + 3000U, armed, true, true, disabled_done));
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(armed + 3000U, armed, true, true, destroyed_done));
+}
+
+TEST(MQTTConnectionPolicy, FirstSetupReleaseIsWrapSafe) {
+  const uint32_t armed = std::numeric_limits<uint32_t>::max() - 999U;
+  // 1999 ms after the stamp, across the wrap.
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(999U, armed, true, true, true));
+  EXPECT_TRUE(Policy::firstSetupGuardReleased(1000U, armed, true, true, true));
+  EXPECT_TRUE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, armed, false, true));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(1000U, 0U, 60000U, armed, false, false));
+}
+
+TEST(MQTTConnectionPolicy, NonFirstAttemptsKeepTheFullGuard) {
+  const uint32_t armed = 5000U;
+  // A setup retry is not a first attempt.
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed + 10000U, armed, false, true, true));
+  // A guard armed by a reconnect, renewal, probe or reconfigure.
+  EXPECT_FALSE(Policy::firstSetupGuardReleased(armed + 10000U, armed, true, false, true));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 0U, 60000U, armed, false, false));
+  EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 1000U, 1000U, armed, false, false));
+}
+
 TEST(MQTTConnectionPolicy, ConnectingReconfigureWaitsForTheReconnectGuard) {
   EXPECT_FALSE(Policy::slotReconfigureDue(false, true, 20000U, 0U, false));
   EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 20000U, 0U, true));
