@@ -157,6 +157,35 @@ void halt() {
 static void loopDuringDisplayRefresh();
 #endif
 
+#ifdef HAS_ESP_MDNS
+static void startMdns() {
+  String nodeName = the_mesh.getNodeName();
+  String sanitizedNodeName;
+  sanitizedNodeName.reserve(nodeName.length());
+  for (size_t i = 0; i < nodeName.length(); ++i) {
+    const char c = nodeName[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+      sanitizedNodeName += c;
+    }
+  }
+
+  String mdnsName = "meshcore_";
+  mdnsName += sanitizedNodeName;
+  if (!MDNS.begin(mdnsName.c_str())) {
+    WIFI_DEBUG_PRINTLN("mDNS failed to start!");
+  } else {
+    MDNS.addService("meshcore", "tcp", TCP_PORT);
+    MDNS.addServiceTxt("meshcore", "tcp", "node-name", the_mesh.getNodeName());
+    MDNS.addServiceTxt("meshcore", "tcp", "firmware-version", FIRMWARE_VERSION);
+    String protocol; protocol+=FIRMWARE_VER_CODE;
+    MDNS.addServiceTxt("meshcore", "tcp", "protocol-version", protocol.c_str());
+    MDNS.addServiceTxt("meshcore", "tcp", "build-date", __DATE__);
+    MDNS.addServiceTxt("meshcore", "tcp", "build-time", __TIME__);
+  }
+}
+#endif
+
 void setup() {
 #ifdef COMPANION_MESH_IN_PSRAM
   allocMesh();   // before anything touches the_mesh
@@ -303,31 +332,8 @@ void setup() {
   interface_manager.addInterface(InterfaceType::Ethernet, &ethernet_interface);
 #endif
 
-#ifdef HAS_ESP_MDNS
-  String nodeName = the_mesh.getNodeName();
-  String sanitizedNodeName;
-  sanitizedNodeName.reserve(nodeName.length());
-  for (size_t i = 0; i < nodeName.length(); ++i) {
-    const char c = nodeName[i];
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') || c == '-' || c == '_') {
-      sanitizedNodeName += c;
-    }
-  }
-
-  String mdnsName = "meshcore_";
-  mdnsName += sanitizedNodeName;
-  if (!MDNS.begin(mdnsName.c_str())) {
-    WIFI_DEBUG_PRINTLN("mDNS failed to start!");
-  } else {
-    MDNS.addService("meshcore", "tcp", TCP_PORT);
-    MDNS.addServiceTxt("meshcore", "tcp", "node-name", the_mesh.getNodeName());
-    MDNS.addServiceTxt("meshcore", "tcp", "firmware-version", FIRMWARE_VERSION);
-    String protocol; protocol+=FIRMWARE_VER_CODE;
-    MDNS.addServiceTxt("meshcore", "tcp", "protocol-version", protocol.c_str());
-    MDNS.addServiceTxt("meshcore", "tcp", "build-date", __DATE__);
-    MDNS.addServiceTxt("meshcore", "tcp", "build-time", __TIME__);
-  }
+#if defined(HAS_ESP_MDNS) && !defined(WITH_MQTT_BRIDGE)
+  startMdns();
 #endif
 
 // add hardware serial interface
@@ -400,6 +406,14 @@ void loop() {
     if (wifi_up && !wifi_was_connected) {
       wifi_interface.begin(TCP_PORT);
       WIFI_DEBUG_PRINTLN("connected, listening on %s:%d", WiFi.localIP().toString().c_str(), TCP_PORT);
+#ifdef HAS_ESP_MDNS
+      // The network link brings WiFi up after setup(), so the responder starts on the first link-up.
+      static bool mdns_started = false;
+      if (!mdns_started) {
+        mdns_started = true;
+        startMdns();
+      }
+#endif
     }
     wifi_was_connected = wifi_up;
   }
