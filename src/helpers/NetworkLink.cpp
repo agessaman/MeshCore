@@ -342,6 +342,9 @@ class WiFiNetworkLink final : public NetworkLinkBase {
     if (_hostname[0] != '\0') WiFi.setHostname(_hostname);
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+    // Scan every channel and join the strongest AP; the default takes the first one found.
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
     // Before WiFi.begin() so association and the handshake honor the cap too.
     applyTxPower();
 
@@ -356,8 +359,9 @@ class WiFiNetworkLink final : public NetworkLinkBase {
             break;
           case ARDUINO_EVENT_WIFI_STA_GOT_IP:
             applyTxPower();
-            NETWORK_DEBUG_PRINTLN("WiFi connected: %s",
-                IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+            NETWORK_DEBUG_PRINTLN("WiFi connected: %s (AP %s, ch %d, %d dBm)",
+                IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str(),
+                WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (int)WiFi.RSSI());
             noteConnected(millis());
             _reconnect_backoff_attempt = 0;
             break;
