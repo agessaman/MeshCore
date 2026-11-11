@@ -17,7 +17,8 @@ Heal::Inputs Healthy(uint32_t now) {
   in.now_ms = now;
   in.bridge_running = true;
   in.network_up = true;
-  in.enabled_slots = 2;
+  in.evidence_age_ms = 5 * kMin;
+  in.candidate_slots = 2;
   in.connected_slots = 2;
   return in;
 }
@@ -43,6 +44,19 @@ struct Harness {
   Heal::Result tick(const Heal::Inputs& in) { return Heal::tick(st, in, cfg, consecutive); }
 };
 
+TEST(MQTTSelfHealPolicy, DefaultsMatchTheAgreedThresholds) {
+  Heal::Config cfg = Heal::defaultConfig();
+  EXPECT_EQ(10 * kMin, cfg.stop_unproven_ms);
+  EXPECT_EQ(30 * kMin, cfg.quarantined_ms);
+  EXPECT_EQ(120 * kMin, cfg.all_slots_down_ms);
+  EXPECT_EQ(30 * kMin, cfg.min_uptime_ms);
+  EXPECT_EQ(1 * kMin, cfg.alert_grace_ms);
+  EXPECT_EQ(10 * kMin, cfg.healthy_reset_ms);
+  EXPECT_EQ(60 * kMin, cfg.evidence_max_age_ms);
+  EXPECT_EQ(3, cfg.max_backoff_shift);
+  EXPECT_EQ(5, cfg.max_consecutive);
+}
+
 TEST(MQTTSelfHealPolicy, HealthyNodeNeverActs) {
   Harness h;
   for (uint32_t t = 0; t < 24UL * 60 * kMin; t += kMin) {
@@ -62,11 +76,11 @@ TEST(MQTTSelfHealPolicy, StopUnprovenAlertsThenRebootsAfterGrace) {
   EXPECT_EQ(10 * kMin, r.held_ms);
   EXPECT_FALSE(r.reboot_suppressed);
 
-  EXPECT_EQ(Heal::Action::None, h.tick(Unproven(start + 15 * kMin - 1)).action);
-  r = h.tick(Unproven(start + 15 * kMin));
+  EXPECT_EQ(Heal::Action::None, h.tick(Unproven(start + 11 * kMin - 1)).action);
+  r = h.tick(Unproven(start + 11 * kMin));
   EXPECT_EQ(Heal::Action::Reboot, r.action);
   EXPECT_EQ(Heal::Cause::StopUnproven, r.cause);
-  EXPECT_EQ(15 * kMin, r.held_ms);
+  EXPECT_EQ(11 * kMin, r.held_ms);
 }
 
 TEST(MQTTSelfHealPolicy, LateRecoveryCancelsPendingReboot) {
@@ -74,7 +88,7 @@ TEST(MQTTSelfHealPolicy, LateRecoveryCancelsPendingReboot) {
   const uint32_t start = 40 * kMin;
   h.tick(Unproven(start));
   EXPECT_EQ(Heal::Action::Alert, h.tick(Unproven(start + 10 * kMin)).action);
-  EXPECT_EQ(Heal::Action::None, h.tick(Healthy(start + 12 * kMin)).action);
+  EXPECT_EQ(Heal::Action::None, h.tick(Healthy(start + 10 * kMin + 30000)).action);
   EXPECT_EQ(Heal::Action::None, h.tick(Healthy(start + 20 * kMin)).action);
 
   // A new episode starts its hold from scratch.
@@ -118,9 +132,9 @@ TEST(MQTTSelfHealPolicy, UptimeLatchSurvivesMillisWrap) {
   EXPECT_EQ(10 * kMin, r.held_ms);
 }
 
-TEST(MQTTSelfHealPolicy, AllSlotsDownNeedsNetworkBridgeAndEnabledSlots) {
+TEST(MQTTSelfHealPolicy, AllSlotsDownNeedsNetworkBridgeAndCandidateSlots) {
   const uint32_t start = 40 * kMin;
-  const uint32_t late = start + 7UL * 60 * kMin;
+  const uint32_t late = start + 3UL * 60 * kMin;
 
   Harness no_net;
   Heal::Inputs in = AllDown(start);
@@ -138,15 +152,15 @@ TEST(MQTTSelfHealPolicy, AllSlotsDownNeedsNetworkBridgeAndEnabledSlots) {
 
   Harness no_slots;
   in = AllDown(start);
-  in.enabled_slots = 0;
+  in.candidate_slots = 0;
   no_slots.tick(in);
   in.now_ms = late;
   EXPECT_EQ(Heal::Action::None, no_slots.tick(in).action);
 
   Harness down;
   down.tick(AllDown(start));
-  EXPECT_EQ(Heal::Action::None, down.tick(AllDown(start + 6UL * 60 * kMin - 1)).action);
-  Heal::Result r = down.tick(AllDown(start + 6UL * 60 * kMin));
+  EXPECT_EQ(Heal::Action::None, down.tick(AllDown(start + 2UL * 60 * kMin - 1)).action);
+  Heal::Result r = down.tick(AllDown(start + 2UL * 60 * kMin));
   EXPECT_EQ(Heal::Action::Alert, r.action);
   EXPECT_EQ(Heal::Cause::AllSlotsDown, r.cause);
 }
@@ -155,11 +169,81 @@ TEST(MQTTSelfHealPolicy, NetworkDropRestartsAllSlotsDownHold) {
   Harness h;
   const uint32_t start = 40 * kMin;
   h.tick(AllDown(start));
-  Heal::Inputs in = AllDown(start + 5UL * 60 * kMin);
+  Heal::Inputs in = AllDown(start + 90 * kMin);
   in.network_up = false;
   h.tick(in);
-  h.tick(AllDown(start + 5UL * 60 * kMin + kMin));
-  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(start + 7UL * 60 * kMin)).action);
+  const uint32_t back = start + 91 * kMin;
+  h.tick(AllDown(back));
+  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(back + 2UL * 60 * kMin - 1)).action);
+  EXPECT_EQ(Heal::Action::Alert, h.tick(AllDown(back + 2UL * 60 * kMin)).action);
+}
+
+TEST(MQTTSelfHealPolicy, MissingEvidenceIsNotACause) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  Heal::Inputs in = AllDown(start);
+  in.evidence_age_ms = Heal::kNoEvidence;
+  h.tick(in);
+  in.now_ms = start + 5UL * 60 * kMin;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+}
+
+TEST(MQTTSelfHealPolicy, StaleEvidenceRestartsAllSlotsDownHold) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  h.tick(AllDown(start));
+  Heal::Inputs in = AllDown(start + 100 * kMin);
+  in.evidence_age_ms = 60 * kMin;   // still fresh at the limit
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+  in.now_ms = start + 110 * kMin;
+  in.evidence_age_ms = 60 * kMin + 1;   // stale: the cause lapses
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+
+  // Fresh evidence returns and the hold starts over from here.
+  const uint32_t back = start + 115 * kMin;
+  h.tick(AllDown(back));
+  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(start + 2UL * 60 * kMin)).action);
+  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(back + 2UL * 60 * kMin - 1)).action);
+  Heal::Result r = h.tick(AllDown(back + 2UL * 60 * kMin));
+  EXPECT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_EQ(2UL * 60 * kMin, r.held_ms);
+}
+
+TEST(MQTTSelfHealPolicy, AllRefusedSlotsAreNotACause) {
+  // Two enabled slots, both refused by their brokers: no candidate remains.
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  Heal::Inputs in = AllDown(start);
+  in.candidate_slots = 0;
+  h.tick(in);
+  in.now_ms = start + 5UL * 60 * kMin;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+}
+
+TEST(MQTTSelfHealPolicy, MixedRefusedAndDownSlotsAreACause) {
+  // One slot refused, one down for a transport reason.
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  Heal::Inputs in = AllDown(start);
+  in.candidate_slots = 1;
+  h.tick(in);
+  in.now_ms = start + 2UL * 60 * kMin;
+  Heal::Result r = h.tick(in);
+  EXPECT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_EQ(Heal::Cause::AllSlotsDown, r.cause);
+}
+
+TEST(MQTTSelfHealPolicy, ConnectedSlotCancelsAllSlotsDown) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  h.tick(AllDown(start));
+  Heal::Inputs in = AllDown(start + 60 * kMin);
+  in.connected_slots = 1;
+  h.tick(in);
+  const uint32_t again = start + 61 * kMin;
+  h.tick(AllDown(again));
+  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(start + 2UL * 60 * kMin)).action);
+  EXPECT_EQ(Heal::Action::Alert, h.tick(AllDown(again + 2UL * 60 * kMin)).action);
 }
 
 TEST(MQTTSelfHealPolicy, QuarantineUsesItsOwnThreshold) {
@@ -257,7 +341,15 @@ TEST(MQTTSelfHealPolicy, AlertTextNamesCauseAndOutcome) {
   r.held_ms = 10 * kMin;
   char buf[96];
   Heal::formatAlert(r, cfg, buf, sizeof(buf));
-  EXPECT_STREQ("MQTT self-heal: stop unproven for 10m, rebooting in 5m", buf);
+  EXPECT_STREQ("MQTT self-heal: stop unproven for 10m, rebooting in 1m", buf);
+
+  cfg.alert_grace_ms = 15000;
+  Heal::formatAlert(r, cfg, buf, sizeof(buf));
+  EXPECT_STREQ("MQTT self-heal: stop unproven for 10m, rebooting in 15s", buf);
+  r.held_ms = 45000;
+  Heal::formatAlert(r, cfg, buf, sizeof(buf));
+  EXPECT_STREQ("MQTT self-heal: stop unproven for 45s, rebooting in 15s", buf);
+  r.held_ms = 10 * kMin;
 
   r.reboot_suppressed = true;
   Heal::formatAlert(r, cfg, buf, sizeof(buf));
