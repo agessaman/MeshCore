@@ -499,6 +499,7 @@ private:
   static const unsigned long CONFIG_WARNING_INTERVAL = 300000; // Log every 5 minutes max
 
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
+  int8_t _guard_armed_by_slot;             // slot whose first setup armed that guard; -1 = anything else
   // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
   std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
   // Free-stack bytes each task last measured for itself; 0 = no sample yet.
@@ -579,6 +580,9 @@ private:
   // (uninitialised client, failed config transaction) is not a broker fault and
   // must not advance this slot's backoff ladder — see maintainSlotConnection().
   esp_err_t reconnectSlotClient(int index);
+  void beginDeferredSlotSetup();       // Arm one-slot setup after NTP; clear a stale guard if none are up
+  bool pendingReconfigureConnects(int index) const; // predicts a connect so the request waits for the guard
+  void applyPendingSlotReconfigures(); // Apply at most one queued reconfigure; connecting ones honor the guard
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
@@ -691,7 +695,7 @@ public:
    * @param preset_name Preset name: "analyzer-us", "analyzer-eu", "nz-analyzer", "meshmapper", "custom", "none"
    */
   void setSlotPreset(int slot_index, const char* preset_name);
-  void applySlotPreset(int slot_index, const char* preset_name);
+  bool applySlotPreset(int slot_index, const char* preset_name); // true when a connection attempt started
 
   /**
    * Configure custom broker settings for a slot. Only applies when the

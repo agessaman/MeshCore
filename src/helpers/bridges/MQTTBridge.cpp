@@ -802,7 +802,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #ifdef WITH_SNMP
       _snmp_agent(nullptr),
 #endif
-      _last_slot_reconnect_ms(0)
+      _last_slot_reconnect_ms(0), _guard_armed_by_slot(-1)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _packet_queue_storage(nullptr)
@@ -1316,6 +1316,7 @@ void MQTTBridge::end() {
   // cannot be turned into a second task over the same state.
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) _slot_reconfigure_pending[i] = false;
   s_stop_unproven = _lifecycle.isStopUnproven();
   if (_lifecycle.isStopUnproven()) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge stop UNPROVEN after %lu ms: task did not acknowledge. "
@@ -1488,7 +1489,9 @@ void MQTTBridge::mqttTaskLoop() {
     // trampoline (vTaskDelete(nullptr)).
     if (_stop_requested.load(std::memory_order_acquire)) {
       MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop - tearing down clients on Core 0");
+      // Drop queued reconfigures so shutdown does not start a handshake.
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+        _slot_reconfigure_pending[i] = false;
         teardownSlot(i);
       }
       destroySlotClients();
@@ -1605,44 +1608,14 @@ void MQTTBridge::mqttTaskLoop() {
     }
 
     // Deferred slot setup: wait until NTP is synced so JWT tokens get valid timestamps.
-    // This avoids wasted TLS handshakes that get rejected due to bad token times.
+    // Slots themselves start in maintainSlotConnections(), one per pass.
     if (_ntp_synced && !_slots_setup_done) {
-      _slots_setup_done = true;
-
       MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots (max %d active)...", _max_active_slots);
-      for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-        if (_slots[i].enabled) {
-          if (!canActivateSlot(i)) {
-            MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", i + 1, _max_active_slots);
-            _slots[i].enabled = false;  // Disable so other loops skip it
-            continue;
-          }
-          char reason[80];
-          if (!isSlotReady(i, reason, sizeof(reason))) {
-            MQTT_DEBUG_PRINTLN("MQTT%d not ready - run '%s' to connect", i + 1, reason);
-            continue;
-          }
-          // A slot that fails to activate consumes no position and stays enabled, so
-          // maintainSlotConnections() retries it and a later healthy broker is not
-          // starved by it on a capped board.
-          if (!setupSlot(i)) continue;
-          // Stagger connections: 5s between slots to avoid simultaneous TLS handshakes
-          // which compete for ~40KB internal heap each
-          if (i < RUNTIME_MQTT_SLOTS - 1) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
-          }
-        }
-      }
+      beginDeferredSlotSetup();
     }
 
-    // Process pending slot reconfigures (queued from CLI on Core 1)
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slot_reconfigure_pending[i]) {
-        _slot_reconfigure_pending[i] = false;
-        MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)", i + 1, _obs->mqtt_slot_preset[i]);
-        applySlotPreset(i, _obs->mqtt_slot_preset[i]);
-      }
-    }
+    // One queued reconfigure per pass. A multi-slot save must not handshake them all at once.
+    applyPendingSlotReconfigures();
 
     // Publish on-connect status for slots whose onConnect callback fired since
     // the last loop. Raised on the esp-mqtt event task, consumed here on the
@@ -2066,13 +2039,10 @@ bool MQTTBridge::setupSlot(int index) {
     return false;
   }
 
-  // Every failure below is a real attempt, so stamp it: the retry interval in
-  // maintainSlotConnections() measures from last_reconnect_attempt, which starts at 0
-  // and is re-zeroed by teardownSlot(). Left unstamped, the gate degenerates to
-  // "uptime >= SLOT_SETUP_RETRY_INTERVAL" and a failure past that point is retried on
-  // the very next maintenance pass — the same task iteration, for a live reconfigure.
-  // The reconnect ladder never reads this field for an unactivated slot (it is gated
-  // on initial_connect_done), so stamping here cannot perturb reconnect timing.
+  // Every failure below is a real attempt, so stamp it. The deferred-setup gate
+  // treats 0 (the constructor value, and teardownSlot()) as "never attempted" and
+  // would otherwise run again on the next pass. The reconnect ladder does not read
+  // this field until initial_connect_done, so the stamp cannot move reconnect timing.
 
   // First setup for this slot allocates its persistent client; later ones reuse it.
   if (!ensureSlotClient(index)) {
@@ -2660,11 +2630,24 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
 }
 
 
-void MQTTBridge::maintainSlotConnections() {
-  if (!_identity) return;
+void MQTTBridge::beginDeferredSlotSetup() {
+  _slots_setup_done = true;
+  _guard_armed_by_slot = -1;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (!_slots[i].initial_connect_done) continue;
+    // A slot is already up and nothing recorded its handshake. Hold the next one.
+    if (_last_slot_reconnect_ms == 0) _last_slot_reconnect_ms = millis();
+    return;
+  }
+  // Nothing is up, so a leftover guard must not hold the first handshake.
+  _last_slot_reconnect_ms = 0;
+}
 
-  // Check WiFi status first
-  if (!_network->isConnected()) return;
+void MQTTBridge::maintainSlotConnections() {
+  // Renewal and reconnect need an identity and a link; a first setup needs only the link.
+  const bool link_up = _network->isConnected();
+  const bool can_maintain = _identity != nullptr && link_up;
+  if (!can_maintain && !_slots_setup_done) return;
 
   unsigned long now_millis = millis();
   unsigned long current_time = time(nullptr);
@@ -2706,21 +2689,73 @@ void MQTTBridge::maintainSlotConnections() {
       continue;
     }
 
-    // Enabled but never activated: setupSlot() failed on a client or token allocation,
-    // or on token creation. The ladder below is gated on initial_connect_done and would
-    // never revisit it, and maintenance used to skip clientless slots entirely, so
-    // without this the slot stayed dead until a reconfigure or reboot. Only retried
-    // after the initial pass has run, so the NTP-deferred setup order is preserved.
+    // Not activated yet: the startup sweep and a failed setupSlot both land here.
+    // One attempt per pass. The first is immediate; a failure waits out the retry
+    // interval; a success arms the cross-slot guard so the next slot waits.
     if (!_slots[i].initial_connect_done) {
-      if (_slots_setup_done && !setup_retry_this_cycle && !reconnect_attempted_this_cycle &&
-          isSlotReady(i) && canActivateSlot(i) &&
-          MQTTConnectionPolicy::elapsedMs(static_cast<uint32_t>(now_millis),
-                                         static_cast<uint32_t>(_slots[i].last_reconnect_attempt))
-              >= SLOT_SETUP_RETRY_INTERVAL) {
+      if (!_slots_setup_done) continue;
+      const bool first_attempt = _slots[i].last_reconnect_attempt == 0;
+      // A client made with the link down cannot connect and would arm the guard for nothing.
+      if (!link_up) continue;
+      // Retries also keep the identity gate.
+      if (!first_attempt && !can_maintain) continue;
+
+      // A ready lower slot still waiting on its first setup has not taken a seat yet.
+      bool lower_pending = false;
+      for (int j = 0; j < i; j++) {
+        if (!_slots[j].enabled || _slots[j].initial_connect_done) continue;
+        if (_slots[j].last_reconnect_attempt != 0) continue;
+        if (!isSlotReady(j)) continue;
+        lower_pending = true;
+        break;
+      }
+
+      // Cap accounting matches the inline sweep, once lower slots have settled.
+      if (!lower_pending && first_attempt && _slots[i].last_deferred_log_ms == 0 &&
+          !canActivateSlot(i)) {
+        MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", i + 1, _max_active_slots);
+        _slots[i].enabled = false;
+        continue;
+      }
+
+      char reason[80];
+      if (!isSlotReady(i, reason, sizeof(reason))) {
+        if (!lower_pending && _slots[i].last_deferred_log_ms == 0) {
+          MQTT_DEBUG_PRINTLN("MQTT%d not ready - run '%s' to connect", i + 1, reason);
+          _slots[i].last_deferred_log_ms = now_millis != 0 ? now_millis : 1;
+        }
+        continue;
+      }
+      if (!canActivateSlot(i)) continue;
+
+      // A first setup may follow another first setup once that one's handshake is over.
+      const int armer = _guard_armed_by_slot;
+      const bool armed_by_first_setup = armer >= 0 && armer < RUNTIME_MQTT_SLOTS;
+      const bool guard_released = armed_by_first_setup &&
+          MQTTConnectionPolicy::firstSetupGuardReleased(
+              static_cast<uint32_t>(now_millis),
+              static_cast<uint32_t>(_last_slot_reconnect_ms),
+              first_attempt, true,
+              MQTTConnectionPolicy::firstSetupHandshakeDone(
+                  _slots[armer].enabled, _slots[armer].client != nullptr,
+                  _slot_attempt_pending[armer], _status_publish_pending[armer]));
+
+      if (MQTTConnectionPolicy::deferredSlotSetupDue(
+              static_cast<uint32_t>(now_millis),
+              static_cast<uint32_t>(_slots[i].last_reconnect_attempt),
+              static_cast<uint32_t>(SLOT_SETUP_RETRY_INTERVAL),
+              static_cast<uint32_t>(_last_slot_reconnect_ms),
+              setup_retry_this_cycle, guard_released)) {
+        _slots[i].last_deferred_log_ms = 0;
         _slots[i].last_reconnect_attempt = now_millis;
         setup_retry_this_cycle = true;
-        MQTT_DEBUG_PRINTLN("MQTT%d retrying deferred setup (int_heap=%d)", i + 1,
-                           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        if (first_attempt) {
+          MQTT_DEBUG_PRINTLN("MQTT%d setup (int_heap=%d)", i + 1,
+                             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        } else {
+          MQTT_DEBUG_PRINTLN("MQTT%d retrying deferred setup (int_heap=%d)", i + 1,
+                             (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        }
         if (setupSlot(i)) {
           // A successful setup ends in connect(), so it spends this cycle's single
           // handshake allowance as well as arming the 15 s cross-slot guard. Without
@@ -2730,12 +2765,13 @@ void MQTTBridge::maintainSlotConnections() {
           // retrying at all. A failed setup launches nothing and so spends only
           // setup_retry_this_cycle.
           _last_slot_reconnect_ms = now_millis;
+          _guard_armed_by_slot = first_attempt ? static_cast<int8_t>(i) : -1;
           reconnect_attempted_this_cycle = true;
         }
       }
       continue;
     }
-    if (!_slots[i].client) continue;
+    if (!can_maintain || !_slots[i].client) continue;
 
     maintainSlotConnection(i, now_millis, current_time, time_synced, reconnect_attempted_this_cycle, teardown_attempted_this_cycle);
   }
@@ -2866,6 +2902,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           MQTT_TRACE_HEAP("renewal:after-reconnect", index);
           reconnect_attempted = true;
           _last_slot_reconnect_ms = now_millis;
+          _guard_armed_by_slot = -1;
           MQTT_DEBUG_PRINTLN("MQTT%d int_heap=%d at token renewal reconnect", index + 1,
               (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
           MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
@@ -2966,6 +3003,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       slot.last_reconnect_attempt = now_millis;
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
+      _guard_armed_by_slot = -1;
       MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker probe (attempting single reconnect after %lu ms, int_heap=%d)", index + 1, probe_elapsed,
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
@@ -3015,6 +3053,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
+      _guard_armed_by_slot = -1;
       if (slot_uses_jwt) {
         prepareJwtReconnect(false, slot.reconnect_backoff);
       } else {
@@ -3439,6 +3478,64 @@ bool MQTTBridge::isAnySlotConnected() {
   return false;
 }
 
+bool MQTTBridge::pendingReconfigureConnects(int index) const {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS || !_obs) return false;
+  const char* name = _obs->mqtt_slot_preset[index];
+  if (!name || name[0] == '\0' || strcmp(name, MQTT_PRESET_NONE) == 0) return false;
+  // A full cap tears the slot down and does not call setupSlot.
+  if (!canActivateSlot(index)) return false;
+  if (strcmp(name, MQTT_PRESET_CUSTOM) == 0) {
+    return customEndpointComplete(_obs->mqtt_slot_host[index], _obs->mqtt_slot_port[index]);
+  }
+  const MQTTPresetDef* preset = findMQTTPreset(name);
+  if (!preset) return false;
+  if (preset->topic_style == MQTT_TOPIC_MESHRANK &&
+      _obs->mqtt_slot_token[index][0] == '\0') {
+    return false;
+  }
+  if (mqttPresetNeedsSlotUsername(preset) &&
+      _obs->mqtt_slot_username[index][0] == '\0') {
+    return false;
+  }
+  if (mqttPresetNeedsSlotPassword(preset) &&
+      _obs->mqtt_slot_password[index][0] == '\0') {
+    return false;
+  }
+  if (preset->topic_style == MQTT_TOPIC_MESHCORE) {
+    // applySlotPreset copies the prefs IATA before the ready check.
+    const char* pref = mqttSlotIata(_obs->mqtt_iata, _obs->mqtt_slot_iata[index]);
+    const bool pref_ok = pref && pref[0] != '\0' && strcmp(pref, "XXX") != 0;
+    if (!isSlotIATAValid(index) && !pref_ok) return false;
+  }
+  return true;
+}
+
+void MQTTBridge::applyPendingSlotReconfigures() {
+  const unsigned long now_ms = millis();
+  bool applied_this_pass = false;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (!_slot_reconfigure_pending[i]) continue;
+    const bool opens = pendingReconfigureConnects(i);
+    if (!MQTTConnectionPolicy::slotReconfigureDue(
+            true, opens,
+            static_cast<uint32_t>(now_ms),
+            static_cast<uint32_t>(_last_slot_reconnect_ms),
+            applied_this_pass)) {
+      continue; // stays pending for a later pass
+    }
+    _slot_reconfigure_pending[i] = false;
+    MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)",
+                       i + 1, _obs->mqtt_slot_preset[i]);
+    const bool started = applySlotPreset(i, _obs->mqtt_slot_preset[i]);
+    applied_this_pass = true;
+    // Stamp from what the apply did, since prefs may have changed since the prediction.
+    if (started) {
+      _last_slot_reconnect_ms = millis();
+      _guard_armed_by_slot = -1;
+    }
+  }
+}
+
 void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
 
@@ -3446,6 +3543,7 @@ void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   // Set a flag so the MQTT task picks it up on its next loop iteration.
   #ifdef ESP_PLATFORM
   if (_mqtt_task_handle != nullptr) {
+    // Already pending still applies once; a second request just updates prefs.
     _slot_reconfigure_pending[slot_index] = true;
     MQTT_DEBUG_PRINTLN("MQTT%d reconfigure queued (preset: %s)", slot_index + 1, preset_name);
     return;
@@ -3456,8 +3554,8 @@ void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   applySlotPreset(slot_index, preset_name);
 }
 
-void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
-  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
+bool MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
+  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[slot_index];
 
   const bool disabling = (strcmp(preset_name, MQTT_PRESET_NONE) == 0 || preset_name[0] == '\0');
@@ -3474,7 +3572,7 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
   if (disabling) {
     slot.enabled = false;
     slot.preset = nullptr;
-    return;
+    return false;
   }
 
   if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
@@ -3501,11 +3599,11 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
       if (!canActivateSlot(slot_index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", slot_index + 1, _max_active_slots);
         slot.enabled = false;
-        return;
+        return false;
       }
-      setupSlot(slot_index);
+      return setupSlot(slot_index);
     }
-    return;
+    return false;
   }
 
   const MQTTPresetDef* preset = findMQTTPreset(preset_name);
@@ -3522,18 +3620,19 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
       char reason[80];
       if (!isSlotReady(slot_index, reason, sizeof(reason))) {
         MQTT_DEBUG_PRINTLN("MQTT%d (%s) not ready - run '%s' to connect", slot_index + 1, preset_name, reason);
-        return;
+        return false;
       }
       // Same cap startup applies. Without this a live reconfigure could raise a
       // non-PSRAM board to three concurrent TLS sessions against a cap of two.
       if (!canActivateSlot(slot_index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", slot_index + 1, _max_active_slots);
         slot.enabled = false;
-        return;
+        return false;
       }
-      setupSlot(slot_index);
+      return setupSlot(slot_index);
     }
   }
+  return false;
 }
 
 void MQTTBridge::setSlotCustomBroker(int slot_index, const char* host, uint16_t port,
@@ -3622,6 +3721,7 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
       }
     }
     _last_slot_reconnect_ms = now - MQTTConnectionPolicy::kReconnectGuardMs;
+    _guard_armed_by_slot = -1;
   }
   return actions.retry_disconnected_slots_now;
 }
@@ -3703,30 +3803,14 @@ void MQTTBridge::loop() {
     syncTimeWithNTP();
   }
 
-  // Deferred slot setup after NTP sync (non-ESP32 path)
+  // Deferred slot setup after NTP sync (non-ESP32 path). One slot per
+  // maintainSlotConnections() pass, same as the ESP32 task.
   if (_ntp_synced && !_slots_setup_done) {
-    _slots_setup_done = true;
-    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slots[i].enabled) {
-        if (!canActivateSlot(i)) {
-          _slots[i].enabled = false;
-          continue;
-        }
-        if (!isSlotReady(i)) {
-          continue;
-        }
-        setupSlot(i);
-      }
-    }
+    beginDeferredSlotSetup();
   }
 
-  // Process pending slot reconfigures
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (_slot_reconfigure_pending[i]) {
-      _slot_reconfigure_pending[i] = false;
-      applySlotPreset(i, _obs->mqtt_slot_preset[i]);
-    }
-  }
+  // One queued reconfigure per pass, same rule as the ESP32 task.
+  applyPendingSlotReconfigures();
 
   // Maintain slot connections (token renewal, reconnect with backoff)
   maintainSlotConnections();
