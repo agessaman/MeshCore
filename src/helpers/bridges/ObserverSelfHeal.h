@@ -5,11 +5,12 @@
 #include "helpers/MQTTSelfHealPolicy.h"
 
 // Drives MQTTSelfHealPolicy from the role's main loop: samples the bridge about
-// every 10 s and performs the returned action. Holds only the policy state.
+// every 10 s and performs the returned action.
 //
 // Platform provides (all static):
 //   bool kSupported;                          false compiles the driver to nothing
 //   uint32_t nowMs();
+//   uint32_t randomBelow(uint32_t bound);       uniform in [0, bound)
 //   MQTTSelfHealPolicy::RtcRecord rtcLoad();
 //   void rtcStore(const MQTTSelfHealPolicy::RtcRecord&);
 // Host provides: getObserverPrefs() (mqtt_selfheal_enabled, alert_enabled), getNodePrefs() (bridge_enabled),
@@ -19,10 +20,21 @@
 
 #if defined(ESP_PLATFORM) && defined(WITH_MQTT_BRIDGE)
 #include <Arduino.h>
+#include <esp_random.h>
 #include "helpers/ObserverSelfHealRtc.h"
 struct ObserverSelfHealPlatform {
   static const bool kSupported = true;
   static uint32_t nowMs() { return (uint32_t)millis(); }
+  static uint32_t randomBelow(uint32_t bound) {
+    if (bound == 0) return 0;
+    // Reject the partial bucket so modulo reduction stays uniform.
+    const uint32_t threshold = (uint32_t)(-bound) % bound;
+    uint32_t value;
+    do {
+      value = esp_random();
+    } while (value < threshold);
+    return value % bound;
+  }
   static MQTTSelfHealPolicy::RtcRecord rtcLoad() { return ObserverSelfHealRtc::load(); }
   static void rtcStore(const MQTTSelfHealPolicy::RtcRecord& rec) { ObserverSelfHealRtc::store(rec); }
 };
@@ -30,10 +42,16 @@ struct ObserverSelfHealPlatform {
 struct ObserverSelfHealPlatform {
   static const bool kSupported = false;
   static uint32_t nowMs() { return 0; }
+  static uint32_t randomBelow(uint32_t) { return 0; }
   static MQTTSelfHealPolicy::RtcRecord rtcLoad() { return MQTTSelfHealPolicy::rtcCleared(); }
   static void rtcStore(const MQTTSelfHealPolicy::RtcRecord&) {}
 };
 #endif
+
+#ifndef MQTT_SELFHEAL_ALL_DOWN_JITTER_MS
+#define MQTT_SELFHEAL_ALL_DOWN_JITTER_MS (30UL * 60UL * 1000UL)
+#endif
+static_assert(MQTT_SELFHEAL_ALL_DOWN_JITTER_MS < UINT32_MAX, "All-down jitter must fit below UINT32_MAX");
 
 // Log provides line(msg, detail = nullptr) and flush().
 template <class Log, class Platform>
@@ -41,7 +59,7 @@ class ObserverSelfHeal {
 public:
   static const uint32_t kTickMs = 10000;
 
-  ObserverSelfHeal() : _st(), _last_tick_ms(0) {}
+  ObserverSelfHeal() : _st(), _last_tick_ms(0), _all_down_jitter_ms(UINT32_MAX) {}
 
   // The bridge was started, stopped or restarted by the sequencer.
   void onBridgeRestart() { MQTTSelfHealPolicy::onBridgeRestart(_st); }
@@ -51,13 +69,18 @@ public:
   void poll(Host& host, Bridge* bridge, bool ota_active = false) {
     if (!Platform::kSupported) return;
     namespace Heal = MQTTSelfHealPolicy;
+    if (_all_down_jitter_ms == UINT32_MAX) {
+      _all_down_jitter_ms = Platform::randomBelow(MQTT_SELFHEAL_ALL_DOWN_JITTER_MS + 1);
+    }
     const uint32_t now = Platform::nowMs();
     if ((uint32_t)(now - _last_tick_ms) < kTickMs) return;
     _last_tick_ms = now;
 
     const auto* obs = host.getObserverPrefs();
     const Heal::Inputs in = sample(host, bridge, now, ota_active);
-    const Heal::Config cfg = Heal::defaultConfig();
+    Heal::Config cfg = Heal::defaultConfig();
+    const uint64_t hold = (uint64_t)cfg.all_slots_down_ms + _all_down_jitter_ms;
+    cfg.all_slots_down_ms = hold > UINT32_MAX ? UINT32_MAX : (uint32_t)hold;
     const Heal::RtcRecord rec = Platform::rtcLoad();
     const Heal::Result r = Heal::tick(_st, in, cfg, Heal::rtcConsecutive(rec));
     switch (r.action) {
@@ -71,7 +94,8 @@ public:
       case Heal::Action::Reboot: {
         // Confirm on a fresh sample so one torn read cannot reboot the node.
         const Heal::Inputs again = sample(host, bridge, Platform::nowMs(), ota_active);
-        if (!again.enabled || again.ota_in_progress || !Heal::causePresent(again, cfg, r.cause)) break;
+        if (!again.enabled || again.ota_in_progress || !Heal::causePresent(again, cfg, r.cause) ||
+            Heal::rebootSuppressed(cfg, r.cause, Heal::rtcConsecutive(rec))) break;
         // Count the reboot before it happens: the boot-loop limit depends on it.
         Platform::rtcStore(Heal::rtcBeforeReboot(rec, r.cause));
         Log::line("MQTT self-heal: rebooting for ", Heal::causeLabel(r.cause));
@@ -113,4 +137,5 @@ private:
 
   MQTTSelfHealPolicy::State _st;
   uint32_t _last_tick_ms;
+  uint32_t _all_down_jitter_ms;
 };

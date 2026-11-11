@@ -26,6 +26,7 @@ struct FakeHealPlatform {
   static uint32_t now;
   static MQTTSelfHealPolicy::RtcRecord rtc;
   static uint32_t nowMs() { return now; }
+  static uint32_t randomBelow(uint32_t) { return 0; }
   static MQTTSelfHealPolicy::RtcRecord rtcLoad() { return rtc; }
   static void rtcStore(const MQTTSelfHealPolicy::RtcRecord& rec) {
     rtc = rec;
