@@ -309,6 +309,14 @@ TEST_F(ObserverBridgeControlTest, BatchDropsSlotsBeyondRuntimeCount) {
 
 // --- deferred OTA -----------------------------------------------------------
 
+TEST_F(ObserverBridgeControlTest, ChecksAreExcludedDuringTheDelayAndOutboundDrain) {
+  EXPECT_FALSE(ctl.otaPending(0));
+  EXPECT_TRUE(ctl.otaPending(1));
+  host.on_drain = [&] { EXPECT_TRUE(ctl.otaPending(0)); };
+  ctl.runOta(host, bridge, false);
+  EXPECT_FALSE(ctl.otaPending(0));
+}
+
 TEST_F(ObserverBridgeControlTest, OtaWithRunningBridgeStopsThenFlashes) {
   startRunning();
   ctl.runOta(host, bridge, false);

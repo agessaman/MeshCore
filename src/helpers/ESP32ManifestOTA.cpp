@@ -26,6 +26,76 @@
 #include <esp_ota_ops.h>
 #include <esp_image_format.h>
 #include "OtaChannel.h"
+#include "OtaCheckPolicy.h"
+#include <atomic>
+
+static portMUX_TYPE ota_check_mux = portMUX_INITIALIZER_UNLOCKED;
+static struct {
+  OtaCheckPolicy::State state;
+  ESP32Board* board;
+  const char* version;
+  uint8_t channel;
+  char reply[160];
+} ota_check;
+
+static void ota_check_entry(void*) {
+  char reply[160] = {};
+  portENTER_CRITICAL(&ota_check_mux);
+  ESP32Board* board = ota_check.board;
+  const char* version = ota_check.version;
+  const uint8_t channel = ota_check.channel;
+  portEXIT_CRITICAL(&ota_check_mux);
+  NetworkLink& network = activeNetworkLink();
+  network.lockSwitching();
+  board->otaFromManifestImpl(ota_resolve_base(channel), version, true, reply);
+  network.unlockSwitching();
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&ota_check_mux);
+  memcpy(ota_check.reply, reply, sizeof(reply));
+  OtaCheckPolicy::complete(ota_check.state, now, channel);
+  portEXIT_CRITICAL(&ota_check_mux);
+  vTaskDelete(nullptr);
+}
+
+void ESP32Board::otaCheck(uint8_t channel, const char* current_ver, char reply[]) {
+  char snapshot[160] = {};
+  portENTER_CRITICAL(&ota_check_mux);
+  const auto read = OtaCheckPolicy::read(ota_check.state, millis(), channel);
+  if (read.reply == OtaCheckPolicy::Reply::Cached) {
+    memcpy(snapshot, ota_check.reply, sizeof(snapshot));
+  }
+  if (read.start) {
+    ota_check.board = this;
+    ota_check.version = current_ver;
+    ota_check.channel = channel;
+  }
+  portEXIT_CRITICAL(&ota_check_mux);
+
+  if (read.start && xTaskCreatePinnedToCore(ota_check_entry, "ota-check", 8192,
+                                           nullptr, 1, nullptr, 1) != pdPASS) {
+    strcpy(snapshot, "ERR: OTA task spawn failed");
+    portENTER_CRITICAL(&ota_check_mux);
+    memcpy(ota_check.reply, snapshot, sizeof(snapshot));
+    OtaCheckPolicy::complete(ota_check.state, millis(), channel);
+    portEXIT_CRITICAL(&ota_check_mux);
+    strcpy(reply, snapshot);
+    return;
+  }
+  switch (read.reply) {
+    case OtaCheckPolicy::Reply::Cached:
+      snprintf(reply, 160, "[%lus ago] %s", (unsigned long)(read.age_ms / 1000), snapshot);
+      break;
+    case OtaCheckPolicy::Reply::Started:
+      strcpy(reply, "OTA check started; read again in a few seconds");
+      break;
+    case OtaCheckPolicy::Reply::Running:
+      strcpy(reply, "OTA check running; read again in a few seconds");
+      break;
+    case OtaCheckPolicy::Reply::Busy:
+      strcpy(reply, "ERR: OTA update busy; retry check later");
+      break;
+  }
+}
 
 // Embedded CA bundle (produced by board_build.embed_files). Weak so non-bundle
 // builds still link; we check for presence at runtime.
@@ -139,18 +209,25 @@ struct OtaTaskArgs {
   const char* current_ver;
   bool dry_run;
   char* reply;
-  volatile bool result;
-  volatile bool done;
+  bool result;
+  std::atomic<bool> done;
 };
 
 static void ota_task_entry(void* param) {
   OtaTaskArgs* a = static_cast<OtaTaskArgs*>(param);
   a->result = a->self->otaFromManifestImpl(a->manifest_base, a->current_ver, a->dry_run, a->reply);
-  a->done = true;        // on a successful `ota update` we reboot before reaching here
+  a->done.store(true, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 
 bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) {
+  portENTER_CRITICAL(&ota_check_mux);
+  const bool allowed = OtaCheckPolicy::beginUpdate(ota_check.state);
+  portEXIT_CRITICAL(&ota_check_mux);
+  if (!allowed) {
+    strcpy(reply, "ERR: OTA check/update running; retry update in a few seconds");
+    return false;
+  }
   // The TLS handshake (cert-bundle verify) + JSON parse / HTTPUpdate use far more
   // stack than the ~8 KB loop task offers — especially when reached via the deep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
@@ -161,19 +238,25 @@ bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_
   static const uint32_t kOtaUpdateTaskStack = 24576;
   NetworkLink& network = activeNetworkLink();
   network.lockSwitching();
-  OtaTaskArgs args = { this, manifest_base, current_ver, dry_run, reply, false, false };
+  OtaTaskArgs args = { this, manifest_base, current_ver, dry_run, reply, false, {false} };
   TaskHandle_t handle = nullptr;
   const uint32_t stack_bytes = dry_run ? kOtaCheckTaskStack : kOtaUpdateTaskStack;
   BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", stack_bytes, &args, 5, &handle, 1);
   if (ok != pdPASS) {
     network.unlockSwitching();
+    portENTER_CRITICAL(&ota_check_mux);
+    OtaCheckPolicy::endUpdate(ota_check.state);
+    portEXIT_CRITICAL(&ota_check_mux);
     strcpy(reply, "ERR: OTA task spawn failed");
     return false;
   }
-  while (!args.done) {
+  while (!args.done.load(std::memory_order_acquire)) {
     delay(50);  // Arduino delay() yields to other tasks
   }
   network.unlockSwitching();
+  portENTER_CRITICAL(&ota_check_mux);
+  OtaCheckPolicy::endUpdate(ota_check.state);
+  portEXIT_CRITICAL(&ota_check_mux);
   return args.result;
 }
 
@@ -437,6 +520,9 @@ bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* curr
 #endif  // OTA_MANIFEST_BASE && OTA_VARIANT
 }
 #else
+void ESP32Board::otaCheck(uint8_t channel, const char* current_ver, char reply[]) {
+  strcpy(reply, "ERR: not supported");
+}
 bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) {
   strcpy(reply, "ERR: not supported");
   return false;
