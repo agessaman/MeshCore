@@ -53,14 +53,18 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
             return request->send(400, "text/plain", "OTA upload not accepted");
         }
         _uploadRequest = nullptr;
-        request->onDisconnect(nullptr);
         // the request handler is triggered after the upload has finished... 
         // create the response, add header, and send response
         AsyncWebServerResponse *response = request->beginResponse((Update.hasError())?500:200, "text/plain", (Update.hasError())?"FAIL":"OK");
         response->addHeader("Connection", "close");
         response->addHeader("Access-Control-Allow-Origin", "*");
+        armDeferredRestart();
+        // Finished request records delivery and leaves the update alone.
+        request->onDisconnect([this]() {
+            _restartClientClosed.store(true, std::memory_order_release);
+        });
         request->send(response);
-        restart();
+        Serial.println("OTA: reply queued, waiting to restart");
     }, [&](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         //Upload handler chunks in data
         if(_authRequired){
@@ -70,7 +74,8 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         }
 
         if (!index) {
-            if (_uploadRequest || Update.isRunning()) {
+            if (_uploadRequest || Update.isRunning() ||
+                _restartPending.load(std::memory_order_acquire)) {
                 return request->send(409, "text/plain", "OTA already running");
             }
             if(!request->hasParam("MD5", true)) {
@@ -130,6 +135,20 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
 void AsyncElegantOtaClass::loop() {
 }
 
+void AsyncElegantOtaClass::armDeferredRestart() {
+    _restartClientClosed.store(false, std::memory_order_relaxed);
+    _restartArmedMs.store(millis(), std::memory_order_relaxed);
+    _restartPending.store(true, std::memory_order_release);
+}
+
+bool AsyncElegantOtaClass::restartArmed(uint32_t& armed_ms, bool& client_closed) const {
+    if (!_restartPending.load(std::memory_order_acquire)) return false;
+    armed_ms = _restartArmedMs.load(std::memory_order_relaxed);
+    client_closed = _restartClientClosed.load(std::memory_order_acquire);
+    return true;
+}
+
+// Blocking reboot for existing callers. The upload reply defers instead.
 void AsyncElegantOtaClass::restart() {
     yield();
     delay(1000);
