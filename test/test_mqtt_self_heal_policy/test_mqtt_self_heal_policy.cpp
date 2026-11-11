@@ -112,6 +112,83 @@ TEST(MQTTSelfHealPolicy, DisabledPrefNeverActsButKeepsHoldTime) {
   EXPECT_EQ(81 * kMin, r.held_ms);
 }
 
+TEST(MQTTSelfHealPolicy, DisablingDropsAPendingRebootAndReenablingAlertsAgain) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  h.tick(Unproven(start));
+  EXPECT_EQ(Heal::Action::Alert, h.tick(Unproven(start + 10 * kMin)).action);
+
+  Heal::Inputs in = Unproven(start + 10 * kMin + 30000);
+  in.enabled = false;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+  in.now_ms = start + 20 * kMin;   // fault outlives the grace while disabled
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+
+  Heal::Result r = h.tick(Unproven(start + 20 * kMin + 10000));
+  EXPECT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_EQ(20 * kMin + 10000, r.held_ms);   // hold kept counting while disabled
+  EXPECT_EQ(Heal::Action::None, h.tick(Unproven(start + 21 * kMin)).action);
+  EXPECT_EQ(Heal::Action::Reboot, h.tick(Unproven(start + 21 * kMin + 10000)).action);
+}
+
+TEST(MQTTSelfHealPolicy, OtaInProgressSuppressesAndResetsPendingAlerts) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  h.tick(Unproven(start));
+  EXPECT_EQ(Heal::Action::Alert, h.tick(Unproven(start + 10 * kMin)).action);
+
+  Heal::Inputs in = Unproven(start + 11 * kMin);
+  in.ota_in_progress = true;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);   // grace expired mid-update: no reboot
+  in.now_ms = start + 30 * kMin;
+  EXPECT_EQ(Heal::Action::None, h.tick(in).action);
+
+  EXPECT_EQ(Heal::Action::Alert, h.tick(Unproven(start + 31 * kMin)).action);
+  EXPECT_EQ(Heal::Action::None, h.tick(Unproven(start + 32 * kMin - 1)).action);
+  EXPECT_EQ(Heal::Action::Reboot, h.tick(Unproven(start + 32 * kMin)).action);
+}
+
+TEST(MQTTSelfHealPolicy, BridgeRestartResetsAllSlotsDownHoldAndAlert) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  h.tick(AllDown(start));
+  EXPECT_EQ(Heal::Action::Alert, h.tick(AllDown(start + 120 * kMin)).action);
+  Heal::onBridgeRestart(h.st);
+
+  // The pending reboot is gone and the hold restarts from the next sample.
+  const uint32_t again = start + 121 * kMin;
+  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(again)).action);
+  EXPECT_EQ(Heal::Action::None, h.tick(AllDown(again + 120 * kMin - 1)).action);
+  EXPECT_EQ(Heal::Action::Alert, h.tick(AllDown(again + 120 * kMin)).action);
+}
+
+TEST(MQTTSelfHealPolicy, BridgeRestartKeepsStopUnprovenAndQuarantineHolds) {
+  Harness h;
+  const uint32_t start = 40 * kMin;
+  Heal::Inputs in = Unproven(start);
+  in.client_quarantined = true;
+  h.tick(in);
+  Heal::onBridgeRestart(h.st);
+  in.now_ms = start + 10 * kMin;
+  Heal::Result r = h.tick(in);
+  EXPECT_EQ(Heal::Action::Alert, r.action);
+  EXPECT_EQ(Heal::Cause::StopUnproven, r.cause);
+  EXPECT_EQ(10 * kMin, r.held_ms);
+  EXPECT_TRUE(h.st.active[Heal::causeIndex(Heal::Cause::ClientQuarantined)]);
+}
+
+TEST(MQTTSelfHealPolicy, BridgeRestartResetsTheHealthyTimer) {
+  Harness h;
+  h.consecutive = 1;
+  h.tick(Healthy(kMin));
+  EXPECT_EQ(Heal::Action::None, h.tick(Healthy(9 * kMin)).action);
+  Heal::onBridgeRestart(h.st);
+  h.tick(Healthy(9 * kMin + 10000));
+  EXPECT_EQ(Heal::Action::None, h.tick(Healthy(11 * kMin)).action);   // would have cleared
+  EXPECT_EQ(Heal::Action::None, h.tick(Healthy(19 * kMin)).action);
+  EXPECT_EQ(Heal::Action::ClearBootCounter, h.tick(Healthy(19 * kMin + 10000)).action);
+}
+
 TEST(MQTTSelfHealPolicy, MinimumUptimeHoldsOffEarlyFaults) {
   Harness h;
   h.tick(Unproven(0));

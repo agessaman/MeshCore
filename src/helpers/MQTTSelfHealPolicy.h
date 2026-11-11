@@ -81,6 +81,7 @@ struct Inputs {
   uint32_t evidence_age_ms;  // since the last successful NTP exchange, or kNoEvidence
   uint8_t candidate_slots;   // enabled slots whose last failure was not a broker refusal
   uint8_t connected_slots;
+  bool ota_in_progress;      // a firmware update is running; never alert or reboot
 };
 
 struct State {
@@ -196,7 +197,12 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
     }
   }
 
-  if (!in.enabled || !st.uptime_ok) return r;
+  // Disabled or mid-update: forget pending alerts so acting later needs a fresh alert and grace.
+  if (!in.enabled || in.ota_in_progress) {
+    for (uint8_t i = 0; i < kCauseCount; i++) st.alerted[i] = false;
+    return r;
+  }
+  if (!st.uptime_ok) return r;
 
   bool suppressed = consecutive_reboots >= cfg.max_consecutive;
 
@@ -228,7 +234,17 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
   return r;
 }
 
-// Boot-loop limiter record kept in RTC no-init memory. A power-on leaves
+// The bridge was started, stopped or restarted: the all-slots-down hold and the
+// healthy timer describe the previous run. Stop-unproven and quarantine persist.
+static inline void onBridgeRestart(State& st) {
+  const uint8_t i = causeIndex(Cause::AllSlotsDown);
+  st.active[i] = false;
+  st.alerted[i] = false;
+  st.healthy = false;
+  st.healthy_reported = false;
+}
+
+// Boot-loop limiter record kept in RTC no-init memory. A power-on leaves A power-on leaves
 // garbage there, which fails validation and reads as zero reboots.
 static const uint32_t kRtcMagic = 0x4D51534Cu;
 
