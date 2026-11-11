@@ -1717,6 +1717,19 @@ void MQTTBridge::mqttTaskLoop() {
       refreshNTP();
     }
 
+    // Forget day-old evidence so a millis() wrap cannot make it look fresh again.
+    if (ntpEvidenceAgeMs() != kNoNtpEvidence && ntpEvidenceAgeMs() > 24UL * 3600UL * 1000UL) {
+      _ntp_reply_ms.store(0, std::memory_order_relaxed);
+    }
+    // While every slot is down, keep the self-heal reachability evidence no older
+    // than the probe interval; the hourly refresh alone can leave it stale.
+    if (_ntp_synced && _network->isConnected() && !_cached_has_connected_slots &&
+        (uint32_t)((uint32_t)millis() - _last_reachability_probe_ms) >= kReachabilityProbeIntervalMs &&
+        ntpEvidenceAgeMs() >= kReachabilityProbeIntervalMs) {
+      _last_reachability_probe_ms = (uint32_t)millis();
+      probeNtpReachability();
+    }
+
     // Publish status updates (handle millis() overflow correctly).
     // Read the toggle live from prefs (like mqtt.packets/rx/tx below) so a
     // CLI/web `set mqtt.status` change applies without a bridge restart.
@@ -4805,6 +4818,8 @@ bool MQTTBridge::probeNtpServer(const char* server, uint32_t min_epoch,
         min_epoch, kNtpMaxValidEpoch);
     if (r.reject == NtpValidation::kAccepted) {
       if (epoch_out) *epoch_out = r.epoch;
+      const uint32_t stamp = (uint32_t)millis();
+      _ntp_reply_ms.store(stamp ? stamp : 1, std::memory_order_relaxed);
       if (why) *why = "ok";
       accepted = true;
       break;
@@ -5059,6 +5074,52 @@ bool MQTTBridge::requestForcedNtpSync(uint32_t timeout_ms) {
     vTaskDelay(pdMS_TO_TICKS(50));
   }
   return _ntp_force_result;
+}
+
+// Runs on the MQTT task (Core 0). Walks the server list until one validated reply
+// arrives, which refreshes _ntp_reply_ms; never touches the clock or the RTC.
+void MQTTBridge::probeNtpReachability() {
+  const char* servers[kMaxNtpServers];
+  int count = 0;
+  fillNtpServerList(_obs, servers, count);
+  for (int i = 0; i < count; i++) {
+    #ifdef ESP_PLATFORM
+    if (_stop_requested.load(std::memory_order_acquire)) return;
+    #endif
+    uint32_t epoch = 0;
+    const char* why = nullptr;
+    if (probeNtpServer(servers[i], kNtpMinValidEpoch, &epoch, &why)) return;
+  }
+  MQTT_DEBUG_PRINTLN("NTP reachability probe: no server answered");
+}
+
+uint32_t MQTTBridge::ntpEvidenceAgeMs() const {
+  const uint32_t stamp = _ntp_reply_ms.load(std::memory_order_relaxed);
+  if (stamp == 0) return kNoNtpEvidence;
+  return (uint32_t)millis() - stamp;
+}
+
+bool MQTTBridge::anyClientQuarantined() const {
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].client_state == ClientState::Quarantined) return true;
+  }
+  return false;
+}
+
+uint8_t MQTTBridge::enabledSlotCount() const {
+  uint8_t n = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled) n++;
+  }
+  return n;
+}
+
+uint8_t MQTTBridge::candidateSlotCount() const {
+  uint8_t n = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled && _slots[i].last_connack_code == 0 && isSlotReady(i)) n++;
+  }
+  return n;
 }
 
 // Runs on the MQTT task (Core 0). Probes every configured NTP server for connectivity

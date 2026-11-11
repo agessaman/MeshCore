@@ -336,6 +336,12 @@ private:
   // How stale a snapshot may be before a read asks for a fresh probe.
   static const uint32_t kNtpDiagRefreshMs = 30000;
 
+  // millis() of the last NTP reply that passed validation (0 = none); any probe sets it.
+  std::atomic<uint32_t> _ntp_reply_ms{0};
+  // Bridge-task-only: last reachability probe made while no slot was connected.
+  uint32_t _last_reachability_probe_ms = 0;
+  static const uint32_t kReachabilityProbeIntervalMs = 20UL * 60UL * 1000UL;
+
   // Cooperative-shutdown handshake. The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
   // sees it, tears down its own clients on Core 0 (where the mbedTLS contexts
@@ -615,6 +621,8 @@ private:
   bool isAnySlotConnected();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
   void runNtpDiagProbe(uint32_t probe_id);  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  // Probe servers until one answers, to keep reachability evidence fresh; never sets the clock. Core 0 only.
+  void probeNtpReachability();
   // Copies the published diag snapshot on the caller's task. False when the task
   // was publishing throughout the attempt.
   bool copyNtpDiagSnapshot(NtpDiagResult* out, int* count_out,
@@ -786,6 +794,17 @@ public:
   // Survives end() clearing the diagnostic singleton, so `get mqtt.status` can
   // still explain why a stopped bridge will not come back without a reboot.
   static bool stopUnprovenLatched();
+
+  // Self-heal sampling from the loop task: plain reads of state the bridge task owns.
+  static const uint32_t kNoNtpEvidence = UINT32_MAX;
+  // ms since the last validated NTP reply, or kNoNtpEvidence.
+  uint32_t ntpEvidenceAgeMs() const;
+  bool anyClientQuarantined() const;
+  bool isNetworkUp() const { return _network && _network->isConnected(); }
+  uint8_t enabledSlotCount() const;
+  // Enabled, configured slots whose last failure was not a broker refusal.
+  uint8_t candidateSlotCount() const;
+  uint8_t connectedSlotCount() const { return (uint8_t)getConnectedBrokers(); }
 
   static unsigned long getWifiConnectedAtMillis();
 
