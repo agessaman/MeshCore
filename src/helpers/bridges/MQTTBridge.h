@@ -315,7 +315,7 @@ private:
   // reported time but never sets the system clock or the RTC. A read reports the last
   // completed probe and asks the MQTT task (Core 0) for a fresh one when the snapshot is
   // missing or stale, so the caller never waits. _ntp_diag_seq is odd while the task
-  // publishes, which lets a reader copy a consistent table.
+  // publishes. The table copy is a short critical section.
   std::atomic<uint32_t> _ntp_diag_request_id{0};    // bumped by a reader wanting fresh results
   std::atomic<uint32_t> _ntp_diag_running_id{0};    // id the MQTT task is probing for (0 = idle)
   std::atomic<uint32_t> _ntp_diag_completed_id{0};  // id the published snapshot belongs to
@@ -333,6 +333,10 @@ private:
   };
   NtpDiagResult _ntp_diag_results[kMaxNtpServers];
   int _ntp_diag_count;
+#ifdef ESP_PLATFORM
+  // Snapshot memcpy only. Network probes stay outside this lock.
+  mutable portMUX_TYPE _ntp_diag_mux = portMUX_INITIALIZER_UNLOCKED;
+#endif
   // How stale a snapshot may be before a read asks for a fresh probe.
   static const uint32_t kNtpDiagRefreshMs = 30000;
 

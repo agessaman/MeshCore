@@ -5315,12 +5315,21 @@ void MQTTBridge::runNtpDiagProbe(uint32_t probe_id) {
   // A probe cut short by a stop is not a result: keep the previous snapshot intact.
   if (!completed) return;
 
-  // Odd while writing, even when the table is complete: readers copy between two
-  // equal even reads, so they never see a half-updated table. One writer, no lock.
+  // Odd while writing, even when the table is complete. Readers still compare
+  // the sequence. The table copy itself is a short critical section.
   _ntp_diag_seq.fetch_add(1, std::memory_order_acq_rel);   // -> odd: writing
-  for (int i = 0; i < probed; i++) _ntp_diag_results[i] = results[i];
+  const uint32_t completed_ms = (uint32_t)millis();
+#ifdef ESP_PLATFORM
+  portENTER_CRITICAL(&_ntp_diag_mux);
+#endif
+  if (probed > 0) {
+    memcpy(_ntp_diag_results, results, (size_t)probed * sizeof(NtpDiagResult));
+  }
   _ntp_diag_count = probed;
-  _ntp_diag_completed_ms.store((uint32_t)millis(), std::memory_order_relaxed);
+#ifdef ESP_PLATFORM
+  portEXIT_CRITICAL(&_ntp_diag_mux);
+#endif
+  _ntp_diag_completed_ms.store(completed_ms, std::memory_order_relaxed);
   _ntp_diag_completed_id.store(probe_id, std::memory_order_release);
   _ntp_diag_seq.fetch_add(1, std::memory_order_acq_rel);   // -> even: readable
 }
@@ -5337,8 +5346,17 @@ bool MQTTBridge::copyNtpDiagSnapshot(NtpDiagResult* out, int* count_out,
       #endif
       continue;   // a probe is publishing right now
     }
-    const int n = _ntp_diag_count;
-    for (int i = 0; i < n && i < kMaxNtpServers; i++) out[i] = _ntp_diag_results[i];
+    int n = 0;
+#ifdef ESP_PLATFORM
+    portENTER_CRITICAL(&_ntp_diag_mux);
+#endif
+    n = _ntp_diag_count;
+    if (n > kMaxNtpServers) n = kMaxNtpServers;
+    if (n < 0) n = 0;
+    if (n > 0) memcpy(out, _ntp_diag_results, (size_t)n * sizeof(NtpDiagResult));
+#ifdef ESP_PLATFORM
+    portEXIT_CRITICAL(&_ntp_diag_mux);
+#endif
     const uint32_t id = _ntp_diag_completed_id.load(std::memory_order_relaxed);
     const uint32_t completed_ms = _ntp_diag_completed_ms.load(std::memory_order_relaxed);
     if (_ntp_diag_seq.load(std::memory_order_acquire) != seq_before) continue;   // torn: retry
