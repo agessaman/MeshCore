@@ -793,6 +793,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
 #if defined(BOARD_HAS_PSRAM)
       _json_scratch_buffer(nullptr),
+      _json_scratch_retry_ms(0),
 #endif
       _identity(identity),
       _cached_has_connected_slots(false),
@@ -912,8 +913,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 
 void MQTTBridge::allocateRuntimeBuffers() {
   #if defined(BOARD_HAS_PSRAM)
-  // Keep each allocation independent. A nullptr is retained on failure: publish
-  // paths skip without a buffer, and the next begin() retries only the missing one.
+  // Keep each allocation independent. A nullptr is retained on failure. Publish
+  // paths retry the JSON scratch buffer slowly; the next begin() retries either.
   _last_raw_data = static_cast<uint8_t*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
       _last_raw_data, LAST_RAW_DATA_SIZE, psram_malloc));
   _json_scratch_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
@@ -929,12 +930,28 @@ void MQTTBridge::allocateRuntimeBuffers() {
   // pref here would leave a runtime enable with no buffer.
 }
 
+void MQTTBridge::retryPublishScratchIfMissing() {
+#if defined(BOARD_HAS_PSRAM)
+  if (_json_scratch_buffer != nullptr) return;
+  const unsigned long now = millis();
+  // A lasting shortage must not allocate on every packet.
+  if (_json_scratch_retry_ms != 0 && now - _json_scratch_retry_ms < 10000UL) return;
+  _json_scratch_retry_ms = now == 0 ? 1 : now;
+  _json_scratch_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _json_scratch_buffer, PUBLISH_JSON_BUFFER_SIZE, psram_malloc));
+  if (_json_scratch_buffer != nullptr) {
+    MQTT_DEBUG_PRINTLN("Runtime buffers: json=PSRAM (retry)");
+  }
+#endif
+}
+
 void MQTTBridge::releaseRuntimeBuffers() {
   #if defined(BOARD_HAS_PSRAM)
   _last_raw_data = static_cast<uint8_t*>(MQTTRuntimeBufferLifecycle::release(
       _last_raw_data, psram_free));
   _json_scratch_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
       _json_scratch_buffer, psram_free));
+  _json_scratch_retry_ms = 0;
   #endif
 
   // Drop the shared document's pools with the buffers. clear() destroys every pool
@@ -3364,7 +3381,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
   // function is reached solely via the _status_publish_pending consumer in
   // mqttTaskLoop, never from the onConnect callback thread — see A2), so the accesses
   // are serialized and need no mutex.
-  // A missing scratch buffer means its allocation failed at begin(); skip instead of building on the stack.
+  // Retry a missed scratch allocation slowly, then skip while it stays null.
+  retryPublishScratchIfMissing();
   char* json_buffer = _json_scratch_buffer;
   if (json_buffer == nullptr) return;
 
@@ -4355,7 +4373,8 @@ bool MQTTBridge::publishStatus() {
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
   // _json_scratch_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
-  // A missing scratch buffer means its allocation failed at begin(); skip instead of building on the stack.
+  // Retry a missed scratch allocation slowly, then skip while it stays null.
+  retryPublishScratchIfMissing();
   char* json_buffer = _json_scratch_buffer;
   if (json_buffer == nullptr) return false;
   char origin_id[65];
@@ -4504,7 +4523,8 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   }
   #endif
 
-  // A missing scratch buffer means its allocation failed at begin(); count the skip instead of building on the stack.
+  // Retry a missed scratch allocation slowly, then count the skip while it stays null.
+  retryPublishScratchIfMissing();
   char* active_buffer = _json_scratch_buffer;
   const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   if (active_buffer == nullptr) {
@@ -4600,7 +4620,8 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
 
   refreshOriginFromPrefs();
 
-  // A missing scratch buffer means its allocation failed at begin(); count the skip instead of building on the stack.
+  // Retry a missed scratch allocation slowly, then count the skip while it stays null.
+  retryPublishScratchIfMissing();
   char* active_buffer = _json_scratch_buffer;
   const size_t active_buffer_size = PUBLISH_JSON_BUFFER_SIZE;
   if (active_buffer == nullptr) {

@@ -427,6 +427,7 @@ private:
                 "crash fragment must fit in the scratch tail");
   #if defined(BOARD_HAS_PSRAM)
   char* _json_scratch_buffer;
+  unsigned long _json_scratch_retry_ms;  // 0 = eligible; else millis() of the last try
   #else
   char _json_scratch_buffer[PUBLISH_JSON_BUFFER_SIZE];
   #endif
@@ -670,6 +671,8 @@ private:
   // transient heap shortage costs only the publishes that need the missing one.
   void allocateRuntimeBuffers();
   void releaseRuntimeBuffers();
+  // PSRAM only: the inline non-PSRAM buffer cannot be null.
+  void retryPublishScratchIfMissing();
 
   // --- Cooperative lifecycle (Phase 5) ---------------------------------------
   // The pure state machine, bounded stop timeout, and OTA barrier live in
