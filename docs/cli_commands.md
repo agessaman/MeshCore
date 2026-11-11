@@ -1443,6 +1443,30 @@ Requires WiFi connected and the MQTT bridge running.
 
 ---
 
+#### View MQTT task stack headroom (MQTT observer only)
+**Usage:**
+- `get mqtt.stacks`
+
+**Output:** `> stk b=<bytes> l=<bytes> m1=<bytes> ...`, e.g. `> stk b=4032 l=3340 m1=1668 m2=1628`. Each value is the stack high-water mark (free bytes) for the MQTT bridge task (`b=`), the main loop task (`l=`, shown when the command runs from the loop task), the AsyncTCP task when it exists (`a=`), and each enabled slot's MQTT client task (`m1=` and so on). Fields that are not available are omitted.
+
+---
+
+#### View the last crash report (MQTT observer only)
+**Usage:**
+- `get crash`
+
+**Output:** `> task=<name> pc=<hex> exc=<n> va=<hex> sha=<hex> bt=<hex> <hex> ...`, e.g. `> task=loopTask pc=42011bae exc=28 va=0000f8ba sha=1a499497 bt=42011bae 42003879 4200911a`, or `> none` when there is no dump and `> none (dump unreadable)` when a dump exists but could not be read back. After a panic the node reads the saved core dump from flash and shows the faulting task, program counter, exception cause, faulting address, the first 8 hex digits of the firmware's ELF SHA-256, and the backtrace addresses. A trailing `!` means the backtrace was flagged corrupt.
+
+---
+
+#### Erase the stored crash dump (MQTT observer only)
+**Usage:**
+- `clear crash`
+
+**Output:** `OK - crash dump cleared`, or `ERR: crash dump erase failed`. Erases the core dump from flash and drops the record. The dump is also erased automatically after the first status message that carried it.
+
+---
+
 #### View or change the speed of the bridge (RS-232 only)
 **Usage:**
 - `get bridge.baud`
