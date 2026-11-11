@@ -1383,15 +1383,15 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     //   ota check  -> report available build, do not flash
     //   ota update -> download and flash, then reboot
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
-    if (memcmp(command, "ota check", 9) == 0) {
+    if (!activeNetworkLink().isConnected()) {
+      snprintf(reply, 160, "ERR: %s not connected",
+               activeNetworkLink().mediumName());
+    } else if (memcmp(command, "ota check", 9) == 0) {
       if (_callbacks->isDeferredOtaUpdatePending()) {
         strcpy(reply, "ERR: OTA update pending; retry check later");
       } else {
         _board->otaCheck(_prefs->ota_channel, _callbacks->getFirmwareVer(), reply);
       }
-    } else if (!activeNetworkLink().isConnected()) {
-      snprintf(reply, 160, "ERR: %s not connected",
-               activeNetworkLink().mediumName());
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
       // schedule the real update — which tears the bridge down, flashes, and
