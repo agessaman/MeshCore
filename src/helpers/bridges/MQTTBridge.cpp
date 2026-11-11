@@ -3514,10 +3514,10 @@ void MQTTBridge::applyPendingSlotReconfigures() {
     _slot_reconfigure_pending[i] = false;
     MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)",
                        i + 1, _obs->mqtt_slot_preset[i]);
-    applySlotPreset(i, _obs->mqtt_slot_preset[i]);
+    const bool started = applySlotPreset(i, _obs->mqtt_slot_preset[i]);
     applied_this_pass = true;
-    // Same stamp a reconnect writes, so the next pending connect waits 15 s.
-    if (opens) {
+    // Stamp from what the apply did, since prefs may have changed since the prediction.
+    if (started) {
       _last_slot_reconnect_ms = millis();
       _guard_armed_by_slot = -1;
     }
@@ -3542,8 +3542,8 @@ void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   applySlotPreset(slot_index, preset_name);
 }
 
-void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
-  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
+bool MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
+  if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[slot_index];
 
   const bool disabling = (strcmp(preset_name, MQTT_PRESET_NONE) == 0 || preset_name[0] == '\0');
@@ -3560,7 +3560,7 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
   if (disabling) {
     slot.enabled = false;
     slot.preset = nullptr;
-    return;
+    return false;
   }
 
   if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
@@ -3587,11 +3587,11 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
       if (!canActivateSlot(slot_index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", slot_index + 1, _max_active_slots);
         slot.enabled = false;
-        return;
+        return false;
       }
-      setupSlot(slot_index);
+      return setupSlot(slot_index);
     }
-    return;
+    return false;
   }
 
   const MQTTPresetDef* preset = findMQTTPreset(preset_name);
@@ -3608,18 +3608,19 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
       char reason[80];
       if (!isSlotReady(slot_index, reason, sizeof(reason))) {
         MQTT_DEBUG_PRINTLN("MQTT%d (%s) not ready - run '%s' to connect", slot_index + 1, preset_name, reason);
-        return;
+        return false;
       }
       // Same cap startup applies. Without this a live reconfigure could raise a
       // non-PSRAM board to three concurrent TLS sessions against a cap of two.
       if (!canActivateSlot(slot_index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", slot_index + 1, _max_active_slots);
         slot.enabled = false;
-        return;
+        return false;
       }
-      setupSlot(slot_index);
+      return setupSlot(slot_index);
     }
   }
+  return false;
 }
 
 void MQTTBridge::setSlotCustomBroker(int slot_index, const char* host, uint16_t port,
