@@ -35,6 +35,9 @@ class AsyncElegantOtaClass{
 
     private:
         AsyncWebServer *_server;
+        // Upload ownership is confined to the AsyncTCP task.
+        AsyncWebServerRequest *_uploadRequest = nullptr;
+        static const uint32_t UPLOAD_IDLE_TIMEOUT_SECONDS = 60;
 
         String getID();
 

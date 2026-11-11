@@ -49,6 +49,11 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 return request->requestAuthentication();
             }
         }
+        if (_uploadRequest != request) {
+            return request->send(400, "text/plain", "OTA upload not accepted");
+        }
+        _uploadRequest = nullptr;
+        request->onDisconnect(nullptr);
         // the request handler is triggered after the upload has finished... 
         // create the response, add header, and send response
         AsyncWebServerResponse *response = request->beginResponse((Update.hasError())?500:200, "text/plain", (Update.hasError())?"FAIL":"OK");
@@ -65,6 +70,9 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         }
 
         if (!index) {
+            if (_uploadRequest || Update.isRunning()) {
+                return request->send(409, "text/plain", "OTA already running");
+            }
             if(!request->hasParam("MD5", true)) {
                 return request->send(400, "text/plain", "MD5 parameter missing");
             }
@@ -86,7 +94,19 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 Update.printError(Serial);
                 return request->send(400, "text/plain", "OTA could not begin");
             }
+            _uploadRequest = request;
+            request->client()->setRxTimeout(UPLOAD_IDLE_TIMEOUT_SECONDS);
+            request->onDisconnect([this, request]() {
+                if (_uploadRequest != request) return;
+                _uploadRequest = nullptr;
+                if (Update.isRunning()) {
+                    Update.abort();
+                    Serial.println("OTA: abandoned upload aborted");
+                }
+            });
         }
+
+        if (_uploadRequest != request) return;
 
         // Write chunked data to the free sketch space
         if(len){
