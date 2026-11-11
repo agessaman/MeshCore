@@ -172,7 +172,8 @@ Settings are only rewritten when something is changed, so a round trip with no c
 on the companion side keeps every repeater setting.
 
 **Not on the companion observer yet:** neighbors publication, SNMP, OTA updates, the
-web configuration portal and fault alerts.
+web configuration portal, fault alerts and MQTT self-heal (`mqtt.selfheal` is refused;
+a value saved by the repeater stays in `/mqtt.json`).
 
 **Heltec V3 (no PSRAM):** two active broker slots, like the repeater observer, with
 150 contacts and a 32-message offline queue so the contact table, WiFi and TLS fit in

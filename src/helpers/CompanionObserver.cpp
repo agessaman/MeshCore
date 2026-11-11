@@ -101,6 +101,18 @@ void CompanionObserver::onRawRx(const uint8_t* raw, int len, float snr, float rs
 
 bool CompanionObserver::handleCommand(uint32_t sender_timestamp, const char* command, char* reply) {
   // sender_timestamp 0 means a local console; remote admin gets secrets masked.
+  // Self-heal reboots are not driven on companions; the saved setting is left for the repeater role.
+  const bool selfheal_cmd = strlen(command) >= 17 && strncmp(&command[3], " mqtt.selfheal", 14) == 0 &&
+      (command[17] == 0 || command[17] == ' ' || command[17] == '\r' || command[17] == '\n');
+  if (selfheal_cmd && memcmp(command, "set", 3) == 0) {
+    strcpy(reply, "Err - self-heal not supported on companion observer");
+    return true;
+  }
+  if (selfheal_cmd && memcmp(command, "get", 3) == 0) {
+    snprintf(reply, 161, "> not supported on companion (saved: %s)",
+             _config.prefs()->mqtt_selfheal_enabled ? "on" : "off");
+    return true;
+  }
   if (memcmp(command, "set ", 4) == 0) return _config.handleSetCmd(sender_timestamp, &command[4], reply);
   if (memcmp(command, "get ", 4) == 0) return _config.handleGetCmd(sender_timestamp, &command[4], reply);
   if (memcmp(command, "ota", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
