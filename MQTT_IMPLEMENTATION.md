@@ -475,6 +475,7 @@ All timestamps are UTC with an explicit `+00:00` offset.
     "rx_air_secs": 340,
     "recv_errors": 2,
     "internal_heap": 102400,
+    "reset_reason": "poweron",
     "boot_id": "a1b2c3d4"
   }
 }
@@ -483,6 +484,23 @@ All timestamps are UTC with an explicit `+00:00` offset.
 `stats` and its fields are omitted when no value is available. Packet counts are totals
 since boot. `boot_id` is eight lowercase hex digits, a random value chosen at boot and
 constant for that boot, so a collector can tell boots apart.
+
+`reset_reason` is the cause of the reset that started this boot and does not change
+until the next restart:
+
+| Value | Meaning |
+|---|---|
+| `poweron` | Power applied |
+| `ext` | External reset pin |
+| `sw` | Restart requested by firmware (`reboot`, an OTA update, a self-heal reboot) |
+| `panic` | Exception or abort; a `crash` record usually follows |
+| `int_wdt` | Interrupt watchdog |
+| `task_wdt` | Task watchdog |
+| `wdt` | Another watchdog |
+| `deepsleep` | Wake from deep sleep |
+| `brownout` | Supply voltage dropped too low |
+| `sdio` | Reset over SDIO |
+| `unknown` | Cause not reported by the chip; a reset over the USB serial port (opening the port, flashing) also reads `unknown` |
 
 After a panic, every status message for the rest of that boot also carries the record
 `get crash` prints, read from the flash core dump:
