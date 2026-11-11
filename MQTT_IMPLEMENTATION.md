@@ -275,7 +275,7 @@ it has no effect there. An empty or invalid override falls back to `mqtt.iata`.
 | `get/set mqtt.neighbors auto\|on\|off` | Periodic neighbors publish (neighbors builds); `auto` only for presets that ask for it | auto |
 | `get/set mqtt.neighbors.interval <12-336>` | Neighbors interval, hours | 24 |
 | `get/set mqtt.breaker.interval <10-30>` | Minutes between retries once a slot stops reconnecting | 30 |
-| `get/set mqtt.selfheal on\|off` | Reboot when MQTT is stuck in a state only a reboot clears; `get` shows the last cause and count | on |
+| `get/set mqtt.selfheal on\|off` | Reboot when MQTT is stuck in a state only a reboot clears; `get` shows the last cause and count | off |
 | `get/set mqtt.ntp <host\|none>` | Primary NTP server; `set` syncs once to test it | `pool.ntp.org` |
 | `get mqtt.ntp.diag` | Probe every NTP server without changing the clock; returns immediately and reports the last completed probe | |
 | `get/set mqtt.owner <64 hex>` | Owner public key for JWT (`get` is serial only) | |

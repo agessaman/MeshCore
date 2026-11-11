@@ -81,7 +81,7 @@ static MQTTPrefs defaults() {
   prefs.display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;
   prefs.display_flip = 0;
   prefs.mqtt_breaker_probe_min = MQTTConnectionPolicy::kBreakerProbeDefaultMinutes;
-  prefs.mqtt_selfheal_enabled = 1;
+  prefs.mqtt_selfheal_enabled = 0;
   strcpy(prefs.snmp_community, "public");
   for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
     strcpy(prefs.mqtt_slot_preset[i], "none");
@@ -535,11 +535,11 @@ TEST(MQTTPrefsSerializer, BreakerIntervalRoundTripsDefaultsAndRepairs) {
   }
 }
 
-// Files from older firmware have no selfheal key; they keep self-heal on
-// without a repair write.
+// Self-heal is opt-in: files from older firmware have no selfheal key and
+// stay off without a repair write.
 TEST(MQTTPrefsSerializer, SelfHealRoundTripsDefaultsAndRepairs) {
   MQTTPrefs source = defaults();
-  EXPECT_EQ(1, source.mqtt_selfheal_enabled);
+  EXPECT_EQ(0, source.mqtt_selfheal_enabled);
   for (uint8_t value : {(uint8_t)0, (uint8_t)1}) {
     source.mqtt_selfheal_enabled = value;
     OutputStream output;
@@ -564,19 +564,19 @@ TEST(MQTTPrefsSerializer, SelfHealRoundTripsDefaultsAndRepairs) {
   bool repaired = false;
   ASSERT_TRUE(legacy_serializer.apply(&repaired));
   EXPECT_FALSE(repaired);
-  EXPECT_EQ(1, legacy.mqtt_selfheal_enabled);
+  EXPECT_EQ(0, legacy.mqtt_selfheal_enabled);
 
   for (const char* bogus_text : {"{version:1,mqtt:{selfheal:2}}",
                                  "{version:1,mqtt:{selfheal:-1}}"}) {
     MQTTPrefs prefs = defaults();
-    prefs.mqtt_selfheal_enabled = 0;
+    prefs.mqtt_selfheal_enabled = 1;
     InputStream bogus(bogus_text);
     MQTTPrefsSerializer bogus_serializer(&prefs);
     ASSERT_TRUE(bogus_serializer.loadSerial(bogus)) << bogus_text;
     repaired = false;
     ASSERT_TRUE(bogus_serializer.apply(&repaired)) << bogus_text;
     EXPECT_TRUE(repaired) << bogus_text;
-    EXPECT_EQ(1, prefs.mqtt_selfheal_enabled) << bogus_text;
+    EXPECT_EQ(0, prefs.mqtt_selfheal_enabled) << bogus_text;
   }
 }
 

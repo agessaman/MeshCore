@@ -154,7 +154,7 @@ struct MQTTPrefs {
   // only, like display_timeout_secs.
   uint8_t mqtt_breaker_probe_min;
 
-  // Bounded self-heal reboot when MQTT is stuck (mqtt.selfheal): 1 on, 0 off.
+  // Bounded self-heal reboot when MQTT is stuck (mqtt.selfheal): 1 on, 0 off (default).
   // Runtime only, like display_timeout_secs.
   uint8_t mqtt_selfheal_enabled;
 };

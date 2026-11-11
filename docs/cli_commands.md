@@ -1410,7 +1410,7 @@ Covers serial NMEA receivers (`MicroNMEALocationProvider`).
 - `get mqtt.selfheal`
 - `set mqtt.selfheal <on|off>`
 
-**Default:** `on`
+**Default:** `off`
 
 > **Note:** When the observer is stuck in a state only a reboot clears, the node sends an alert and reboots 1 min later. The states are a bridge stop that never completed (10 min), an MQTT client that could not be stopped (30 min), and every slot down for 2 h while NTP shows the internet is reachable. The all-slots-down hold adds up to 30 min of per-node random delay, chosen once at boot. Slots refused by their broker (wrong credentials) do not count. A node must be up 30 min first, each consecutive self-heal reboot doubles the wait (up to 8x), and after 5 in a row it only alerts. All-slots-down gets one reboot per outage, and only if no self-heal reboot of any cause has occurred since the last healthy period; after that it only alerts. Ten healthy minutes resets the count and re-arms all-slots-down, either with a connected slot or with the bridge deliberately off and clean. `get` also shows the last self-heal cause and count, or `none`. The repeater keeps working in all of these states.
 
