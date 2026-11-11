@@ -2709,9 +2709,9 @@ void MQTTBridge::maintainSlotConnections() {
 
   // Only allow one reconnect attempt per maintenance cycle to avoid
   // multiple simultaneous TLS handshakes blocking the network stack.
-  // Time-based guard: block reconnects if any slot reconnected within the last 15 s,
-  // ensuring the previous TLS handshake (and its Core-0-expensive completion events)
-  // finish before the next slot begins its own handshake.
+  // Time-based guard: hold reconnects for up to 15 s after any slot started a handshake,
+  // so it (and its Core-0-expensive completion events) can finish first. A first setup or
+  // a backoff reconnect may follow sooner once that handshake is known to be over.
   bool reconnect_attempted_this_cycle = MQTTConnectionPolicy::reconnectGuardActive(
       static_cast<uint32_t>(now_millis), static_cast<uint32_t>(_last_slot_reconnect_ms));
   // Only allow one full teardown+setup per cycle to limit heap fragmentation
@@ -3107,7 +3107,9 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           (_radio && _radio->getLastRecvMillis() > 0) ? (_ms->getMillis() - _radio->getLastRecvMillis()) : 0);
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
-      _guard_armed_by_slot = static_cast<int8_t>(index);
+      // Issued over an attempt still in flight, the pending flag can be cleared by that older
+      // attempt's outcome, so it proves nothing about this one: keep the full guard.
+      _guard_armed_by_slot = _slot_attempt_pending[index] ? -1 : static_cast<int8_t>(index);
       _guard_armer_first_setup = false;
       if (slot_uses_jwt) {
         prepareJwtReconnect(false, slot.reconnect_backoff);
