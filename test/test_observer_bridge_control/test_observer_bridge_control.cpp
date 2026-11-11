@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,7 @@ struct FakeHost {
   bool flash_result = true;
   const char* flash_reply = "";
   std::vector<std::string> alerts;
+  std::function<void()> on_drain;
 
   FakeBridge* newBridge() {
     created++;
@@ -81,7 +83,10 @@ struct FakeHost {
   void setAlertBridge(FakeBridge* b) { alert_bridge = b; }
   FakeNodePrefs* getNodePrefs() { return &node; }
   FakeObserverPrefs* getObserverPrefs() { return &obs; }
-  void drainOutbound(uint32_t) { calls.push_back("drain"); }
+  void drainOutbound(uint32_t) {
+    calls.push_back("drain");
+    if (on_drain) on_drain();
+  }
   bool flashFromManifest(char* reply) {
     calls.push_back("flash");
     strcpy(reply, flash_reply);
@@ -316,7 +321,21 @@ TEST_F(ObserverBridgeControlTest, OtaRefusedForUnprovenIdleBridgeLeavesItStopped
   ctl.runOta(host, bridge, false);
   EXPECT_FALSE(bridge->running);
   EXPECT_EQ((std::vector<std::string>{"drain", "pollLateStopAck"}), host.calls);
-  EXPECT_EQ((std::vector<std::string>{"OTA aborted: MQTT stop unclean, bridge left stopped"}), host.alerts);
+  EXPECT_EQ((std::vector<std::string>{"OTA aborted: MQTT stop unclean, bridge left stopped - reboot to clear"}),
+            host.alerts);
+}
+
+TEST_F(ObserverBridgeControlTest, OtaCapturesBridgeStartedDuringDrain) {
+  startRunning();
+  ctl.setState(host, bridge, false);
+  host.calls.clear();
+  host.on_drain = [&] { ctl.setState(host, bridge, true); };   // operator start mid-drain
+  host.flash_result = false;
+  ctl.runOta(host, bridge, false);
+  EXPECT_EQ((std::vector<std::string>{"drain", "prepare", "begin", "pollLateStopAck", "end", "flash", "prepare",
+                                      "begin"}),
+            host.calls);
+  EXPECT_TRUE(bridge->running);
 }
 
 TEST_F(ObserverBridgeControlTest, OtaIdleLatchOnlyBlocksInStrictMode) {

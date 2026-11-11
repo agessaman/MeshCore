@@ -45,7 +45,7 @@ public:
 
   enum OtaStep : uint8_t {
     OTA_IDLE = 0,
-    OTA_BEGIN,          // log, record bridge state, drain queued TX
+    OTA_BEGIN,          // log, drain queued TX, record bridge state
     OTA_STOP_BRIDGE,    // stop a running bridge and decide whether flashing is safe
     OTA_FLASH,          // download and flash; reboots on success
     OTA_RESUME,         // abort path: restore a bridge that was meant to be running
@@ -125,7 +125,7 @@ public:
     }
   }
 
-  // Called once per role loop(): finishes late-acknowledged stops and advances a queued OTA.
+  // Called once per role loop(): finishes late-acknowledged stops.
   template <class Host>
   void poll(Host& host, Bridge*& bridge) {
     // Release withheld resources when a timed-out stop is acknowledged late, and
@@ -137,7 +137,6 @@ public:
         setState(host, bridge, true);
       }
     }
-    if (_ota_step != OTA_IDLE) stepOta(host, bridge);
   }
 
   // Runs the deferred OTA to completion (blocking); strict_idle also refuses a stopped
@@ -154,17 +153,18 @@ public:
     switch (_ota_step) {
       case OTA_BEGIN: {
         Log::line("OTA: starting update");
+        host.drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
+        if (bridge) bridge->pollLateStopAck();
+        // Capture state after the drain so a start processed during it is seen.
         _ota_was_running = bridge && bridge->isRunning();
         // A bridge waiting on a late stop ack is still meant to run if the flash aborts.
         _ota_resume = _ota_was_running || (_resume_pending && host.getNodePrefs()->bridge_enabled);
         _ota_stop_refused = 0;
-        host.drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
         _ota_step = OTA_STOP_BRIDGE;
         break;
       }
       case OTA_STOP_BRIDGE: {
         bool may_flash = true;
-        if (bridge) bridge->pollLateStopAck();
         if (_ota_was_running) {
           setState(host, bridge, false);
           // A forced/timed-out stop leaves TLS/heap ownership uncertain: do not flash.
@@ -205,7 +205,7 @@ public:
         }
         if (_ota_stop_refused) {
           if (!_ota_resume) {
-            host.otaAlert("OTA aborted: MQTT stop unclean, bridge left stopped");
+            host.otaAlert("OTA aborted: MQTT stop unclean, bridge left stopped - reboot to clear");
           } else if (bridge && bridge->isRunning()) {
             host.otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
           } else {
