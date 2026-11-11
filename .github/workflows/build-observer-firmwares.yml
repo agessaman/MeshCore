@@ -30,6 +30,8 @@ on:
       # Throwaway build worktrees never affect the binaries.
       - '.build-wt-*'
       - '.build-wt-*/**'
+      # The crash collector runs on a host and is never compiled into firmware.
+      - 'tools/observer_crash_collector/**'
 
 # Own group: serialize builds against each other only. Do NOT share this group
 # with sync-flasher-content.yml — a mixed code+docs commit triggers both, and a
