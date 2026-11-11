@@ -11,6 +11,7 @@
 #include "../MQTTTopicRouter.h"
 #include "../AdvertSignature.h"
 #include "../TxtDataHelpers.h"
+#include "../CrashReport.h"
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include <time.h>
@@ -1655,6 +1656,9 @@ void MQTTBridge::mqttTaskLoop() {
         publishStatusToSlot(i);
       }
     }
+
+    // Erase a reported flash core dump here, at shallow stack depth, not inside a publish.
+    CrashReport::service();
 
     // Sample this task's stack headroom about once a second for `get mqtt.stacks`.
     static uint32_t last_stack_sample_ms = 0;
@@ -3335,6 +3339,11 @@ void MQTTBridge::publishStatusToSlot(int index) {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   int heap_min = (int)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
 
+  // The crash fragment sits in the scratch tail past the status JSON, so it costs no stack.
+  char* crash_json = json_buffer + STATUS_JSON_BUFFER_SIZE;
+  CrashReport::formatJson(crash_json, STATUS_CRASH_FRAGMENT_SIZE);
+  bool crash_included = false;
+
   int len = MQTTMessageBuilder::buildStatusMessage(
     _json_scratch_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
@@ -3344,7 +3353,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
     collectConnHealth(),
-    heap_min, cachedResetReason(_board)
+    heap_min, cachedResetReason(_board),
+    crash_json, &crash_included
   );
 
   if (len > 0) {
@@ -3356,6 +3366,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     int result = slot.client->publish(status_topic, 1, use_retain, json_buffer, len);
     if (result <= 0) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
+    } else if (crash_included) {
+      CrashReport::notePublished();
     }
   }
 }
@@ -4270,6 +4282,11 @@ bool MQTTBridge::publishStatus() {
   int internal_heap_free = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   int heap_min = (int)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
 
+  // The crash fragment sits in the scratch tail past the status JSON, so it costs no stack.
+  char* crash_json = json_buffer + STATUS_JSON_BUFFER_SIZE;
+  CrashReport::formatJson(crash_json, STATUS_CRASH_FRAGMENT_SIZE);
+  bool crash_included = false;
+
   int len = MQTTMessageBuilder::buildStatusMessage(
     _json_scratch_doc,
     _origin, origin_id, _board_model, _firmware_version, radio_info,
@@ -4279,7 +4296,8 @@ bool MQTTBridge::publishStatus() {
     packets_sent, packets_received,
     _prefs->disable_fwd ? "off" : "on",
     collectConnHealth(),
-    heap_min, cachedResetReason(_board)
+    heap_min, cachedResetReason(_board),
+    crash_json, &crash_included
   );
 
   if (len > 0) {
@@ -4297,6 +4315,7 @@ bool MQTTBridge::publishStatus() {
         }
       }
     }
+    if (published && crash_included) CrashReport::notePublished();
     // If no connected slot accepts status topics, treat as success to avoid
     // infinite retry loops
     if (published || !any_slot_wants_status) {

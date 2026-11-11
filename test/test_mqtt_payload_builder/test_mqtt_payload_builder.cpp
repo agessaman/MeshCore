@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "helpers/CrashReportFormat.h"
 #include "helpers/MQTTPayloadBuilder.h"
 
 namespace {
@@ -276,6 +277,120 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
   ASSERT_FALSE(deserializeJson(parsed, buffer));
   EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
   EXPECT_STREQ("deepsleep", parsed["stats"]["reset_reason"].as<const char*>());
+}
+
+// The widest crash fragment the formatter emits into the bridge's 160-byte slot.
+static std::string widestCrashFragment() {
+  CrashRecord r = {};
+  r.arch = CrashRecord::ARCH_XTENSA;
+  r.pc = r.cause = r.vaddr = 0xffffffff;
+  r.bt_depth = CrashRecord::kMaxBacktrace;
+  for (int i = 0; i < CrashRecord::kMaxBacktrace; i++) r.bt[i] = 0x40000000u;
+  r.bt_corrupted = 1;
+  memset(r.task, 'T', 15);
+  strcpy(r.elf_sha, "ffffffff");
+  char buf[CrashReportFormat::kJsonMax];
+  CrashReportFormat::formatJson(&r, buf, sizeof(buf));
+  return buf;
+}
+
+TEST(MQTTPayloadBuilder, StatusCarriesCrashObjectWhenItFits) {
+  const char* crash = "{\"task\":\"loopTask\",\"pc\":\"400d1a2b\",\"exc\":28,"
+                      "\"va\":\"00000010\",\"bt\":\"400d1a2b 400d5678\"}";
+  JsonDocument scratch;
+  char buffer[1024];
+  bool included = false;
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "fw", "radio", "client", "online", kTimestamp,
+      buffer, sizeof(buffer), 4200, 60, -1, -1, -999, -1, -1, -1, -1, -1, -1,
+      "on", MQTTConnHealth(), -1, "panic", crash, &included);
+  ASSERT_GT(len, 0);
+  EXPECT_TRUE(included);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("loopTask", parsed["crash"]["task"].as<const char*>());
+  EXPECT_EQ(28, parsed["crash"]["exc"].as<int>());
+  EXPECT_STREQ("panic", parsed["stats"]["reset_reason"].as<const char*>());
+}
+
+TEST(MQTTPayloadBuilder, StatusWithoutCrashLeavesFlagFalse) {
+  JsonDocument scratch;
+  char buffer[1024];
+  bool included = true;
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "fw", "radio", "client", "online", kTimestamp,
+      buffer, sizeof(buffer), -1, -1, -1, -1, -999, -1, -1, -1, -1, -1, -1,
+      nullptr, MQTTConnHealth(), -1, nullptr, "", &included);
+  ASSERT_GT(len, 0);
+  EXPECT_FALSE(included);
+  EXPECT_EQ(std::string::npos, std::string(buffer).find("crash"));
+}
+
+// The crash object adds at most ",\"crash\":" (9) + 159 = 168 bytes. At the real field
+// maxima that overflows 1024, so the field must be dropped and the rest still published.
+TEST(MQTTPayloadBuilder, WorstCaseStatusDropsCrashInsteadOfOverflowing) {
+  constexpr size_t kStatusJsonBufferSize = 1024;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  const std::string origin(31, '"');
+  const std::string origin_id(64, 'A');
+  const std::string model(63, 'M');
+  const std::string firmware(63, 'F');
+  const std::string client_version(63, 'C');
+  const std::string crash = widestCrashFragment();
+  ASSERT_GT(crash.size(), 150u);
+  ASSERT_LT(crash.size(), CrashReportFormat::kJsonMax);
+
+  MQTTConnHealth health;
+  health.slots_up = 0;
+  health.slots_total = 6;
+  health.worst_outage_secs = 4294967;
+  health.heap_largest = 8388608;
+  health.connect_failures = 2147483647;
+  health.slots_breaker = 6;
+
+  JsonDocument scratch;
+  char buffer[kStatusJsonBufferSize];
+  bool included = true;
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, origin.c_str(), origin_id.c_str(), model.c_str(), firmware.c_str(),
+      "9999.999999,1000.0,12,8", client_version.c_str(), "online", kTimestamp,
+      buffer, sizeof(buffer),
+      4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
+      8388608, 2147483647, 2147483647,
+      "off", health, 8388608, "deepsleep", crash.c_str(), &included);
+
+  ASSERT_GT(len, 0) << "status must survive a crash field that does not fit";
+  EXPECT_FALSE(included);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["crash"].is<JsonVariant>());
+  EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
+}
+
+// A realistic node (ordinary name and versions, full health block) keeps the widest crash object.
+TEST(MQTTPayloadBuilder, RealisticStatusKeepsWidestCrash) {
+  const std::string crash = widestCrashFragment();
+  MQTTConnHealth health;
+  health.slots_up = 2;
+  health.slots_total = 3;
+  health.worst_outage_secs = 86400;
+  health.heap_largest = 31732;
+  health.connect_failures = 12;
+  health.slots_breaker = 1;
+
+  JsonDocument scratch;
+  char buffer[1024];
+  bool included = false;
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "DEN Repeater North", "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+      "Heltec V3", "v1.18.0.9-abcdef1", "910.525000,62.5,7,5", "meshcore/v1.18.0.9-abcdef1",
+      "online", kTimestamp, buffer, sizeof(buffer),
+      4120, 2147483, 0, 3, -112, 123456, 654321, 9999, 61234, 123456, 654321,
+      "on", health, 41000, "panic", crash.c_str(), &included);
+  ASSERT_GT(len, 0);
+  EXPECT_TRUE(included) << "len=" << len;
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_TRUE(parsed["crash"]["bt"].is<const char*>());
 }
 
 TEST(MQTTPayloadBuilder, StatusOmissionSentinelsRemainOmitted) {
