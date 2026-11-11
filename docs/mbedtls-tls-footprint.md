@@ -140,19 +140,40 @@ from the first archive that satisfies an undefined symbol.
 
 They are not committed: ~6 MB per architecture, and they have to be rebuilt for every
 `platformio/espressif32` bump, so committing them would grow history permanently and go
-stale silently. Instead they are published as a release asset and fetched on demand:
+stale silently. Instead they are published as release assets and fetched on demand:
 
-```
-scripts/fetch_mbedtls_4k.sh esp32s3            # download + verify against the manifest
-MESHCORE_REDUCED_TLS=1 pio run -e Heltec_v3_repeater_observer_mqtt
+```sh
+scripts/fetch_mbedtls_4k.sh --all             # fetch every architecture in the manifest
+MESHCORE_REDUCED_TLS=auto pio run -e Heltec_v3_repeater_observer_mqtt
 ```
 
-- `scripts/mbedtls_4k_manifest.txt` — per-arch sha256 of each archive. **Update it on every
-  platform bump**, together with the published asset.
-- `scripts/fetch_mbedtls_4k.sh` — downloads into `.mbedtls-4k/<arch>/` (gitignored) and
-  verifies. `MBEDTLS_4K_LOCAL=<dir>` copies from a local build tree instead of downloading.
-- `scripts/mbedtls_4k.py` — wired into `esp32_base.extra_scripts`, but a **no-op unless
-  `MESHCORE_REDUCED_TLS=1`**, so ordinary builds need no artifact and behave as before.
+- `scripts/mbedtls_4k_manifest.txt` pins the release tag, per-architecture archive hashes,
+  and stock framework fingerprints. The current tag is `mbedtls-4k`. Every platform bump
+  gets a new tag named after the platform version, with rebuilt archives and updated
+  fingerprints. Never delete old tags: old commits must keep building with their pinned assets.
+- `scripts/fetch_mbedtls_4k.sh` downloads into `.mbedtls-4k/<arch>/` (gitignored) and
+  verifies. Valid existing archives are a no-op, including offline use. Downloads retry on
+  transient failures. Pass an architecture instead of `--all` to fetch only that one.
+  `MBEDTLS_4K_LOCAL=<dir>` copies from a local build tree instead of downloading;
+  `MBEDTLS_4K_BASE_URL` overrides the release download URL.
+- `scripts/mbedtls_4k.py` is wired into `esp32_base.extra_scripts`. With the variable unset,
+  ordinary `pio run` needs no archives and uses the framework unchanged. `0` or an empty
+  value disables the hook. `1` forces it for the selected environment and fails on any
+  missing or incompatible archives.
+- `auto` selects environments whose resolved project and board flags define
+  `WITH_MQTT_BRIDGE` without `BOARD_HAS_PSRAM`. A qualifying MCU absent from the manifest
+  builds stock with a visible summary (currently classic `esp32`). Once its archive entries
+  are added, all verification becomes mandatory, including the linker-map check.
+  Each build with the variable set prints one summary; `active` appears only after the
+  map check passes, including when the existing link is reused.
+
+`build.sh build-firmware <env>` fetches all manifest architectures before each observer
+build and defaults to `MESHCORE_REDUCED_TLS=auto`. Both observer release workflows call
+this path. A fetch failure stops the build. Existing verified archives avoid repeated
+network access within a shard. Caller values are preserved, so
+`MESHCORE_REDUCED_TLS=0 FIRMWARE_VERSION=v0.0.0-test bash build.sh build-firmware <env>`
+is the escape hatch (the fetch still verifies or stages the archives). Non-observer
+builds neither fetch archives nor set the variable.
 
 The opt-in path is deliberately loud, because both ways this can go wrong produce a
 firmware that looks correct and silently lacks the change:
@@ -167,6 +188,17 @@ That last one is the reason the post-link check exists rather than trusting the 
 build flag reaching the compiler proves nothing about what got linked.
 
 ## How to verify it worked
+
+An active build reports `reduced-TLS: <env>: active` after verifying all four linked
+archive paths. `strings .pio/build/<env>/firmware.bin | grep 'TLS outbound record'`
+finds the boot-log format, which prints `TLS outbound record: 4096 bytes (reduced)`.
+A plain build with the variable unset prints no reduced-TLS summary and its map names
+the framework's own archives.
+
+Measured on a Heltec V3 with two WSS slots on November 10, 2026: boot free heap rose
+from 70.3 K to 94.9 K and the largest free block from 52.2 K to 75.8 K. After four slot
+reconfigures, the reduced build's largest block was 73.7 K; the stock build had fallen
+to 37.9 K after two. These are hardware observations from that comparison, not a fleet soak.
 
 1. `strings`/`grep` the new `sdkconfig.h` for the four settings.
 2. Build and check the RAM figure; static usage should be unchanged (these are heap buffers).
