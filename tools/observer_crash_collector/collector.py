@@ -1,215 +1,201 @@
 #!/usr/bin/env python3
-"""Collect MeshCore observer crash reports from MQTT status topics.
-
-Read-only subscriber. Keeps only panic, self-heal, and abnormal-reset status
-messages in an append-only JSON Lines file. See README.md for the contract.
-"""
+"""Collect observer crash occurrences; see README.md for evidence limits."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
+import re
 import secrets
+import shlex
 import signal
 import sys
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
-# From src/helpers/bridges/MQTTBridge.cpp, resetReasonToken().
-ABNORMAL_RESETS = frozenset({"panic", "int_wdt", "task_wdt", "wdt", "brownout"})
-
-# CrashReportFormat::formatJson() keys: task, pc, exc, va, sha, bt.
-CRASH_KEYS = ("task", "pc", "exc", "va", "sha", "bt")
-
-# Boot-time estimates closer than this are the same boot. Uptime has one-second
-# resolution and the device timestamp is NTP-synced; the first status after a
-# boot is published at connect, about 70 s in (firmware example), so a real
-# reboot shifts the estimate by at least that much.
+ABNORMAL_RESETS = frozenset({'panic', 'int_wdt', 'task_wdt', 'wdt', 'brownout'})
+RESET_REASONS = ABNORMAL_RESETS | {'poweron', 'ext', 'sw', 'deepsleep', 'sdio', 'unknown'}
+SELFHEAL_CAUSES = frozenset({'stop_unproven', 'client_quarantined', 'all_slots_down'})
+KINDS = ('crash', 'selfheal', 'reset')
 BOOT_TOLERANCE_SECS = 30.0
-
+UPTIME_PERIOD = 2**32 / 1000
+MAX_PAYLOAD = 65536
+MAX_RECORD = 8192
+MAX_NODES = 20000
 SUMMARY_CRASH_LIMIT = 200
+HEX64 = re.compile(r'[0-9a-fA-F]{64}')
+HEX8 = re.compile(r'[0-9a-fA-F]{8}')
+BOOT_ID = re.compile(r'[0-9a-fA-F]{1,32}')
+SCALARS = ('heap_min', 'internal_heap', 'heap_largest', 'mqtt_slots_up',
+           'mqtt_slots_total', 'mqtt_outage_secs', 'mqtt_connect_failures',
+           'mqtt_slots_breaker', 'battery_mv')
+
+
+def safe_text(value: Any, limit: int = 128) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    return ''.join(c if ' ' <= c <= '~' else '?' for c in value[:limit])
 
 
 def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    print(json.dumps(message[:1024], ensure_ascii=True)[1:-1], file=sys.stderr, flush=True)
 
 
 def _as_int(value: Any) -> Optional[int]:
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    return None
+    return value if type(value) is int and 0 <= value <= 0xffffffff else None
 
 
-def _as_str(value: Any) -> Optional[str]:
-    return value if isinstance(value, str) and value else None
+def hex_value(value: Any, pattern=HEX64) -> Optional[str]:
+    return value.lower() if isinstance(value, str) and pattern.fullmatch(value) else None
 
 
-def _normalize_node_id(value: Optional[str]) -> str:
-    if not value:
-        return ""
-    if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
-        return value.lower()
-    return value
+def reject_constant(value):
+    raise ValueError('nonfinite JSON number')
 
 
-def crash_signature(node_id: str, crash: dict) -> str:
-    """Stable, bounded identity for a crash object on one node."""
-    canonical = json.dumps(crash, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return node_id + "\x00" + digest
+def decode_json(data):
+    return json.loads(data, parse_constant=reject_constant,
+                      parse_float=finite_float)
 
 
-def _parse_time(value: Any) -> Optional[float]:
-    if not isinstance(value, str):
+def finite_float(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError('nonfinite JSON number')
+    return number
+
+
+def validate_crash(value: Any) -> Optional[dict]:
+    if not isinstance(value, dict):
         return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
+    if not {'task', 'pc', 'exc', 'va'} <= value.keys():
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
+    if value.keys() - {'task', 'pc', 'exc', 'va', 'sha', 'bt'}:
+        return None
+    task = value['task']
+    if not isinstance(task, str) or not 1 <= len(task) <= 15:
+        return None
+    if any(c < '!' or c > '~' or c in '\\"' for c in task):
+        return None
+    pc, va = hex_value(value['pc'], HEX8), hex_value(value['va'], HEX8)
+    exc = _as_int(value['exc'])
+    if pc is None or va is None or exc is None:
+        return None
+    result = dict(task=task, pc=pc, exc=exc, va=va)
+    if 'sha' in value:
+        sha = hex_value(value['sha'], HEX8)
+        if sha is None:
+            return None
+        result['sha'] = sha
+    if 'bt' in value:
+        bt = value['bt']
+        if not isinstance(bt, str) or len(bt) > 73:
+            return None
+        if not re.fullmatch(r'(?:[0-9a-fA-F]{8}(?: [0-9a-fA-F]{8}){0,7}(?: ?!)?|!)', bt):
+            return None
+        result['bt'] = bt.lower()
+    return result
+
+
+def crash_signature(crash: dict) -> str:
+    return hashlib.sha256(json.dumps(crash, sort_keys=True).encode('ascii')).hexdigest()
 
 
 @dataclass
 class ParsedStatus:
     received_at: str
+    receive_time: float
     iata: str
     node_id: str
-    node_name: Optional[str]
-    model: Optional[str]
-    firmware_version: Optional[str]
-    crash: Optional[dict]
-    crash_signature: Optional[str]
-    report_key: Optional[Tuple[Optional[str], Optional[str], Optional[int]]]
-    report_kinds: Tuple[str, ...]
+    digest: str
+    boot_id: Optional[str]
     uptime_secs: Optional[int]
-    boot_time: Optional[float]
-    scalars: Dict[str, Any] = field(default_factory=dict)
+    crash: Optional[dict]
+    report_kinds: Tuple[str, ...]
+    context: dict
 
 
 def parse_status(payload: bytes, topic: str, received_at: datetime) -> Optional[ParsedStatus]:
-    """Parse one status payload. Returns None for malformed or non-object input."""
-    if not isinstance(payload, (bytes, bytearray)):
+    if not isinstance(payload, (bytes, bytearray)) or len(payload) > MAX_PAYLOAD:
+        return None
+    if not isinstance(topic, str) or len(topic) > 128:
+        return None
+    parts = topic.split('/')
+    if (len(parts) != 4 or parts[0] != 'meshcore' or parts[3] != 'status'
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,16}', parts[1])):
+        return None
+    node = hex_value(parts[2])
+    if node is None:
         return None
     try:
-        doc = json.loads(bytes(payload))
+        doc = decode_json(bytes(payload))
     except (ValueError, TypeError, RecursionError):
         return None
     if not isinstance(doc, dict):
         return None
-
-    stats = doc.get("stats")
+    if 'origin_id' in doc and hex_value(doc['origin_id']) != node:
+        return None
+    stats = doc.get('stats')
     if not isinstance(stats, dict):
         stats = {}
-
-    parts = topic.split("/")
-    iata = parts[1] if len(parts) > 1 else ""
-    topic_node = _normalize_node_id(parts[2] if len(parts) > 2 else "")
-    node_id = _normalize_node_id(_as_str(doc.get("origin_id"))) or topic_node
-
-    crash = doc.get("crash")
-    crash = crash if isinstance(crash, dict) else None
-    signature = None
-    if crash is not None:
-        try:
-            signature = crash_signature(node_id, crash)
-        except (TypeError, ValueError):
-            crash = None
-
-    reset_reason = _as_str(stats.get("reset_reason"))
-    selfheal = _as_str(stats.get("selfheal"))
-    selfheal_n = _as_int(stats.get("selfheal_n"))
-    uptime = _as_int(stats.get("uptime_secs"))
-    if uptime is not None and uptime < 0:
-        uptime = None
-
-    message_time = _parse_time(doc.get("timestamp"))
-    boot_time = None
-    if uptime is not None:
-        base = message_time if message_time is not None else received_at.timestamp()
-        boot_time = base - uptime
-
-    report_key = None
-    if reset_reason is not None or selfheal is not None:
-        report_key = (reset_reason, selfheal, selfheal_n)
-
-    kinds: List[str] = []
-    if selfheal is not None and selfheal_n is not None and selfheal_n > 0:
-        kinds.append("selfheal")
-    if reset_reason in ABNORMAL_RESETS:
-        kinds.append("reset")
-
-    scalars: Dict[str, Any] = {}
-    for key in ("heap_min", "internal_heap", "heap_largest", "mqtt_slots_up", "mqtt_slots_total"):
-        value = _as_int(stats.get(key))
+    context = {}
+    for source, target in (('origin', 'node_name'), ('model', 'model'),
+                           ('firmware_version', 'firmware_version'), ('timestamp', 'device_timestamp')):
+        value = safe_text(doc.get(source))
         if value is not None:
-            scalars[key] = value
-
-    return ParsedStatus(
-        received_at=received_at.isoformat(timespec="microseconds"),
-        iata=iata,
-        node_id=node_id,
-        node_name=_as_str(doc.get("origin")),
-        model=_as_str(doc.get("model")),
-        firmware_version=_as_str(doc.get("firmware_version")),
-        crash=crash,
-        crash_signature=signature,
-        report_key=report_key,
-        report_kinds=tuple(kinds),
-        uptime_secs=uptime,
-        boot_time=boot_time,
-        scalars=scalars,
-    )
-
-
-class BoundedSet:
-    """LRU set with a hard cap, so a busy broker cannot grow memory without limit."""
-
-    def __init__(self, capacity: int) -> None:
-        self.capacity = max(1, capacity)
-        self._items: "OrderedDict[str, None]" = OrderedDict()
-
-    def add(self, value: str) -> None:
-        self._items[value] = None
-        self._items.move_to_end(value)
-        while len(self._items) > self.capacity:
-            self._items.popitem(last=False)
-
-    def __contains__(self, value: str) -> bool:
-        return value in self._items
+            context[target] = value
+    reason, heal = stats.get('reset_reason'), stats.get('selfheal')
+    reason = reason if isinstance(reason, str) and reason in RESET_REASONS else None
+    heal = heal if isinstance(heal, str) and heal in SELFHEAL_CAUSES else None
+    if reason is not None:
+        context['reset_reason'] = reason
+    if heal is not None:
+        context['selfheal'] = heal
+    count = _as_int(stats.get('selfheal_n'))
+    if count is not None:
+        context['selfheal_n'] = count
+    for key in SCALARS:
+        number = _as_int(stats.get(key))
+        if number is not None:
+            context[key] = number
+    kinds = []
+    if reason == 'sw' and heal is not None and count is not None and count > 0:
+        kinds.append('selfheal')
+    if reason in ABNORMAL_RESETS:
+        kinds.append('reset')
+    uptime = _as_int(stats.get('uptime_secs'))
+    if uptime is not None and uptime > int(UPTIME_PERIOD):
+        uptime = None
+    return ParsedStatus(received_at.isoformat(timespec='microseconds'), received_at.timestamp(),
+                        parts[1], node, hashlib.sha256(payload).hexdigest(),
+                        hex_value(stats.get('boot_id'), BOOT_ID), uptime,
+                        validate_crash(doc.get('crash')), tuple(kinds), context)
 
 
 @dataclass
 class NodeState:
-    report_key: Optional[Tuple[Optional[str], Optional[str], Optional[int]]]
+    receive_time: float
     uptime_secs: Optional[int]
-    boot_time: Optional[float]
+    boot_id: Optional[str]
+    digest: Optional[str]
+    reported: Tuple[str, ...]
 
 
 class Deduper:
-    """Decides whether a parsed status is a new event. No I/O."""
+    """Prepare a candidate without acknowledging any event."""
 
-    def __init__(self, node_capacity: int = 20000) -> None:
-        self.nodes: "OrderedDict[str, NodeState]" = OrderedDict()
-        self.node_capacity = max(1, node_capacity)
-        self.crashes = BoundedSet(self.node_capacity * 4)
-
-    def _node(self, node_id: str) -> Optional[NodeState]:
-        state = self.nodes.get(node_id)
-        if state is not None:
-            self.nodes.move_to_end(node_id)
-        return state
+    def __init__(self, node_capacity: int = MAX_NODES) -> None:
+        self.nodes = OrderedDict()
+        self.node_capacity = min(MAX_NODES, max(1, node_capacity))
+        self.sequence = 0
 
     def _put_node(self, node_id: str, state: NodeState) -> None:
         self.nodes[node_id] = state
@@ -219,133 +205,223 @@ class Deduper:
 
     @staticmethod
     def _rebooted(previous: NodeState, event: ParsedStatus) -> bool:
-        if previous.boot_time is not None and event.boot_time is not None:
-            # The same boot predicts a constant boot time for every status.
-            return abs(event.boot_time - previous.boot_time) > BOOT_TOLERANCE_SECS
-        if previous.uptime_secs is not None and event.uptime_secs is not None:
-            return event.uptime_secs < previous.uptime_secs
-        return False
+        if previous.boot_id is not None and event.boot_id is not None:
+            return previous.boot_id != event.boot_id
+        if previous.digest == event.digest:
+            return False
+        if previous.uptime_secs is None or event.uptime_secs is None:
+            return False
+        expected = previous.uptime_secs + max(0, event.receive_time - previous.receive_time)
+        wraps = round((expected - event.uptime_secs) / UPTIME_PERIOD)
+        if wraps >= 1 and abs(event.uptime_secs + wraps * UPTIME_PERIOD - expected) <= BOOT_TOLERANCE_SECS:
+            return False
+        return event.uptime_secs < expected - BOOT_TOLERANCE_SECS
 
-    def observe(self, event: ParsedStatus) -> Optional[dict]:
-        """Return a projected record for a new event, or None for a duplicate/non-event."""
-        previous = self._node(event.node_id)
-        crash_new = event.crash is not None and event.crash_signature not in self.crashes
+    def prepare(self, event: ParsedStatus):
+        previous = self.nodes.get(event.node_id)
+        reboot = previous is None or self._rebooted(previous, event)
+        reported = set() if reboot else set(previous.reported)
+        available = set(event.report_kinds)
+        if event.crash is not None:
+            available.add('crash')
+        kinds = [kind for kind in KINDS if kind in available - reported]
+        if previous is not None and previous.digest == event.digest and not reboot:
+            return None, previous
+        state = NodeState(event.receive_time, event.uptime_secs,
+                          event.boot_id or (previous.boot_id if previous and not reboot else None),
+                          event.digest, tuple(k for k in KINDS if k in reported | available))
+        record = None
+        if kinds:
+            record = dict(received_at=event.received_at, kinds=kinds, iata=event.iata,
+                          node_id=event.node_id, **event.context)
+            if event.uptime_secs is not None:
+                record['uptime_secs'] = event.uptime_secs
+            if 'crash' in kinds:
+                record['crash'] = event.crash
+            record['state_seq'] = self.sequence + 1
+            record['boot_evidence'] = asdict(state)
+        return record, state
 
-        report_new = False
-        if event.report_key is not None:
-            if previous is None or previous.report_key != event.report_key:
-                report_new = True
-            else:
-                report_new = self._rebooted(previous, event)
-        report_event = report_new and bool(event.report_kinds)
-
-        # Keep the observation window fresh even for discarded statuses: a later
-        # reboot is easier to see against the newest uptime, not the last stored one.
-        self._put_node(
-            event.node_id,
-            NodeState(
-                report_key=event.report_key if event.report_key is not None else (previous.report_key if previous else None),
-                uptime_secs=event.uptime_secs,
-                boot_time=event.boot_time,
-            ),
-        )
-        if event.crash_signature is not None:
-            self.crashes.add(event.crash_signature)
-
-        if not crash_new and not report_event:
-            return None
-
-        kinds: List[str] = []
-        if crash_new:
-            kinds.append("crash")
-        if report_event:
-            kinds.extend(event.report_kinds)
-        return project(event, kinds, event.crash if crash_new else None)
+    def commit(self, event: ParsedStatus, state: NodeState) -> None:
+        self.sequence += 1
+        self._put_node(event.node_id, state)
 
 
-def project(event: ParsedStatus, kinds: Iterable[str], crash: Optional[dict]) -> dict:
-    record: Dict[str, Any] = {
-        "received_at": event.received_at,
-        "kinds": list(kinds),
-        "iata": event.iata,
-        "node_id": event.node_id,
-    }
-    if event.node_name is not None:
-        record["node_name"] = event.node_name
-    if event.model is not None:
-        record["model"] = event.model
-    if event.firmware_version is not None:
-        record["firmware_version"] = event.firmware_version
-    if crash is not None:
-        record["crash"] = crash
-    if event.report_key is not None:
-        reset_reason, selfheal, selfheal_n = event.report_key
-        if reset_reason is not None:
-            record["reset_reason"] = reset_reason
-        if selfheal is not None:
-            record["selfheal"] = selfheal
-        if selfheal_n is not None:
-            record["selfheal_n"] = selfheal_n
-    if event.uptime_secs is not None:
-        record["uptime_secs"] = event.uptime_secs
-    record.update(event.scalars)
-    return record
+def fsync_directory(path: str) -> None:
+    fd = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
-def absorb_record(deduper: Deduper, record: dict) -> None:
-    """Rebuild dedup state from a stored record. Boot time is left unset: it was
-    derived from the collector's receive time, not the device's publish time."""
-    node_id = _normalize_node_id(_as_str(record.get("node_id")))
-    if "crash" in record and isinstance(record["crash"], dict):
+def bounded_lines(handle, limit: int):
+    while True:
+        line = handle.readline(limit + 1)
+        if not line:
+            return
+        if len(line) > limit:
+            while line and not line.endswith(b'\n'):
+                line = handle.readline(limit + 1)
+            yield None
+        else:
+            yield line
+
+
+def read_records(output_path: str) -> Iterable[dict]:
+    for path in (output_path + '.1', output_path):
         try:
-            deduper.crashes.add(crash_signature(node_id, record["crash"]))
-        except (TypeError, ValueError):
-            pass
-
-    reset_reason = _as_str(record.get("reset_reason"))
-    selfheal = _as_str(record.get("selfheal"))
-    selfheal_n = _as_int(record.get("selfheal_n"))
-    report_key = (reset_reason, selfheal, selfheal_n) if (reset_reason or selfheal) else None
-    previous = deduper.nodes.get(node_id)
-    deduper._put_node(
-        node_id,
-        NodeState(
-            report_key=report_key if report_key is not None else (previous.report_key if previous else None),
-            uptime_secs=_as_int(record.get("uptime_secs")),
-            boot_time=None,
-        ),
-    )
-
-
-def load_state(deduper: Deduper, output_path: str) -> None:
-    for path in (output_path + ".1", output_path):
-        try:
-            handle = open(path, "r", encoding="utf-8", errors="replace")
-        except OSError:
+            handle = open(path, 'rb')
+        except FileNotFoundError:
             continue
         with handle:
-            for line in handle:
+            for line in bounded_lines(handle, MAX_RECORD):
+                if line is None:
+                    continue
                 try:
-                    record = json.loads(line)
+                    record = decode_json(line)
                 except (ValueError, RecursionError):
                     continue
                 if isinstance(record, dict):
-                    absorb_record(deduper, record)
+                    yield record
+
+
+def repair_tail(path: str) -> None:
+    try:
+        handle = open(path, 'rb')
+    except FileNotFoundError:
+        return
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if not size:
+            return
+        handle.seek(size - 1)
+        if handle.read(1) == b'\n':
+            return
+        position = size
+        end = 0
+        while position:
+            start = max(0, position - MAX_RECORD)
+            handle.seek(start)
+            chunk = handle.read(position - start)
+            newline = chunk.rfind(b'\n')
+            if newline >= 0:
+                end = start + newline + 1
+                break
+            position = start
+    with open(path, 'r+b') as handle:
+        handle.truncate(end)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def state_from_dict(value: Any) -> NodeState:
+    if not isinstance(value, dict):
+        raise ValueError('invalid state')
+    receive = value.get('receive_time')
+    if type(receive) not in (float, int) or not 0 <= receive <= 1e12 or not math.isfinite(receive):
+        raise ValueError('invalid receive time')
+    uptime = value.get('uptime_secs')
+    if uptime is not None and (_as_int(uptime) is None or uptime > int(UPTIME_PERIOD)):
+        raise ValueError('invalid uptime')
+    boot, digest, reported = value.get('boot_id'), value.get('digest'), value.get('reported')
+    if boot is not None and hex_value(boot, BOOT_ID) is None:
+        raise ValueError('invalid boot ID')
+    if digest is not None and hex_value(digest) is None:
+        raise ValueError('invalid digest')
+    if not isinstance(reported, list) or len(reported) > 3 or any(k not in KINDS for k in reported):
+        raise ValueError('invalid kinds')
+    return NodeState(float(receive), uptime, boot, digest, tuple(reported))
+
+
+def load_state(deduper: Deduper, output_path: str) -> None:
+    for path in (output_path + '.1', output_path):
+        repair_tail(path)
+    try:
+        with open(output_path + '.state', 'rb') as handle:
+            raw = handle.read(MAX_NODES * 512 + 1024)
+            if handle.read(1):
+                raise ValueError('oversized state')
+        saved = decode_json(raw)
+        if not isinstance(saved, dict) or saved.get('version') != 1:
+            raise ValueError('invalid state version')
+        seq = saved['sequence']
+        if type(seq) is not int or not 0 <= seq <= 2**63 - 1:
+            raise ValueError('invalid sequence')
+        rows = saved['nodes']
+        if not isinstance(rows, list) or len(rows) > MAX_NODES:
+            raise ValueError('invalid nodes')
+        for node, value in rows:
+            if hex_value(node) is None:
+                raise ValueError('invalid node key')
+            deduper._put_node(node, state_from_dict(value))
+        deduper.sequence = seq
+    except FileNotFoundError:
+        pass
+    except (ValueError, TypeError, KeyError, RecursionError) as error:
+        raise OSError('invalid collector state') from error
+    for record in read_records(output_path):
+        node = hex_value(record.get('node_id'))
+        if node is None:
+            continue
+        if 'boot_evidence' in record:
+            try:
+                seq = record['state_seq']
+                if type(seq) is not int or not 0 <= seq <= 2**63 - 1:
+                    raise ValueError('invalid sequence')
+                state = state_from_dict(record['boot_evidence'])
+            except (ValueError, TypeError, KeyError) as error:
+                raise OSError('invalid event evidence') from error
+            if seq > deduper.sequence:
+                deduper._put_node(node, state)
+                deduper.sequence = seq
+        elif not deduper.sequence:
+            try:
+                receive = datetime.fromisoformat(record['received_at']).timestamp()
+                state = NodeState(receive, _as_int(record.get('uptime_secs')), None, None,
+                                  tuple(k for k in KINDS if k in record.get('kinds', [])))
+                deduper._put_node(node, state)
+            except (ValueError, TypeError, KeyError):
+                continue
+
+
+def save_state(deduper: Deduper, path: str, event: ParsedStatus, state: NodeState) -> None:
+    nodes = deduper.nodes.copy()
+    nodes[event.node_id] = state
+    nodes.move_to_end(event.node_id)
+    while len(nodes) > deduper.node_capacity:
+        nodes.popitem(last=False)
+    saved = dict(version=1, sequence=deduper.sequence + 1,
+                 nodes=[[key, asdict(value)] for key, value in nodes.items()])
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path + '.state.tmp', 'w', encoding='ascii') as handle:
+        json.dump(saved, handle, ensure_ascii=True, allow_nan=False, separators=(',', ':'))
+        handle.write('\n')
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(path + '.state.tmp', path + '.state')
+    fsync_directory(path)
 
 
 def append_record(output_path: str, record: dict, max_bytes: int) -> None:
-    directory = os.path.dirname(os.path.abspath(output_path))
-    os.makedirs(directory, exist_ok=True)
-    line = json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n"
-    with open(output_path, "a", encoding="utf-8") as handle:
-        handle.write(line)
-        handle.flush()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    line = (json.dumps(record, separators=(',', ':'), ensure_ascii=True, allow_nan=False) + '\n').encode('ascii')
+    if len(line) > MAX_RECORD:
+        raise OSError('oversized event record')
     try:
-        if os.path.getsize(output_path) >= max_bytes:
-            os.replace(output_path, output_path + ".1")
-    except OSError:
-        pass
-
+        size = os.path.getsize(output_path)
+    except FileNotFoundError:
+        size = 0
+    if size and size + len(line) > max_bytes:
+        os.replace(output_path, output_path + '.1')
+        fsync_directory(output_path)
+    with open(output_path, 'ab') as handle:
+        if handle.write(line) != len(line):
+            raise OSError('short event write')
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_directory(output_path)
 
 class Counters:
     def __init__(self) -> None:
@@ -382,25 +458,27 @@ class Collector:
         self.max_payload = max_payload
         self.counters = Counters()
 
-    def handle(self, topic: str, payload: bytes) -> Optional[dict]:
+    def handle(self, topic: str, payload: bytes, received_at: Optional[datetime] = None) -> Optional[dict]:
         self.counters.count("seen")
-        if len(payload) > self.max_payload:
-            self.counters.count("malformed")
-            self.counters.maybe_log()
-            return None
-        event = parse_status(payload, topic, datetime.now(timezone.utc))
+        event = None
+        if len(payload) <= self.max_payload:
+            event = parse_status(payload, topic, received_at or datetime.now(timezone.utc))
         if event is None:
             self.counters.count("malformed")
             self.counters.maybe_log()
             return None
-        record = self.deduper.observe(event)
+        record, state = self.deduper.prepare(event)
+        if state is not self.deduper.nodes.get(event.node_id):
+            if record is not None:
+                append_record(self.output_path, record, self.max_bytes)
+            save_state(self.deduper, self.output_path, event, state)
+            self.deduper.commit(event, state)
         if record is None:
             self.counters.count("discarded")
-            self.counters.maybe_log()
-            return None
-        append_record(self.output_path, record, self.max_bytes)
-        self.counters.count("kept")
-        log("kept %s node=%s iata=%s at=%s" % (",".join(record["kinds"]), record["node_id"], record["iata"], record["received_at"]))
+        else:
+            self.counters.count("kept")
+            log("kept %s node=%s iata=%s at=%s" % (
+                ",".join(record["kinds"]), event.node_id, event.iata, event.received_at))
         self.counters.maybe_log()
         return record
 
@@ -470,8 +548,8 @@ def load_config(require_host: bool) -> Config:
     config.tls_insecure = _env_bool("OBSERVER_CRASH_TLS_INSECURE", False)
     config.output = os.environ.get("OBSERVER_CRASH_OUTPUT", "crash-events.jsonl")
     config.max_bytes = _env_int("OBSERVER_CRASH_MAX_BYTES", 20 * 1024 * 1024)
-    config.max_payload = _env_int("OBSERVER_CRASH_MAX_PAYLOAD", 65536)
-    config.node_cache = _env_int("OBSERVER_CRASH_NODE_CACHE", 20000)
+    config.max_payload = min(MAX_PAYLOAD, _env_int("OBSERVER_CRASH_MAX_PAYLOAD", MAX_PAYLOAD))
+    config.node_cache = min(MAX_NODES, _env_int("OBSERVER_CRASH_NODE_CACHE", MAX_NODES))
     config.backoff_max = _env_int("OBSERVER_CRASH_BACKOFF_MAX", 60)
     if not config.client_id:
         config.client_id = "observer-crash-collector-" + secrets.token_hex(4)
@@ -494,49 +572,108 @@ def run_stdin(config: Config) -> int:
     deduper = Deduper(config.node_cache)
     load_state(deduper, config.output)
     collector = Collector(deduper, config.output, config.max_bytes, config.max_payload)
-    for raw in sys.stdin:
-        line = raw.rstrip("\r\n")
-        if not line:
+    for raw in bounded_lines(sys.stdin.buffer, config.max_payload + 130):
+        if raw is None or b'\t' not in raw:
+            collector.counters.count('seen')
+            collector.counters.count('malformed')
             continue
-        topic, sep, payload = line.partition("\t")
-        if not sep:
-            collector.counters.count("seen")
-            collector.counters.count("malformed")
-            collector.counters.maybe_log()
-            continue
-        collector.handle(topic, payload.encode("utf-8", errors="replace"))
+        topic, payload = raw.rstrip(b'\r\n').split(b'\t', 1)
+        collector.handle(topic.decode('ascii', errors='replace'), payload)
+    log('stdin seen=%d kept=%d discarded=%d malformed=%d' % (
+        collector.counters.seen, collector.counters.kept,
+        collector.counters.discarded, collector.counters.malformed))
     return 0
 
 
-def run_mqtt(config: Config) -> int:
-    try:
-        import paho.mqtt.client as mqtt
-    except ImportError:
-        log("paho-mqtt 2.x is required (pip install 'paho-mqtt>=2,<3')")
-        return 2
-    if not hasattr(mqtt, "CallbackAPIVersion"):
-        log("paho-mqtt 2.x is required (pip install 'paho-mqtt>=2,<3')")
-        return 2
+class SetupTimeout(Exception):
+    pass
 
-    deduper = Deduper(config.node_cache)
-    load_state(deduper, config.output)
-    collector = Collector(deduper, config.output, config.max_bytes, config.max_payload)
-    stop = threading.Event()
 
-    def request_stop(signum, frame):
-        stop.set()
+def connect_bounded(client, config: Config, stop, timeout: float = 8.0) -> bool:
+    done = threading.Event()
+    succeeded = []
 
-    signal.signal(signal.SIGTERM, request_stop)
-    signal.signal(signal.SIGINT, request_stop)
+    def setup():
+        try:
+            succeeded.append(client.connect(config.host, config.port, config.keepalive) == 0)
+        except (OSError, ValueError):
+            succeeded.append(False)
+        finally:
+            done.set()
 
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
-        client_id=config.client_id,
-        clean_session=True,
-        protocol=mqtt.MQTTv311,
-        transport="websockets" if config.ws else "tcp",
-        reconnect_on_failure=False,
-    )
+    threading.Thread(target=setup, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    while not done.is_set():
+        if stop.wait(0.05):
+            return False
+        if time.monotonic() >= deadline:
+            raise SetupTimeout()
+    return bool(succeeded and succeeded[0])
+
+
+class Subscription:
+    def __init__(self, client, config: Config, collector: Collector):
+        self.ready = False
+        self.failed = False
+        self.mid = None
+        self.config = config
+        self.collector = collector
+        client.on_connect = self.on_connect
+        client.on_disconnect = self.on_disconnect
+        client.on_subscribe = self.on_subscribe
+        client.on_message = self.on_message
+
+    def on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            self.failed = True
+            log('MQTT connection rejected')
+            return
+        result, self.mid = client.subscribe(self.config.topic, qos=0)
+        if result != 0:
+            self.failed = True
+            log('MQTT subscribe failed')
+
+    def on_subscribe(self, client, userdata, mid, reason_codes, properties):
+        if mid != self.mid or not reason_codes or any(code.is_failure or code.value not in (0, 1, 2) for code in reason_codes):
+            self.failed = True
+            log('MQTT subscription rejected')
+            return
+        self.ready = True
+        log('MQTT ready: subscription granted')
+
+    def on_disconnect(self, client, userdata, flags, reason_code, properties):
+        self.ready = False
+        self.failed = True
+
+    def on_message(self, client, userdata, message):
+        self.collector.handle(message.topic, message.payload)
+
+    def pump(self, client, stop, timeout: float = 8.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not stop.is_set() and not self.failed:
+            if not self.ready and time.monotonic() >= deadline:
+                log('MQTT subscription handshake timed out')
+                break
+            if client.loop(timeout=0.5) != 0:
+                self.failed = True
+                break
+
+
+def bounded_client(mqtt, config: Config):
+    class Client(mqtt.Client):
+        def _sock_recv(self, size):
+            # Paho 2.x otherwise buffers the entire advertised MQTT packet.
+            if self._in_packet['remaining_length'] > config.max_payload + 256:
+                raise ConnectionError('MQTT packet exceeds limit')
+            # Paho retains consumed bytes until the WebSocket frame ends.
+            if config.ws and len(getattr(self._sock, '_readbuffer', b'')) > config.max_payload + 512:
+                raise ConnectionError('WebSocket frame exceeds limit')
+            return super()._sock_recv(size)
+
+    client = Client(mqtt.CallbackAPIVersion.VERSION2, client_id=config.client_id,
+                    clean_session=True, protocol=mqtt.MQTTv311,
+                    transport='websockets' if config.ws else 'tcp', reconnect_on_failure=False)
+    client.connect_timeout = 5.0
     if config.ws:
         client.ws_set_options(path=config.ws_path)
     if config.tls:
@@ -545,199 +682,155 @@ def run_mqtt(config: Config) -> int:
             client.tls_insecure_set(True)
     if config.username is not None:
         client.username_pw_set(config.username, config.password)
+    return client
 
-    connected = threading.Event()
-    connect_failed = threading.Event()
 
-    def on_connect(client, userdata, flags, reason_code, properties):
-        if reason_code.is_failure:
-            connect_failed.set()
-            return
-        client.subscribe(config.topic, qos=0)
-        connected.set()
-        log("connected %s:%d topic=%s" % (config.host, config.port, config.topic))
-
-    def on_disconnect(client, userdata, flags, reason_code, properties):
-        connected.clear()
-        if not stop.is_set():
-            log("disconnected rc=%s" % reason_code)
-
-    def on_message(client, userdata, message):
+def run_mqtt(config: Config, mqtt_module=None, stop=None) -> int:
+    if mqtt_module is None:
         try:
-            collector.handle(message.topic, message.payload)
-        except Exception:
-            collector.counters.count("malformed")
-
-    client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
-    client.on_message = on_message
-
-    log("starting output=%s client_id=%s" % (config.output, config.client_id))
+            import paho.mqtt.client as mqtt_module
+        except ImportError:
+            log("paho-mqtt 2.x is required (pip install 'paho-mqtt>=2,<3')")
+            return 2
+    if not hasattr(mqtt_module, 'CallbackAPIVersion'):
+        log('paho-mqtt 2.x is required')
+        return 2
+    if stop is None:
+        stop = threading.Event()
+        def request_stop(signum, frame):
+            stop.set()
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+    deduper = Deduper(config.node_cache)
+    load_state(deduper, config.output)
+    collector = Collector(deduper, config.output, config.max_bytes, config.max_payload)
     backoff = 1.0
+    log('starting MQTT collector')
     while not stop.is_set():
-        connected.clear()
-        connect_failed.clear()
+        client = bounded_client(mqtt_module, config)
+        subscription = Subscription(client, config, collector)
+        started = time.monotonic()
+        connected = False
         try:
-            client.connect(config.host, config.port, config.keepalive)
-        except OSError:
-            delay = min(config.backoff_max, backoff)
-            if stop.wait(delay / 2 + random.uniform(0, delay / 2)):
-                break
-            backoff = min(config.backoff_max, backoff * 2)
-            continue
-
-        # connect() only sends CONNECT; pump the loop until CONNACK or failure.
-        deadline = time.monotonic() + max(10.0, float(config.keepalive))
-        while not stop.is_set() and not connected.is_set() and not connect_failed.is_set():
-            client.loop(timeout=1.0)
-            if time.monotonic() >= deadline:
-                break
-
+            connected = connect_bounded(client, config, stop)
+            if connected and not stop.is_set():
+                subscription.pump(client, stop)
+        except SetupTimeout:
+            log('MQTT setup deadline exceeded; stopping')
+            return 1
+        finally:
+            if connected:
+                try:
+                    client.disconnect()
+                except OSError:
+                    log('MQTT disconnect failed')
         if stop.is_set():
             break
-        if connected.is_set():
+        log('MQTT attempt ended; retrying with backoff')
+        if subscription.ready and time.monotonic() - started >= 30:
             backoff = 1.0
-            while not stop.is_set() and connected.is_set():
-                client.loop(timeout=1.0)
-
-        if stop.is_set():
-            break
         delay = min(config.backoff_max, backoff)
-        backoff = min(config.backoff_max, backoff * 2)
         stop.wait(delay / 2 + random.uniform(0, delay / 2))
-
-    try:
-        client.disconnect()
-        client.loop(timeout=1.0)
-    except Exception:
-        pass
+        backoff = min(config.backoff_max, backoff * 2)
     return 0
 
 
-def read_records(output_path: str) -> Iterable[dict]:
-    for path in (output_path + ".1", output_path):
-        try:
-            handle = open(path, "r", encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        with handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except (ValueError, RecursionError):
-                    continue
-                if isinstance(record, dict):
-                    yield record
-
-
 def _crash_addresses(crash: dict) -> List[str]:
-    bt = crash.get("bt")
-    if not isinstance(bt, str):
-        return []
-    return [token for token in bt.split() if token != "!" and all(c in "0123456789abcdefABCDEF" for c in token)]
+    crash = validate_crash(crash)
+    return crash.get('bt', '').replace('!', '').split() if crash else []
 
 
 def print_summary(output_path: str) -> int:
-    groups: Dict[Tuple[str, str, str, str], dict] = {}
-    selfheal: Dict[str, Dict[str, int]] = {}
-    resets: Dict[str, Dict[str, int]] = {}
-
+    groups = {}
+    selfheal = {}
+    resets = {}
+    omitted = 0
+    omitted_categories = 0
     for record in read_records(output_path):
-        firmware = (_as_str(record.get("firmware_version")) or "(unknown)")
-        node = (_as_str(record.get("node_id")) or "")
-        seen = _as_str(record.get("received_at"))
-        crash = record.get("crash")
-        if isinstance(crash, dict):
-            sha = _as_str(crash.get("sha")) or ""
-            task = _as_str(crash.get("task")) or ""
-            pc = _as_str(crash.get("pc")) or ""
-            key = (firmware, sha, task, pc)
-            entry = groups.get(key)
-            if entry is None:
-                entry = {
-                    "count": 0,
-                    "nodes": set(),
-                    "first": seen,
-                    "last": seen,
-                    "addresses": _crash_addresses(crash),
-                }
-                groups[key] = entry
-            entry["count"] += 1
-            if node:
-                entry["nodes"].add(node)
-            if seen is not None:
-                if entry["first"] is None or seen < entry["first"]:
-                    entry["first"] = seen
-                if entry["last"] is None or seen > entry["last"]:
-                    entry["last"] = seen
-            if len(entry["addresses"]) < len(_crash_addresses(crash)):
-                entry["addresses"] = _crash_addresses(crash)
-
-        cause = _as_str(record.get("selfheal"))
-        if cause is not None:
-            counts = selfheal.setdefault(firmware, {})
-            counts[cause] = counts.get(cause, 0) + 1
-        reason = _as_str(record.get("reset_reason"))
-        if reason in ABNORMAL_RESETS:
-            counts = resets.setdefault(firmware, {})
-            counts[reason] = counts.get(reason, 0) + 1
-
-    print("Crash signatures")
+        firmware = safe_text(record.get('firmware_version')) or '(unknown)'
+        node = hex_value(record.get('node_id'))
+        seen = safe_text(record.get('received_at'), 40)
+        kinds = record.get('kinds', [])
+        if not isinstance(kinds, list):
+            continue
+        crash = validate_crash(record.get('crash'))
+        if crash is not None and 'crash' in kinds:
+            key = (firmware, crash.get('sha', ''), crash['task'], crash['pc'], crash_signature(crash))
+            if key not in groups and len(groups) >= SUMMARY_CRASH_LIMIT:
+                omitted += 1
+            else:
+                entry = groups.setdefault(key, dict(count=0, nodes=set(), capped=False,
+                                                    first=seen, last=seen, addresses=[]))
+                entry['count'] += 1
+                if node:
+                    if len(entry['nodes']) < 1024:
+                        entry['nodes'].add(node)
+                    elif node not in entry['nodes']:
+                        entry['capped'] = True
+                if seen is not None:
+                    entry['first'] = min(entry['first'] or seen, seen)
+                    entry['last'] = max(entry['last'] or seen, seen)
+                addresses = _crash_addresses(crash)
+                if len(addresses) > len(entry['addresses']):
+                    entry['addresses'] = addresses
+        cause = record.get('selfheal')
+        if 'selfheal' in kinds and isinstance(cause, str) and cause in SELFHEAL_CAUSES:
+            if firmware in selfheal or len(selfheal) < SUMMARY_CRASH_LIMIT:
+                counts = selfheal.setdefault(firmware, {})
+                counts[cause] = counts.get(cause, 0) + 1
+            else:
+                omitted_categories += 1
+        reason = record.get('reset_reason')
+        if 'reset' in kinds and isinstance(reason, str) and reason in ABNORMAL_RESETS:
+            if firmware in resets or len(resets) < SUMMARY_CRASH_LIMIT:
+                counts = resets.setdefault(firmware, {})
+                counts[reason] = counts.get(reason, 0) + 1
+            else:
+                omitted_categories += 1
+    print('Crash signatures')
     if not groups:
-        print("  none")
-    ordered = sorted(groups.items(), key=lambda item: (-item[1]["count"], item[0]))
-    for (firmware, sha, task, pc), entry in ordered[:SUMMARY_CRASH_LIMIT]:
-        print("  fw=%s sha=%s task=%s pc=%s" % (firmware, sha or "?", task or "?", pc or "?"))
-        print(
-            "    count=%d nodes=%d first=%s last=%s"
-            % (entry["count"], len(entry["nodes"]), entry["first"] or "?", entry["last"] or "?")
-        )
-        hint = "xtensa-esp32s3-elf-addr2line -pfiaC -e <firmware.elf matching sha %s> %s" % (
-            sha or "????????",
-            " ".join([pc or "????????"] + entry["addresses"]),
-        )
-        print("    hint: " + hint)
-    if len(ordered) > SUMMARY_CRASH_LIMIT:
-        print("  ... %d more signatures" % (len(ordered) - SUMMARY_CRASH_LIMIT))
-
-    print("Self-heal causes")
-    if not selfheal:
-        print("  none")
-    for firmware in sorted(selfheal):
-        parts = ["%s=%d" % (cause, count) for cause, count in sorted(selfheal[firmware].items())]
-        print("  %s: %s" % (firmware, " ".join(parts)))
-
-    print("Abnormal reset reasons")
-    if not resets:
-        print("  none")
-    for firmware in sorted(resets):
-        parts = ["%s=%d" % (reason, count) for reason, count in sorted(resets[firmware].items())]
-        print("  %s: %s" % (firmware, " ".join(parts)))
+        print('  none')
+    for (firmware, sha, task, pc, signature), entry in sorted(groups.items(), key=lambda item: (-item[1]['count'], item[0])):
+        print('  fw=%s sha=%s task=%s pc=%s' % (firmware, sha or '?', task, pc))
+        print('    count=%d nodes=%s%d first=%s last=%s' % (
+            entry['count'], '>=' if entry['capped'] else '', len(entry['nodes']),
+            entry['first'] or '?', entry['last'] or '?'))
+        arguments = ['xtensa-esp32s3-elf-addr2line', '-pfiaC', '-e',
+                     'firmware-matching-%s.elf' % (sha or 'unknown'), pc] + entry['addresses']
+        print('    hint: ' + shlex.join(arguments))
+    if omitted:
+        print('  omitted crash occurrences outside the first 200 groups: %d' % omitted)
+    for title, categories in (('Self-heal causes', selfheal), ('Abnormal reset reasons', resets)):
+        print(title)
+        if not categories:
+            print('  none')
+        for firmware, counts in sorted(categories.items()):
+            print('  %s: %s' % (firmware, ' '.join('%s=%d' % item for item in sorted(counts.items()))))
+    if omitted_categories:
+        print('  omitted category occurrences outside the first 200 firmware versions: %d' % omitted_categories)
     return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Collect MeshCore observer crash reports from MQTT status topics.")
-    parser.add_argument("--stdin", action="store_true", help="read topic<TAB>payload lines from stdin")
-    parser.add_argument("--dry-run", action="store_true", help="alias for --stdin")
-    parser.add_argument("--summary", action="store_true", help="summarize the existing output file(s)")
+    parser = argparse.ArgumentParser(description='Collect observer crash reports from MQTT status topics.')
+    parser.add_argument('--stdin', action='store_true', help='read topic<TAB>payload lines from stdin')
+    parser.add_argument('--dry-run', action='store_true', help='alias for --stdin')
+    parser.add_argument('--summary', action='store_true', help='summarize existing output files')
     args = parser.parse_args(argv)
-
     try:
         if args.summary:
-            return print_summary(os.environ.get("OBSERVER_CRASH_OUTPUT", "crash-events.jsonl"))
+            return print_summary(os.environ.get('OBSERVER_CRASH_OUTPUT', 'crash-events.jsonl'))
         config = load_config(require_host=not (args.stdin or args.dry_run))
+        return run_stdin(config) if args.stdin or args.dry_run else run_mqtt(config)
     except ConfigError as error:
         log(str(error))
         return 2
-
-    if args.stdin or args.dry_run:
-        try:
-            return run_stdin(config)
-        except KeyboardInterrupt:
-            return 0
-    return run_mqtt(config)
+    except OSError:
+        log('storage failure; stopping collector')
+        return 1
+    except KeyboardInterrupt:
+        return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())

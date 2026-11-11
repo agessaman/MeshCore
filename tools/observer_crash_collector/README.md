@@ -1,233 +1,184 @@
 # Observer crash collector
 
-Read-only MQTT subscriber for MeshCore "MQTT observer" firmware. It watches the
-per-node status topics and stores only diagnostic events: crash reports,
-self-heal reboots, and abnormal reset causes. High-volume packet, raw, and
-neighbor topics are never subscribed.
+Read-only paho-mqtt 2.x subscriber for ESP32 observer status topics. The default
+filter, `meshcore/+/+/status`, excludes packets, raw traffic, and neighbors.
+No publishing, last will, or offline queue is configured; delivery is QoS 0 with
+a clean session. Only diagnostic events go into the JSON Lines event file.
 
-## What it keeps
+## Events and boot evidence
 
-A status message is kept when at least one of these is true:
+Each node can contribute one occurrence of each kind per observed boot:
 
-- a `crash` object is present (published once after a panic, read back from the
-  on-flash core dump);
-- `stats.selfheal` is present and `stats.selfheal_n` is greater than zero;
-- `stats.reset_reason` is one of `panic`, `int_wdt`, `task_wdt`, `wdt`, or
-  `brownout`.
+- `crash`: a valid firmware crash object. Firmware repeats it throughout the
+  boot, even after erasing the flash dump. An identical crash on a later boot
+  counts again and keeps its diagnostics.
+- `reset`: `panic`, `int_wdt`, `task_wdt`, `wdt`, or `brownout`.
+- `selfheal`: a software (`sw`) reset with a recognized `selfheal` cause and
+  positive `selfheal_n`. Inherited self-heal fields on other reset types are
+  context only. Firmware can clear these fields during healthy operation.
 
-Everything else is discarded without a disk write and without a log line. This
-includes normal `sw`, `poweron`, `ext`, `deepsleep`, `sdio`, and `unknown`
-resets, status messages with no `stats`, malformed JSON, non-object JSON, and
-payloads larger than `OBSERVER_CRASH_MAX_PAYLOAD`.
+Kinds may arrive in separate statuses; a late crash does not recount the reset.
+Node identity comes exclusively from the topic's 64-hex public key. A supplied
+`origin_id` must match it. Keys and hex fields are normalized to lowercase.
 
-The default subscription is `meshcore/+/+/status`, so the broker filters out
-`meshcore/<IATA>/<pubkey>/packets`, `/raw`, and `/neighbors`.
+Boot evidence, strongest first:
 
-## Output
+1. When both observations contain `stats.boot_id` (1–32 hex characters), equal
+   IDs mean the same boot and different IDs mean a new boot, regardless of uptime.
+   Current firmware does not provide this optional field yet.
+2. Otherwise compare uptime with the previous uptime plus elapsed collector
+   receive time, allowing 30 seconds of slack. Falling below that prediction
+   means a new boot. An expected 32-bit millisecond wrap (4,294,967.296 seconds)
+   within the same slack is accepted without inventing a reboot. Byte-identical
+   redelivery of the last payload never starts a boot or advances the baseline.
+3. Device timestamps are context only. NTP steps and 1970 timestamps do not
+   affect detection. Reset/self-heal tuple changes alone never prove a reboot.
 
-One compact JSON object per line in an append-only JSON Lines file. The only
-keys that can appear are:
+Receive times use the collector host's UTC clock, including across restarts;
+keep that clock synchronized. Without boot IDs, missing uptime, reordered
+statuses, uptime regressions from other causes, and wrap-boundary reboots are
+ambiguous. A reboot during downtime is detectable only if its uptime regresses
+against the receive-time prediction; a higher-than-predicted uptime is not
+proof. A new boot with byte-identical payload is indistinguishable from replay.
+Cloned keys cannot be separated. Evicted node history can count replay again.
+Whole boots missed while disconnected cannot be recovered from QoS 0 or from
+retention of only the latest status.
 
-| Key | Meaning |
-| --- | --- |
-| `received_at` | Collector receive time, UTC ISO 8601 |
-| `kinds` | Event kinds: `crash`, `selfheal`, `reset` |
-| `iata` | IATA segment from the topic |
-| `node_id` | `origin_id` (lowercased when it is 64 hex), else the topic segment |
-| `node_name` | `origin` |
-| `model` | `model` |
-| `firmware_version` | `firmware_version` |
-| `crash` | The crash object, unchanged, stored once per unique crash |
-| `reset_reason` | `stats.reset_reason` |
-| `selfheal` | `stats.selfheal` |
-| `selfheal_n` | `stats.selfheal_n` |
-| `uptime_secs` | `stats.uptime_secs` |
-| `heap_min` | `stats.heap_min` |
-| `internal_heap` | `stats.internal_heap` |
-| `heap_largest` | `stats.heap_largest` |
-| `mqtt_slots_up` | `stats.mqtt_slots_up` |
-| `mqtt_slots_total` | `stats.mqtt_slots_total` |
+## Storage and bounds
 
-Absent fields are omitted. The crash object is the firmware's own JSON:
+Events include UTC `received_at`, `kinds`, topic `iata`, `node_id`, and available
+bounded context: `node_name`, `model`, `firmware_version`, `device_timestamp`,
+`reset_reason`, `selfheal`, `selfheal_n`, and `uptime_secs`. Integer diagnostics
+are `heap_min`, `internal_heap`, `heap_largest`, `mqtt_slots_up`,
+`mqtt_slots_total`, `mqtt_outage_secs`, `mqtt_connect_failures`,
+`mqtt_slots_breaker`, and `battery_mv` (unsigned 32-bit values, excluding bools).
 
-```json
-{"task":"loopTask","pc":"400d1a2b","exc":28,"va":"00000010","sha":"deadbeef","bt":"400d1a2b 400d5678"}
-```
+`crash` follows `src/helpers/CrashReportFormat.h`: a printable task of at most
+15 characters, eight-digit hex `pc` and `va`, unsigned 32-bit `exc`, optional
+eight-digit ELF `sha`, and up to eight space-separated hex backtrace words.
+`bt` may end with `!`, marking corruption. Invalid crash fragments and unknown
+reset/self-heal tokens are dropped. Nonfinite JSON numbers reject the message.
+Other text is capped at 128 characters and nonprintable/non-ASCII characters
+become `?`; output JSON escapes text. Logs are separately escaped and capped.
 
-`pc` and `va` are hex strings, `exc` is the Xtensa `EXCCAUSE` or RISC-V
-`mcause`, `sha` is the first 8 hex characters of the crashing image's ELF
-SHA-256, and `bt` is a space-separated list of backtrace words. A trailing `!`
-inside `bt` means the firmware flagged the backtrace as corrupt. These keys come
-from `src/helpers/CrashReportFormat.h` (`formatJson()`, lines 110-141).
+Each event append is flushed and fsynced before dedup acknowledgement. Rotation
+occurs before an append would exceed the threshold; a single record can exceed
+a very small configured threshold. Only the current file and `.1` are kept.
+The parent directory is fsynced after rename and creation. Startup truncates
+an unfinished trailing line before accepting new events. Missing files are
+normal; unreadable history, append, fsync, state, or rotation failures produce
+one bounded storage error and exit 1 for systemd to restart.
 
-Example line:
+`<output>.state` is an atomically replaced JSON snapshot, version 1, containing
+a global sequence and an LRU list of `[node_key, evidence]` pairs. Evidence is
+last receive time, uptime, optional boot ID, last payload SHA-256, and reported
+kinds. Every changed accepted status persists this evidence, including normal
+statuses; this intentionally adds state-file writes. Identical replay does not.
+An event carries `state_seq` and `boot_evidence` so startup can replay an append
+that preceded a failed snapshot replacement. Events and state are not a single
+filesystem transaction; a failed write is not acknowledged in memory. Older
+collector events can seed weaker evidence until new statuses arrive.
 
-```json
-{"received_at":"2026-11-11T15:44:48.123456+00:00","kinds":["crash","reset"],"iata":"LAX","node_id":"<64 hex>","node_name":"Some Node","model":"Heltec V4 OLED","firmware_version":"v1.18.0.12-observer-beta-dev-3476485","crash":{"task":"loopTask","pc":"400d1a2b","exc":28,"va":"00000010","sha":"deadbeef","bt":"400d1a2b 400d5678"},"reset_reason":"panic","uptime_secs":70,"heap_min":126160,"internal_heap":128548,"heap_largest":118772,"mqtt_slots_up":5,"mqtt_slots_total":5}
-```
-
-### Disk writes
-
-The file is opened, one line is appended, flushed, and closed only when an event
-is kept. There is no per-message write, no heartbeat file, no database, and no
-periodic snapshot. Disk size is checked only after a kept write.
-
-When the file reaches `OBSERVER_CRASH_MAX_BYTES` (default 20 MB) it is renamed
-to `<name>.1`, replacing any older `.1`; the next event starts a new file. At
-startup the dedup state is rebuilt by reading `<name>.1` and then `<name>`, so a
-restart does not store the same crash again. Only the current file and its one
-rotation are kept.
-
-### Deduplication
-
-A `(reset_reason, selfheal, selfheal_n)` report is stored again only when the
-node rebooted since the last stored report. Because `reset_reason` and the
-self-heal record are fixed for a boot, a change in that tuple is itself proof of
-a reboot. For an identical tuple, a reboot is detected when:
-
-- the boot-time estimate moves by more than 30 seconds. The estimate is the
-  status `timestamp` minus `uptime_secs`. The first status after boot is
-  published at connect, about 70 seconds of uptime in the firmware example, so
-  a real reboot moves the estimate by at least that much. Thirty seconds
-  absorbs the one-second uptime resolution, scheduler jitter, and small NTP
-  steps without swallowing a real reboot; or
-- `uptime_secs` goes down, when a boot-time estimate is unavailable.
-
-If `uptime_secs` is missing on both sides, only the report tuple is compared:
-the same tuple is a duplicate, a different tuple is a new boot. After a process
-restart, boot times are not reconstructed from collector receive times, so the
-first post-restart message is compared by tuple and uptime only. A reboot that
-happened while the collector was down and produced the same tuple with a higher
-uptime cannot be detected; the next distinct tuple is.
-
-A crash is identified by node id plus the canonical crash object, which covers
-the ELF SHA prefix, `pc`, `bt`, and `task` (and also `exc` and `va`). The same
-crash redelivered by the broker, after a reconnect, or after a collector restart
-is not stored again. A crash object is written only on the record that first
-reports it.
-
-Both dedup structures are bounded: an LRU of `OBSERVER_CRASH_NODE_CACHE` nodes
-(default 20,000), and an LRU of four times that many crash signatures in total.
-A broker with tens of thousands of nodes therefore cannot grow memory without
-limit.
+The LRU has at most 20,000 fixed-size node keys and bounded evidence values.
+State and temporary snapshots are bounded independently of event rotation.
+Stdin lines and MQTT packets are bounded before accumulating payload bodies.
+The paho 2.x packet guard uses its private receive hook; tests exercise the
+installed implementation. WebSocket receive-buffer growth is also capped.
+The unit adds `MemoryMax=256M`. One collector per output path is supported.
 
 ## Configuration
 
-All settings are environment variables. There is no configuration file parser.
+All settings use environment variables:
 
-| Variable | Default | Description |
+| `OBSERVER_CRASH_` suffix | Default | Meaning |
 | --- | --- | --- |
-| `OBSERVER_CRASH_HOST` | required | Broker hostname or IP address (no scheme) |
-| `OBSERVER_CRASH_PORT` | `1883`, or `8883` when TLS is on | Broker port |
-| `OBSERVER_CRASH_TLS` | `false` | Enable TLS. For WebSockets this means `wss` |
-| `OBSERVER_CRASH_WS` | `false` | Use MQTT over WebSockets instead of plain TCP |
-| `OBSERVER_CRASH_WS_PATH` | `/mqtt` | WebSocket path (for example `/mqtt` or `/ws`) |
-| `OBSERVER_CRASH_USERNAME` | unset | MQTT username |
-| `OBSERVER_CRASH_PASSWORD` | unset | MQTT password. Takes precedence over the password file |
-| `OBSERVER_CRASH_PASSWORD_FILE` | unset | File containing the MQTT password. Only trailing CR/LF is stripped |
-| `OBSERVER_CRASH_CLIENT_ID` | random | MQTT client id. Default is `observer-crash-collector-<8 hex>` |
-| `OBSERVER_CRASH_TOPIC` | `meshcore/+/+/status` | Subscription filter |
-| `OBSERVER_CRASH_KEEPALIVE` | `60` | MQTT keepalive seconds |
-| `OBSERVER_CRASH_CA_FILE` | system trust store | CA bundle for TLS |
-| `OBSERVER_CRASH_TLS_INSECURE` | `false` | Skip certificate verification. Do not use in production |
-| `OBSERVER_CRASH_OUTPUT` | `crash-events.jsonl` | Output JSON Lines path |
-| `OBSERVER_CRASH_MAX_BYTES` | `20971520` (20 MB) | Rotation threshold |
-| `OBSERVER_CRASH_MAX_PAYLOAD` | `65536` | Maximum accepted payload in bytes |
-| `OBSERVER_CRASH_NODE_CACHE` | `20000` | Maximum nodes kept in dedup memory |
-| `OBSERVER_CRASH_BACKOFF_MAX` | `60` | Reconnect backoff cap in seconds |
+| `HOST` | required | Broker hostname/IP, without scheme |
+| `PORT` | 1883 / 8883 with TLS | Broker port |
+| `TLS` | false | Enable certificate/hostname-verified TLS |
+| `WS` / `WS_PATH` | false / `/mqtt` | MQTT over WebSockets |
+| `USERNAME` | unset | MQTT username |
+| `PASSWORD` | unset | Password; nonempty value overrides file |
+| `PASSWORD_FILE` | unset | UTF-8 file; trailing CR/LF removed |
+| `CLIENT_ID` | random | MQTT client ID |
+| `TOPIC` | `meshcore/+/+/status` | Subscription filter |
+| `KEEPALIVE` | 60 | MQTT keepalive seconds |
+| `CA_FILE` | system trust | TLS CA bundle |
+| `TLS_INSECURE` | false | Explicitly disable verification |
+| `OUTPUT` | `crash-events.jsonl` | Event path, also used for state |
+| `MAX_BYTES` | 20971520 | Event-file rotation threshold |
+| `MAX_PAYLOAD` | 65536 | Payload byte limit, capped at 65536 |
+| `NODE_CACHE` | 20000 | Node capacity, capped at 20000 |
+| `BACKOFF_MAX` | 60 | Reconnect delay cap in seconds |
 
-The client subscribes with QoS 0, uses a clean session, sets no last will, and
-never publishes. Reconnects use capped exponential backoff with jitter and
-resubscribe on every successful connect. Credentials are never written to
-stdout, stderr, the output file, or exception messages.
+Enable TLS when sending credentials over an untrusted network. Credentials do
+not appear in logs, records, or command arguments. `collector.env.example`
+provides a deployment template. Booleans accept true/false, yes/no, on/off, 1/0.
 
-## Running
+## Running and decoding
 
 ```sh
-python3 -m pip install 'paho-mqtt>=2,<3'
-export OBSERVER_CRASH_HOST=mqtt.example.net
-export OBSERVER_CRASH_OUTPUT=/var/lib/observer-crash-collector/events.jsonl
-python3 collector.py
+python3 -m venv .venv
+.venv/bin/python -m pip install 'paho-mqtt>=2,<3'
+OBSERVER_CRASH_HOST=mqtt.example.net .venv/bin/python collector.py
+OBSERVER_CRASH_OUTPUT=/tmp/events.jsonl .venv/bin/python collector.py --stdin < samples.txt
+OBSERVER_CRASH_OUTPUT=/tmp/events.jsonl .venv/bin/python collector.py --summary
 ```
 
-Offline processing of captured lines, without a broker:
+Stdin lines are `topic<TAB>payload`; `--dry-run` is an alias and still writes
+output. The tests include `tests/stdin-sample.txt`. Stdin prints final counters
+to stderr; normal MQTT operation logs lifecycle changes, kept events, and
+pending counters at most hourly.
 
-```sh
-OBSERVER_CRASH_OUTPUT=/tmp/events.jsonl \
-  python3 collector.py --stdin < samples.txt
-```
+Summary counts only categories named in `kinds`. It groups canonical crash
+content and reporting firmware version, showing counts, distinct nodes, and
+first/last receive times. Memory is capped at 200 crash groups, 200 firmware
+versions per other category, and 1,024 distinct nodes per crash group; capped
+node counts show `>=`, and omitted crash occurrences are reported.
 
-Each input line is `topic<TAB>payload`. `--dry-run` is an alias for `--stdin`.
-Both run through the same filter, dedup, and append path; output still goes to
-`OBSERVER_CRASH_OUTPUT`.
+The summary's shell-quoted addr2line hint contains only validated addresses.
+Replace `firmware-matching-<sha>.elf` with the exact crashing ELF identified by
+its SHA prefix. The reporting firmware version may describe a later image.
+For RISC-V use `riscv32-esp-elf-addr2line`; for Xtensa choose the board's toolchain.
+Backtrace return addresses, especially after a corruption marker, need care.
 
-Summarize stored events:
+Readiness is logged only after SUBACK grants the subscription. Rejected
+subscriptions, pre-CONNACK disconnects, and loop errors retry with capped,
+jittered backoff. Setup runs in one daemon thread with an eight-second deadline;
+a stalled attempt exits 1 instead of accumulating threads. SIGTERM/SIGINT
+interrupt the main wait or network pump and normally exit 0, including while
+DNS or WebSocket setup is blocked. This is tested with fake clients and a
+subprocess, not a live systemd installation or a physical power cut.
 
-```sh
-OBSERVER_CRASH_OUTPUT=/var/lib/observer-crash-collector/events.jsonl \
-  python3 collector.py --summary
-```
+## systemd installation
 
-`--summary` groups crash signatures by firmware version, ELF SHA prefix, task,
-and `pc`, with event counts, distinct node counts, and first/last receive times.
-It also prints self-heal causes and abnormal reset reasons per firmware version.
-
-Stop the process with SIGTERM or SIGINT; it disconnects and exits with status 0.
-
-## Decoding a crash
-
-`bt` holds call-return addresses, not exact source line PCs. The ELF must be the
-exact build whose SHA-256 starts with the 8-character `sha` prefix; another
-build can map the same address to the wrong function. The summary prints a
-ready-to-paste hint:
-
-```sh
-xtensa-esp32s3-elf-addr2line -pfiaC -e <firmware.elf matching sha deadbeef> 400d1a2b 400d1a2b 400d5678
-```
-
-Replace the placeholder with the matching `.elf`. The first address is `pc`;
-the rest come from `bt`. If `bt` ends with `!`, the firmware marked the
-backtrace corrupt, so treat the frames below the first bad one as unreliable.
-For RISC-V boards, use the matching `riscv32-esp-elf-addr2line` instead.
-
-## systemd
-
-Install the script under `/opt/observer-crash-collector`, the unit under
-`/etc/systemd/system`, the environment file under
-`/etc/observer-crash-collector/collector.env`, and create the service user:
+Run from this directory on Linux (install Python's venv package if needed):
 
 ```sh
 sudo groupadd --system meshcore-observer
-sudo useradd --system --gid meshcore-observer \
-  --home-dir /var/lib/observer-crash-collector \
+sudo useradd --system --gid meshcore-observer --home-dir /var/lib/observer-crash-collector \
   --shell /usr/sbin/nologin meshcore-observer
-sudo install -d -o meshcore-observer -g meshcore-observer \
-  /var/lib/observer-crash-collector
-sudo install -d /etc/observer-crash-collector
+sudo install -d /opt/observer-crash-collector /etc/observer-crash-collector
+sudo install -m 0755 collector.py /opt/observer-crash-collector/collector.py
+sudo python3 -m venv /opt/observer-crash-collector/venv
+sudo /opt/observer-crash-collector/venv/bin/python -m pip install 'paho-mqtt>=2,<3'
+sudo install -m 0644 observer-crash-collector.service /etc/systemd/system/
 sudo install -m 0640 -o root -g meshcore-observer \
   collector.env.example /etc/observer-crash-collector/collector.env
+# Edit the environment file with your broker settings before starting.
 sudo systemctl daemon-reload
 sudo systemctl enable --now observer-crash-collector
 ```
 
-`StateDirectory=` creates and owns the output directory. The unit sets
-`ProtectSystem=strict`, `ProtectHome=true`, an empty capability set, and a
-system-call filter. Keep the password file outside `/home` (for example under
-`/etc/observer-crash-collector`) and readable only by the service group, or use
-`OBSERVER_CRASH_PASSWORD` in a root-owned `0600` environment file.
-
-Logs go to stderr (the journal) only on start, connect, disconnect, each kept
-event, and a counters line at most once per hour. Counters are never written to
-the output file.
+The unit uses that venv's interpreter. `StateDirectory` owns the output directory;
+`UMask=0077`, strict system protection, protected home, and empty capabilities
+limit access. Keep any password file outside `/home`, readable by the service
+group. Logs go to the journal. Linux/systemd hardening requires deployment checks.
 
 ## Tests
 
 ```sh
-python3 -m unittest discover -s tools/observer_crash_collector/tests -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/observer_crash_collector/tests -v
 ```
 
-The tests cover every event kind, discarded non-events, repeated five-minute
-statuses, a reboot producing a second record, crash redelivery after a
-reconnect and after a restart with state rebuilt from the file, malformed and
-oversized payloads, a missing `stats` object, rotation plus rebuild, summary
-grouping, and password non-disclosure. They do not need a broker or paho-mqtt.
+Tests need no broker. Two receive-bound tests use installed paho 2.x and skip
+explicitly if it is absent; the other tests use fake clients or stdin.
