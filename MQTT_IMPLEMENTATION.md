@@ -474,13 +474,15 @@ All timestamps are UTC with an explicit `+00:00` offset.
     "tx_air_secs": 12,
     "rx_air_secs": 340,
     "recv_errors": 2,
-    "internal_heap": 102400
+    "internal_heap": 102400,
+    "boot_id": "a1b2c3d4"
   }
 }
 ```
 
 `stats` and its fields are omitted when no value is available. Packet counts are totals
-since boot.
+since boot. `boot_id` is eight lowercase hex digits, a random value chosen at boot and
+constant for that boot, so a collector can tell boots apart.
 
 After a panic, every status message for the rest of that boot also carries the record
 `get crash` prints, read from the flash core dump:

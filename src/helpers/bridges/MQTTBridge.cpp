@@ -3341,6 +3341,23 @@ static const char* cachedResetReason(mesh::MainBoard* board) {
 #endif
 
 #ifdef ESP_PLATFORM
+// Drawn once per boot on the bridge task; 0 means not drawn yet.
+static const char* cachedBootId() {
+  static uint32_t value = 0;
+  static char hex[9];
+  if (value == 0) {
+    do {
+      value = esp_random();
+    } while (value == 0);
+    snprintf(hex, sizeof(hex), "%08x", static_cast<unsigned>(value));
+  }
+  return hex;
+}
+#else
+static const char* cachedBootId() { return nullptr; }
+#endif
+
+#ifdef ESP_PLATFORM
 // Last self-heal reboot from the RTC record; a cleared or invalid record reports none.
 static const char* selfHealCause() {
   const MQTTSelfHealPolicy::RtcRecord rec = ObserverSelfHealRtc::load();
@@ -3451,7 +3468,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     collectConnHealth(),
     heap_min, cachedResetReason(_board),
     crash_json, &crash_included,
-    selfHealCause(), selfHealCount()
+    selfHealCause(), selfHealCount(),
+    cachedBootId()
   );
 
   if (len > 0) {
@@ -4442,7 +4460,8 @@ bool MQTTBridge::publishStatus() {
     collectConnHealth(),
     heap_min, cachedResetReason(_board),
     crash_json, &crash_included,
-    selfHealCause(), selfHealCount()
+    selfHealCause(), selfHealCount(),
+    cachedBootId()
   );
 
   if (len > 0) {

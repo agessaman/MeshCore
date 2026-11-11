@@ -190,6 +190,70 @@ TEST(MQTTPayloadBuilder, StatusReportsResetReasonAndMinimumHeap) {
   EXPECT_FALSE(zero_min["stats"]["reset_reason"].is<JsonVariant>());
 }
 
+TEST(MQTTPayloadBuilder, StatusIncludesBootIdInsideStats) {
+  JsonDocument scratch;
+  char buffer[1024];
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), 4096, "panic",
+      nullptr, nullptr, nullptr, 0, "a1b2c3d4");
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  ASSERT_FALSE(stats.isNull());
+  EXPECT_EQ(4096, stats["heap_min"].as<int>());
+  EXPECT_STREQ("panic", stats["reset_reason"].as<const char*>());
+  EXPECT_STREQ("a1b2c3d4", stats["boot_id"].as<const char*>());
+}
+
+TEST(MQTTPayloadBuilder, StatusOmitsBootIdWhenNullOrEmpty) {
+  JsonDocument scratch;
+  char buffer[1024];
+
+  // Defaulted argument: same stats contract as before, no boot_id key.
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), 4096, "panic"), 0);
+  JsonDocument omitted;
+  ASSERT_FALSE(deserializeJson(omitted, buffer));
+  EXPECT_STREQ("panic", omitted["stats"]["reset_reason"].as<const char*>());
+  EXPECT_FALSE(omitted["stats"]["boot_id"].is<JsonVariant>());
+
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), -1, "sw",
+      nullptr, nullptr, nullptr, 0, nullptr), 0);
+  JsonDocument null_id;
+  ASSERT_FALSE(deserializeJson(null_id, buffer));
+  EXPECT_STREQ("sw", null_id["stats"]["reset_reason"].as<const char*>());
+  EXPECT_FALSE(null_id["stats"]["boot_id"].is<JsonVariant>());
+
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), -1, "sw",
+      nullptr, nullptr, nullptr, 0, ""), 0);
+  JsonDocument empty_id;
+  ASSERT_FALSE(deserializeJson(empty_id, buffer));
+  EXPECT_STREQ("sw", empty_id["stats"]["reset_reason"].as<const char*>());
+  EXPECT_FALSE(empty_id["stats"]["boot_id"].is<JsonVariant>());
+
+  // An empty id alone does not create a stats object.
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), -1, nullptr,
+      nullptr, nullptr, nullptr, 0, ""), 0);
+  JsonDocument empty_only;
+  ASSERT_FALSE(deserializeJson(empty_only, buffer));
+  EXPECT_FALSE(empty_only["stats"].is<JsonVariant>());
+}
+
 TEST(MQTTPayloadBuilder, StatusReportsSelfHealOnlyWhileTheCountIsNonZero) {
   JsonDocument scratch;
   char buffer[1024];
@@ -268,7 +332,8 @@ TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
 // is legal and every one escapes to two bytes — that is the true worst case for the
 // only free-text field an operator controls.
 // heap_min shares heap_largest's 8388608 ceiling; the longest reset token is "deepsleep";
-// the longest self-heal token is "client_quarantined" and the count tops out at 255.
+// boot_id is always 8 hex digits; the longest self-heal token is "client_quarantined"
+// and the count tops out at 255.
 TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
   constexpr size_t kStatusJsonBufferSize = 1280;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
   const std::string origin(31, '"');                 // _origin[32], worst-case escaping
@@ -294,7 +359,8 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
       buffer, sizeof(buffer),
       4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
       8388608, 2147483647, 2147483647,
-      "off", health, 8388608, "deepsleep", nullptr, nullptr, "client_quarantined", 255);
+      "off", health, 8388608, "deepsleep", nullptr, nullptr, "client_quarantined", 255,
+      "ffffffff");
 
   ASSERT_GT(len, 0) << "worst-case status payload overflowed the " << kStatusJsonBufferSize
                     << "-byte production buffer; serializeComplete() returns 0 and the "
@@ -306,6 +372,7 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
   ASSERT_FALSE(deserializeJson(parsed, buffer));
   EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
   EXPECT_STREQ("deepsleep", parsed["stats"]["reset_reason"].as<const char*>());
+  EXPECT_STREQ("ffffffff", parsed["stats"]["boot_id"].as<const char*>());
   EXPECT_EQ(255, parsed["stats"]["selfheal_n"].as<int>());
 }
 
@@ -428,7 +495,7 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusKeepsWidestCrashInProductionBuffer) {
       4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
       8388608, 2147483647, 2147483647,
       "off", health, 8388608, "deepsleep", crash.c_str(), &included,
-      "client_quarantined", 255);
+      "client_quarantined", 255, "ffffffff");
 
   ASSERT_GT(len, 0) << "worst-case status plus crash overflowed the "
                     << kStatusJsonBufferSize << "-byte production buffer";

@@ -423,6 +423,7 @@ private:
   // Raised to 1152 for the self-heal fields, which left 20 bytes at the maxima; the
   // status build has no stack fallback any more, so this costs no RAM.
   // 1280 keeps a maximum-width crash field on that same payload.
+  // boot_id adds 21 bytes: those maxima measure 1025, or 1189 with the widest crash.
   static const size_t STATUS_JSON_BUFFER_SIZE = 1280;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
