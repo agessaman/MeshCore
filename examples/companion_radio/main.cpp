@@ -1,6 +1,9 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#ifdef WITH_MQTT_BRIDGE
+#include <helpers/CrashReport.h>
+#endif
 
 #if defined(ENABLE_WIFI_INTERFACE) && defined(ENABLE_ESP_MDNS)
 #define HAS_ESP_MDNS
@@ -160,6 +163,9 @@ void setup() {
 #endif
   Serial.begin(115200);
   board.begin();
+#ifdef WITH_MQTT_BRIDGE
+  CrashReport::captureAtBoot();
+#endif
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
