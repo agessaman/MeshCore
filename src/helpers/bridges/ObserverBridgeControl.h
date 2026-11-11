@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "helpers/bridges/ObserverSelfHeal.h"
+
 // Start/stop/restart and deferred-OTA sequencing for the observer MQTT bridge,
 // shared by the repeater and room-server roles.
 //
@@ -10,7 +12,8 @@
 // templates take the role (Host) by reference, so the object holds only flags.
 //
 // Bridge must provide: isRunning, isStopUnproven, stopAcknowledgedLate,
-// pollLateStopAck, canFlashAfterStop, begin, end, setSlotPreset.
+// pollLateStopAck, canFlashAfterStop, begin, end, setSlotPreset, and the self-heal
+// sampling accessors listed in ObserverSelfHeal.h.
 // Host must provide:
 //   Bridge* newBridge();                                  construct (may return null)
 //   void prepareBridgeStart(Bridge* b, bool restart);     metadata before begin()
@@ -20,6 +23,8 @@
 //   void drainOutbound(uint32_t timeout_ms);              flush queued TX before OTA
 //   bool flashFromManifest(char* reply);                  reboots on success
 //   void otaAlert(const char* msg);                       OTA milestone alert (may be a no-op)
+//   bool sendAlertText(const char* msg);                  mesh alert channel (self-heal)
+//   void rebootForSelfHeal();                             reboot through the board
 
 #if defined(ARDUINO)
 #include <Arduino.h>
@@ -32,14 +37,18 @@ struct ObserverBridgeSerialLog {
       Serial.println(msg);
     }
   }
+  static void flush() { Serial.flush(); }
 };
 #else
 struct ObserverBridgeSerialLog;
 #endif
 
-template <class Bridge, class Log = ObserverBridgeSerialLog>
+template <class Bridge, class Log = ObserverBridgeSerialLog,
+          class SelfHealPlatform = ObserverSelfHealPlatform>
 class ObserverBridgeControl {
 public:
+  using SelfHeal = ObserverSelfHeal<Log, SelfHealPlatform>;
+
   static const uint32_t OTA_TX_DRAIN_TIMEOUT_MS = 5000;  // bounded flush before OTA blocks the loop
   static const int OTA_REPLY_SIZE = 160;
 
@@ -125,7 +134,8 @@ public:
     }
   }
 
-  // Called once per role loop(): finishes late-acknowledged stops.
+  // Called once per role loop(): finishes late-acknowledged stops and drives self-heal,
+  // whether or not the bridge is running.
   template <class Host>
   void poll(Host& host, Bridge*& bridge) {
     // Release withheld resources when a timed-out stop is acknowledged late, and
@@ -137,6 +147,7 @@ public:
         setState(host, bridge, true);
       }
     }
+    _heal.poll(host, bridge);
   }
 
   // Runs the deferred OTA to completion (blocking); strict_idle also refuses a stopped
@@ -231,4 +242,5 @@ private:
   uint8_t _ota_strict_idle : 1;
   uint8_t _ota_step : 3;
   uint8_t _slot_restart_mask;
+  SelfHeal _heal;
 };

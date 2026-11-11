@@ -387,6 +387,7 @@ public:
   void prepareBridgeStart(MQTTBridge* b, bool restart);
   void setAlertBridge(MQTTBridge* b) { _alerter.setBridge(b); }
   bool flashFromManifest(char* reply);
+  void rebootForSelfHeal() { _cli.getBoard()->reboot(); }
   void otaAlert(const char*) {}   // this role sends no OTA milestone alerts
 
 #if defined(WITH_MQTT_BRIDGE)

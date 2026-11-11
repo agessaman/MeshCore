@@ -15,7 +15,28 @@ struct FakeLog {
   static void line(const char* msg, const char* detail = nullptr) {
     g_log.push_back(std::string(msg) + (detail ? detail : ""));
   }
+  static void flush() {}
 };
+
+// Shared ordered record of host/RTC side effects for the self-heal tests.
+std::vector<std::string>* g_heal_calls = nullptr;
+
+struct FakeHealPlatform {
+  static const bool kSupported = true;
+  static uint32_t now;
+  static MQTTSelfHealPolicy::RtcRecord rtc;
+  static uint32_t nowMs() { return now; }
+  static MQTTSelfHealPolicy::RtcRecord rtcLoad() { return rtc; }
+  static void rtcStore(const MQTTSelfHealPolicy::RtcRecord& rec) {
+    rtc = rec;
+    if (g_heal_calls) {
+      g_heal_calls->push_back("rtc:" + std::to_string(MQTTSelfHealPolicy::rtcConsecutive(rec)) + ":" +
+                              MQTTSelfHealPolicy::causeLabel((MQTTSelfHealPolicy::Cause)rec.last_cause));
+    }
+  }
+};
+uint32_t FakeHealPlatform::now = 0;
+MQTTSelfHealPolicy::RtcRecord FakeHealPlatform::rtc{};
 
 // Mirrors the MQTTBridge lifecycle surface the control class touches.
 struct FakeBridge {
@@ -58,10 +79,26 @@ struct FakeBridge {
   void setSlotPreset(int slot, const char* preset) {
     calls->push_back("slot" + std::to_string(slot) + ":" + preset);
   }
+
+  // Self-heal sampling surface.
+  bool quarantined = false;
+  bool network_up = true;
+  uint32_t evidence_age_ms = MQTTSelfHealPolicy::kNoEvidence;
+  uint8_t candidate_slots = 0;
+  uint8_t connected_slots = 0;
+  bool anyClientQuarantined() const { return quarantined; }
+  bool isNetworkUp() const { return network_up; }
+  uint32_t ntpEvidenceAgeMs() const { return evidence_age_ms; }
+  uint8_t candidateSlotCount() const { return candidate_slots; }
+  uint8_t connectedSlotCount() const { return connected_slots; }
 };
 
 struct FakeNodePrefs { uint8_t bridge_enabled = 1; };
-struct FakeObserverPrefs { char mqtt_slot_preset[6][24] = {"a", "b", "c", "d", "e", "f"}; };
+struct FakeObserverPrefs {
+  char mqtt_slot_preset[6][24] = {"a", "b", "c", "d", "e", "f"};
+  uint8_t mqtt_selfheal_enabled = 1;
+  uint8_t alert_enabled = 1;
+};
 
 struct FakeHost {
   std::vector<std::string> calls;
@@ -93,9 +130,14 @@ struct FakeHost {
     return flash_result;
   }
   void otaAlert(const char* msg) { alerts.push_back(msg); }
+  bool sendAlertText(const char* msg) {
+    calls.push_back(std::string("alert:") + msg);
+    return true;
+  }
+  void rebootForSelfHeal() { calls.push_back("reboot"); }
 };
 
-using Ctl = ObserverBridgeControl<FakeBridge, FakeLog>;
+using Ctl = ObserverBridgeControl<FakeBridge, FakeLog, FakeHealPlatform>;
 
 class ObserverBridgeControlTest : public ::testing::Test {
 protected:
@@ -115,8 +157,9 @@ protected:
 
 }  // namespace
 
-TEST(ObserverBridgeControlSize, FitsInThreeBytes) {
-  EXPECT_LE(sizeof(Ctl), 3u);
+TEST(ObserverBridgeControlSize, FlagsFitInFourBytesBesideSelfHealState) {
+  EXPECT_LE(sizeof(Ctl), 4u + sizeof(Ctl::SelfHeal));
+  EXPECT_LE(sizeof(Ctl::SelfHeal), 48u);
 }
 
 // --- enable / disable -------------------------------------------------------
@@ -365,6 +408,141 @@ TEST_F(ObserverBridgeControlTest, OtaRestoresPendingResumeConsumedByItsLateAckPo
   ctl.runOta(host, bridge, false);
   EXPECT_TRUE(bridge->running);
   EXPECT_FALSE(ctl.resumePending());
+}
+
+// --- bounded self-heal --------------------------------------------------------
+
+namespace {
+
+const uint32_t kMin = 60000UL;
+
+class ObserverSelfHealTest : public ObserverBridgeControlTest {
+protected:
+  void SetUp() override {
+    ObserverBridgeControlTest::SetUp();
+    FakeHealPlatform::now = 0;
+    FakeHealPlatform::rtc = MQTTSelfHealPolicy::rtcCleared();
+    g_heal_calls = &host.calls;
+  }
+  void TearDown() override {
+    g_heal_calls = nullptr;
+    ObserverBridgeControlTest::TearDown();
+  }
+  void pollAt(uint32_t t) {
+    FakeHealPlatform::now = t;
+    ctl.poll(host, bridge);
+  }
+  // A running bridge whose stop then timed out: down, unproven, never acknowledged.
+  void makeStopUnproven() {
+    startRunning();
+    bridge->next_stop_times_out = true;
+    ctl.setState(host, bridge, false);
+    ASSERT_TRUE(bridge->unproven);
+    host.calls.clear();
+  }
+};
+
+}  // namespace
+
+TEST_F(ObserverSelfHealTest, StopUnprovenAlertsThenRebootsAfterGrace) {
+  makeStopUnproven();
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  pollAt(start + 10 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+
+  pollAt(start + 10 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"alert:MQTT self-heal: stop unproven for 10m, rebooting in 1m"}),
+            host.calls);
+  EXPECT_EQ((std::vector<std::string>{"MQTT self-heal: stop unproven for 10m, rebooting in 1m"}), g_log);
+
+  host.calls.clear();
+  pollAt(start + 11 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(start + 11 * kMin);
+  // The RTC record is written before the reboot call.
+  EXPECT_EQ((std::vector<std::string>{"rtc:1:stop unproven", "reboot"}), host.calls);
+  EXPECT_EQ("MQTT self-heal: rebooting for stop unproven", g_log.back());
+}
+
+TEST_F(ObserverSelfHealTest, AlertIsLoggedButNotSentWhenAlertsAreOff) {
+  makeStopUnproven();
+  host.obs.alert_enabled = 0;
+  pollAt(40 * kMin);
+  pollAt(50 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  EXPECT_EQ(1u, g_log.size());
+}
+
+TEST_F(ObserverSelfHealTest, TicksAboutEveryTenSeconds) {
+  makeStopUnproven();
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  pollAt(start + 10 * kMin - 5000);   // the hold starts at the first tick
+  pollAt(start + 10 * kMin);          // under 10 s since the last tick: skipped
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(start + 10 * kMin + 5000);
+  EXPECT_EQ(1u, host.calls.size());
+}
+
+TEST_F(ObserverSelfHealTest, HealthyPeriodClearsTheBootCounter) {
+  FakeHealPlatform::rtc = MQTTSelfHealPolicy::rtcMake(2, MQTTSelfHealPolicy::Cause::AllSlotsDown);
+  startRunning();
+  bridge->connected_slots = 1;
+  bridge->candidate_slots = 1;
+  pollAt(kMin);
+  pollAt(11 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(11 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"rtc:0:none"}), host.calls);
+  EXPECT_EQ(0, MQTTSelfHealPolicy::rtcConsecutive(FakeHealPlatform::rtc));
+  host.calls.clear();
+  pollAt(60 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+}
+
+TEST_F(ObserverSelfHealTest, PrefOffNeverAlertsOrReboots) {
+  makeStopUnproven();
+  host.obs.mqtt_selfheal_enabled = 0;
+  for (uint32_t t = 40 * kMin; t < 600 * kMin; t += kMin) pollAt(t);
+  EXPECT_TRUE(host.calls.empty());
+  EXPECT_TRUE(g_log.empty());
+}
+
+TEST_F(ObserverSelfHealTest, NullBridgeNeverActs) {
+  FakeHealPlatform::rtc = MQTTSelfHealPolicy::rtcMake(1, MQTTSelfHealPolicy::Cause::StopUnproven);
+  for (uint32_t t = 0; t < 600 * kMin; t += kMin) pollAt(t);
+  EXPECT_EQ(nullptr, bridge);
+  EXPECT_TRUE(host.calls.empty());
+  EXPECT_EQ(1, MQTTSelfHealPolicy::rtcConsecutive(FakeHealPlatform::rtc));
+}
+
+TEST_F(ObserverSelfHealTest, AllSlotsDownNeedsFreshEvidence) {
+  startRunning();
+  bridge->candidate_slots = 2;
+  bridge->connected_slots = 0;
+  const uint32_t start = 40 * kMin;
+  for (uint32_t t = start; t <= start + 3 * 60 * kMin; t += kMin) pollAt(t);
+  EXPECT_TRUE(host.calls.empty());   // no NTP evidence: not a cause
+
+  bridge->evidence_age_ms = 10 * kMin;
+  const uint32_t fresh = start + 3 * 60 * kMin + kMin;
+  pollAt(fresh);
+  pollAt(fresh + 2 * 60 * kMin - kMin);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(fresh + 2 * 60 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"alert:MQTT self-heal: all slots down for 120m, rebooting in 1m"}),
+            host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, RebootLimitStopsRebooting) {
+  FakeHealPlatform::rtc = MQTTSelfHealPolicy::rtcMake(5, MQTTSelfHealPolicy::Cause::StopUnproven);
+  makeStopUnproven();
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  for (uint32_t t = start + kMin; t < start + 600 * kMin; t += kMin) pollAt(t);
+  EXPECT_EQ((std::vector<std::string>{"alert:MQTT self-heal: stop unproven for 80m, reboot limit reached"}),
+            host.calls);
 }
 
 int main(int argc, char** argv) {
