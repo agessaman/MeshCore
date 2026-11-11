@@ -4,6 +4,7 @@
 #include "../MQTTConnectionPolicy.h"
 #include "../NtpValidation.h"
 #include "../MQTTMessageBuilder.h"
+#include "../ObserverSelfHealRtc.h"
 #include "../MQTTNeighborsPolicy.h"
 #include "../MQTTPacketQueuePolicy.h"
 #include "../MQTTReplyFormat.h"
@@ -836,6 +837,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].preset = nullptr;
     // auth_token == nullptr after memset above — allocated on first token creation
     _slots[i].connected = false;
+    noteSlotConnected(i, false);
     _slots[i].initial_connect_done = false;
     _slots[i].token_expires_at = 0;
     _slots[i].last_token_renewal = 0;
@@ -1694,6 +1696,20 @@ void MQTTBridge::mqttTaskLoop() {
       refreshNTP();
     }
 
+    // Forget day-old evidence so a millis() wrap cannot make it look fresh again.
+    if (ntpEvidenceAgeMs() != kNoNtpEvidence && ntpEvidenceAgeMs() > 24UL * 3600UL * 1000UL) {
+      _ntp_reply_ms.store(0, std::memory_order_relaxed);
+    }
+    // While every slot is down, keep the self-heal reachability evidence no older
+    // than the probe interval; the hourly refresh alone can leave it stale.
+    if (_ntp_synced && _network->isConnected() && connectedSlotCount() == 0 &&
+        !_stop_requested.load(std::memory_order_acquire) &&
+        (uint32_t)((uint32_t)millis() - _last_reachability_probe_ms) >= kReachabilityProbeIntervalMs &&
+        ntpEvidenceAgeMs() >= kReachabilityProbeIntervalMs) {
+      _last_reachability_probe_ms = (uint32_t)millis();
+      probeNtpReachability();
+    }
+
     // Publish status updates (handle millis() overflow correctly).
     // Read the toggle live from prefs (like mqtt.packets/rx/tx below) so a
     // CLI/web `set mqtt.status` change applies without a bridge restart.
@@ -1824,6 +1840,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
     _slot_attempt_pending[index] = false;
     _slots[index].client_state = ClientState::Connected;
     _slots[index].connected = true;
+    noteSlotConnected(index, true);
     _slot_force_jwt_mint[index] = false;
     // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
     // A CONNACK alone doesn't prove the link is healthy — a broker that
@@ -1879,6 +1896,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
       _slots[index].current_outage_started_ms = millis();
     }
     _slots[index].connected = false;
+    noteSlotConnected(index, false);
     _slots[index].connected_at_ms = 0;  // stability clock only runs while connected
     updateCachedConnectionStatus();
   });
@@ -2079,6 +2097,7 @@ bool MQTTBridge::setupSlot(int index) {
     // written as "" — which does clear them.
     if (slot.auth_token) slot.auth_token[0] = '\0';
     slot.connected = false;
+    noteSlotConnected(index, false);
     slot.token_expires_at = 0;
     slot.applied_token_expires_at = 0;
     slot.last_token_renewal = 0;
@@ -2403,6 +2422,7 @@ bool MQTTBridge::recreateSlotClient(int index) {
     return false;
   }
   slot.connected = false;
+  noteSlotConnected(index, false);
 
   delete slot.client;
   slot.client = nullptr;
@@ -2570,6 +2590,7 @@ void MQTTBridge::teardownSlot(int index, TeardownReason reason) {
   // holds this pointer in its config (see MQTTSlot::auth_token).
   if (slot.auth_token) slot.auth_token[0] = '\0';
   slot.connected = false;
+  noteSlotConnected(index, false);
   slot.initial_connect_done = false;
   slot.broker_uri[0] = '\0';
   slot.token_expires_at = 0;
@@ -3297,6 +3318,19 @@ static const char* cachedResetReason(mesh::MainBoard* board) {
 }
 #endif
 
+#ifdef ESP_PLATFORM
+// Last self-heal reboot from the RTC record; a cleared or invalid record reports none.
+static const char* selfHealCause() {
+  const MQTTSelfHealPolicy::RtcRecord rec = ObserverSelfHealRtc::load();
+  return ObserverSelfHealRtc::lastCount(rec) > 0
+             ? MQTTSelfHealPolicy::causeToken(ObserverSelfHealRtc::lastCause(rec)) : nullptr;
+}
+static int selfHealCount() { return ObserverSelfHealRtc::lastCount(ObserverSelfHealRtc::load()); }
+#else
+static const char* selfHealCause() { return nullptr; }
+static int selfHealCount() { return 0; }
+#endif
+
 void MQTTBridge::publishStatusToSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
@@ -3393,7 +3427,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     _prefs->disable_fwd ? "off" : "on",
     collectConnHealth(),
     heap_min, cachedResetReason(_board),
-    crash_json, &crash_included
+    crash_json, &crash_included,
+    selfHealCause(), selfHealCount()
   );
 
   if (len > 0) {
@@ -3692,6 +3727,7 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       closeLiveClientForLinkTransition(i);
       _slots[i].connected = false;
+      noteSlotConnected(i, false);
       _slots[i].connected_at_ms = 0;
     }
     updateCachedConnectionStatus();
@@ -4381,7 +4417,8 @@ bool MQTTBridge::publishStatus() {
     _prefs->disable_fwd ? "off" : "on",
     collectConnHealth(),
     heap_min, cachedResetReason(_board),
-    crash_json, &crash_included
+    crash_json, &crash_included,
+    selfHealCause(), selfHealCount()
   );
 
   if (len > 0) {
@@ -4908,6 +4945,8 @@ bool MQTTBridge::probeNtpServer(const char* server, uint32_t min_epoch,
         min_epoch, kNtpMaxValidEpoch);
     if (r.reject == NtpValidation::kAccepted) {
       if (epoch_out) *epoch_out = r.epoch;
+      const uint32_t stamp = (uint32_t)millis();
+      _ntp_reply_ms.store(stamp ? stamp : 1, std::memory_order_relaxed);
       if (why) *why = "ok";
       accepted = true;
       break;
@@ -5162,6 +5201,55 @@ bool MQTTBridge::requestForcedNtpSync(uint32_t timeout_ms) {
     vTaskDelay(pdMS_TO_TICKS(50));
   }
   return _ntp_force_result;
+}
+
+// Runs on the MQTT task (Core 0). Probes the next server in the list; a validated
+// reply refreshes _ntp_reply_ms. Never touches the clock or the RTC.
+void MQTTBridge::probeNtpReachability() {
+  #ifdef ESP_PLATFORM
+  if (_stop_requested.load(std::memory_order_acquire)) return;
+  #endif
+  const char* servers[kMaxNtpServers];
+  int count = 0;
+  fillNtpServerList(_obs, servers, count);
+  if (count <= 0) return;
+  // One server per round bounds the stall to a single lookup and probe.
+  const int i = _reachability_server_idx % count;
+  _reachability_server_idx = (uint8_t)((i + 1) % count);
+  uint32_t epoch = 0;
+  const char* why = nullptr;
+  if (!probeNtpServer(servers[i], kNtpMinValidEpoch, &epoch, &why)) {
+    MQTT_DEBUG_PRINTLN("NTP reachability probe: %s %s", servers[i], why ? why : "no reply");
+  }
+}
+
+uint32_t MQTTBridge::ntpEvidenceAgeMs() const {
+  const uint32_t stamp = _ntp_reply_ms.load(std::memory_order_relaxed);
+  if (stamp == 0) return kNoNtpEvidence;
+  return (uint32_t)millis() - stamp;
+}
+
+bool MQTTBridge::anyClientQuarantined() const {
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].client_state == ClientState::Quarantined) return true;
+  }
+  return false;
+}
+
+uint8_t MQTTBridge::enabledSlotCount() const {
+  uint8_t n = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled) n++;
+  }
+  return n;
+}
+
+uint8_t MQTTBridge::candidateSlotCount() const {
+  uint8_t n = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled && _slots[i].last_connack_code == 0 && isSlotReady(i)) n++;
+  }
+  return n;
 }
 
 // Runs on the MQTT task (Core 0). Probes every configured NTP server for connectivity

@@ -73,6 +73,7 @@ public:
    * @param reset_reason Short token for the reset that booted this image; nullptr omits it
    * @param crash_json Pre-formatted `crash` object; dropped if it would overflow the buffer
    * @param crash_included Set true when the `crash` field made it into the output
+   * @param selfheal Last self-heal cause and selfheal_n its consecutive count; omitted when 0
    * @return Length of JSON string, or 0 on error
    */
   static int buildStatusMessage(
@@ -103,7 +104,8 @@ public:
     int heap_min = -1,
     const char* reset_reason = nullptr,
     const char* crash_json = nullptr,
-    bool* crash_included = nullptr
+    bool* crash_included = nullptr,
+    const char* selfheal = nullptr, int selfheal_n = 0
   );
 
   /**

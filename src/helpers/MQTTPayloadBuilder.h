@@ -71,7 +71,8 @@ public:
     int heap_min = -1,
     const char* reset_reason = nullptr,
     const char* crash_json = nullptr,
-    bool* crash_included = nullptr
+    bool* crash_included = nullptr,
+    const char* selfheal = nullptr, int selfheal_n = 0
   );
 
   static int buildPacketMessage(

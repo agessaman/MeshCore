@@ -35,6 +35,7 @@
 #include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
 #include "MQTTPacketFilter.h"
 #include "MQTTTopicRouter.h"   // mqttSlotIata() — a slot's effective region code
+#include "ObserverSelfHealRtc.h"  // last self-heal cause and count for get mqtt.selfheal
 #endif
 
 // Local copy of the busted-libc-safe atoi (the original in CommonCLI.cpp is static).
@@ -386,6 +387,16 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       // Published to the bridge only once saved, so a rolled-back value never applies.
       MQTTBridge::setBreakerProbeMinutes(minutes);
       sprintf(reply, "OK - breaker probe every %u minutes", (unsigned)minutes);
+    }
+  } else if (memcmp(config, "mqtt.selfheal ", 14) == 0) {
+    const char* val = &config[14];
+    if (strcmp(val, "on") == 0 || strcmp(val, "off") == 0) {
+      // Read live by the self-heal driver on its next tick.
+      _mqtt_prefs.mqtt_selfheal_enabled = val[1] == 'n' ? 1 : 0;
+      if (!persistObserverPrefs(reply)) return true;
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: use on or off");
     }
   } else if (memcmp(config, "mqtt.interval ", 14) == 0) {
     uint32_t minutes = _atoi(&config[14]);
@@ -1033,6 +1044,15 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.breaker.interval", 21) == 0) {
     sprintf(reply, "> %u minutes",
             (unsigned)(MQTTConnectionPolicy::breakerProbeMs(_mqtt_prefs.mqtt_breaker_probe_min) / 60000UL));
+  } else if (memcmp(config, "mqtt.selfheal", 13) == 0) {
+    const MQTTSelfHealPolicy::RtcRecord rec = ObserverSelfHealRtc::load();
+    const uint8_t n = ObserverSelfHealRtc::lastCount(rec);
+    if (n == 0) {
+      sprintf(reply, "> %s, last: none", _mqtt_prefs.mqtt_selfheal_enabled ? "on" : "off");
+    } else {
+      sprintf(reply, "> %s, last: %s x%u", _mqtt_prefs.mqtt_selfheal_enabled ? "on" : "off",
+              MQTTSelfHealPolicy::causeLabel(ObserverSelfHealRtc::lastCause(rec)), (unsigned)n);
+    }
   } else if (memcmp(config, "mqtt.interval", 13) == 0) {
     uint32_t minutes = (_mqtt_prefs.mqtt_status_interval + 29999) / 60000;
     sprintf(reply, "> %u minutes (%lu ms)", minutes, (unsigned long)_mqtt_prefs.mqtt_status_interval);

@@ -404,6 +404,8 @@ public:
   void prepareBridgeStart(MQTTBridge* b, bool restart);
   void setAlertBridge(MQTTBridge* b) { _alerter.setBridge(b); }
   bool flashFromManifest(char* reply);
+  void rebootForSelfHeal() { _cli.getBoard()->reboot(); }
+  bool isOtaInProgress() { return _cli.getBoard()->isOTAUpdateInProgress(); }
 
 #if defined(WITH_MQTT_BRIDGE)
   // Broadcast a key OTA milestone (start/fail only) on the configured alert

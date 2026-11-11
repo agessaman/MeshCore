@@ -336,6 +336,22 @@ private:
   // How stale a snapshot may be before a read asks for a fresh probe.
   static const uint32_t kNtpDiagRefreshMs = 30000;
 
+  // millis() of the last NTP reply that passed validation (0 = none); any probe sets it.
+  std::atomic<uint32_t> _ntp_reply_ms{0};
+  // Bridge-task-only: last reachability probe made while no slot was connected.
+  uint32_t _last_reachability_probe_ms = 0;
+  static const uint32_t kReachabilityProbeIntervalMs = 20UL * 60UL * 1000UL;
+  uint8_t _reachability_server_idx = 0;  // bridge-task-only: next server, one per round
+
+  // Bit i set while slot i is connected; one atomic word so a reader never sees a torn scan.
+  std::atomic<uint8_t> _connected_mask{0};
+  static_assert(RUNTIME_MQTT_SLOTS <= 8, "_connected_mask holds one bit per slot");
+  void noteSlotConnected(int index, bool up) {
+    const uint8_t bit = (uint8_t)(1u << index);
+    if (up) _connected_mask.fetch_or(bit, std::memory_order_release);
+    else _connected_mask.fetch_and((uint8_t)~bit, std::memory_order_release);
+  }
+
   // Cooperative-shutdown handshake. The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
   // sees it, tears down its own clients on Core 0 (where the mbedTLS contexts
@@ -400,7 +416,9 @@ private:
   // entirely. Raised to 1024: no extra RAM while status serializes into the shared scratch
   // buffer, but +256 B of bridge-task stack in the fallback used if the PSRAM allocation
   // failed. See the worst-case test in test_mqtt_payload_builder.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
+  // Raised to 1152 for the self-heal fields, which left 20 bytes at the maxima; the
+  // status build has no stack fallback any more, so this costs no RAM.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1152;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
   // The status `crash` fragment is formatted into the scratch tail past the status JSON.
@@ -623,6 +641,8 @@ private:
   bool isAnySlotConnected();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
   void runNtpDiagProbe(uint32_t probe_id);  // Probe every server for connectivity; never sets the clock. Core 0 only.
+  // Probe one server per call, rotating, to keep reachability evidence fresh; never sets the clock. Core 0 only.
+  void probeNtpReachability();
   // Copies the published diag snapshot on the caller's task. False when the task
   // was publishing throughout the attempt.
   bool copyNtpDiagSnapshot(NtpDiagResult* out, int* count_out,
@@ -794,6 +814,20 @@ public:
   // Survives end() clearing the diagnostic singleton, so `get mqtt.status` can
   // still explain why a stopped bridge will not come back without a reboot.
   static bool stopUnprovenLatched();
+
+  // Self-heal sampling from the loop task: plain reads of state the bridge task owns.
+  static const uint32_t kNoNtpEvidence = UINT32_MAX;
+  // ms since the last validated NTP reply, or kNoNtpEvidence.
+  uint32_t ntpEvidenceAgeMs() const;
+  bool anyClientQuarantined() const;
+  bool isNetworkUp() const { return _network && _network->isConnected(); }
+  uint8_t enabledSlotCount() const;
+  // Enabled, configured slots whose last failure was not a broker refusal.
+  uint8_t candidateSlotCount() const;
+  // One atomic load, not a scan, so a sample cannot miss a slot that was always up.
+  uint8_t connectedSlotCount() const {
+    return (uint8_t)__builtin_popcount(_connected_mask.load(std::memory_order_acquire));
+  }
 
   static unsigned long getWifiConnectedAtMillis();
 

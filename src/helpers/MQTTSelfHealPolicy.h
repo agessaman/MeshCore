@@ -20,41 +20,69 @@ enum class Action : uint8_t {
   ClearBootCounter,  // MQTT has been healthy; forget earlier self-heal reboots
 };
 
+// Build-time overrides so a bench build can shorten the windows without patching code.
+#ifndef MQTT_SELFHEAL_STOP_UNPROVEN_MS
+#define MQTT_SELFHEAL_STOP_UNPROVEN_MS (10UL * 60UL * 1000UL)
+#endif
+#ifndef MQTT_SELFHEAL_QUARANTINED_MS
+#define MQTT_SELFHEAL_QUARANTINED_MS (30UL * 60UL * 1000UL)
+#endif
+#ifndef MQTT_SELFHEAL_ALL_DOWN_MS
+#define MQTT_SELFHEAL_ALL_DOWN_MS (2UL * 60UL * 60UL * 1000UL)
+#endif
+#ifndef MQTT_SELFHEAL_MIN_UPTIME_MS
+#define MQTT_SELFHEAL_MIN_UPTIME_MS (30UL * 60UL * 1000UL)
+#endif
+#ifndef MQTT_SELFHEAL_GRACE_MS
+#define MQTT_SELFHEAL_GRACE_MS (60UL * 1000UL)
+#endif
+#ifndef MQTT_SELFHEAL_HEALTHY_MS
+#define MQTT_SELFHEAL_HEALTHY_MS (10UL * 60UL * 1000UL)
+#endif
+
 struct Config {
   uint32_t stop_unproven_ms;   // stop never acknowledged by the bridge task
   uint32_t quarantined_ms;     // a client is retained and cannot be reused
-  uint32_t all_slots_down_ms;  // network up, bridge running, no slot connected
+  uint32_t all_slots_down_ms;  // internet reachable, bridge running, no slot connected
   uint32_t min_uptime_ms;      // never self-heal a freshly booted node
   uint32_t alert_grace_ms;     // delay between the alert and the reboot
   uint32_t healthy_reset_ms;   // connected this long clears the boot counter
+  uint32_t evidence_max_age_ms;  // oldest NTP reply that still proves the internet is reachable
   uint8_t max_backoff_shift;   // hold time doubles per consecutive reboot, up to this
   uint8_t max_consecutive;     // stop rebooting after this many without recovery
 };
 
-// Proposed defaults. A late stop ack and the breaker probe both resolve well
-// inside these windows, so only states that are truly stuck reach them.
+// A late stop ack and the breaker probe both resolve well inside these windows,
+// so only states that are truly stuck reach them.
 static inline Config defaultConfig() {
   Config c{};
-  c.stop_unproven_ms = 10UL * 60UL * 1000UL;
-  c.quarantined_ms = 30UL * 60UL * 1000UL;
-  c.all_slots_down_ms = 6UL * 60UL * 60UL * 1000UL;
-  c.min_uptime_ms = 30UL * 60UL * 1000UL;
-  c.alert_grace_ms = 5UL * 60UL * 1000UL;
-  c.healthy_reset_ms = 10UL * 60UL * 1000UL;
+  c.stop_unproven_ms = MQTT_SELFHEAL_STOP_UNPROVEN_MS;
+  c.quarantined_ms = MQTT_SELFHEAL_QUARANTINED_MS;
+  c.all_slots_down_ms = MQTT_SELFHEAL_ALL_DOWN_MS;
+  c.min_uptime_ms = MQTT_SELFHEAL_MIN_UPTIME_MS;
+  c.alert_grace_ms = MQTT_SELFHEAL_GRACE_MS;
+  c.healthy_reset_ms = MQTT_SELFHEAL_HEALTHY_MS;
+  c.evidence_max_age_ms = 60UL * 60UL * 1000UL;
   c.max_backoff_shift = 3;
   c.max_consecutive = 5;
   return c;
 }
 
+// Evidence age meaning "no successful NTP exchange yet".
+static const uint32_t kNoEvidence = UINT32_MAX;
+
 struct Inputs {
   bool enabled;             // operator pref
   uint32_t now_ms;          // millis()
   bool bridge_running;      // false when the operator stopped the bridge
+  bool bridge_wanted;       // operator's bridge-enabled pref
   bool stop_unproven;
   bool client_quarantined;
   bool network_up;
-  uint8_t enabled_slots;
+  uint32_t evidence_age_ms;  // since the last successful NTP exchange, or kNoEvidence
+  uint8_t candidate_slots;   // enabled slots whose last failure was not a broker refusal
   uint8_t connected_slots;
+  bool ota_in_progress;      // a firmware update is running; never alert or reboot
 };
 
 struct State {
@@ -86,6 +114,16 @@ static inline const char* causeLabel(Cause c) {
   }
 }
 
+// Compact token for the status payload, in the style of reset_reason.
+static inline const char* causeToken(Cause c) {
+  switch (c) {
+    case Cause::StopUnproven: return "stop_unproven";
+    case Cause::ClientQuarantined: return "client_quarantined";
+    case Cause::AllSlotsDown: return "all_slots_down";
+    default: return "none";
+  }
+}
+
 static inline uint32_t baseHoldMs(const Config& cfg, Cause c) {
   switch (c) {
     case Cause::StopUnproven: return cfg.stop_unproven_ms;
@@ -103,14 +141,17 @@ static inline uint32_t requiredHoldMs(const Config& cfg, Cause c, uint8_t consec
   return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
 }
 
-static inline bool causePresent(const Inputs& in, Cause c) {
+static inline bool causePresent(const Inputs& in, const Config& cfg, Cause c) {
   switch (c) {
     case Cause::StopUnproven:
       return in.stop_unproven;
     case Cause::ClientQuarantined:
       return in.client_quarantined;
     case Cause::AllSlotsDown:
-      return in.bridge_running && in.network_up && in.enabled_slots > 0 &&
+      // Only when a reboot could plausibly help: the internet answers and some
+      // slot failed for a reason other than the broker refusing its credentials.
+      return in.bridge_running && in.network_up && in.evidence_age_ms != kNoEvidence &&
+             in.evidence_age_ms <= cfg.evidence_max_age_ms && in.candidate_slots > 0 &&
              in.connected_slots == 0;
     default:
       return false;
@@ -128,7 +169,7 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
   // Track each cause's hold time even while disabled or young, so enabling the
   // pref or reaching minimum uptime acts on how long the fault has really held.
   for (uint8_t i = 0; i < kCauseCount; i++) {
-    bool present = causePresent(in, (Cause)(i + 1));
+    bool present = causePresent(in, cfg, (Cause)(i + 1));
     if (present && !st.active[i]) {
       st.active[i] = true;
       st.alerted[i] = false;
@@ -139,8 +180,9 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
     }
   }
 
-  bool healthy = in.bridge_running && in.connected_slots > 0 && !in.stop_unproven &&
-                 !in.client_quarantined;
+  // A bridge deliberately off and not stuck is healthy too, so the counter can clear.
+  bool healthy = !in.stop_unproven && !in.client_quarantined &&
+                 (in.bridge_wanted ? in.bridge_running && in.connected_slots > 0 : true);
   if (healthy && !st.healthy) {
     st.healthy = true;
     st.healthy_reported = false;
@@ -157,7 +199,12 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
     }
   }
 
-  if (!in.enabled || !st.uptime_ok) return r;
+  // Disabled or mid-update: forget pending alerts so acting later needs a fresh alert and grace.
+  if (!in.enabled || in.ota_in_progress) {
+    for (uint8_t i = 0; i < kCauseCount; i++) st.alerted[i] = false;
+    return r;
+  }
+  if (!st.uptime_ok) return r;
 
   bool suppressed = consecutive_reboots >= cfg.max_consecutive;
 
@@ -187,6 +234,16 @@ static inline Result tick(State& st, const Inputs& in, const Config& cfg,
     }
   }
   return r;
+}
+
+// The bridge was started, stopped or restarted: the all-slots-down hold and the
+// healthy timer describe the previous run. Stop-unproven and quarantine persist.
+static inline void onBridgeRestart(State& st) {
+  const uint8_t i = causeIndex(Cause::AllSlotsDown);
+  st.active[i] = false;
+  st.alerted[i] = false;
+  st.healthy = false;
+  st.healthy_reported = false;
 }
 
 // Boot-loop limiter record kept in RTC no-init memory. A power-on leaves
@@ -231,16 +288,25 @@ static inline RtcRecord rtcBeforeReboot(const RtcRecord& cur, Cause cause) {
 
 static inline RtcRecord rtcCleared() { return rtcMake(0, Cause::None); }
 
+// Whole minutes, or seconds below one minute so a bench build's short grace reads sensibly.
+static inline void formatDuration(uint32_t ms, char* buf, size_t len) {
+  if (ms < 60000UL) snprintf(buf, len, "%us", (unsigned)(ms / 1000UL));
+  else snprintf(buf, len, "%um", (unsigned)(ms / 60000UL));
+}
+
 // "MQTT self-heal: <cause> for <N>m, rebooting in <M>m" or "... reboot limit reached".
 static inline int formatAlert(const Result& r, const Config& cfg, char* buf, size_t len) {
   if (!buf || len == 0) return 0;
-  unsigned held_min = (unsigned)(r.held_ms / 60000UL);
+  char held[12];
+  formatDuration(r.held_ms, held, sizeof(held));
   if (r.reboot_suppressed) {
-    return snprintf(buf, len, "MQTT self-heal: %s for %um, reboot limit reached",
-                    causeLabel(r.cause), held_min);
+    return snprintf(buf, len, "MQTT self-heal: %s for %s, reboot limit reached",
+                    causeLabel(r.cause), held);
   }
-  return snprintf(buf, len, "MQTT self-heal: %s for %um, rebooting in %um",
-                  causeLabel(r.cause), held_min, (unsigned)(cfg.alert_grace_ms / 60000UL));
+  char grace[12];
+  formatDuration(cfg.alert_grace_ms, grace, sizeof(grace));
+  return snprintf(buf, len, "MQTT self-heal: %s for %s, rebooting in %s",
+                  causeLabel(r.cause), held, grace);
 }
 
 }  // namespace MQTTSelfHealPolicy

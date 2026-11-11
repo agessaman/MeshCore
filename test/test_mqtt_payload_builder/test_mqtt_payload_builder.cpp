@@ -94,6 +94,8 @@ TEST(MQTTPayloadBuilder, StatusIncludesRepeatAndEveryRequestedStatistic) {
   EXPECT_EQ(47, stats["packets_received"].as<int>());
   EXPECT_FALSE(stats["heap_min"].is<JsonVariant>());
   EXPECT_FALSE(stats["reset_reason"].is<JsonVariant>());
+  EXPECT_FALSE(stats["selfheal"].is<JsonVariant>());
+  EXPECT_FALSE(stats["selfheal_n"].is<JsonVariant>());
 }
 
 TEST(MQTTPayloadBuilder, StatusReportsConnectionHealthWhenSupplied) {
@@ -188,6 +190,32 @@ TEST(MQTTPayloadBuilder, StatusReportsResetReasonAndMinimumHeap) {
   EXPECT_FALSE(zero_min["stats"]["reset_reason"].is<JsonVariant>());
 }
 
+TEST(MQTTPayloadBuilder, StatusReportsSelfHealOnlyWhileTheCountIsNonZero) {
+  JsonDocument scratch;
+  char buffer[1024];
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), -1, "sw", nullptr, nullptr, "stop_unproven", 2);
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  ASSERT_FALSE(stats.isNull());
+  EXPECT_STREQ("sw", stats["reset_reason"].as<const char*>());
+  EXPECT_STREQ("stop_unproven", stats["selfheal"].as<const char*>());
+  EXPECT_EQ(2, stats["selfheal_n"].as<int>());
+
+  // A cleared counter omits both keys, and alone does not create a stats object.
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, MQTTConnHealth(), -1, nullptr, nullptr, nullptr, "none", 0), 0);
+  JsonDocument cleared;
+  ASSERT_FALSE(deserializeJson(cleared, buffer));
+  EXPECT_FALSE(cleared["stats"].is<JsonVariant>());
+}
+
 // Zero counters with nothing else supplied must not create an empty stats object.
 TEST(MQTTPayloadBuilder, StatusOmitsStatsWhenOnlyZeroCountersSupplied) {
   JsonDocument scratch;
@@ -239,9 +267,10 @@ TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
 // isValidName() rejects [ ] / \ : , ? * but ALLOWS '"', so a node name of 31 quotes
 // is legal and every one escapes to two bytes — that is the true worst case for the
 // only free-text field an operator controls.
-// heap_min shares heap_largest's 8388608 ceiling; the longest reset token is "deepsleep".
+// heap_min shares heap_largest's 8388608 ceiling; the longest reset token is "deepsleep";
+// the longest self-heal token is "client_quarantined" and the count tops out at 255.
 TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
-  constexpr size_t kStatusJsonBufferSize = 1024;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  constexpr size_t kStatusJsonBufferSize = 1152;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
   const std::string origin(31, '"');                 // _origin[32], worst-case escaping
   const std::string origin_id(64, 'A');              // _device_id[65]
   const std::string model(63, 'M');                  // _board_model[64]
@@ -265,7 +294,7 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
       buffer, sizeof(buffer),
       4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
       8388608, 2147483647, 2147483647,
-      "off", health, 8388608, "deepsleep");
+      "off", health, 8388608, "deepsleep", nullptr, nullptr, "client_quarantined", 255);
 
   ASSERT_GT(len, 0) << "worst-case status payload overflowed the " << kStatusJsonBufferSize
                     << "-byte production buffer; serializeComplete() returns 0 and the "
@@ -277,6 +306,7 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
   ASSERT_FALSE(deserializeJson(parsed, buffer));
   EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
   EXPECT_STREQ("deepsleep", parsed["stats"]["reset_reason"].as<const char*>());
+  EXPECT_EQ(255, parsed["stats"]["selfheal_n"].as<int>());
 }
 
 // The widest crash fragment the formatter emits into the bridge's 160-byte slot.
