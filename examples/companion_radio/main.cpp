@@ -158,7 +158,7 @@ static void loopDuringDisplayRefresh();
 #endif
 
 #ifdef HAS_ESP_MDNS
-static void startMdns() {
+static bool startMdns() {
   String nodeName = the_mesh.getNodeName();
   String sanitizedNodeName;
   sanitizedNodeName.reserve(nodeName.length());
@@ -174,6 +174,7 @@ static void startMdns() {
   mdnsName += sanitizedNodeName;
   if (!MDNS.begin(mdnsName.c_str())) {
     WIFI_DEBUG_PRINTLN("mDNS failed to start!");
+    return false;
   } else {
     MDNS.addService("meshcore", "tcp", TCP_PORT);
     MDNS.addServiceTxt("meshcore", "tcp", "node-name", the_mesh.getNodeName());
@@ -183,6 +184,7 @@ static void startMdns() {
     MDNS.addServiceTxt("meshcore", "tcp", "build-date", __DATE__);
     MDNS.addServiceTxt("meshcore", "tcp", "build-time", __TIME__);
   }
+  return true;
 }
 #endif
 
@@ -407,12 +409,10 @@ void loop() {
       wifi_interface.begin(TCP_PORT);
       WIFI_DEBUG_PRINTLN("connected, listening on %s:%d", WiFi.localIP().toString().c_str(), TCP_PORT);
 #ifdef HAS_ESP_MDNS
-      // The network link brings WiFi up after setup(), so the responder starts on the first link-up.
+      // The network link brings WiFi up after setup(), so the responder starts on a link-up;
+      // a failed start is retried on the next one.
       static bool mdns_started = false;
-      if (!mdns_started) {
-        mdns_started = true;
-        startMdns();
-      }
+      if (!mdns_started) mdns_started = startMdns();
 #endif
     }
     wifi_was_connected = wifi_up;
