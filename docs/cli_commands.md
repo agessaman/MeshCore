@@ -91,7 +91,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ### Online firmware update (observer builds)
 
-- `ota check`: reports whether the release manifest has a newer build for this board. Does not flash.
+- `ota check`: starts a background manifest check and returns immediately; read again in a few seconds for the cached result and its age. Results (including errors) refresh on a read after 60 seconds. Does not flash or stop the bridge. `ota update` refuses while a check runs; retry after it finishes.
 - `ota update`: downloads and flashes the newer build, then reboots. Refuses builds that change the partition table (flash those by cable).
 - `ota branch`: shows the selected channel, the channel this build came from, and the manifest URL.
 - `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`): pull future updates from that channel. The choice is saved; run `ota update` to switch.
