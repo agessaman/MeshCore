@@ -341,6 +341,16 @@ private:
   // Bridge-task-only: last reachability probe made while no slot was connected.
   uint32_t _last_reachability_probe_ms = 0;
   static const uint32_t kReachabilityProbeIntervalMs = 20UL * 60UL * 1000UL;
+  uint8_t _reachability_server_idx = 0;  // bridge-task-only: next server, one per round
+
+  // Bit i set while slot i is connected; one atomic word so a reader never sees a torn scan.
+  std::atomic<uint8_t> _connected_mask{0};
+  static_assert(RUNTIME_MQTT_SLOTS <= 8, "_connected_mask holds one bit per slot");
+  void noteSlotConnected(int index, bool up) {
+    const uint8_t bit = (uint8_t)(1u << index);
+    if (up) _connected_mask.fetch_or(bit, std::memory_order_release);
+    else _connected_mask.fetch_and((uint8_t)~bit, std::memory_order_release);
+  }
 
   // Cooperative-shutdown handshake. The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
@@ -623,7 +633,7 @@ private:
   bool isAnySlotConnected();
   void refreshNTP();  // Lightweight periodic NTP refresh (non-blocking)
   void runNtpDiagProbe(uint32_t probe_id);  // Probe every server for connectivity; never sets the clock. Core 0 only.
-  // Probe servers until one answers, to keep reachability evidence fresh; never sets the clock. Core 0 only.
+  // Probe one server per call, rotating, to keep reachability evidence fresh; never sets the clock. Core 0 only.
   void probeNtpReachability();
   // Copies the published diag snapshot on the caller's task. False when the task
   // was publishing throughout the attempt.
@@ -806,7 +816,10 @@ public:
   uint8_t enabledSlotCount() const;
   // Enabled, configured slots whose last failure was not a broker refusal.
   uint8_t candidateSlotCount() const;
-  uint8_t connectedSlotCount() const { return (uint8_t)getConnectedBrokers(); }
+  // One atomic load, not a scan, so a sample cannot miss a slot that was always up.
+  uint8_t connectedSlotCount() const {
+    return (uint8_t)__builtin_popcount(_connected_mask.load(std::memory_order_acquire));
+  }
 
   static unsigned long getWifiConnectedAtMillis();
 
