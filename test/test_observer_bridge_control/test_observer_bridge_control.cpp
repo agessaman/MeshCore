@@ -409,6 +409,23 @@ TEST_F(ObserverBridgeControlTest, OtaIdleLatchOnlyBlocksInStrictMode) {
   EXPECT_FALSE(bridge->running);
 }
 
+TEST_F(ObserverBridgeControlTest, StrictOtaAfterExplicitLateAckPreservesTimeoutBarrier) {
+  startRunning();
+  bridge->next_stop_times_out = true;
+  ctl.setState(host, bridge, false);
+  ASSERT_FALSE(bridge->canFlashAfterStop());
+  bridge->late_acked = true;
+  ctl.poll(host, bridge);
+  ASSERT_FALSE(bridge->unproven);
+  ASSERT_TRUE(bridge->stop_timed_out);
+  host.calls.clear();
+
+  ctl.runOta(host, bridge, true);
+  EXPECT_EQ((std::vector<std::string>{"drain", "pollLateStopAck"}), host.calls);
+  EXPECT_FALSE(bridge->running);
+  EXPECT_FALSE(ctl.resumePending());
+}
+
 TEST_F(ObserverBridgeControlTest, OtaRestoresPendingResumeConsumedByItsLateAckPoll) {
   startRunning();
   bridge->next_stop_times_out = true;
