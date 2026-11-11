@@ -29,6 +29,7 @@
 #endif
 #ifdef WITH_MQTT_BRIDGE
 #include "bridges/MQTTBridge.h"
+#include "CrashReport.h"
 #include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
 #include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
@@ -1010,6 +1011,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       start = (int)_atoi(start_arg);
     }
     formatMQTTPresetListReply(reply, 160, start);
+  } else if (memcmp(config, "crash", 5) == 0 && (config[5] == '\0' || config[5] == '\n' || config[5] == '\r')) {
+    CrashReport::formatCli(reply, 160);
   } else if (memcmp(config, "mqtt.stacks", 11) == 0) {
     MQTTBridge::formatMqttStacksReply(reply, 160);
   } else if (memcmp(config, "mqtt.stats", 10) == 0) {
@@ -1308,7 +1311,10 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 
 bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
-  if (memcmp(command, "tls.bundletest ", 15) == 0) {
+  if (memcmp(command, "clear crash", 11) == 0) {
+    strcpy(reply, CrashReport::clear() ? "OK - crash dump cleared" : "ERR: crash dump erase failed");
+    return true;
+  } else if (memcmp(command, "tls.bundletest ", 15) == 0) {
 #ifdef ESP_PLATFORM
     if (!activeNetworkLink().isConnected()) {
       snprintf(reply, 160, "ERR: %s not connected",

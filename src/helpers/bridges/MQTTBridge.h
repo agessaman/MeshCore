@@ -403,6 +403,10 @@ private:
   static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
+  // The status `crash` fragment is formatted into the scratch tail past the status JSON.
+  static const size_t STATUS_CRASH_FRAGMENT_SIZE = 160;
+  static_assert(STATUS_JSON_BUFFER_SIZE + STATUS_CRASH_FRAGMENT_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
+                "crash fragment must fit in the scratch tail");
   #if defined(BOARD_HAS_PSRAM)
   char* _json_scratch_buffer;
   #else
