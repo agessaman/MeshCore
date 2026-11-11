@@ -13,7 +13,7 @@
 //   MQTTSelfHealPolicy::RtcRecord rtcLoad();
 //   void rtcStore(const MQTTSelfHealPolicy::RtcRecord&);
 // Host provides: getObserverPrefs() (mqtt_selfheal_enabled, alert_enabled),
-//   bool sendAlertText(const char*), void rebootForSelfHeal().
+//   bool sendAlertText(const char*), void rebootForSelfHeal(), bool isOtaInProgress().
 // Bridge provides: isRunning, isStopUnproven, anyClientQuarantined, isNetworkUp,
 //   ntpEvidenceAgeMs, candidateSlotCount, connectedSlotCount.
 
@@ -43,8 +43,12 @@ public:
 
   ObserverSelfHeal() : _st(), _last_tick_ms(0) {}
 
+  // The bridge was started, stopped or restarted by the sequencer.
+  void onBridgeRestart() { MQTTSelfHealPolicy::onBridgeRestart(_st); }
+
+  // ota_active: the caller's own update sequence is running.
   template <class Host, class Bridge>
-  void poll(Host& host, Bridge* bridge) {
+  void poll(Host& host, Bridge* bridge, bool ota_active = false) {
     if (!Platform::kSupported) return;
     namespace Heal = MQTTSelfHealPolicy;
     const uint32_t now = Platform::nowMs();
@@ -52,20 +56,7 @@ public:
     _last_tick_ms = now;
 
     const auto* obs = host.getObserverPrefs();
-    Heal::Inputs in{};
-    in.enabled = obs && obs->mqtt_selfheal_enabled;
-    in.now_ms = now;
-    in.evidence_age_ms = Heal::kNoEvidence;
-    if (bridge) {
-      in.bridge_running = bridge->isRunning();
-      in.stop_unproven = bridge->isStopUnproven();
-      in.client_quarantined = bridge->anyClientQuarantined();
-      in.network_up = bridge->isNetworkUp();
-      in.evidence_age_ms = bridge->ntpEvidenceAgeMs();
-      in.candidate_slots = bridge->candidateSlotCount();
-      in.connected_slots = bridge->connectedSlotCount();
-    }
-
+    const Heal::Inputs in = sample(host, bridge, now, ota_active);
     const Heal::Config cfg = Heal::defaultConfig();
     const Heal::RtcRecord rec = Platform::rtcLoad();
     const Heal::Result r = Heal::tick(_st, in, cfg, Heal::rtcConsecutive(rec));
@@ -77,13 +68,17 @@ public:
         if (obs && obs->alert_enabled) host.sendAlertText(msg);   // queued; never blocks
         break;
       }
-      case Heal::Action::Reboot:
+      case Heal::Action::Reboot: {
+        // Confirm on a fresh sample so one torn read cannot reboot the node.
+        const Heal::Inputs again = sample(host, bridge, Platform::nowMs(), ota_active);
+        if (!again.enabled || again.ota_in_progress || !Heal::causePresent(again, cfg, r.cause)) break;
         // Count the reboot before it happens: the boot-loop limit depends on it.
         Platform::rtcStore(Heal::rtcBeforeReboot(rec, r.cause));
         Log::line("MQTT self-heal: rebooting for ", Heal::causeLabel(r.cause));
         Log::flush();
         host.rebootForSelfHeal();
         break;
+      }
       case Heal::Action::ClearBootCounter:
         Platform::rtcStore(Heal::rtcCleared());
         Log::line("MQTT self-heal: healthy, reboot counter cleared");
@@ -94,6 +89,26 @@ public:
   }
 
 private:
+  template <class Host, class Bridge>
+  static MQTTSelfHealPolicy::Inputs sample(Host& host, Bridge* bridge, uint32_t now, bool ota_active) {
+    const auto* obs = host.getObserverPrefs();
+    MQTTSelfHealPolicy::Inputs in{};
+    in.enabled = obs && obs->mqtt_selfheal_enabled;
+    in.now_ms = now;
+    in.ota_in_progress = ota_active || host.isOtaInProgress();
+    in.evidence_age_ms = MQTTSelfHealPolicy::kNoEvidence;
+    if (bridge) {
+      in.bridge_running = bridge->isRunning();
+      in.stop_unproven = bridge->isStopUnproven();
+      in.client_quarantined = bridge->anyClientQuarantined();
+      in.network_up = bridge->isNetworkUp();
+      in.evidence_age_ms = bridge->ntpEvidenceAgeMs();
+      in.candidate_slots = bridge->candidateSlotCount();
+      in.connected_slots = bridge->connectedSlotCount();
+    }
+    return in;
+  }
+
   MQTTSelfHealPolicy::State _st;
   uint32_t _last_tick_ms;
 };

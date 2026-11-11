@@ -25,6 +25,7 @@
 //   void otaAlert(const char* msg);                       OTA milestone alert (may be a no-op)
 //   bool sendAlertText(const char* msg);                  mesh alert channel (self-heal)
 //   void rebootForSelfHeal();                             reboot through the board
+//   bool isOtaInProgress();                               an upload or flash is running
 
 #if defined(ARDUINO)
 #include <Arduino.h>
@@ -76,6 +77,7 @@ public:
     }
     if (!enable) _resume_pending = 0;   // an explicit stop cancels a pending resume
     if (enable == bridge->isRunning()) return;
+    _heal.onBridgeRestart();
     if (enable) {
       host.prepareBridgeStart(bridge, false);
       bridge->begin();
@@ -95,6 +97,7 @@ public:
       _batch_restart = 1;
       return;
     }
+    _heal.onBridgeRestart();
     bridge->end();
     host.prepareBridgeStart(bridge, true);
     bridge->begin();
@@ -108,6 +111,7 @@ public:
       _slot_restart_mask |= (uint8_t)(1u << slot);
       return;
     }
+    _heal.onBridgeRestart();
     bridge->setSlotPreset(slot, host.getObserverPrefs()->mqtt_slot_preset[slot]);
   }
 
@@ -147,7 +151,7 @@ public:
         setState(host, bridge, true);
       }
     }
-    _heal.poll(host, bridge);
+    _heal.poll(host, bridge, _ota_step != OTA_IDLE);
   }
 
   // Runs the deferred OTA to completion (blocking); strict_idle also refuses a stopped

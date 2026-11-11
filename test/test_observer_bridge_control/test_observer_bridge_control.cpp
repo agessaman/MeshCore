@@ -90,7 +90,14 @@ struct FakeBridge {
   bool isNetworkUp() const { return network_up; }
   uint32_t ntpEvidenceAgeMs() const { return evidence_age_ms; }
   uint8_t candidateSlotCount() const { return candidate_slots; }
-  uint8_t connectedSlotCount() const { return connected_slots; }
+  // Reports one connected slot from read number connect_from_read on (-1 = never).
+  mutable int connected_reads = 0;
+  int connect_from_read = -1;
+  uint8_t connectedSlotCount() const {
+    connected_reads++;
+    if (connect_from_read >= 0 && connected_reads >= connect_from_read) return 1;
+    return connected_slots;
+  }
 };
 
 struct FakeNodePrefs { uint8_t bridge_enabled = 1; };
@@ -135,6 +142,8 @@ struct FakeHost {
     return true;
   }
   void rebootForSelfHeal() { calls.push_back("reboot"); }
+  bool ota = false;
+  bool isOtaInProgress() { return ota; }
 };
 
 using Ctl = ObserverBridgeControl<FakeBridge, FakeLog, FakeHealPlatform>;
@@ -543,6 +552,107 @@ TEST_F(ObserverSelfHealTest, RebootLimitStopsRebooting) {
   for (uint32_t t = start + kMin; t < start + 600 * kMin; t += kMin) pollAt(t);
   EXPECT_EQ((std::vector<std::string>{"alert:MQTT self-heal: stop unproven for 80m, reboot limit reached"}),
             host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, OtaInProgressBlocksTheRebootAndNeedsAFreshAlert) {
+  makeStopUnproven();
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  pollAt(start + 10 * kMin);
+  ASSERT_EQ(1u, host.calls.size());   // alert
+  host.calls.clear();
+
+  host.ota = true;
+  for (uint32_t t = start + 11 * kMin; t <= start + 30 * kMin; t += kMin) pollAt(t);
+  EXPECT_TRUE(host.calls.empty());
+
+  host.ota = false;
+  pollAt(start + 31 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"alert:MQTT self-heal: stop unproven for 31m, rebooting in 1m"}),
+            host.calls);
+  host.calls.clear();
+  pollAt(start + 32 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(start + 32 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"rtc:1:stop unproven", "reboot"}), host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, BridgeRestartDropsAllSlotsDownHoldAndPendingReboot) {
+  startRunning();
+  bridge->candidate_slots = 1;
+  bridge->evidence_age_ms = 5 * kMin;
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  pollAt(start + 120 * kMin);
+  ASSERT_EQ(1u, host.calls.size());   // alert
+  host.calls.clear();
+
+  ctl.restart(host, bridge);   // operator config save between two ticks
+  host.calls.clear();
+  pollAt(start + 121 * kMin);
+  pollAt(start + 241 * kMin - 10000);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(start + 241 * kMin);
+  EXPECT_EQ(1u, host.calls.size());
+  EXPECT_EQ(0u, host.calls[0].find("alert:MQTT self-heal: all slots down"));
+}
+
+TEST_F(ObserverSelfHealTest, SlotRestartAlsoResetsAllSlotsDownHold) {
+  startRunning();
+  bridge->candidate_slots = 1;
+  bridge->evidence_age_ms = 5 * kMin;
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  pollAt(start + 100 * kMin);
+  ctl.restartSlot(host, bridge, 0);
+  host.calls.clear();
+  pollAt(start + 120 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+}
+
+TEST_F(ObserverSelfHealTest, RestartAttemptKeepsTheStopUnprovenHold) {
+  makeStopUnproven();
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  ctl.setState(host, bridge, true);   // refused while the stop is unproven
+  ASSERT_FALSE(bridge->running);
+  host.calls.clear();
+  pollAt(start + 10 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"alert:MQTT self-heal: stop unproven for 10m, rebooting in 1m"}),
+            host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, BridgeRestartResetsTheHealthyTimer) {
+  FakeHealPlatform::rtc = MQTTSelfHealPolicy::rtcMake(1, MQTTSelfHealPolicy::Cause::AllSlotsDown);
+  startRunning();
+  bridge->connected_slots = 1;
+  pollAt(kMin);
+  pollAt(9 * kMin);
+  ctl.restart(host, bridge);
+  host.calls.clear();
+  pollAt(11 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(21 * kMin);
+  EXPECT_EQ((std::vector<std::string>{"rtc:0:none"}), host.calls);
+}
+
+TEST_F(ObserverSelfHealTest, RebootIsSkippedWhenAFreshSampleNoLongerShowsTheCause) {
+  startRunning();
+  bridge->candidate_slots = 1;
+  bridge->evidence_age_ms = 5 * kMin;
+  const uint32_t start = 40 * kMin;
+  pollAt(start);
+  pollAt(start + 120 * kMin);
+  ASSERT_EQ(1u, host.calls.size());   // alert
+  host.calls.clear();
+
+  // The tick's own sample reads 0 connected; the confirming sample sees a slot up.
+  bridge->connect_from_read = bridge->connected_reads + 2;
+  pollAt(start + 121 * kMin);
+  EXPECT_TRUE(host.calls.empty());
+  pollAt(start + 122 * kMin);   // the slot stays up: the cause lapses
+  EXPECT_TRUE(host.calls.empty());
+  EXPECT_EQ(0, MQTTSelfHealPolicy::rtcConsecutive(FakeHealPlatform::rtc));
 }
 
 int main(int argc, char** argv) {
