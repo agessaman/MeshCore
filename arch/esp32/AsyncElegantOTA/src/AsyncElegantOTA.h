@@ -5,6 +5,7 @@
 
 #include "Arduino.h"
 #include "stdlib_noniso.h"
+#include <atomic>
 
 #if defined(ESP8266)
     #include "ESP8266WiFi.h"
@@ -33,11 +34,20 @@ class AsyncElegantOtaClass{
             loop(),
             restart();
 
+        // False when no deferred restart is waiting on the main loop.
+        bool restartArmed(uint32_t& armed_ms, bool& client_closed) const;
+
     private:
         AsyncWebServer *_server;
         // Upload ownership is confined to the AsyncTCP task.
         AsyncWebServerRequest *_uploadRequest = nullptr;
         static const uint32_t UPLOAD_IDLE_TIMEOUT_SECONDS = 60;
+        // Written on the AsyncTCP task, read on the main loop.
+        std::atomic<bool> _restartPending{false};
+        std::atomic<bool> _restartClientClosed{false};
+        std::atomic<uint32_t> _restartArmedMs{0};
+
+        void armDeferredRestart();
 
         String getID();
 

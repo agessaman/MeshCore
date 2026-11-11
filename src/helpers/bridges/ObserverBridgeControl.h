@@ -69,6 +69,7 @@ public:
 
   bool resumePending() const { return _resume_pending; }
   OtaStep otaStep() const { return (OtaStep)_ota_step; }
+  bool otaPending(uint32_t scheduled_at) const { return scheduled_at != 0 || _ota_step != OTA_IDLE; }
 
   template <class Host>
   void setState(Host& host, Bridge*& bridge, bool enable) {

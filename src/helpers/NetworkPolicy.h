@@ -70,6 +70,8 @@ static constexpr uint32_t kEthernetInitRetryMaxMs = 300000;
 static constexpr uint32_t kNtpRetryMs = 30000;
 static constexpr uint32_t kManualOtaSessionTimeoutMs =
     15UL * 60UL * 1000UL;
+static constexpr uint32_t kManualOtaRestartGraceMs = 1000;
+static constexpr uint32_t kManualOtaRestartFallbackMs = 3000;
 
 static inline uint32_t ethernetInitRetryDelayMs(uint8_t attempt) {
   if (attempt == 0) return 0;
@@ -220,6 +222,16 @@ static constexpr bool manualOtaTimeoutDue(uint32_t now_ms,
                                           bool upload_in_progress) {
   return !upload_in_progress &&
          (uint32_t)(now_ms - started_ms) >= kManualOtaSessionTimeoutMs;
+}
+
+// Signed delta: a sample from before the arm is not due, and short spans wrap.
+static inline bool manualOtaRestartDue(uint32_t now_ms, uint32_t armed_ms,
+                                       bool client_closed) {
+  const int32_t elapsed = (int32_t)(now_ms - armed_ms);
+  if (elapsed < 0) return false;
+  const uint32_t elapsed_ms = (uint32_t)elapsed;
+  if (client_closed && elapsed_ms >= kManualOtaRestartGraceMs) return true;
+  return elapsed_ms >= kManualOtaRestartFallbackMs;
 }
 
 }  // namespace NetworkPolicy

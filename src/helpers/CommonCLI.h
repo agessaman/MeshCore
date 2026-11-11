@@ -371,6 +371,7 @@ public:
   virtual bool beginDeferredOtaUpdate() {
     return false;
   };
+  virtual bool isDeferredOtaUpdatePending() { return false; }
 
   virtual int getQueueSize() {
     return 0; // no op by default
