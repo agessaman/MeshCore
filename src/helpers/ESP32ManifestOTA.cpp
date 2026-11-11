@@ -401,6 +401,7 @@ bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* curr
   // A channel switch is checked before it may boot (below); native updates reboot here.
   httpUpdate.rebootOnUpdate(!cross_channel);
   t_httpUpdate_return ret = httpUpdate.update(uclient, file_url);
+  if (ret != HTTP_UPDATE_OK && Update.isRunning()) Update.abort();
   if (ret == HTTP_UPDATE_OK && cross_channel) {
     const esp_partition_t* running = esp_ota_get_running_partition();
     const esp_partition_t* target = esp_ota_get_boot_partition();
