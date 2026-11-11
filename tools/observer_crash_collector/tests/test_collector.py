@@ -57,10 +57,11 @@ class FileTests(unittest.TestCase):
         self.addCleanup(self.redirect.__exit__, None, None, None)
         self.counter = self.make_collector()
 
-    def make_collector(self, capacity=20, max_bytes=1000000):
+    def make_collector(self, capacity=20, max_bytes=1000000, snapshot_interval=60):
         deduper = collector.Deduper(capacity)
         collector.load_state(deduper, self.path)
-        return collector.Collector(deduper, self.path, max_bytes, 65536, monotonic=lambda: self.elapsed)
+        return collector.Collector(deduper, self.path, max_bytes, 65536, snapshot_interval,
+                                   monotonic=lambda: self.elapsed)
 
     def send(self, data=None, after=0, topic=TOPIC, counter=None, retained=False):
         self.elapsed = after
@@ -239,7 +240,10 @@ class FileTests(unittest.TestCase):
         with patch.dict(os.environ, {'OBSERVER_CRASH_SNAPSHOT_INTERVAL': '0'}):
             with self.assertRaises(collector.ConfigError):
                 collector.load_config(False)
-        self.assertEqual(60, collector.Config().snapshot_interval)
+        self.assertEqual(86400, collector.Config().snapshot_interval)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('OBSERVER_CRASH_SNAPSHOT_INTERVAL', None)
+            self.assertEqual(86400, collector.load_config(False).snapshot_interval)
 
     def test_stale_snapshot_replays_newer_event_kinds(self):
         self.send(payload(uptime=1000, reason='poweron', crash=None))
@@ -494,6 +498,32 @@ sys.exit(c.run_mqtt(c.Config(output=sys.argv[1]), types.SimpleNamespace(Callback
         restarted = self.make_collector()
         self.assertIsNone(self.send(payload(boot_id='3'), after=20000, counter=restarted))
         self.assertEqual(2, len(self.records()))
+
+    def test_rotation_snapshots_evidence_before_dropping_history(self):
+        counter = self.make_collector(max_bytes=1, snapshot_interval=86400)
+        nodes = ['%064x' % index for index in range(3)]
+        for index, node in enumerate(nodes):
+            self.send(changed(payload(), origin_id=node), after=index,
+                      topic=TOPIC.replace(NODE_A, node), counter=counter)
+        # Hard kill: no shutdown flush. The first node's event is no longer in either log file.
+        self.assertNotIn(nodes[0], [record['node_id'] for record in self.records()])
+        restarted = self.make_collector(snapshot_interval=86400)
+        self.assertIsNone(self.send(changed(payload(uptime=80), origin_id=nodes[0]), after=10,
+                                    topic=TOPIC.replace(NODE_A, nodes[0]), counter=restarted))
+
+    def test_default_interval_writes_nothing_for_non_event_statuses(self):
+        counter = self.make_collector(snapshot_interval=collector.DEFAULT_SNAPSHOT_INTERVAL)
+        with patch.object(collector, 'save_state') as save, \
+                patch.object(collector, 'append_record') as append:
+            for minute in range(600):
+                for index in range(20):
+                    node = '%064x' % index
+                    self.send(changed(payload(uptime=70 + minute * 60, reason='sw', crash=None),
+                                      origin_id=node),
+                              after=minute * 60, topic=TOPIC.replace(NODE_A, node), counter=counter)
+                counter.flush_state()
+            save.assert_not_called()
+            append.assert_not_called()
 
     def test_unreadable_history_is_fatal(self):
         os.mkdir(self.path)

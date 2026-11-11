@@ -51,8 +51,8 @@ receive time and uptime remain a consistent pair and newer available event recor
 restore reported kinds. A newer retained payload can falsely imply a reboot after
 a long gap, so that decision is deferred, preserving the old anchor until a fresh
 status arrives, unless boot IDs resolve it. This can delay counting or miss a
-retained-only boot; unflagged stale traffic, byte-identical boots, and history
-rotated away before a snapshot remain ambiguous.
+retained-only boot; unflagged stale traffic and byte-identical boots remain
+ambiguous.
 
 ## Storage and bounds
 
@@ -83,11 +83,14 @@ one bounded storage error and exit 1 for systemd to restart.
 a global sequence and an LRU list of `[node_key, evidence]` pairs. Evidence is
 last receive time, uptime, optional boot ID, last payload SHA-256, and reported
 kinds. Changed accepted statuses advance memory without copying the node map.
-While dirty, the network pump, connection waits, and stdin processing write at
-most one snapshot per `OBSERVER_CRASH_SNAPSHOT_INTERVAL` (default 60 seconds),
-using a monotonic clock; SIGTERM, SIGINT, and stdin EOF force a final dirty flush.
-An event carries `state_seq` and `boot_evidence` so startup can replay an append
-that preceded a failed snapshot replacement. Events and state are not a single
+Non-event statuses cause no disk writes between snapshots, which limits wear on
+SD cards. A dirty snapshot is written before each event-file rotation, on
+SIGTERM, SIGINT, and stdin EOF, and otherwise at most once per
+`OBSERVER_CRASH_SNAPSHOT_INTERVAL` (default 86400 seconds, monotonic clock).
+Each event carries `state_seq` and `boot_evidence`, so startup replays events
+newer than the snapshot and a hard kill loses only non-event uptime baselines.
+A node whose baseline is lost or stale is re-anchored by its next status; a
+reboot without a reportable kind is not an event either way. Events and state are not a single
 filesystem transaction; an event is acknowledged after its successful append,
 independently of snapshots. Older collector events can seed weaker evidence until
 new statuses arrive.
@@ -122,7 +125,7 @@ All settings use environment variables:
 | `MAX_PAYLOAD` | 65536 | Payload byte limit, capped at 65536 |
 | `NODE_CACHE` | 20000 | Node capacity, capped at 20000 |
 | `BACKOFF_MAX` | 60 | Reconnect delay cap in seconds |
-| `SNAPSHOT_INTERVAL` | 60 | Minimum seconds between periodic dirty snapshots |
+| `SNAPSHOT_INTERVAL` | 86400 | Minimum seconds between periodic dirty snapshots |
 
 Enable TLS when sending credentials over an untrusted network. Credentials do
 not appear in logs, records, or command arguments. `collector.env.example`

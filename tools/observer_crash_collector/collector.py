@@ -30,6 +30,8 @@ UPTIME_PERIOD = 2**32 / 1000
 MAX_PAYLOAD = 65536
 MAX_RECORD = 8192
 MAX_NODES = 20000
+# Events carry their own boot evidence, so routine snapshots can be rare (SD wear).
+DEFAULT_SNAPSHOT_INTERVAL = 86400
 SUMMARY_CRASH_LIMIT = 200
 HEX64 = re.compile(r'[0-9a-fA-F]{64}')
 HEX8 = re.compile(r'[0-9a-fA-F]{8}')
@@ -405,7 +407,7 @@ def save_state(deduper: Deduper, path: str) -> None:
     fsync_directory(path)
 
 
-def append_record(output_path: str, record: dict, max_bytes: int) -> None:
+def append_record(output_path: str, record: dict, max_bytes: int, before_rotate=None) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     line = (json.dumps(record, separators=(',', ':'), ensure_ascii=True, allow_nan=False) + '\n').encode('ascii')
     if len(line) > MAX_RECORD:
@@ -415,6 +417,9 @@ def append_record(output_path: str, record: dict, max_bytes: int) -> None:
     except FileNotFoundError:
         size = 0
     if size and size + len(line) > max_bytes:
+        if before_rotate is not None:
+            # Rotation drops the old .1, so persist its boot evidence first.
+            before_rotate()
         os.replace(output_path, output_path + '.1')
         fsync_directory(output_path)
     with open(output_path, 'ab') as handle:
@@ -453,7 +458,7 @@ class Collector:
     """Transport-independent glue: parse, dedup, append, count."""
 
     def __init__(self, deduper: Deduper, output_path: str, max_bytes: int, max_payload: int,
-                 snapshot_interval: float = 60, monotonic=None) -> None:
+                 snapshot_interval: float = DEFAULT_SNAPSHOT_INTERVAL, monotonic=None) -> None:
         self.deduper = deduper
         self.output_path = output_path
         self.max_bytes = max_bytes
@@ -494,7 +499,8 @@ class Collector:
         record, state = self.deduper.prepare(event, retained)
         if state is not self.deduper.nodes.get(event.node_id):
             if record is not None:
-                append_record(self.output_path, record, self.max_bytes)
+                append_record(self.output_path, record, self.max_bytes,
+                              before_rotate=lambda: self.flush_state(force=True))
             self.deduper.commit(event, state)
         if record is None:
             self.counters.count("discarded")
@@ -525,7 +531,7 @@ class Config:
     max_payload: int = 65536
     node_cache: int = 20000
     backoff_max: int = 60
-    snapshot_interval: int = 60
+    snapshot_interval: int = DEFAULT_SNAPSHOT_INTERVAL
 
 
 class ConfigError(Exception):
@@ -575,7 +581,7 @@ def load_config(require_host: bool) -> Config:
     config.max_payload = min(MAX_PAYLOAD, _env_int("OBSERVER_CRASH_MAX_PAYLOAD", MAX_PAYLOAD))
     config.node_cache = min(MAX_NODES, _env_int("OBSERVER_CRASH_NODE_CACHE", MAX_NODES))
     config.backoff_max = _env_int("OBSERVER_CRASH_BACKOFF_MAX", 60)
-    config.snapshot_interval = _env_int("OBSERVER_CRASH_SNAPSHOT_INTERVAL", 60)
+    config.snapshot_interval = _env_int("OBSERVER_CRASH_SNAPSHOT_INTERVAL", DEFAULT_SNAPSHOT_INTERVAL)
     if not config.client_id:
         config.client_id = "observer-crash-collector-" + secrets.token_hex(4)
 
