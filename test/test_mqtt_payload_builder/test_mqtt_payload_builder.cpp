@@ -270,7 +270,7 @@ TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
 // heap_min shares heap_largest's 8388608 ceiling; the longest reset token is "deepsleep";
 // the longest self-heal token is "client_quarantined" and the count tops out at 255.
 TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
-  constexpr size_t kStatusJsonBufferSize = 1152;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  constexpr size_t kStatusJsonBufferSize = 1280;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
   const std::string origin(31, '"');                 // _origin[32], worst-case escaping
   const std::string origin_id(64, 'A');              // _device_id[65]
   const std::string model(63, 'M');                  // _board_model[64]
@@ -356,10 +356,11 @@ TEST(MQTTPayloadBuilder, StatusWithoutCrashLeavesFlagFalse) {
   EXPECT_EQ(std::string::npos, std::string(buffer).find("crash"));
 }
 
-// The crash object adds at most ",\"crash\":" (9) + 159 = 168 bytes. At the real field
-// maxima that overflows 1024, so the field must be dropped and the rest still published.
+// The crash object adds at most ",\"crash\":" (9) + 159 = 168 bytes. A 1024-byte
+// buffer is short of the field maxima, so the field must be dropped and the rest
+// still published.
 TEST(MQTTPayloadBuilder, WorstCaseStatusDropsCrashInsteadOfOverflowing) {
-  constexpr size_t kStatusJsonBufferSize = 1024;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  constexpr size_t kStatusJsonBufferSize = 1024;
   const std::string origin(31, '"');
   const std::string origin_id(64, 'A');
   const std::string model(63, 'M');
@@ -393,6 +394,51 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusDropsCrashInsteadOfOverflowing) {
   JsonDocument parsed;
   ASSERT_FALSE(deserializeJson(parsed, buffer));
   EXPECT_FALSE(parsed["crash"].is<JsonVariant>());
+  EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
+}
+
+// The production status buffer must keep the crash field at the same field maxima.
+// Overflow drops the field and the bridge then never marks the stored dump published.
+TEST(MQTTPayloadBuilder, WorstCaseStatusKeepsWidestCrashInProductionBuffer) {
+  constexpr size_t kStatusJsonBufferSize = 1280;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  const std::string origin(31, '"');
+  const std::string origin_id(64, 'A');
+  const std::string model(63, 'M');
+  const std::string firmware(63, 'F');
+  const std::string client_version(63, 'C');
+  const std::string radio("9999.999999,1000.0,12,8");
+  const std::string crash = widestCrashFragment();
+  ASSERT_LT(crash.size(), CrashReportFormat::kJsonMax);
+
+  MQTTConnHealth health;
+  health.slots_up = 0;
+  health.slots_total = 6;
+  health.worst_outage_secs = 4294967;
+  health.heap_largest = 8388608;
+  health.connect_failures = 2147483647;
+  health.slots_breaker = 6;
+
+  JsonDocument scratch;
+  char buffer[kStatusJsonBufferSize];
+  bool included = false;
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, origin.c_str(), origin_id.c_str(), model.c_str(), firmware.c_str(),
+      radio.c_str(), client_version.c_str(), "online", kTimestamp,
+      buffer, sizeof(buffer),
+      4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
+      8388608, 2147483647, 2147483647,
+      "off", health, 8388608, "deepsleep", crash.c_str(), &included,
+      "client_quarantined", 255);
+
+  ASSERT_GT(len, 0) << "worst-case status plus crash overflowed the "
+                    << kStatusJsonBufferSize << "-byte production buffer";
+  EXPECT_TRUE(included) << "len=" << len;
+  EXPECT_LT(static_cast<size_t>(len), kStatusJsonBufferSize - 32)
+      << "less than 32 bytes of headroom left (len=" << len << ")";
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_TRUE(parsed["crash"].is<JsonObject>());
+  EXPECT_STREQ("TTTTTTTTTTTTTTT", parsed["crash"]["task"].as<const char*>());
   EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
 }
 

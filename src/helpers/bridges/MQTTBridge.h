@@ -418,7 +418,8 @@ private:
   // failed. See the worst-case test in test_mqtt_payload_builder.
   // Raised to 1152 for the self-heal fields, which left 20 bytes at the maxima; the
   // status build has no stack fallback any more, so this costs no RAM.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 1152;
+  // 1280 keeps a maximum-width crash field on that same payload.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1280;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
   // The status `crash` fragment is formatted into the scratch tail past the status JSON.
