@@ -1,4 +1,5 @@
 #include "ge.h"
+#include "secure_zero.h"
 #include "precomp_data.h"
 
 
@@ -431,6 +432,11 @@ void ge_scalarmult_base(ge_p3 *h, const unsigned char *a) {
         ge_madd(&r, h, &t);
         ge_p1p1_to_p3(h, &r);
     }
+    ed25519_secure_zero(e, sizeof(e));
+    ed25519_secure_zero(&carry, sizeof(carry));
+    ed25519_secure_zero(&r, sizeof(r));
+    ed25519_secure_zero(&s, sizeof(s));
+    ed25519_secure_zero(&t, sizeof(t));
 }
 
 

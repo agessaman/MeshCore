@@ -9,6 +9,7 @@
 #include <new>
 
 #include <ed_25519.h>
+#include <secure_zero.h>
 
 #include "../NetworkLink.h"
 #include "PollControlJson.h"
@@ -49,7 +50,7 @@ struct WipingAllocator : ArduinoJson::Allocator {
     uint8_t* base = static_cast<uint8_t*>(ptr) - 8;
     size_t size = 0;
     memcpy(&size, base, sizeof(size));
-    memset(ptr, 0, size);
+    ed25519_secure_zero(ptr, size);
     heap_caps_free(base);
   }
   void* reallocate(void* ptr, size_t new_size) override {
@@ -106,8 +107,11 @@ struct Conn {
   size_t rpos = 0;
   size_t rlen = 0;
 
+  ~Conn() { destroy(); }
+
   void close() {
     if (c) c->stop();
+    ed25519_secure_zero(rbuf, sizeof(rbuf));
     reusable = false;
     rpos = rlen = 0;
   }
@@ -476,7 +480,7 @@ bool expandSharedKey(const uint8_t pub[kPubKeySize], const uint8_t* prv, uint8_t
     return false;
   }
   if (memcmp(derived, pub, kPubKeySize) != 0) {
-    memset(out, 0, 64);
+    ed25519_secure_zero(out, 64);
     return false;
   }
   return true;
@@ -589,7 +593,6 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
     for (size_t i = 0; i <= kControlBodyMax; i++) vb[i] = 0;
   }
 
-  k->destroy();
   delete k;
   POLL_CTL_LOG("control session done in %lums: owners=%d policy=%d reg=%d shared=%d "
                "int_heap=%u->%u max_blk=%u->%u int_low=%u->%u",
