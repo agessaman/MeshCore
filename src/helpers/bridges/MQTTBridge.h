@@ -18,6 +18,11 @@
 #include "helpers/MQTTClientState.h"
 #include "helpers/MQTTConnectionPolicy.h"
 #include "helpers/ObserverBuildDefaults.h"
+#include "helpers/poll/PollBuild.h"
+#if defined(WITH_REPEATER_POLL)
+#include "helpers/poll/PollControlTypes.h"
+struct MQTTPollSession;   // the session task's own copy (MQTTBridge.cpp)
+#endif
 #include <atomic>
 
 #ifdef WITH_SNMP
@@ -467,6 +472,34 @@ private:
   std::atomic<uint32_t> _neighbors_secs_until_next;
 #endif
 
+#if defined(WITH_REPEATER_POLL)
+  // CoreScope control mailbox. The mesh loop fills _poll_ctl_box->req and takes
+  // ->res; the MQTT task runs the session on a short-lived task of its own so a
+  // slow server never stalls packet publishing. Allocated on first request.
+  struct PollControlBox {
+    poll::ControlRequest req;
+    poll::ControlResult res;
+  };
+  PollControlBox* _poll_ctl_box;
+  std::atomic<uint8_t> _poll_ctl_state;    // poll::ControlMailbox
+  MQTTPollSession* _poll_session;            // MQTT task only; the session in flight
+  uint32_t _poll_ctl_seen_ms;              // MQTT task: first pass that saw REQUESTED, 0 = none
+  uint32_t _poll_session_started_ms;       // MQTT task
+  bool _poll_session_tls;                  // MQTT task: the session holds the handshake guard
+  // Claim hand-off: same pattern as the neighbors snapshot, one slot, QoS 1.
+  char* _poll_claim_buf;
+  size_t _poll_claim_len;
+  uint8_t _poll_claim_slot;                // 1-based
+  std::atomic<uint8_t> _poll_claim_state;  // poll::ClaimPublish
+  // Set once the mesh first uses either hand-off, so a node with polling off
+  // pays one atomic load per bridge pass and nothing else.
+  std::atomic<bool> _poll_used;
+  void servicePollControl();
+  void servicePollClaim();
+  void finishPollControl(bool started);
+  void stopPollControl();
+#endif
+
   // Routes the shared document's pools to PSRAM where the board has it, matching the
   // neighbors document's allocator in MyMesh.cpp. ArduinoJson's default allocator is
   // plain malloc(), which puts every per-publish pool block in internal DRAM next to
@@ -810,6 +843,20 @@ public:
     NBR_DUE,        // publish is due, waiting on the bridge/WiFi to come up
   };
   void setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_next);
+#endif
+
+#if defined(WITH_REPEATER_POLL)
+  // Mesh loop only; none of these block. requestPollControl is refused while a
+  // session is requested, running or its result is still untaken.
+  bool requestPollControl(const poll::ControlRequest& req);
+  bool takePollControlResult(poll::ControlResult& out);
+  // slot is 1-based. Refused while the previous claim is still pending.
+  bool requestPublishPollClaim(const char* json, size_t len, uint8_t slot);
+  uint8_t takePollClaimResult();   // poll::ClaimPublish; a final answer is returned once
+#if defined(POLL_TEST_CONTROL_CLI)
+  // Bench only: the running bridge, for `get poll.ctl`.
+  static MQTTBridge* pollBenchInstance();
+#endif
 #endif
 
   int getConnectedBrokers() const;

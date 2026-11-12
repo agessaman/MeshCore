@@ -13,6 +13,9 @@
 #include "../AdvertSignature.h"
 #include "../TxtDataHelpers.h"
 #include "../CrashReport.h"
+#if defined(WITH_REPEATER_POLL)
+#include "../poll/PollControlClient.h"
+#endif
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include <time.h>
@@ -27,7 +30,7 @@
 
 #ifdef ESP_PLATFORM
 #include <esp_wifi.h>
-#include <esp_tls.h>
+#include <esp_tls_errors.h>  // not esp_tls.h: its sys/poll.h clashes with namespace poll
 #include <esp_random.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
@@ -891,6 +894,20 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   _neighbors_secs_until_next.store(0, std::memory_order_relaxed);
 #endif
 
+#if defined(WITH_REPEATER_POLL)
+  _poll_ctl_box = nullptr;
+  _poll_ctl_state.store(poll::CONTROL_IDLE, std::memory_order_relaxed);
+  _poll_session = nullptr;
+  _poll_ctl_seen_ms = 0;
+  _poll_session_started_ms = 0;
+  _poll_session_tls = false;
+  _poll_claim_buf = nullptr;
+  _poll_claim_len = 0;
+  _poll_claim_slot = 0;
+  _poll_claim_state.store(poll::CLAIM_NONE, std::memory_order_relaxed);
+  _poll_used.store(false, std::memory_order_relaxed);
+#endif
+
   // Initialize JWT username
   _jwt_username[0] = '\0';
 
@@ -971,6 +988,19 @@ void MQTTBridge::releaseRuntimeBuffers() {
       _neighbors_json_buffer, psram_free));
   _neighbors_publish_len = 0;
   _neighbors_publish_pending.store(false, std::memory_order_release);
+#endif
+
+#if defined(WITH_REPEATER_POLL)
+  // The request may hold a private key; the session task never points here.
+  if (_poll_ctl_box) memset(_poll_ctl_box, 0, sizeof(*_poll_ctl_box));
+  _poll_ctl_box = static_cast<PollControlBox*>(MQTTRuntimeBufferLifecycle::release(
+      _poll_ctl_box, psram_free));
+  _poll_ctl_state.store(poll::CONTROL_IDLE, std::memory_order_release);
+  _poll_ctl_seen_ms = 0;
+  _poll_claim_buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+      _poll_claim_buf, psram_free));
+  _poll_claim_len = 0;
+  _poll_claim_state.store(poll::CLAIM_NONE, std::memory_order_release);
 #endif
 
   // Never pair a newly allocated raw buffer with metadata from a prior bridge
@@ -1519,6 +1549,10 @@ void MQTTBridge::mqttTaskLoop() {
     // trampoline (vTaskDelete(nullptr)).
     if (_stop_requested.load(std::memory_order_acquire)) {
       MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop - tearing down clients on Core 0");
+#if defined(WITH_REPEATER_POLL)
+      // Before the clients go: a session may still be reading the shared CA bundle.
+      stopPollControl();
+#endif
       // Drop queued reconfigures so shutdown does not start a handshake.
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         _slot_reconfigure_pending[i] = false;
@@ -1692,6 +1726,13 @@ void MQTTBridge::mqttTaskLoop() {
         MQTT_DEBUG_PRINTLN("Neighbors publish failed");
       }
       _neighbors_publish_pending.store(false, std::memory_order_release);
+    }
+#endif
+
+#if defined(WITH_REPEATER_POLL)
+    if (_poll_used.load(std::memory_order_acquire)) {
+      servicePollControl();
+      servicePollClaim();
     }
 #endif
 
@@ -4883,6 +4924,294 @@ bool MQTTBridge::publishNeighbors() {
   return published;
 }
 #endif  // WITH_MQTT_NEIGHBORS
+
+#if defined(WITH_REPEATER_POLL)
+// ---------------------------------------------------------------------------
+// CoreScope control session and claim publication
+// ---------------------------------------------------------------------------
+
+#if defined(MQTT_DEBUG)
+  #define POLL_BRIDGE_LOG(F, ...) do { if (Serial.availableForWrite() > 0) { Serial.printf("POLL: " F "\n", ##__VA_ARGS__); } } while (0)
+#else
+  #define POLL_BRIDGE_LOG(...) do {} while (0)
+#endif
+
+// One session task at a time across bridge restarts: a task abandoned by a
+// stop still owns the client's body buffer until it exits.
+static std::atomic<bool> s_poll_session_alive(false);
+
+// A session stuck in DNS past its budget is abandoned, not waited on.
+static const uint32_t POLL_SESSION_GRACE_MS = 3000;
+// Preconditions that never come true end the request with started = false.
+static const uint32_t POLL_CONTROL_WAIT_MS = 120000;
+// mbedTLS runs the handshake on the calling task. Arduino's loopTask does
+// HTTPS in 8 KB; the extra 2 KB covers the session's own frames.
+static const uint32_t POLL_SESSION_STACK = 10240;
+
+enum PollSessionState : uint8_t { POLL_SESSION_RUNNING = 0, POLL_SESSION_DONE, POLL_SESSION_ORPHANED };
+
+struct MQTTPollSession {
+  poll::ControlRequest req;
+  poll::ControlResult res;
+  std::atomic<uint8_t> state;   // PollSessionState
+  std::atomic<bool> abort;
+  bool tls_ready;
+  uint32_t stack_free;
+};
+
+static void freePollSession(MQTTPollSession* s) {
+  // Request and result both may hold private keys.
+  volatile uint8_t* p = reinterpret_cast<volatile uint8_t*>(s);
+  for (size_t i = 0; i < sizeof(*s); i++) p[i] = 0;
+  psram_free(s);
+}
+
+static void pollSessionTask(void* arg) {
+  MQTTPollSession* s = static_cast<MQTTPollSession*>(arg);
+  poll::ControlEnv env;
+  env.abort = &s->abort;
+  env.tls_bundle_ready = s->tls_ready;
+  poll::runControlSession(s->req, s->res, env);
+  memset(s->req.reg_body, 0, sizeof(s->req.reg_body));
+  s->stack_free = (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
+  uint8_t expected = POLL_SESSION_RUNNING;
+  if (!s->state.compare_exchange_strong(expected, POLL_SESSION_DONE, std::memory_order_acq_rel)) {
+    // The bridge stopped or gave up on this session; nobody else frees it.
+    freePollSession(s);
+  }
+  s_poll_session_alive.store(false, std::memory_order_release);
+  vTaskDelete(nullptr);
+}
+
+bool MQTTBridge::requestPollControl(const poll::ControlRequest& req) {
+  if (_poll_ctl_state.load(std::memory_order_acquire) != poll::CONTROL_IDLE) return false;
+  // Same rule as requestPublishNeighbors: a stopped bridge must not allocate.
+  if (!isRunning()) return false;
+  _poll_ctl_box = static_cast<PollControlBox*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _poll_ctl_box, sizeof(PollControlBox), psram_malloc));
+  if (!_poll_ctl_box) return false;
+  memcpy(&_poll_ctl_box->req, &req, sizeof(req));
+  _poll_ctl_box->req.url[sizeof(_poll_ctl_box->req.url) - 1] = '\0';
+  _poll_ctl_state.store(poll::CONTROL_REQUESTED, std::memory_order_release);
+  _poll_used.store(true, std::memory_order_release);
+  return true;
+}
+
+bool MQTTBridge::takePollControlResult(poll::ControlResult& out) {
+  if (_poll_ctl_state.load(std::memory_order_acquire) != poll::CONTROL_DONE) return false;
+  memcpy(&out, &_poll_ctl_box->res, sizeof(out));
+  poll::wipeControlResult(_poll_ctl_box->res);
+  _poll_ctl_state.store(poll::CONTROL_IDLE, std::memory_order_release);
+  return true;
+}
+
+bool MQTTBridge::requestPublishPollClaim(const char* json, size_t len, uint8_t slot) {
+  // A cut claim would be invalid JSON, so an oversized one is refused whole.
+  if (!json || len == 0 || len > poll::kClaimJsonMax) return false;
+  if (slot < 1 || slot > RUNTIME_MQTT_SLOTS) return false;
+  if (_poll_claim_state.load(std::memory_order_acquire) == poll::CLAIM_PENDING) return false;
+  if (!isRunning()) return false;
+  _poll_claim_buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _poll_claim_buf, poll::kClaimJsonMax + 1, psram_malloc));
+  if (!_poll_claim_buf) return false;
+  memcpy(_poll_claim_buf, json, len);
+  _poll_claim_buf[len] = '\0';
+  _poll_claim_len = len;
+  _poll_claim_slot = slot;
+  _poll_claim_state.store(poll::CLAIM_PENDING, std::memory_order_release);
+  _poll_used.store(true, std::memory_order_release);
+  return true;
+}
+
+uint8_t MQTTBridge::takePollClaimResult() {
+  uint8_t s = _poll_claim_state.load(std::memory_order_acquire);
+  if (s != poll::CLAIM_PUBLISHED && s != poll::CLAIM_FAILED) return s;
+  // The MQTT task writes only while PENDING, so this cannot lose a newer answer.
+  _poll_claim_state.store(poll::CLAIM_NONE, std::memory_order_release);
+  return s;
+}
+
+void MQTTBridge::servicePollClaim() {
+  if (_poll_claim_state.load(std::memory_order_acquire) != poll::CLAIM_PENDING) return;
+  const int i = (int)_poll_claim_slot - 1;
+  bool ok = false;
+  if (i >= 0 && i < RUNTIME_MQTT_SLOTS && _slots[i].enabled && _slots[i].client &&
+      _slots[i].connected) {
+    char topic[128];
+    // The router refuses the polling topic on presets that do not take it.
+    if (buildTopicForSlot(i, MSG_POLLING, topic, sizeof(topic))) {
+      ok = publishToSlot(i, topic, _poll_claim_buf, _poll_claim_len, false, 1);
+    }
+  }
+  if (ok) {
+    POLL_BRIDGE_LOG("claim queued on MQTT%d (%u bytes)", i + 1, (unsigned)_poll_claim_len);
+  } else {
+    POLL_BRIDGE_LOG("claim not published on MQTT%d", i + 1);
+  }
+  _poll_claim_state.store(ok ? poll::CLAIM_PUBLISHED : poll::CLAIM_FAILED, std::memory_order_release);
+}
+
+void MQTTBridge::finishPollControl(bool started) {
+  memset(&_poll_ctl_box->res, 0, sizeof(_poll_ctl_box->res));
+  _poll_ctl_box->res.started = started;
+  _poll_ctl_box->res.finished_at = (uint32_t)time(nullptr);
+  poll::policyDefaults(_poll_ctl_box->res.policy);
+  _poll_ctl_state.store(poll::CONTROL_DONE, std::memory_order_release);
+}
+
+void MQTTBridge::servicePollControl() {
+  const uint32_t now = millis();
+
+  if (_poll_session) {
+    MQTTPollSession* s = _poll_session;
+    bool done = s->state.load(std::memory_order_acquire) == POLL_SESSION_DONE;
+    if (!done && (uint32_t)(now - _poll_session_started_ms) >=
+                     poll::kControlBudgetMs + POLL_SESSION_GRACE_MS) {
+      s->abort.store(true, std::memory_order_release);
+      uint8_t expected = POLL_SESSION_RUNNING;
+      if (s->state.compare_exchange_strong(expected, POLL_SESSION_ORPHANED,
+                                           std::memory_order_acq_rel)) {
+        // The task frees its copy when it gets out; report what was asked as timed out.
+        POLL_BRIDGE_LOG("control session overran its budget, abandoned");
+        const uint8_t want = s->req.want;
+        const bool reg = s->req.reg_body_len > 0;
+        _poll_session = nullptr;
+        finishPollControl(true);
+        poll::ControlResult& r = _poll_ctl_box->res;
+        if (want & poll::WANT_OWNERS) r.owners_status = poll::CTL_ERR_TIMEOUT;
+        if (want & poll::WANT_POLICY) r.policy_status = poll::CTL_ERR_TIMEOUT;
+        if ((want & poll::WANT_REGISTER) && reg) r.reg_status = poll::CTL_ERR_TIMEOUT;
+        if (want & poll::WANT_SHARED_KEY) r.shared_status = poll::CTL_ERR_TIMEOUT;
+      } else {
+        done = true;
+      }
+    }
+    if (done) {
+      memcpy(&_poll_ctl_box->res, &s->res, sizeof(s->res));
+      _poll_ctl_box->res.finished_at = (uint32_t)time(nullptr);
+      POLL_BRIDGE_LOG("control session task exited, stack free %u of %u",
+                      (unsigned)s->stack_free, (unsigned)POLL_SESSION_STACK);
+      freePollSession(s);
+      _poll_session = nullptr;
+      _poll_ctl_state.store(poll::CONTROL_DONE, std::memory_order_release);
+    }
+  }
+
+  // Hold the cross-slot guard for as long as an HTTPS session task lives, even
+  // an abandoned one: its TLS working set is still on the internal heap.
+  if (_poll_session_tls) {
+    if (s_poll_session_alive.load(std::memory_order_acquire)) {
+      if (MQTTConnectionPolicy::elapsedMs(now, (uint32_t)_last_slot_reconnect_ms) +
+              2000UL >= MQTTConnectionPolicy::kReconnectGuardMs) {
+        _last_slot_reconnect_ms = now;
+        _guard_armed_by_slot = -1;
+      }
+    } else {
+      _poll_session_tls = false;
+    }
+  }
+
+  if (_poll_session) return;
+  if (_poll_ctl_state.load(std::memory_order_acquire) != poll::CONTROL_REQUESTED) {
+    _poll_ctl_seen_ms = 0;
+    return;
+  }
+  if (_poll_ctl_seen_ms == 0) _poll_ctl_seen_ms = now ? now : 1;
+
+  const bool tls = strncasecmp(_poll_ctl_box->req.url, "https://", 8) == 0;
+  const char* wait = nullptr;
+  if (!_network->isConnected()) {
+    wait = "link down";
+  } else if (!_ntp_synced) {
+    wait = "clock not synced";
+  } else if (s_poll_session_alive.load(std::memory_order_acquire)) {
+    wait = "previous session still exiting";
+  } else if (tls && (!MQTTConnectionPolicy::bounceHandshakeAllowed(
+                         false, now, static_cast<uint32_t>(_last_slot_reconnect_ms)) ||
+                     _bounce_waiting_mask != 0)) {
+    // Same test a token-renewal bounce makes before it opens a handshake.
+    wait = "handshake guard busy";
+  }
+  if (wait) {
+    if ((uint32_t)(now - _poll_ctl_seen_ms) >= POLL_CONTROL_WAIT_MS) {
+      POLL_BRIDGE_LOG("control session not started: %s", wait);
+      _poll_ctl_seen_ms = 0;
+      finishPollControl(false);
+    }
+    return;
+  }
+
+  MQTTPollSession* s = static_cast<MQTTPollSession*>(psram_calloc(1, sizeof(MQTTPollSession)));
+  if (!s) {
+    POLL_BRIDGE_LOG("control session not started: no memory");
+    _poll_ctl_seen_ms = 0;
+    finishPollControl(false);
+    return;
+  }
+  new (&s->state) std::atomic<uint8_t>(POLL_SESSION_RUNNING);
+  new (&s->abort) std::atomic<bool>(false);
+  memcpy(&s->req, &_poll_ctl_box->req, sizeof(s->req));
+  memset(_poll_ctl_box->req.reg_body, 0, sizeof(_poll_ctl_box->req.reg_body));
+
+  if (tls) {
+#if ESP_IDF_VERSION_MAJOR < 5
+    // Loaded once for every TLS user, exactly as setupSlot() does; a reload
+    // would free the table under a slot's handshake.
+    if (!s_ca_bundle_loaded && rootca_crt_bundle_start != nullptr &&
+        rootca_crt_bundle_end != nullptr && rootca_crt_bundle_end > rootca_crt_bundle_start) {
+      arduino_esp_crt_bundle_set(rootca_crt_bundle_start);
+      s_ca_bundle_loaded = true;
+    }
+    s->tls_ready = s_ca_bundle_loaded;
+#else
+    s->tls_ready = false;
+#endif
+    // Arm the cross-slot guard the way a renewal bounce does.
+    _last_slot_reconnect_ms = now;
+    _guard_armed_by_slot = -1;
+    _poll_session_tls = true;
+  }
+
+  s_poll_session_alive.store(true, std::memory_order_release);
+  _poll_ctl_state.store(poll::CONTROL_RUNNING, std::memory_order_release);
+  TaskHandle_t handle = nullptr;
+  if (xTaskCreatePinnedToCore(pollSessionTask, "PollCtl", POLL_SESSION_STACK, s,
+                              MQTT_TASK_PRIORITY, &handle, MQTT_TASK_CORE) != pdPASS) {
+    s_poll_session_alive.store(false, std::memory_order_release);
+    freePollSession(s);
+    POLL_BRIDGE_LOG("control session not started: task create failed");
+    _poll_ctl_seen_ms = 0;
+    finishPollControl(false);
+    return;
+  }
+  _poll_session = s;
+  _poll_session_started_ms = now;
+  _poll_ctl_seen_ms = 0;
+}
+
+void MQTTBridge::stopPollControl() {
+  MQTTPollSession* s = _poll_session;
+  if (!s) return;
+  _poll_session = nullptr;
+  s->abort.store(true, std::memory_order_release);
+  // The abort is seen within a read poll; a connect or DNS wait is not interruptible.
+  for (int i = 0; i < 100 && s->state.load(std::memory_order_acquire) != POLL_SESSION_DONE; i++) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  uint8_t expected = POLL_SESSION_RUNNING;
+  if (!s->state.compare_exchange_strong(expected, POLL_SESSION_ORPHANED,
+                                        std::memory_order_acq_rel)) {
+    freePollSession(s);   // it finished
+  }
+}
+
+#if defined(POLL_TEST_CONTROL_CLI)
+MQTTBridge* MQTTBridge::pollBenchInstance() {
+  MQTTBridge* b = s_mqtt_bridge_instance;
+  return (b && b->_initialized) ? b : nullptr;
+}
+#endif
+#endif  // WITH_REPEATER_POLL
 
 // ---------------------------------------------------------------------------
 // Queue management
