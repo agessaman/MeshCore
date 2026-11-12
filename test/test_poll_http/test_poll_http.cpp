@@ -108,6 +108,50 @@ TEST(PollHttp, LineAcceptsFinalBudgetByteAndPropagatesReadFailures) {
   }
 }
 
+TEST(PollHttp, LateConnectOrCancellationPreventsAnyWrite) {
+  const uint8_t data[] = {1, 2, 3};
+  size_t writes = 0;
+  auto write = [&](const uint8_t*, size_t n) { ++writes; return (int)n; };
+  for (int stopped : {0, -2}) {
+    EXPECT_EQ(stopped, poll::writeHttpBytes(data, sizeof(data), [&]() { return stopped; },
+                                          write, []() {}));
+  }
+  EXPECT_EQ(0u, writes);
+}
+
+TEST(PollHttp, WritesStopOnBudgetEvenWithPartialProgress) {
+  const uint8_t data[] = {1, 2, 3, 4};
+  size_t sent = 0;
+  auto ready = [&]() { return sent < 2 ? 1 : 0; };
+  auto write = [&](const uint8_t* p, size_t) { EXPECT_EQ(data[sent], *p); ++sent; return 1; };
+  EXPECT_EQ(0, poll::writeHttpBytes(data, sizeof(data), ready, write, []() {}));
+  EXPECT_EQ(2u, sent);
+}
+
+TEST(PollHttp, BlockedWriteYieldsAndRegistrationBodyChecksCancellation) {
+  const uint8_t data[] = {1, 2, 3};
+  int state = 1;
+  size_t writes = 0;
+  auto ready = [&]() { return state; };
+  auto blocked = [&](const uint8_t*, size_t) { ++writes; return 0; };
+  EXPECT_EQ(0, poll::writeHttpBytes(data, sizeof(data), ready, blocked, [&]() { state = 0; }));
+  EXPECT_EQ(1u, writes);
+
+  state = 1;
+  auto header = [&](const uint8_t*, size_t n) { state = -2; ++writes; return (int)n; };
+  EXPECT_EQ(-2, poll::writeHttpBytes(data, sizeof(data), ready, header, []() {}));
+  EXPECT_EQ(-2, poll::writeHttpBytes(data, sizeof(data), ready, blocked, []() {}));
+  EXPECT_EQ(2u, writes);
+}
+
+TEST(PollHttp, CompleteWriteAndTransportFailure) {
+  const uint8_t data[] = {1, 2};
+  EXPECT_EQ(1, poll::writeHttpBytes(data, sizeof(data), []() { return 1; },
+                                   [](const uint8_t*, size_t n) { return (int)n; }, []() {}));
+  EXPECT_EQ(-1, poll::writeHttpBytes(data, sizeof(data), []() { return 1; },
+                                    [](const uint8_t*, size_t) { return -1; }, []() {}));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

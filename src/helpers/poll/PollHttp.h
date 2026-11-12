@@ -35,6 +35,23 @@ static inline int readHttpLine(ReadByte read_byte, char* line, size_t cap, size_
   return 1;
 }
 
+// Nonblocking writes yield when full and recheck cancellation and budget each time.
+// Returns 1, 0 for timeout, -2 for cancellation, or -1 for transport failure.
+template <typename Ready, typename WriteSome, typename Wait>
+static inline int writeHttpBytes(const uint8_t* data, size_t len, Ready ready,
+                                 WriteSome write_some, Wait wait) {
+  size_t sent = 0;
+  while (sent < len) {
+    const int r = ready();
+    if (r <= 0) return r;
+    const int n = write_some(data + sent, len - sent);
+    if (n < 0 || (size_t)n > len - sent) return -1;
+    sent += (size_t)n;
+    if (n == 0) wait();
+  }
+  return ready();
+}
+
 struct HttpBase {
   bool     tls;
   uint16_t port;

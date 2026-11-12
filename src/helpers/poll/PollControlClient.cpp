@@ -13,6 +13,7 @@
 
 #include "../NetworkLink.h"
 #include "PollControlJson.h"
+#include "PollControlSocket.h"
 #include "PollHttp.h"
 
 #if defined(MQTT_DEBUG)
@@ -70,6 +71,11 @@ struct WipingAllocator : ArduinoJson::Allocator {
 class BundleTlsClient : public WiFiClientSecure {
  public:
   void useLoadedBundle() { _use_ca_bundle = true; }
+  int writeSome(const uint8_t* data, size_t len) {
+    const int n = mbedtls_ssl_write(&sslclient->ssl_ctx, data, len);
+    if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
+    return n;
+  }
   // Set the fields directly: setTimeout() also pokes the socket, which after a
   // failed connect is a stale descriptor.
   void setLimits(int connect_ms, unsigned long handshake_ms) {
@@ -90,7 +96,7 @@ bool aborted(const ControlEnv& env) {
   return !activeNetworkLink().isConnected();
 }
 
-int readReady(uint32_t deadline, const ControlEnv& env) {
+int ioReady(uint32_t deadline, const ControlEnv& env) {
   if (aborted(env)) return -2;
   return expired(deadline) ? 0 : 1;
 }
@@ -128,7 +134,7 @@ struct Conn {
 // > 0 bytes read, 0 timeout, -1 peer closed, -2 link down or stop requested.
 int readSome(Conn& k, uint8_t* dst, size_t want, uint32_t deadline, const ControlEnv& env) {
   for (;;) {
-    const int ready = readReady(deadline, env);
+    const int ready = ioReady(deadline, env);
     if (ready <= 0) return ready;
     const int avail = k.c->available();
     if (avail > 0) {
@@ -142,7 +148,7 @@ int readSome(Conn& k, uint8_t* dst, size_t want, uint32_t deadline, const Contro
 }
 
 int readByte(Conn& k, uint8_t* out, uint32_t deadline, const ControlEnv& env) {
-  const int ready = readReady(deadline, env);
+  const int ready = ioReady(deadline, env);
   if (ready <= 0) return ready;
   if (k.rpos == k.rlen) {
     const int n = readSome(k, k.rbuf, sizeof(k.rbuf), deadline, env);
@@ -188,6 +194,7 @@ int16_t connectConn(Conn& k, uint32_t deadline, const ControlEnv& env) {
   if (!activeNetworkLink().resolveHost(k.base.host, ip)) {
     return aborted(env) ? CTL_ERR_LINK : CTL_ERR_CONNECT;
   }
+  if (aborted(env)) return CTL_ERR_LINK;
   const uint32_t left = remainingMs(deadline);
   if (left < 250) return CTL_ERR_TIMEOUT;
   const uint32_t connect_ms = left < kControlConnectMs ? left : kControlConnectMs;
@@ -200,6 +207,11 @@ int16_t connectConn(Conn& k, uint32_t deadline, const ControlEnv& env) {
     ok = k.plain->connect(ip, k.base.port, (int32_t)connect_ms);
   }
   const uint32_t took = millis() - t0;
+  const int ready = ioReady(deadline, env);
+  if (ready <= 0) {
+    k.close();
+    return readFailure(ready);
+  }
   if (!ok) {
     POLL_CTL_LOG("connect failed (%s) after %lums", k.tls ? "tls" : "tcp", (unsigned long)took);
     k.close();
@@ -209,6 +221,15 @@ int16_t connectConn(Conn& k, uint32_t deadline, const ControlEnv& env) {
   POLL_CTL_LOG("connected (%s) in %lums", k.tls ? "tls" : "tcp", (unsigned long)took);
   (void)took;
   return 0;
+}
+
+int writeBytes(Conn& k, const char* data, size_t len, uint32_t deadline, const ControlEnv& env) {
+  return writeHttpBytes(reinterpret_cast<const uint8_t*>(data), len,
+      [&]() { return ioReady(deadline, env); },
+      [&](const uint8_t* p, size_t n) {
+        return k.tls ? k.tls->writeSome(p, n) : pollControlSend(k.plain->fd(), p, n);
+      },
+      []() { vTaskDelay(pdMS_TO_TICKS(5)); });
 }
 
 struct Reply {
@@ -224,7 +245,7 @@ bool appendBody(Conn& k, size_t want, size_t* len, uint32_t deadline, const Cont
     return false;
   }
   while (want > 0) {
-    const int ready = readReady(deadline, env);
+    const int ready = ioReady(deadline, env);
     if (ready <= 0) {
       *fail = readFailure(ready);
       return false;
@@ -340,7 +361,7 @@ Reply readReply(Conn& k, bool reused, uint32_t deadline, const ControlEnv& env) 
     // Unframed: the body runs to the close.
     framed = false;
     for (;;) {
-      const int ready = readReady(deadline, env);
+      const int ready = ioReady(deadline, env);
       if (ready <= 0) {
         out.status = readFailure(ready);
         return out;
@@ -424,6 +445,11 @@ Reply request(Conn& k, const char* method, const char* path, const char* body, s
   }
 
   for (int attempt = 0; attempt < 2; attempt++) {
+    const int ready = ioReady(session_deadline, env);
+    if (ready <= 0) {
+      out.status = readFailure(ready);
+      break;
+    }
     const bool reused = k.reusable && k.c && k.c->connected();
     if (!reused) {
       const int16_t c = connectConn(k, session_deadline, env);
@@ -435,14 +461,14 @@ Reply request(Conn& k, const char* method, const char* path, const char* body, s
     }
     k.reusable = false;
     k.rpos = k.rlen = 0;
-    bool sent = k.c->write(reinterpret_cast<const uint8_t*>(head), (size_t)n) == (size_t)n;
-    if (sent && body) {
-      sent = k.c->write(reinterpret_cast<const uint8_t*>(body), body_len) == body_len;
+    int sent = writeBytes(k, head, (size_t)n, session_deadline, env);
+    if (sent == 1 && body) {
+      sent = writeBytes(k, body, body_len, session_deadline, env);
     }
-    if (!sent) {
+    if (sent != 1) {
       k.close();
-      if (reused && attempt == 0) continue;   // the server dropped an idle connection
-      out.status = aborted(env) ? CTL_ERR_LINK : CTL_ERR_CONNECT;
+      if (sent == -1 && reused && attempt == 0) continue;   // the server dropped an idle connection
+      out.status = sent == -1 ? CTL_ERR_CONNECT : readFailure(sent);
       break;
     }
     uint32_t reply_deadline = millis() + kControlResponseMs;
