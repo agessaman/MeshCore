@@ -263,6 +263,14 @@ TEST(PollDecisions, FreshnessNearTheTopOfTheEpochDoesNotWrap) {
   EXPECT_EQ(UINT32_MAX, d.until);
 }
 
+TEST(PollDecisions, StartupHoldLengthIsTheCallers) {
+  const uint32_t started = 1700000000;
+  EXPECT_TRUE(poll::startupHold(true, true, started, 0, 0, started + 179, 180));
+  EXPECT_FALSE(poll::startupHold(true, true, started, 0, 0, started + 180, 180));
+  EXPECT_TRUE(poll::startupHold(true, true, started, 0, 0, started + 180));
+  EXPECT_FALSE(poll::startupHold(true, true, started, 0, 0, started + poll::kStartupHoldS));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

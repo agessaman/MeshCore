@@ -175,14 +175,16 @@ static inline bool ownersLapsed(uint32_t owners_ok_at, uint32_t now, uint32_t st
 
 // Scheduled polls wait out the restart stampede: a claim must have gone out
 // and owners must have answered strictly after it, unless the hold has run out.
+// hold_s is two control periods plus a minute; the bench shortens the period.
 static inline bool startupHold(bool community, bool has_url, uint32_t started_at,
-                               uint32_t claim_sent_at, uint32_t owners_ok_at, uint32_t now) {
+                               uint32_t claim_sent_at, uint32_t owners_ok_at, uint32_t now,
+                               uint32_t hold_s = kStartupHoldS) {
   if (!community || !has_url) return false;
   bool expired = false;
   if (started_at == 0) {
-    expired = now >= kStartupHoldS;
+    expired = now >= hold_s;
   } else if (started_at <= now) {
-    expired = (now - started_at) >= kStartupHoldS;
+    expired = (now - started_at) >= hold_s;
   }
   if (expired) return false;
   if (claim_sent_at == 0 || owners_ok_at == 0) return true;

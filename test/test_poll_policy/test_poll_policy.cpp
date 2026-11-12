@@ -396,6 +396,31 @@ TEST(PollPolicy, IsoUtcRoundTripsAndRejectsWhatIsNotUtc) {
   EXPECT_FALSE(poll::parseIsoUtc("9999-12-31T23:59:59Z", &back));
 }
 
+TEST(PollPolicy, FastModeDropsTheTimeFloorsToAMinute) {
+  poll::Policy p;
+  poll::policyDefaults(p);
+  p.direct_s = 120;
+  p.one_hop_s = 30;
+  p.grace_s = 90;
+  p.node_window_count = 1;
+  p.node_windows[0].window_s = 45;
+  poll::Policy normal = p;
+  poll::policyClamp(normal);
+  EXPECT_EQ(poll::kDirectMinS, normal.direct_s);
+  EXPECT_EQ(poll::kOneHopMinS, normal.one_hop_s);
+  EXPECT_EQ(poll::kGraceMinS, normal.grace_s);
+  EXPECT_EQ(poll::kDirectMinS, normal.node_windows[0].window_s);
+
+  poll::policyClamp(p, true);
+  EXPECT_EQ(120U, p.direct_s);
+  EXPECT_EQ(60U, p.one_hop_s);
+  EXPECT_EQ(90U, p.grace_s);
+  EXPECT_EQ(60U, p.node_windows[0].window_s);
+  p.direct_s = 2 * poll::kDay;
+  poll::policyClamp(p, true);
+  EXPECT_EQ(poll::kDirectMaxS, p.direct_s);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

@@ -80,10 +80,14 @@ static inline void policyDefaults(Policy& p) {
   p.max_requests = kMaxRequestsDefault;
 }
 
-static inline void policyClamp(Policy& p) {
-  p.direct_s = clampU32(p.direct_s, kDirectMinS, kDirectMaxS);
-  p.one_hop_s = clampU32(p.one_hop_s, kOneHopMinS, kOneHopMaxS);
-  p.grace_s = clampU32(p.grace_s, kGraceMinS, kGraceMaxS);
+// Bench fast mode: the plugin's time floors drop to a minute so a stub can set short windows.
+static const uint32_t kFastFloorS = 60;
+
+static inline void policyClamp(Policy& p, bool fast = false) {
+  const uint32_t direct_min = fast ? kFastFloorS : kDirectMinS;
+  p.direct_s = clampU32(p.direct_s, direct_min, kDirectMaxS);
+  p.one_hop_s = clampU32(p.one_hop_s, fast ? kFastFloorS : kOneHopMinS, kOneHopMaxS);
+  p.grace_s = clampU32(p.grace_s, fast ? kFastFloorS : kGraceMinS, kGraceMaxS);
   if (p.max_requests < kMaxRequestsMin) p.max_requests = kMaxRequestsMin;
   if (p.max_requests > kMaxRequestsMax) p.max_requests = kMaxRequestsMax;
   // A full buffer with no NUL would run off in strcmp.
@@ -102,7 +106,7 @@ static inline void policyClamp(Policy& p) {
   // Same floor and ceiling as direct_s, whatever direct_s itself was set to.
   for (uint8_t i = 0; i < p.node_window_count; i++) {
     p.node_windows[i].window_s =
-        clampU32(p.node_windows[i].window_s, kDirectMinS, kDirectMaxS);
+        clampU32(p.node_windows[i].window_s, direct_min, kDirectMaxS);
   }
 }
 
