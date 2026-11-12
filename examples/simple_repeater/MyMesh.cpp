@@ -1767,6 +1767,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     while (*sub == ' ') sub++;
     if (*sub != 0) {
       strcpy(reply, "Err - discover.neighbors has no options");
+#ifdef WITH_REPEATER_POLL
+    } else if (_poller.busy()) {
+      strcpy(reply, "Err - busy polling a neighbor, try again shortly");
+#endif
     } else {
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
@@ -2500,6 +2504,8 @@ bool MyMesh::startNeighborDiscover(char* reply, bool periodic) {
 
 #ifdef WITH_REPEATER_POLL
 bool MyMesh::pollDiscoveryActive() const {
+  // A zero-hop discovery window (manual or periodic) is still collecting answers.
+  if (pending_discover_tag != 0 && !millisHasNowPassed(pending_discover_until)) return true;
 #if defined(WITH_MQTT_NEIGHBORS)
   return neighbor_discover_active || neighbor_table_refresh_active;
 #else
