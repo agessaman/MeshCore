@@ -112,7 +112,7 @@ struct TargetState {
   int16_t  noise_floor;        // from the last status reply
 
   uint32_t sends[kSendHistory];        // poll start times, newest last, 0 = empty
-  uint32_t recent_tags[kRecentTags];   // ring of own request and login tags
+  uint32_t recent_tags[kRecentTags];   // ring of own request tags
   uint8_t  recent_tag_next;
 };
 

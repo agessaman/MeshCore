@@ -182,6 +182,11 @@ static inline bool tagInList(uint32_t tag, const uint32_t* tags, uint8_t n) {
   return false;
 }
 
+// Only a request's tag comes back in its reply. A login answer carries the
+// target's own clock, which can equal our login or setperm timestamp, so those
+// must not be remembered or the answer would be dropped.
+static inline bool tagIsEchoed(uint8_t act) { return act == ACT_SEND_REQUEST; }
+
 // A poll-tag match is this poll's data reply. A login answer is response code
 // 0 and admin code <= 3, four bytes present. Own tags are never logins:
 // CayenneLPP voltage `01 74 01 ..` puts 1 in the admin-code byte, and a short

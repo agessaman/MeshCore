@@ -670,7 +670,6 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
       tag = nextTag();
       n = poll::buildLoginPlain(plain, sizeof(plain), tag, s.pw);
       if (n) {
-        poll::rememberTag(t, tag);
         mesh::Identity target(meta_[idx].pub);
         pkt = host_->pollCreateLogin(poll_id_, target, meta_[idx].secret, plain, n);
       }
@@ -682,7 +681,7 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
       uint8_t req = s.kind == poll::REQ_STATUS ? poll::kReqStatus : poll::kReqTelemetry;
       n = poll::buildRequestPlain(plain, sizeof(plain), tag, req, rnd);
       if (n) {
-        poll::rememberTag(t, tag);
+        if (poll::tagIsEchoed(s.act)) poll::rememberTag(t, tag);
         if (poll_tag_count_ < kMaxPollTags) {
           poll_tags_[poll_tag_count_++] = tag;
         } else {
@@ -702,10 +701,7 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
     case poll::ACT_SEND_SETPERM: {
       tag = nextTag();
       n = poll::buildSetPermPlain(plain, sizeof(plain), tag, poll_id_.pub_key);
-      if (n) {
-        poll::rememberTag(t, tag);
-        pkt = buildDatagram(PAYLOAD_TYPE_TXT_MSG, poll_id_, idx, plain, n);
-      }
+      if (n) pkt = buildDatagram(PAYLOAD_TYPE_TXT_MSG, poll_id_, idx, plain, n);
       break;
     }
     default:
@@ -828,6 +824,7 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
       pushEvent(cls == poll::REPLY_LOGIN_ADMIN ? poll::EV_LOGIN_ADMIN : poll::EV_LOGIN_GUEST, flooded);
       break;
     default:
+      POLL_LOG("rx ignored tag=%lu len=%u %s", (unsigned long)r.tag, (unsigned)r.len, flooded ? "flooded" : "direct");
       break;
   }
   memset(plain, 0, sizeof(plain));

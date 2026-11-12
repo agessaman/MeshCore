@@ -296,6 +296,39 @@ TEST(PollPacketCodec, RecentTagIsNeverALoginAnswer) {
   EXPECT_EQ(poll::REPLY_IGNORE, poll::classifyReply(r, t, tags, 1, true, false));
 }
 
+TEST(PollPacketCodec, OnlyRequestTagsAreRemembered) {
+  EXPECT_TRUE(poll::tagIsEchoed(poll::ACT_SEND_REQUEST));
+  EXPECT_FALSE(poll::tagIsEchoed(poll::ACT_SEND_LOGIN));
+  EXPECT_FALSE(poll::tagIsEchoed(poll::ACT_SEND_SETPERM));
+  EXPECT_FALSE(poll::tagIsEchoed(poll::ACT_SEND_TEACH));
+}
+
+TEST(PollPacketCodec, LoginAnswerStampedLikeOurLoginIsStillALogin) {
+  // Both clocks NTP-synced: the target's answer carries the same second as our login.
+  const uint32_t login_ts = 1794510941u;
+  const uint32_t req_tag = 1794510950u;
+  poll::TargetState t = BlankTarget();
+  if (poll::tagIsEchoed(poll::ACT_SEND_LOGIN)) poll::rememberTag(t, login_ts);
+  if (poll::tagIsEchoed(poll::ACT_SEND_REQUEST)) poll::rememberTag(t, req_tag);
+
+  const uint8_t guest[] = {0x00, 60, 0x00, 0x00};
+  const uint8_t admin[] = {0x00, 0x00, 0x01, 0x03};
+  poll::Reply r;
+  r.tag = login_ts;
+  r.data = guest;
+  r.len = sizeof(guest);
+  EXPECT_EQ(poll::REPLY_LOGIN_GUEST, poll::classifyReply(r, t, nullptr, 0, true, false));
+  r.data = admin;
+  EXPECT_EQ(poll::REPLY_LOGIN_ADMIN, poll::classifyReply(r, t, nullptr, 0, true, false));
+
+  // A late telemetry reply to an earlier poll's request still never reads as a login.
+  const uint8_t lpp[] = {0x00, 0x74, 0x01, 0x9A};
+  r.tag = req_tag;
+  r.data = lpp;
+  r.len = sizeof(lpp);
+  EXPECT_EQ(poll::REPLY_IGNORE, poll::classifyReply(r, t, nullptr, 0, true, false));
+}
+
 TEST(PollPacketCodec, LoginShapeAdminGuestAndNeither) {
   poll::TargetState t = BlankTarget();
   poll::Reply r;
