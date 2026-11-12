@@ -119,6 +119,14 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;
   prefs->display_flip = 0;
   prefs->network_setup_complete = 0;
+
+  // Polling stays off until the operator sets a CoreScope URL, slot, and consent.
+  prefs->poll_enabled = 0;
+  prefs->poll_consent = 0;
+  prefs->poll_slot = 0;
+  prefs->poll_interval_min = MQTT_POLL_INTERVAL_DEFAULT;
+  prefs->poll_status_hours = MQTT_POLL_STATUS_HOURS_DEFAULT;
+  prefs->poll_community = MQTT_POLL_COMMUNITY_DEFAULT;
 }
 
 #endif // WITH_MQTT_BRIDGE

@@ -82,6 +82,9 @@ static MQTTPrefs defaults() {
   prefs.display_flip = 0;
   prefs.mqtt_breaker_probe_min = MQTTConnectionPolicy::kBreakerProbeDefaultMinutes;
   prefs.mqtt_selfheal_enabled = 0;
+  prefs.poll_interval_min = MQTT_POLL_INTERVAL_DEFAULT;
+  prefs.poll_status_hours = MQTT_POLL_STATUS_HOURS_DEFAULT;
+  prefs.poll_community = MQTT_POLL_COMMUNITY_DEFAULT;
   strcpy(prefs.snmp_community, "public");
   for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
     strcpy(prefs.mqtt_slot_preset[i], "none");
@@ -847,6 +850,180 @@ TEST(MQTTPrefsSerializer, RepairsSlotIataCaseAndDropsInvalidOverrides) {
   EXPECT_STREQ("", prefs.mqtt_slot_iata[1]);
   EXPECT_STREQ("", prefs.mqtt_slot_iata[2]);
   EXPECT_STREQ("SEA", prefs.mqtt_iata);
+}
+
+static MQTTPrefs loadPoll(const char* json, bool* repaired) {
+  MQTTPrefs prefs = defaults();
+  InputStream input(json);
+  MQTTPrefsSerializer serializer(&prefs);
+  EXPECT_TRUE(serializer.loadSerial(input)) << json;
+  EXPECT_TRUE(serializer.apply(repaired)) << json;
+  return prefs;
+}
+
+static const char* kPollKey =
+    "ab0123456789cdefab0123456789cdefab0123456789cdefab0123456789cdef";
+static const char* kPollKey2 =
+    "01010101010101010101010101010101010101010101010101010101010101c0";
+
+TEST(MQTTPrefsSerializer, PollRoundTripsAPopulatedObject) {
+  MQTTPrefs source = defaults();
+  source.poll_enabled = 1;
+  source.poll_consent = 1;
+  strcpy(source.poll_url, "https://corescope.example/api");
+  source.poll_slot = 2;
+  source.poll_interval_min = 90;
+  source.poll_status_hours = 12;
+  source.poll_community = 0;
+  ASSERT_EQ(poll::TargetHex::Ok,
+            poll::parseTargetHex(kPollKey, source.poll_targets[0], nullptr));
+  source.poll_pw_mode[0] = MQTT_POLL_PW_HELLO;
+  ASSERT_EQ(poll::TargetHex::Ok,
+            poll::parseTargetHex(kPollKey2, source.poll_targets[1], nullptr));
+  source.poll_pw_mode[1] = MQTT_POLL_PW_AUTO;
+
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+  EXPECT_NE(std::string::npos, output.text().find("poll:{")) << output.text();
+  EXPECT_NE(std::string::npos, output.text().find("interval_min:90")) << output.text();
+  EXPECT_NE(std::string::npos, output.text().find(kPollKey)) << output.text();
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input)) << output.text();
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(1, loaded.poll_enabled);
+  EXPECT_EQ(1, loaded.poll_consent);
+  EXPECT_STREQ("https://corescope.example/api", loaded.poll_url);
+  EXPECT_EQ(2, loaded.poll_slot);
+  EXPECT_EQ(90, loaded.poll_interval_min);
+  EXPECT_EQ(12, loaded.poll_status_hours);
+  EXPECT_EQ(0, loaded.poll_community);
+  EXPECT_EQ(0, memcmp(source.poll_targets[0], loaded.poll_targets[0], 32));
+  EXPECT_EQ(0, memcmp(source.poll_targets[1], loaded.poll_targets[1], 32));
+  EXPECT_EQ(MQTT_POLL_PW_HELLO, loaded.poll_pw_mode[0]);
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, loaded.poll_pw_mode[1]);
+  EXPECT_TRUE(poll::targetIsEmpty(loaded.poll_targets[2]));
+}
+
+TEST(MQTTPrefsSerializer, PollObjectMissingKeepsDefaultsWithoutRepair) {
+  bool repaired = true;
+  MQTTPrefs prefs = loadPoll("{version:1,wifi:{ssid:\"mesh\"}}", &repaired);
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(0, prefs.poll_enabled);
+  EXPECT_EQ(0, prefs.poll_consent);
+  EXPECT_STREQ("", prefs.poll_url);
+  EXPECT_EQ(0, prefs.poll_slot);
+  EXPECT_EQ(MQTT_POLL_INTERVAL_DEFAULT, prefs.poll_interval_min);
+  EXPECT_EQ(MQTT_POLL_STATUS_HOURS_DEFAULT, prefs.poll_status_hours);
+  EXPECT_EQ(MQTT_POLL_COMMUNITY_DEFAULT, prefs.poll_community);
+  EXPECT_TRUE(poll::targetIsEmpty(prefs.poll_targets[0]));
+  EXPECT_EQ(0, prefs.poll_pw_mode[0]);
+}
+
+TEST(MQTTPrefsSerializer, PollRepairsEachOutOfRangeRule) {
+  bool repaired = false;
+  MQTTPrefs prefs = loadPoll(
+      "{version:1,poll:{interval_min:29,status_hours:2,slot:7,pw1:3,community:4,consent:5,enabled:2}}",
+      &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(MQTT_POLL_INTERVAL_DEFAULT, prefs.poll_interval_min);
+  EXPECT_EQ(MQTT_POLL_STATUS_HOURS_DEFAULT, prefs.poll_status_hours);
+  EXPECT_EQ(0, prefs.poll_slot);
+  EXPECT_EQ(0, prefs.poll_pw_mode[0]);
+  EXPECT_EQ(MQTT_POLL_COMMUNITY_DEFAULT, prefs.poll_community);
+  EXPECT_EQ(0, prefs.poll_consent);
+  EXPECT_EQ(0, prefs.poll_enabled);
+
+  repaired = false;
+  prefs = loadPoll("{version:1,poll:{interval_min:1441,status_hours:0,slot:-1}}", &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(MQTT_POLL_INTERVAL_DEFAULT, prefs.poll_interval_min);
+  EXPECT_EQ(MQTT_POLL_STATUS_HOURS_DEFAULT, prefs.poll_status_hours);
+  EXPECT_EQ(0, prefs.poll_slot);
+
+  repaired = false;
+  prefs = loadPoll("{version:1,poll:{url:\"ftp://nope.example\"}}", &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_STREQ("", prefs.poll_url);
+
+  repaired = false;
+  prefs = loadPoll("{version:1,poll:{url:\"https://corescope.example/\"}}", &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_STREQ("https://corescope.example", prefs.poll_url);
+
+  repaired = false;
+  prefs = loadPoll("{version:1,poll:{url:\"https://corescope.example\"}}", &repaired);
+  EXPECT_FALSE(repaired);
+  EXPECT_STREQ("https://corescope.example", prefs.poll_url);
+
+  const std::string bad_target =
+      std::string("{version:1,poll:{t1:\"abcd\",pw1:2,t2:\"") + std::string(64, '0') + "\"}}";
+  repaired = false;
+  prefs = loadPoll(bad_target.c_str(), &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_TRUE(poll::targetIsEmpty(prefs.poll_targets[0]));
+  EXPECT_EQ(0, prefs.poll_pw_mode[0]);
+  EXPECT_TRUE(poll::targetIsEmpty(prefs.poll_targets[1]));
+
+  const std::string upper(64, 'A');
+  const std::string upper_json = "{version:1,poll:{t1:\"" + upper + "\",pw1:1}}";
+  repaired = false;
+  prefs = loadPoll(upper_json.c_str(), &repaired);
+  EXPECT_TRUE(repaired);
+  uint8_t expect[32];
+  ASSERT_EQ(poll::TargetHex::Ok, poll::parseTargetHex(std::string(64, 'a').c_str(), expect, nullptr));
+  EXPECT_EQ(0, memcmp(expect, prefs.poll_targets[0], 32));
+  EXPECT_EQ(MQTT_POLL_PW_BLANK, prefs.poll_pw_mode[0]);
+
+  repaired = false;
+  prefs = loadPoll(
+      "{version:1,poll:{enabled:1,url:\"https://corescope.example\",slot:1,consent:0}}",
+      &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(0, prefs.poll_enabled);
+  EXPECT_EQ(1, prefs.poll_slot);
+  EXPECT_STREQ("https://corescope.example", prefs.poll_url);
+
+  repaired = false;
+  prefs = loadPoll(
+      "{version:1,poll:{enabled:1,url:\"\",slot:1,consent:1}}",
+      &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(0, prefs.poll_enabled);
+
+  repaired = false;
+  prefs = loadPoll(
+      "{version:1,poll:{enabled:1,url:\"https://corescope.example\",slot:0,consent:1}}",
+      &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(0, prefs.poll_enabled);
+
+  repaired = false;
+  prefs = loadPoll(
+      "{version:1,poll:{enabled:1,consent:1,slot:6,interval_min:1440,status_hours:24,"
+      "url:\"http://corescope.example\"}}",
+      &repaired);
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(1, prefs.poll_enabled);
+  EXPECT_EQ(6, prefs.poll_slot);
+  EXPECT_EQ(1440, prefs.poll_interval_min);
+  EXPECT_EQ(24, prefs.poll_status_hours);
+}
+
+TEST(MQTTPrefsSerializer, PollKeysFitTheSerializerLimit) {
+  const char* keys[] = {
+      "poll", "enabled", "consent", "url", "slot", "interval_min", "status_hours",
+      "community", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8",
+      "pw1", "pw2", "pw3", "pw4", "pw5", "pw6", "pw7", "pw8",
+  };
+  for (const char* key : keys) {
+    EXPECT_LE(strlen(key), 15u) << key;
+  }
 }
 
 int main(int argc, char** argv) {

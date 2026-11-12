@@ -157,6 +157,18 @@ struct MQTTPrefs {
   // Bounded self-heal reboot when MQTT is stuck (mqtt.selfheal): 1 on, 0 off (default).
   // Runtime only, like display_timeout_secs.
   uint8_t mqtt_selfheal_enabled;
+
+  // Repeater polling. Runtime only, like display_timeout_secs: absent from
+  // LegacyV1MQTTPrefs so the frozen binary layouts stay unchanged.
+  uint8_t  poll_enabled;          // master switch, default 0
+  uint8_t  poll_consent;          // operator agreed to register the polling key with CoreScope, default 0
+  char     poll_url[96];          // CoreScope base URL, default ""
+  uint8_t  poll_slot;             // 1-based MQTT slot that feeds that CoreScope, 0 = unset
+  uint16_t poll_interval_min;     // default 60, valid 30..1440
+  uint8_t  poll_status_hours;     // default 6, valid values 1, 3, 6, 12, 24
+  uint8_t  poll_community;        // share polling with other observers, default 1
+  uint8_t  poll_targets[8][32];   // target public keys; an all-zero entry is empty
+  uint8_t  poll_pw_mode[8];       // per target: 0 auto, 1 blank, 2 hello
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {
@@ -166,6 +178,25 @@ static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {
 
 static const uint16_t DISPLAY_TIMEOUT_DEFAULT_SECS = 60;
 static const uint16_t DISPLAY_TIMEOUT_MAX_SECS = 3600;
+
+// Repeater-poll bounds. The arrays above use the same sizes; these names are
+// what the serializer, CLI, and poller share.
+static const uint8_t MQTT_POLL_MAX_TARGETS = 8;
+static const uint8_t MQTT_POLL_PUBKEY_SIZE = 32;
+static const size_t MQTT_POLL_URL_LEN = 96;
+static const uint16_t MQTT_POLL_INTERVAL_MIN = 30;
+static const uint16_t MQTT_POLL_INTERVAL_MAX = 1440;
+static const uint16_t MQTT_POLL_INTERVAL_DEFAULT = 60;
+static const uint8_t MQTT_POLL_STATUS_HOURS_DEFAULT = 6;
+static const uint8_t MQTT_POLL_COMMUNITY_DEFAULT = 1;
+static const uint8_t MQTT_POLL_PW_AUTO = 0;
+static const uint8_t MQTT_POLL_PW_BLANK = 1;
+static const uint8_t MQTT_POLL_PW_HELLO = 2;
+static_assert(sizeof(MQTTPrefs::poll_url) == MQTT_POLL_URL_LEN, "poll url capacity");
+static_assert(sizeof(MQTTPrefs::poll_targets) / sizeof(MQTTPrefs::poll_targets[0]) == MQTT_POLL_MAX_TARGETS,
+              "poll target capacity");
+static_assert(sizeof(MQTTPrefs::poll_targets[0]) == MQTT_POLL_PUBKEY_SIZE, "poll key size");
+static_assert(sizeof(MQTTPrefs::poll_pw_mode) == MQTT_POLL_MAX_TARGETS, "poll pw mode capacity");
 
 // Frozen payload written by the version-1 binary format. Keep this distinct
 // from the runtime MQTTPrefs type: JSON persistence must not make the runtime
