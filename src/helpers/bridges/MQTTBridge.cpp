@@ -50,6 +50,9 @@ static void applyEffectiveOrigin(const NodePrefs* np, const MQTTPrefs* obs, char
   StrHelper::stripSurroundingQuotes(dest, dest_size);
 }
 
+// Outlives a bridge restart: the RTC keeps the time once it was set.
+static std::atomic<bool> s_ntp_time_applied{false};
+
 static const char* const kNtpBuiltinFallbacks[] = {
   "pool.ntp.org",
   "time.google.com",
@@ -5269,6 +5272,7 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per
     if (_rtc) {
       _rtc->setCurrentTime(epochTime);
     }
+    if (ntp_server_used) s_ntp_time_applied.store(true, std::memory_order_release);
 
     bool was_ntp_synced = _ntp_synced;
     _ntp_synced = true;
@@ -5394,6 +5398,8 @@ void MQTTBridge::probeNtpReachability() {
     MQTT_DEBUG_PRINTLN("NTP reachability probe: %s %s", servers[i], why ? why : "no reply");
   }
 }
+
+bool MQTTBridge::ntpTimeApplied() { return s_ntp_time_applied.load(std::memory_order_acquire); }
 
 uint32_t MQTTBridge::ntpEvidenceAgeMs() const {
   const uint32_t stamp = _ntp_reply_ms.load(std::memory_order_relaxed);

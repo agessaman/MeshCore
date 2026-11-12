@@ -2582,7 +2582,7 @@ int MyMesh::pollResolveNeighborPrefix(const char* hex, uint8_t* pub_out) {
 }
 
 bool MyMesh::pollNtpSeen() {
-  return bridge && bridge->ntpEvidenceAgeMs() != MQTTBridge::kNoNtpEvidence;
+  return MQTTBridge::ntpTimeApplied();
 }
 
 // The neighbor-scope query's reply window (see neighborDiscoverQueryTimeoutMs).

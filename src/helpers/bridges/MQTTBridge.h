@@ -838,6 +838,8 @@ public:
   static const uint32_t kNoNtpEvidence = UINT32_MAX;
   // ms since the last validated NTP reply, or kNoNtpEvidence.
   uint32_t ntpEvidenceAgeMs() const;
+  // A validated NTP reply's time was written to the RTC this boot; reachability probes and the fallback clock do not count.
+  static bool ntpTimeApplied();
   bool anyClientQuarantined() const;
   bool isNetworkUp() const { return _network && _network->isConnected(); }
   uint8_t enabledSlotCount() const;

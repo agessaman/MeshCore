@@ -53,7 +53,7 @@ public:
   virtual int pollResolveNeighborPrefix(const char* hex, uint8_t* pub_out) = 0;
   virtual uint32_t pollNow() = 0;
   virtual uint32_t pollNowUnique() = 0;
-  virtual bool pollNtpSeen() = 0;               // a validated NTP reply has been seen
+  virtual bool pollNtpSeen() = 0;               // a validated NTP time was applied to the RTC this boot
   virtual mesh::RNG* pollRng() = 0;
   virtual uint32_t pollReplyWindowMs() = 0;     // discovery's reply window for one request
   virtual bool pollDiscoveryBusy() = 0;
