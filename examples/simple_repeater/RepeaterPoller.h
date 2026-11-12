@@ -97,6 +97,9 @@ public:
   void summary(uint8_t* ok, uint8_t* total) const;
   bool enabled() const { return enabled_; }
 
+  // False when listing pub would leave no room for a removed target's unverified admin stop.
+  bool roomFor(const uint8_t* pub);
+
 private:
   enum RunKind : uint8_t { RUN_NONE = 0, RUN_EXCHANGE, RUN_DRILL };
   enum Note : uint8_t { NOTE_NONE = 0, NOTE_WAIT, NOTE_DUE, NOTE_CAP, NOTE_NOT_DIRECT, NOTE_ADMIN };
@@ -136,7 +139,7 @@ private:
   uint32_t tag_hw_;
   uint32_t tag_hw_saved_;
   poll::SavedGate gate_;
-  poll::StoredTarget stored_[poll::kMaxTargets];   // persisted per-key flags, incl. removed admin stops
+  poll::StoredTarget stored_[poll::kStoredTargets];   // per-key flags as written to flash, incl. removed targets
 
   // Targets
   Meta meta_[kSlots];
@@ -200,6 +203,7 @@ private:
   int8_t findTarget(const char* hex, int* matches) const;
   int8_t slotFor(const uint8_t* pub) const;
   void forgetKeyState();
+  void foldSlots();
   void restoreStored(uint8_t idx);
 
   void startPoll(uint8_t idx, bool scheduled);
@@ -225,6 +229,7 @@ private:
   void cmdGetKey(char* reply);
   void cmdNow(const char* arg, char* reply);
   void cmdEnable(const char* arg, char* reply);
+  bool enableRemoved(const char* arg, char* reply);
 };
 
 #endif  // WITH_REPEATER_POLL

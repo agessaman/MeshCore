@@ -462,6 +462,12 @@ static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
   return true;
 }
 
+static bool pollRoomFor(CommonCLICallbacks* cb, const char* key) {
+  uint8_t pub[MQTT_POLL_PUBKEY_SIZE];
+  if (poll::parseTargetHex(key, pub, nullptr) != poll::TargetHex::Ok) return true;   // addTarget reports it
+  return cb->repeaterPollRoomFor(pub);
+}
+
 static void pollKeyError(poll::TargetEdit edit, char* reply, bool full_key) {
   switch (edit) {
     case poll::TargetEdit::Duplicate:
@@ -1848,6 +1854,8 @@ bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
       strcpy(reply, "Error: no heard neighbor has that prefix");
     } else if (matches > 1) {
       snprintf(reply, 160, "Error: prefix matches %d neighbors", matches);
+    } else if (!pollRoomFor(_callbacks, key)) {
+      strcpy(reply, "Error: no room left to keep removed targets' admin stops; clear one with poll enable <key>");
     } else {
       const poll::TargetEdit edit =
           poll::addTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key);

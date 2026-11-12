@@ -437,6 +437,8 @@ public:
   virtual bool ensureRepeaterPollKey() { return false; }
   // `poll add <prefix>`: heard neighbors whose key starts with hex; pub_out set when exactly one.
   virtual int resolveRepeaterPollPrefix(const char* /*hex*/, uint8_t* /*pub_out*/) { return 0; }
+  // `poll add`: false when adding pub would leave no room for a removed target's admin stop.
+  virtual bool repeaterPollRoomFor(const uint8_t* /*pub*/) { return true; }
   // `get mqtt.status`: append the poll summary when polling is on and it fits.
   virtual void appendRepeaterPollStatus(char* /*reply*/, size_t /*reply_size*/) {}
 };

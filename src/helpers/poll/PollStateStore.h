@@ -7,7 +7,8 @@
 // firmware is reported as such so the caller can leave it untouched.
 //
 // Layout: magic u32, version u16, body_len u16, body, crc32 u32 over all
-// preceding bytes.
+// preceding bytes. Version 1 kept 8 targets, version 2 keeps 16 so admin stops
+// of removed targets survive a full list; version 1 is still read.
 
 #include "PollPolicy.h"
 #include "PollTypes.h"
@@ -19,13 +20,17 @@
 namespace poll {
 
 static const uint32_t kStateMagic = 0x54535052UL;   // "RPST"
-static const uint16_t kStateVersion = 1;
+static const uint16_t kStateVersion = 2;
 static const uint8_t  kPrvKeySize = 64;
+static const uint8_t  kStoredTargetsV1 = 8;
+static const uint8_t  kStoredTargets = 16;   // the operator's list plus room for removed targets' stops
 static const size_t   kStateHeaderSize = 8;
 static const size_t   kStateTargetSize = kPubKeySize + 2;
-static const size_t   kStateBodySizeV1 = 4 + 1 + kPubKeySize + kPrvKeySize + 4 + 4 + 5 +
-                                         (size_t)kMaxTargets * kStateTargetSize;
-static const size_t   kStateRecordSize = kStateHeaderSize + kStateBodySizeV1 + 4;
+static const size_t   kStateFixedBody = 4 + 1 + kPubKeySize + kPrvKeySize + 4 + 4 + 5;
+static const size_t   kStateBodySizeV1 = kStateFixedBody + (size_t)kStoredTargetsV1 * kStateTargetSize;
+static const size_t   kStateBodySizeV2 = kStateFixedBody + (size_t)kStoredTargets * kStateTargetSize;
+static const size_t   kStateRecordSize = kStateHeaderSize + kStateBodySizeV2 + 4;
+static_assert(kStoredTargets >= 2 * kMaxTargets, "a full list must leave as many entries for removed targets");
 
 struct StoredTarget {
   uint8_t pub[kPubKeySize];   // all zero = empty
@@ -42,7 +47,7 @@ struct StateRecord {
   uint32_t key_created_at;
   uint32_t tag_high_water;    // last request tag or login timestamp handed out
   SavedGate gate;
-  StoredTarget targets[kMaxTargets];
+  StoredTarget targets[kStoredTargets];
 };
 
 enum StateLoad : uint8_t {
@@ -97,7 +102,7 @@ static inline size_t encodeState(const StateRecord& r, uint8_t* out, size_t cap)
   uint8_t* p = out;
   statePut32(p, kStateMagic);
   statePut16(p + 4, kStateVersion);
-  statePut16(p + 6, (uint16_t)kStateBodySizeV1);
+  statePut16(p + 6, (uint16_t)kStateBodySizeV2);
   p += kStateHeaderSize;
   statePut32(p, r.seq);
   p += 4;
@@ -113,7 +118,7 @@ static inline size_t encodeState(const StateRecord& r, uint8_t* out, size_t cap)
   *p++ = (uint8_t)((r.gate.blocked ? 1 : 0) | (r.gate.version_disabled ? 2 : 0) | (r.gate.paused ? 4 : 0));
   statePut32(p, r.gate.paused_until);
   p += 4;
-  for (uint8_t i = 0; i < kMaxTargets; i++) {
+  for (uint8_t i = 0; i < kStoredTargets; i++) {
     const StoredTarget& t = r.targets[i];
     memcpy(p, t.pub, kPubKeySize);
     p += kPubKeySize;
@@ -137,7 +142,10 @@ static inline uint8_t decodeState(const uint8_t* in, size_t len, StateRecord* ou
   if (len != total) return STATE_CORRUPT;
   if (stateGet32(in + total - 4) != stateCrc32(in, total - 4)) return STATE_CORRUPT;
   if (version > kStateVersion) return STATE_NEWER;
-  if (version != kStateVersion || body_len != kStateBodySizeV1) return STATE_CORRUPT;
+  uint8_t n_targets = 0;
+  if (version == 1 && body_len == kStateBodySizeV1) n_targets = kStoredTargetsV1;
+  else if (version == 2 && body_len == kStateBodySizeV2) n_targets = kStoredTargets;
+  else return STATE_CORRUPT;
 
   const uint8_t* p = in + kStateHeaderSize;
   out->seq = stateGet32(p);
@@ -160,7 +168,7 @@ static inline uint8_t decodeState(const uint8_t* in, size_t len, StateRecord* ou
   out->gate.paused = (gate & 4) != 0;
   out->gate.paused_until = stateGet32(p);
   p += 4;
-  for (uint8_t i = 0; i < kMaxTargets; i++) {
+  for (uint8_t i = 0; i < n_targets; i++) {
     StoredTarget& t = out->targets[i];
     memcpy(t.pub, p, kPubKeySize);
     p += kPubKeySize;
@@ -172,6 +180,62 @@ static inline uint8_t decodeState(const uint8_t* in, size_t len, StateRecord* ou
     t.learned_pw = learned;
   }
   return STATE_OK;
+}
+
+static inline bool storedIsEmpty(const StoredTarget& t) {
+  for (uint8_t i = 0; i < kPubKeySize; i++) {
+    if (t.pub[i]) return false;
+  }
+  return true;
+}
+
+// How much an entry is worth keeping once its target leaves the list: an
+// unverified admin stop most, then a verified one, then a learned password.
+enum StoredRank : uint8_t { RANK_NONE = 0, RANK_LEARNED, RANK_STOP_VERIFIED, RANK_STOP };
+
+static inline uint8_t storedRank(const StoredTarget& t) {
+  if (t.admin_seen) return t.admin_removed ? RANK_STOP_VERIFIED : RANK_STOP;
+  return t.learned_pw != LEARNED_NONE ? RANK_LEARNED : RANK_NONE;
+}
+
+static inline bool storedKeyIn(const uint8_t* pub, const uint8_t (*keys)[kPubKeySize], uint8_t n) {
+  for (uint8_t i = 0; i < n; i++) {
+    if (memcmp(keys[i], pub, kPubKeySize) == 0) return true;
+  }
+  return false;
+}
+
+// Where to write an entry for pub: its own, an empty one, or the one least worth
+// keeping among keys not in keep[]. An entry outranking `rank` is taken only when
+// must is set (a listed target always gets one). -1 when nothing may be taken.
+static inline int storedSlotFor(const StoredTarget* stored, uint8_t n, const uint8_t* pub, uint8_t rank,
+                                bool must, const uint8_t (*keep)[kPubKeySize], uint8_t n_keep) {
+  int empty = -1, victim = -1;
+  for (uint8_t i = 0; i < n; i++) {
+    if (memcmp(stored[i].pub, pub, kPubKeySize) == 0) return i;
+    if (storedIsEmpty(stored[i])) {
+      if (empty < 0) empty = i;
+      continue;
+    }
+    if (storedKeyIn(stored[i].pub, keep, n_keep)) continue;
+    if (victim < 0 || storedRank(stored[i]) < storedRank(stored[victim])) victim = i;
+  }
+  if (empty >= 0) return empty;
+  if (victim < 0) return -1;
+  if (!must && storedRank(stored[victim]) >= rank) return -1;
+  return victim;
+}
+
+// True when the list (after an add) leaves an entry for every unverified admin
+// stop of a target not on it. Each listed target may need an entry of its own.
+static inline bool storedRoomForList(const StoredTarget* stored, uint8_t n,
+                                     const uint8_t (*listed)[kPubKeySize], uint8_t n_listed) {
+  unsigned stops = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    if (storedRank(stored[i]) != RANK_STOP || storedIsEmpty(stored[i])) continue;
+    if (!storedKeyIn(stored[i].pub, listed, n_listed)) stops++;
+  }
+  return (unsigned)n_listed + stops <= (unsigned)n;
 }
 
 // Which copy to use when several files may exist (primary, temp, backup after

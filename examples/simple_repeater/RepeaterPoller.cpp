@@ -217,26 +217,8 @@ bool RepeaterPoller::saveState(const char* why) {
   r.tag_high_water = tag_hw_;
   r.gate = gate_;
 
-  // Current targets first, then admin stops of removed targets while room remains.
-  uint8_t n = 0;
-  for (uint8_t pos = 0; pos < count_ && n < poll::kMaxTargets; pos++) {
-    for (uint8_t i = 0; i < kSlots; i++) {
-      if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != pos) continue;
-      poll::StoredTarget& s = r.targets[n++];
-      memcpy(s.pub, meta_[i].pub, poll::kPubKeySize);
-      s.admin_seen = states_[i].admin_seen;
-      s.admin_removed = states_[i].admin_removed;
-      s.learned_pw = states_[i].learned_pw;
-      break;
-    }
-  }
-  for (uint8_t k = 0; k < poll::kMaxTargets && n < poll::kMaxTargets; k++) {
-    const poll::StoredTarget& old = stored_[k];
-    if (!old.admin_seen) continue;
-    bool present = false;
-    for (uint8_t j = 0; j < n; j++) present = present || memcmp(r.targets[j].pub, old.pub, poll::kPubKeySize) == 0;
-    if (!present) r.targets[n++] = old;
-  }
+  foldSlots();
+  memcpy(r.targets, stored_, sizeof(r.targets));
 
   const size_t len = poll::encodeState(r, buf, sizeof(buf));
   memset(r.prv, 0, sizeof(r.prv));
@@ -266,7 +248,6 @@ bool RepeaterPoller::saveState(const char* why) {
   tag_hw_saved_ = tag_hw_;
   save_due_ = false;
   save_safety_ = false;
-  memcpy(stored_, r.targets, sizeof(stored_));
   POLL_LOG("state saved seq=%lu (%s)", (unsigned long)seq_, why);
   return true;
 }
@@ -314,7 +295,52 @@ void RepeaterPoller::forgetKeyState() {
     t.flood_replies = 0;
     meta_[i].secret_ok = false;
   }
-  for (uint8_t k = 0; k < poll::kMaxTargets; k++) stored_[k].learned_pw = poll::LEARNED_NONE;
+  for (uint8_t k = 0; k < poll::kStoredTargets; k++) stored_[k].learned_pw = poll::LEARNED_NONE;
+}
+
+// Brings stored_ up to date with every slot, removed-but-draining ones included.
+void RepeaterPoller::foldSlots() {
+  uint8_t keep[kSlots][poll::kPubKeySize];
+  uint8_t n_keep = 0;
+  for (uint8_t i = 0; i < kSlots; i++) {
+    if (meta_[i].used) memcpy(keep[n_keep++], meta_[i].pub, poll::kPubKeySize);
+  }
+  for (uint8_t i = 0; i < kSlots; i++) {
+    if (!meta_[i].used) continue;
+    poll::StoredTarget e;
+    memcpy(e.pub, meta_[i].pub, poll::kPubKeySize);
+    e.admin_seen = states_[i].admin_seen;
+    e.admin_removed = states_[i].admin_removed;
+    e.learned_pw = states_[i].learned_pw;
+    const uint8_t rank = poll::storedRank(e);
+    const int k = poll::storedSlotFor(stored_, poll::kStoredTargets, e.pub, rank, !meta_[i].orphan, keep, n_keep);
+    char pfx[9];
+    if (k < 0) {
+      hex8(pfx, e.pub);
+      if (rank == poll::RANK_STOP) POLL_LOG("admin stop of %s not kept: no room", pfx);
+      continue;
+    }
+    poll::StoredTarget& slot = stored_[k];
+    if (memcmp(slot.pub, e.pub, poll::kPubKeySize) != 0) {
+      if (rank == poll::RANK_NONE) continue;   // nothing to keep yet
+      if (poll::storedRank(slot) == poll::RANK_STOP && !poll::storedIsEmpty(slot)) {
+        hex8(pfx, slot.pub);
+        POLL_LOG("admin stop of removed %s dropped: no room", pfx);
+      }
+    }
+    slot = e;
+  }
+}
+
+bool RepeaterPoller::roomFor(const uint8_t* pub) {
+  if (!host_) return true;
+  PollSettings s;
+  host_->pollReadSettings(s);
+  if (s.count > poll::kMaxTargets) s.count = poll::kMaxTargets;
+  if (poll::storedKeyIn(pub, s.targets, s.count) || s.count >= poll::kMaxTargets) return true;
+  memcpy(s.targets[s.count++], pub, poll::kPubKeySize);
+  foldSlots();
+  return poll::storedRoomForList(stored_, poll::kStoredTargets, s.targets, s.count);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +354,7 @@ int8_t RepeaterPoller::slotFor(const uint8_t* pub) const {
 }
 
 void RepeaterPoller::restoreStored(uint8_t idx) {
-  for (uint8_t k = 0; k < poll::kMaxTargets; k++) {
+  for (uint8_t k = 0; k < poll::kStoredTargets; k++) {
     if (memcmp(stored_[k].pub, meta_[idx].pub, poll::kPubKeySize) != 0) continue;
     states_[idx].admin_seen = stored_[k].admin_seen;
     states_[idx].admin_removed = stored_[k].admin_removed;
@@ -362,6 +388,7 @@ void RepeaterPoller::readSettings() {
       continue;
     }
     if (run_idx_ == (int8_t)i && run_kind_ == RUN_EXCHANGE) abortRun("target removed");
+    foldSlots();   // its stop must outlive the slot even if no save has succeeded yet
     memset(&meta_[i], 0, sizeof(meta_[i]));
     memset(&states_[i], 0, sizeof(states_[i]));
   }
@@ -926,6 +953,7 @@ void RepeaterPoller::endRun() {
   event_count_ = 0;
   inflight_ = NULL;
   if (idx >= 0 && meta_[idx].orphan) {
+    foldSlots();
     memset(&meta_[idx], 0, sizeof(meta_[idx]));
     memset(&states_[idx], 0, sizeof(states_[idx]));
   }
@@ -1118,6 +1146,7 @@ void RepeaterPoller::cmdEnable(const char* arg, char* reply) {
   readSettings();
   int matches = 0;
   int8_t idx = findTarget(arg, &matches);
+  if (idx < 0 && matches == 0 && enableRemoved(arg, reply)) return;
   if (idx < 0) {
     if (matches > 1) snprintf(reply, 160, "Error: prefix matches %d targets", matches);
     else strcpy(reply, "Error: usage poll enable <target key or prefix>");
@@ -1140,12 +1169,42 @@ void RepeaterPoller::cmdEnable(const char* arg, char* reply) {
   t.logged_in_at = 0;
   t.login_checked_at = 0;
   meta_[idx].note = NOTE_NONE;
-  for (uint8_t k = 0; k < poll::kMaxTargets; k++) {
-    if (memcmp(stored_[k].pub, meta_[idx].pub, poll::kPubKeySize) == 0) stored_[k].admin_seen = false;
+  for (uint8_t k = 0; k < poll::kStoredTargets; k++) {
+    if (memcmp(stored_[k].pub, meta_[idx].pub, poll::kPubKeySize) == 0) {
+      stored_[k].admin_seen = false;
+      stored_[k].admin_removed = false;
+    }
   }
   POLL_LOG("%s re-enabled by the operator", pfx);
   if (saveState("re-enabled")) snprintf(reply, 160, "OK - %s re-enabled", pfx);
   else snprintf(reply, 160, "OK - %s re-enabled (not saved)", pfx);
+}
+
+// A removed target's stop is cleared by its key here, so its entry can make room for new targets.
+bool RepeaterPoller::enableRemoved(const char* arg, char* reply) {
+  size_t n = 0;
+  if (!hexWord(arg, &n)) return false;
+  while (*arg == ' ') arg++;
+  int found = -1, matches = 0;
+  for (uint8_t k = 0; k < poll::kStoredTargets; k++) {
+    if (!stored_[k].admin_seen || slotFor(stored_[k].pub) >= 0) continue;
+    if (!hexPrefixMatches(stored_[k].pub, arg, n)) continue;
+    matches++;
+    found = k;
+  }
+  if (matches == 0) return false;
+  if (matches > 1) {
+    snprintf(reply, 160, "Error: prefix matches %d removed targets", matches);
+    return true;
+  }
+  char pfx[9];
+  hex8(pfx, stored_[found].pub);
+  stored_[found].admin_seen = false;
+  stored_[found].admin_removed = false;
+  POLL_LOG("%s (removed) re-enabled by the operator", pfx);
+  if (saveState("re-enabled")) snprintf(reply, 160, "OK - %s (removed target) re-enabled", pfx);
+  else snprintf(reply, 160, "OK - %s (removed target) re-enabled (not saved)", pfx);
+  return true;
 }
 
 #endif  // WITH_REPEATER_POLL

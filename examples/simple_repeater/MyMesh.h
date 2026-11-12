@@ -532,6 +532,7 @@ public:
   bool supportsRepeaterPoll() override { return true; }
   bool ensureRepeaterPollKey() override { return _poller.ensureIdentity(); }
   int resolveRepeaterPollPrefix(const char* hex, uint8_t* pub_out) override { return pollResolveNeighborPrefix(hex, pub_out); }
+  bool repeaterPollRoomFor(const uint8_t* pub) override { return _poller.roomFor(pub); }
   void appendRepeaterPollStatus(char* reply, size_t reply_size) override;
 
   // RepeaterPollHost
