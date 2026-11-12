@@ -178,6 +178,23 @@ TEST(MQTTTopicRouter, RejectsInvalidStyleTypeSlotAndOutput) {
   EXPECT_FALSE(mqttTopicSlotIndexValid(0, 0));
 }
 
+TEST(MQTTTopicRouter, PollingTopicsFollowMeshCoreAndCustomAndAreRefusedByMeshRank) {
+  char topic[128];
+  ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, MQTT_PUBLICATION_POLLING,
+                                        nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("meshcore/DEN/0123456789ABCDEF/polling", topic);
+
+  ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_CUSTOM, MQTT_PUBLICATION_POLLING,
+                                        "custom/{iata}/{device}/{type}",
+                                        IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("custom/DEN/0123456789ABCDEF/polling", topic);
+
+  EXPECT_FALSE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHRANK, MQTT_PUBLICATION_POLLING,
+                                         nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+  EXPECT_STREQ("polling", mqttPublicationTypeName(MQTT_PUBLICATION_POLLING));
+}
+
 TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
   // The bridge passes MQTTBridge::MQTTMessageType to mqttBuildPublicationTopic
   // as an int; a compile-time static_assert in the bridge ties the two enums
@@ -186,10 +203,12 @@ TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
   EXPECT_EQ(1, MQTT_PUBLICATION_PACKETS);
   EXPECT_EQ(2, MQTT_PUBLICATION_RAW);
   EXPECT_EQ(3, MQTT_PUBLICATION_NEIGHBORS);
+  EXPECT_EQ(4, MQTT_PUBLICATION_POLLING);
   EXPECT_STREQ("status", mqttPublicationTypeName(MQTT_PUBLICATION_STATUS));
   EXPECT_STREQ("packets", mqttPublicationTypeName(MQTT_PUBLICATION_PACKETS));
   EXPECT_STREQ("raw", mqttPublicationTypeName(MQTT_PUBLICATION_RAW));
   EXPECT_STREQ("neighbors", mqttPublicationTypeName(MQTT_PUBLICATION_NEIGHBORS));
+  EXPECT_STREQ("polling", mqttPublicationTypeName(MQTT_PUBLICATION_POLLING));
 }
 
 TEST(MQTTTopicRouter, SlotIataOverridesTheGlobalCodeOnlyWhenUsable) {

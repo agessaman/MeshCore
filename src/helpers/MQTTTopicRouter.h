@@ -15,6 +15,7 @@ enum MQTTPublicationType {
   MQTT_PUBLICATION_PACKETS = 1,
   MQTT_PUBLICATION_RAW = 2,
   MQTT_PUBLICATION_NEIGHBORS = 3,
+  MQTT_PUBLICATION_POLLING = 4,
 };
 
 enum MQTTTopicRouteStyle {
@@ -44,6 +45,7 @@ static inline const char* mqttPublicationTypeName(int type) {
     case MQTT_PUBLICATION_PACKETS: return "packets";
     case MQTT_PUBLICATION_RAW: return "raw";
     case MQTT_PUBLICATION_NEIGHBORS: return "neighbors";
+    case MQTT_PUBLICATION_POLLING: return "polling";
     default: return NULL;
   }
 }
@@ -60,9 +62,9 @@ static inline bool mqttWriteTopic(char* buf, size_t buf_size, const char* format
 // Build the complete topic for one publication. MeshRank takes status, packets,
 // and neighbors under meshrank/uplink/{token}/{device}/, using the same type
 // suffixes as the MeshCore layout, and requires a per-slot token rather than an
-// IATA. MeshCore routes require a configured IATA and device id. Custom
-// templates may omit either placeholder, so their individual values are allowed
-// to be empty.
+// IATA. Raw and polling are withheld there. MeshCore routes require a configured
+// IATA and device id. Custom templates may omit either placeholder, so their
+// individual values are allowed to be empty.
 static inline bool mqttBuildPublicationTopic(MQTTTopicRouteStyle style, int type,
                                              const char* custom_template,
                                              const char* iata, const char* device,
@@ -84,8 +86,9 @@ static inline bool mqttBuildPublicationTopic(MQTTTopicRouteStyle style, int type
     case MQTT_ROUTE_MESHRANK:
       // Raw is deliberately withheld: highest-volume topic, and the broker does
       // not consume it. observer-firmware still sends it — keep this on merge.
-      if (type == MQTT_PUBLICATION_RAW || !token || token[0] == '\0' ||
-          !device || device[0] == '\0') {
+      // Polling is withheld the same way: MeshRank does not consume that topic.
+      if (type == MQTT_PUBLICATION_RAW || type == MQTT_PUBLICATION_POLLING ||
+          !token || token[0] == '\0' || !device || device[0] == '\0') {
         return false;
       }
       return mqttWriteTopic(buf, buf_size, "meshrank/uplink/%s/%s/%s",
