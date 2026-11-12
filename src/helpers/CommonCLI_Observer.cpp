@@ -34,6 +34,10 @@
 #include "MQTTDefaults.h"
 #include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
 #include "poll/PollPrefsPolicy.h"
+#if defined(POLL_TEST_CONTROL_CLI)
+#include "poll/PollControlClient.h"
+#include <esp_heap_caps.h>
+#endif
 #include "MQTTPacketFilter.h"
 #include "MQTTTopicRouter.h"   // mqttSlotIata() — a slot's effective region code
 #include "ObserverSelfHealRtc.h"  // last self-heal cause and count for get mqtt.selfheal
@@ -1250,6 +1254,99 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 #endif
 }
 
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_REPEATER_POLL) && defined(POLL_TEST_CONTROL_CLI)
+// Bench only (-D POLL_TEST_CONTROL_CLI): runs one CoreScope control session
+// from the saved prefs without the poller, so the client can be checked on
+// hardware on its own. Not part of any release build.
+static poll::ControlResult* s_bench_ctl = nullptr;
+static bool s_bench_ctl_have = false;
+
+static char benchRoleChar(uint8_t role) {
+  switch (role) {
+    case poll::OWNER_ROLE_POLLING: return 'P';
+    case poll::OWNER_ROLE_INDEPENDENT: return 'I';
+    case poll::OWNER_ROLE_STANDBY: return 'S';
+    case poll::OWNER_ROLE_EXCLUDED: return 'X';
+    case poll::OWNER_ROLE_PAUSED: return 'Z';
+    case poll::OWNER_ROLE_DISABLED: return 'D';
+    case poll::OWNER_ROLE_ABSENT: return 'A';
+    default: return '?';
+  }
+}
+
+static bool benchPollControlGet(const char* config, const MQTTPrefs* prefs,
+                                const uint8_t* self_pub, char* reply) {
+  const bool queue = strcmp(config, "poll.ctl") == 0;
+  const bool show = strcmp(config, "poll.ctl.res") == 0;
+  if (!queue && !show) return false;
+  MQTTBridge* bridge = MQTTBridge::pollBenchInstance();
+  if (!bridge) {
+    strcpy(reply, "> bridge not running");
+    return true;
+  }
+  if (!s_bench_ctl) {
+    s_bench_ctl = static_cast<poll::ControlResult*>(
+        heap_caps_calloc(1, sizeof(poll::ControlResult), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!s_bench_ctl) s_bench_ctl = static_cast<poll::ControlResult*>(calloc(1, sizeof(poll::ControlResult)));
+    if (!s_bench_ctl) {
+      strcpy(reply, "> no memory");
+      return true;
+    }
+  }
+  if (bridge->takePollControlResult(*s_bench_ctl)) {
+    poll::wipeControlResult(*s_bench_ctl);   // the bench shows only the public half
+    s_bench_ctl_have = true;
+  }
+
+  if (queue) {
+    poll::ControlRequest* req =
+        static_cast<poll::ControlRequest*>(calloc(1, sizeof(poll::ControlRequest)));
+    if (!req) {
+      strcpy(reply, "> no memory");
+      return true;
+    }
+    strncpy(req->url, prefs->poll_url, sizeof(req->url) - 1);
+    memcpy(req->observer_pub, self_pub, poll::kPubKeySize);
+    req->want = poll::WANT_OWNERS | poll::WANT_POLICY | poll::WANT_SHARED_KEY;
+    for (int i = 0; i < (int)(sizeof(prefs->poll_targets) / sizeof(prefs->poll_targets[0])) &&
+                    req->target_count < poll::kMaxTargets; i++) {
+      if (poll::targetIsEmpty(prefs->poll_targets[i])) continue;
+      memcpy(req->targets[req->target_count++], prefs->poll_targets[i], poll::kPubKeySize);
+    }
+    const bool ok = bridge->requestPollControl(*req);
+    free(req);
+    strcpy(reply, ok ? "> queued" : "> busy");
+    return true;
+  }
+
+  if (!s_bench_ctl_have) {
+    strcpy(reply, "> no result yet");
+    return true;
+  }
+  const poll::ControlResult& r = *s_bench_ctl;
+  char roles[3 * poll::kMaxTargets + 1];
+  size_t n = 0;
+  for (uint8_t i = 0; i < poll::kMaxTargets; i++) {
+    if (!r.owners[i].present && i > 0 && !r.owners_ok) break;
+    roles[n++] = r.owners[i].present ? benchRoleChar(r.owners[i].role) : '-';
+    if (r.owners[i].present && r.owners[i].role == poll::OWNER_ROLE_STANDBY) {
+      roles[n++] = (char)('0' + (r.owners[i].standby_rank % 10));
+    }
+  }
+  roles[n] = '\0';
+  char pub[9];
+  for (int i = 0; i < 4; i++) snprintf(pub + 2 * i, 3, "%02x", r.shared_pub[i]);
+  snprintf(reply, 160,
+           "> st=%d own=%d/%d [%s] pol=%d/%d v=%s pz=%d/%lu win=%lu/%lu blk=%d sh=%d/%d %s",
+           r.started ? 1 : 0, (int)r.owners_status, r.owners_ok ? 1 : 0, roles,
+           (int)r.policy_status, r.policy_ok ? 1 : 0, r.policy.version, r.policy.paused ? 1 : 0,
+           (unsigned long)r.policy.paused_until, (unsigned long)r.policy.direct_s,
+           (unsigned long)r.policy.one_hop_s, r.policy.observer_blocked ? 1 : 0,
+           (int)r.shared_status, r.shared_ok ? 1 : 0, r.shared_ok ? pub : "-");
+  return true;
+}
+#endif
+
 bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   bool handled = true;
@@ -1585,6 +1682,10 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     sprintf(reply, "> %u min", (unsigned)_mqtt_prefs.alert_min_interval_min);
   } else if (memcmp(config, "alert", 5) == 0 && (config[5] == 0 || config[5] == '\n' || config[5] == '\r')) {
     sprintf(reply, "> %s", _mqtt_prefs.alert_enabled ? "on" : "off");
+#if defined(WITH_REPEATER_POLL) && defined(POLL_TEST_CONTROL_CLI)
+  } else if (benchPollControlGet(config, &_mqtt_prefs, _callbacks->getSelfId().pub_key, reply)) {
+    // bench only
+#endif
   } else if (applyPollGet(&_mqtt_prefs, _callbacks, config, reply)) {
     // Longer poll.status.hours is matched inside applyPollGet, ahead of the
     // poller's `get poll`, `get poll.status`, and `get poll.key`.
