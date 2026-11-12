@@ -436,7 +436,7 @@ is, the node polls every target it is given, at most twice per hour-long window.
 | `poll remove <key>`, `poll clear`, `poll list` | Edit or show targets | |
 | `poll pw <key> auto\|blank\|hello` | Guest password to try | auto |
 | `poll now <key or prefix>` | One poll outside the schedule. Replies `queued`, `busy`, or an error. Works with polling off; needs the polling key, a synced clock, a direct route, and 60 s since that target's last poll | |
-| `poll enable <key or prefix>` | Clear an admin stop | |
+| `poll enable <key or prefix>` | Clear an admin stop, also of a target no longer listed | |
 | `get poll` | Switch, target count, key source, gate, clock | |
 | `get poll.status` | One short entry per target: number, key prefix, last result | |
 | `get poll.status <n>` | Target n: result, age, battery, temperature, route and SNR, role, next poll, login state, flood count | |
@@ -451,11 +451,14 @@ Safety rules:
   Nothing is ever flooded. A target out of reach shows `not_direct` and gets no packet.
 - The only passwords sent are blank and `hello`. If a repeater answers the polling key as
   admin, polling of that repeater stops, the node sends `setperm <polling key> 0`, and it checks
-  that the grant is gone. The repeater stays stopped until `poll enable`.
-- No polling until a validated NTP reply this boot. Request timestamps never go backwards,
+  that the grant is gone. The repeater stays stopped until `poll enable`, even after it's
+  removed from the list. Up to 16 targets' stops and learned passwords are kept; when removed
+  targets' unconfirmed stops would no longer fit, `poll add` is refused until one is cleared
+  with `poll enable <key>`.
+- No polling until a validated NTP time was applied to the clock this boot. Request timestamps never go backwards,
   across reboots too. They're kept in `/poll_state` with the polling key.
-- One poll runs at a time, and never during neighbor-scope discovery. Discovery waits for a
-  poll on the air to finish.
+- One poll runs at a time, and never during neighbor discovery. Periodic discovery waits for
+  a poll on the air to finish; `discover.neighbors` replies busy while one runs.
 
 Debug builds (`MQTT_DEBUG`) log every step on serial with a `POLL:` prefix.
 
