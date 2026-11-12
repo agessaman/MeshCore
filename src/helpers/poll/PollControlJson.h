@@ -180,8 +180,22 @@ static inline void numberField(JsonObjectConst o, const char* name, uint32_t* fi
 
 }  // namespace cjson
 
-// Server fields on top of policyDefaults; nothing is clamped here.
-static inline void parsePolicyObject(JsonObjectConst o, Policy& p) {
+namespace cjson {
+
+static inline bool keyIn(const uint8_t* key, const uint8_t (*keys)[kPubKeySize], uint8_t n) {
+  for (uint8_t i = 0; keys && i < n; i++) {
+    if (memcmp(keys[i], key, kPubKeySize) == 0) return true;
+  }
+  return false;
+}
+
+}  // namespace cjson
+
+// Server fields on top of policyDefaults; nothing is clamped here. When the lists hold more than
+// fits, entries for targets[] are kept first (they always fit) and the list is marked truncated.
+static inline void parsePolicyObject(JsonObjectConst o, Policy& p,
+                                     const uint8_t (*targets)[kPubKeySize] = nullptr,
+                                     uint8_t target_count = 0) {
   policyDefaults(p);
   cjson::numberField(o, "direct_s", &p.direct_s);
   cjson::numberField(o, "one_hop_s", &p.one_hop_s);
@@ -197,30 +211,43 @@ static inline void parsePolicyObject(JsonObjectConst o, Policy& p) {
     if (parseIsoUtc(until.as<const char*>(), &t)) p.paused_until = t;
   }
 
+  if (target_count > kMaxTargets) target_count = kMaxTargets;
   JsonArrayConst ex = o["excluded_nodes"].as<JsonArrayConst>();
-  for (JsonVariantConst item : ex) {
-    if (p.excluded_count >= kMaxExcluded) break;
-    uint8_t key[kPubKeySize];
-    if (!item.is<const char*>() || !cjson::decodeKey(item.as<const char*>(), key)) continue;
-    if (policyExcluded(p, key)) continue;  // the plugin keeps a set
-    memcpy(p.excluded[p.excluded_count++], key, kPubKeySize);
+  for (uint8_t pass = 0; pass < 2; pass++) {
+    for (JsonVariantConst item : ex) {
+      uint8_t key[kPubKeySize];
+      if (!item.is<const char*>() || !cjson::decodeKey(item.as<const char*>(), key)) continue;
+      if (cjson::keyIn(key, targets, target_count) != (pass == 0)) continue;
+      if (policyExcluded(p, key)) continue;  // the plugin keeps a set
+      if (p.excluded_count >= kMaxExcluded) {
+        p.excluded_truncated = true;
+        continue;
+      }
+      memcpy(p.excluded[p.excluded_count++], key, kPubKeySize);
+    }
   }
 
   JsonObjectConst nw = o["node_windows"].as<JsonObjectConst>();
-  for (JsonPairConst kv : nw) {
-    if (p.node_window_count >= kMaxNodeWindows) break;
-    uint8_t key[kPubKeySize];
-    if (!cjson::decodeKey(kv.key().c_str(), key)) continue;
-    int64_t w = 0;
-    if (!cjson::readInt(kv.value(), &w) || w <= 0) continue;
-    bool dup = false;
-    for (uint8_t i = 0; i < p.node_window_count; i++) {
-      if (memcmp(p.node_windows[i].node, key, kPubKeySize) == 0) dup = true;
+  for (uint8_t pass = 0; pass < 2; pass++) {
+    for (JsonPairConst kv : nw) {
+      uint8_t key[kPubKeySize];
+      if (!cjson::decodeKey(kv.key().c_str(), key)) continue;
+      if (cjson::keyIn(key, targets, target_count) != (pass == 0)) continue;
+      int64_t w = 0;
+      if (!cjson::readInt(kv.value(), &w) || w <= 0) continue;
+      bool dup = false;
+      for (uint8_t i = 0; i < p.node_window_count; i++) {
+        if (memcmp(p.node_windows[i].node, key, kPubKeySize) == 0) dup = true;
+      }
+      if (dup) continue;
+      if (p.node_window_count >= kMaxNodeWindows) {
+        p.windows_truncated = true;
+        continue;
+      }
+      memcpy(p.node_windows[p.node_window_count].node, key, kPubKeySize);
+      p.node_windows[p.node_window_count].window_s = cjson::satU32(w);
+      p.node_window_count++;
     }
-    if (dup) continue;
-    memcpy(p.node_windows[p.node_window_count].node, key, kPubKeySize);
-    p.node_windows[p.node_window_count].window_s = cjson::satU32(w);
-    p.node_window_count++;
   }
 
   cjson::copyText(o["min_plugin_version"], p.min_plugin_version, sizeof(p.min_plugin_version));
@@ -237,13 +264,15 @@ static inline void parsePolicyObject(JsonObjectConst o, Policy& p) {
 
 // A /policy reply. False: not a JSON object (p is left at the defaults).
 static inline bool parsePolicyReply(const char* body, size_t len, Policy& p,
-                                    ArduinoJson::Allocator* alloc = nullptr) {
+                                    ArduinoJson::Allocator* alloc = nullptr,
+                                    const uint8_t (*targets)[kPubKeySize] = nullptr,
+                                    uint8_t target_count = 0) {
   policyDefaults(p);
   JsonDocument filter(cjson::pickAllocator(alloc));
   cjson::policyFilter(filter.to<JsonObject>());
   JsonDocument doc(cjson::pickAllocator(alloc));
   if (!cjson::deserializeObject(doc, body, len, filter)) return false;
-  parsePolicyObject(doc.as<JsonObjectConst>(), p);
+  parsePolicyObject(doc.as<JsonObjectConst>(), p, targets, target_count);
   return true;
 }
 
@@ -320,7 +349,7 @@ static inline bool parseOwnersReply(const char* body, size_t len,
   if (policy && !nodes.isNull()) {
     JsonObjectConst p = root["policy"].as<JsonObjectConst>();
     if (!p.isNull()) {
-      parsePolicyObject(p, *policy);
+      parsePolicyObject(p, *policy, targets, target_count);
       if (has_policy) *has_policy = true;
     }
   }

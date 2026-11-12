@@ -584,7 +584,7 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
     const Reply r = request(*k, "GET", path, nullptr, 0, deadline, env);
     res.policy_status = r.status;
     if (r.status == 200) {
-      res.policy_ok = parsePolicyReply(s_body, r.len, res.policy, &alloc);
+      res.policy_ok = parsePolicyReply(s_body, r.len, res.policy, &alloc, req.targets, count);
       if (!res.policy_ok) res.policy_status = CTL_ERR_PROTOCOL;
     }
   }

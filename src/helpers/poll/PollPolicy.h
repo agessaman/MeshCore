@@ -49,6 +49,9 @@ struct Policy {
     uint32_t window_s;
   } node_windows[kMaxNodeWindows];  // window clamped to the direct_s range
   uint8_t  node_window_count;
+  // More entries than fit: those for the targets named when it was read are kept first.
+  bool     excluded_truncated;
+  bool     windows_truncated;
   // Fetch bookkeeping. The switches above stay as they are across a failed fetch.
   bool     ever_fetched;
   uint32_t fetched_at;      // last successful fetch; 0 = none
@@ -227,6 +230,26 @@ static inline uint32_t policyWindow(const Policy& p, const uint8_t node[kPubKeyS
   if (!policyStale(p, now)) return w;
   if (w > UINT32_MAX / 2U) return UINT32_MAX;
   return w * 2U;
+}
+
+// covered: the node was one of the targets named when the policy was read, so a truncated list
+// still holds its entry. Otherwise a truncated list cannot rule it out: fail safe.
+static inline bool policyExcludesTarget(const Policy& p, const uint8_t node[kPubKeySize], bool covered) {
+  if (policyExcluded(p, node)) return true;
+  return p.excluded_truncated && !covered;
+}
+
+// A dropped window may have been longer than the default, so an uncovered node waits the longest.
+static inline uint32_t policyWindowFor(const Policy& p, const uint8_t node[kPubKeySize], uint8_t hops,
+                                       uint32_t now, bool covered) {
+  const uint32_t w = policyWindow(p, node, hops, now);
+  if (!p.windows_truncated || covered || !node) return w;
+  uint8_t n = p.node_window_count;
+  if (n > kMaxNodeWindows) n = kMaxNodeWindows;
+  for (uint8_t i = 0; i < n; i++) {
+    if (memcmp(p.node_windows[i].node, node, kPubKeySize) == 0) return w;
+  }
+  return policyStale(p, now) ? kDirectMaxS * 2U : kDirectMaxS;
 }
 
 static inline SavedGate savedGateFrom(const Policy& p, const char* own_version) {

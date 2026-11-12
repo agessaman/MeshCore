@@ -19,7 +19,7 @@
 static_assert(PATH_HASH_SIZE == 1, "poll packets carry one-byte hashes");
 static_assert(PUB_KEY_SIZE == poll::kPubKeySize, "key size");
 static_assert(PRV_KEY_SIZE == poll::kPrvKeySize, "private key size");
-static_assert(sizeof(RepeaterPoller) <= 5184, "repeater poller RAM budget");
+static_assert(sizeof(RepeaterPoller) <= 5188, "repeater poller RAM budget");
 
 namespace {
 
@@ -463,6 +463,7 @@ void RepeaterPoller::readSettings() {
     foldSlots();   // its stop must outlive the slot even if no save has succeeded yet
     memset(&meta_[i], 0, sizeof(meta_[i]));
     memset(&states_[i], 0, sizeof(states_[i]));
+    policy_covered_ &= (uint16_t)~(1U << i);
   }
   // Add new ones and refresh the per-target settings.
   for (uint8_t p = 0; p < s.count; p++) {
@@ -478,6 +479,7 @@ void RepeaterPoller::readSettings() {
       memset(&meta_[idx], 0, sizeof(meta_[idx]));
       memset(&states_[idx], 0, sizeof(states_[idx]));
       meta_[idx].used = true;
+      policy_covered_ &= (uint16_t)~(1U << idx);   // the policy in use was not read for this target
       memcpy(meta_[idx].pub, s.targets[p], poll::kPubKeySize);
       states_[idx].temperature_c10 = INT16_MIN;
       restoreStored((uint8_t)idx);
@@ -1372,6 +1374,7 @@ void RepeaterPoller::initControl() {
   ctl_last_at_ = 0;
   memset(ctl_status_, 0, sizeof(ctl_status_));
   memset(skip_, 0, sizeof(skip_));
+  policy_covered_ = 0;
   ctl_note_ = 0;
   key_note_ = 0;
 }
@@ -1380,6 +1383,7 @@ void RepeaterPoller::initControl() {
 void RepeaterPoller::resetCorescope() {
   poll::policyDefaults(policy_);
   policy_answered_ = false;
+  policy_covered_ = 0;
   memset(owners_, 0, sizeof(owners_));
   owners_ok_at_ = 0;
   memset(&claim_, 0, sizeof(claim_));
@@ -1422,7 +1426,7 @@ uint32_t RepeaterPoller::windowFor(uint8_t idx, uint32_t now) const {
   if (!policy_.ever_fetched) return POLL_TEST_INTERVAL_S;
 #endif
   // Direct neighbors only, so the one-hop window never applies.
-  return poll::policyWindow(policy_, meta_[idx].pub, 0, now);
+  return poll::policyWindowFor(policy_, meta_[idx].pub, 0, now, policyCovers(idx));
 }
 
 uint8_t RepeaterPoller::gateAt(uint32_t now) const {
@@ -1439,7 +1443,7 @@ poll::CycleInput RepeaterPoller::cycleInputFor(uint8_t idx, bool test, uint32_t 
   const poll::OwnerEntry& e = owners_[idx];
   in.test = test;
   in.gate = gateAt(now);
-  in.excluded = poll::policyExcluded(policy_, meta_[idx].pub);
+  in.excluded = poll::policyExcludesTarget(policy_, meta_[idx].pub, policyCovers(idx));
   in.role = poll::mapRole(community_, e);
   in.rank = e.standby_rank ? e.standby_rank : 1;
   in.starting = startingAt(now);
@@ -1552,7 +1556,7 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
       if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
       int8_t snr = 0;
       // An admin-stopped target is never polled here, so it is not offered either.
-      if (states_[i].admin_seen || !directRoute(i, &snr) || poll::policyExcluded(policy_, meta_[i].pub)) break;
+      if (states_[i].admin_seen || !directRoute(i, &snr) || poll::policyExcludesTarget(policy_, meta_[i].pub, policyCovers(i))) break;
       poll::ClaimNode& c = nodes[n++];
       memset(&c, 0, sizeof(c));
       memcpy(c.node, meta_[i].pub, poll::kPubKeySize);
@@ -1749,6 +1753,14 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
   const uint8_t pa = poll::applyPolicyAnswer(policy_, res.policy_ok, res.policy_status, res.policy, now, kFastPolicy);
   if (pa != poll::POLICY_KEPT) policy_answered_ = true;
   if (pa == poll::POLICY_APPLIED) {
+    policy_covered_ = 0;
+    for (uint8_t k = 0; k < ctl_count_ && k < poll::kMaxTargets; k++) {
+      const int8_t i = ctl_slot_[k];
+      if (i >= 0 && meta_[i].used && memcmp(meta_[i].pub, ctl_pfx_[k], sizeof(ctl_pfx_[0])) == 0) policy_covered_ |= (uint16_t)(1U << i);
+    }
+    if (policy_.excluded_truncated || policy_.windows_truncated) {
+      POLL_LOG("CoreScope policy lists more than fit: kept the entries for this node's targets");
+    }
     if (!had_policy || strcmp(before, policy_.version) != 0) {
       POLL_LOG("CoreScope policy %s: window %lus grace %lus cap %u, %u excluded", policy_.version[0] ? policy_.version : "-",
                (unsigned long)policy_.direct_s, (unsigned long)policy_.grace_s, (unsigned)policy_.max_requests,

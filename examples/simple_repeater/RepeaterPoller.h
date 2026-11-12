@@ -312,6 +312,7 @@ private:
   uint32_t ctl_last_at_;
   int16_t  ctl_status_[4];           // owners, policy, registration, shared key
   uint8_t  skip_[kSlots];            // poll::SkipReason of the last decision
+  uint16_t policy_covered_;          // slot bits: targets named in the request the policy in use answered
   uint8_t  ctl_note_;                // log-once notes
   uint8_t  key_note_;
 
@@ -340,6 +341,7 @@ private:
   poll::CycleInput cycleInputFor(uint8_t idx, bool test, uint32_t now) const;
   void noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now);
   void fmtControl(char* out, size_t cap, uint32_t now) const;
+  bool policyCovers(uint8_t idx) const { return (policy_covered_ >> idx) & 1U; }
 };
 
 #endif  // WITH_REPEATER_POLL

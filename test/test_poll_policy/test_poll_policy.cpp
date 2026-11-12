@@ -421,6 +421,32 @@ TEST(PollPolicy, FastModeDropsTheTimeFloorsToAMinute) {
   EXPECT_EQ(poll::kDirectMaxS, p.direct_s);
 }
 
+TEST(PollPolicy, ATruncatedListFailsSafeForNodesItWasNotReadFor) {
+  poll::Policy p;
+  poll::policyDefaults(p);
+  uint8_t listed[poll::kPubKeySize], other[poll::kPubKeySize];
+  memset(listed, 1, sizeof(listed));
+  memset(other, 2, sizeof(other));
+  memcpy(p.excluded[0], listed, sizeof(listed));
+  p.excluded_count = 1;
+  p.node_windows[0].window_s = 7200;
+  memcpy(p.node_windows[0].node, listed, sizeof(listed));
+  p.node_window_count = 1;
+  // Complete lists: as before.
+  EXPECT_TRUE(poll::policyExcludesTarget(p, listed, false));
+  EXPECT_FALSE(poll::policyExcludesTarget(p, other, false));
+  EXPECT_EQ(3600U, poll::policyWindowFor(p, other, 0, 1000, false));
+  // Truncated: a node the reply was read for keeps its answer; any other is excluded and waits a day.
+  p.excluded_truncated = true;
+  p.windows_truncated = true;
+  EXPECT_FALSE(poll::policyExcludesTarget(p, other, true));
+  EXPECT_TRUE(poll::policyExcludesTarget(p, other, false));
+  EXPECT_TRUE(poll::policyExcludesTarget(p, listed, true));
+  EXPECT_EQ(3600U, poll::policyWindowFor(p, other, 0, 1000, true));
+  EXPECT_EQ(poll::kDirectMaxS, poll::policyWindowFor(p, other, 0, 1000, false));
+  EXPECT_EQ(7200U, poll::policyWindowFor(p, listed, 0, 1000, false));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

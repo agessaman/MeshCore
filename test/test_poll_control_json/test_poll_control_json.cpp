@@ -329,6 +329,51 @@ TEST(PollControlJson, PolicyExcludedOverflowAndValidity) {
   ASSERT_TRUE(poll::parsePolicyReply(body.data(), body.size(), p));
   ASSERT_EQ(poll::kMaxExcluded, p.excluded_count);
   for (int i = 0; i < poll::kMaxExcluded; i++) EXPECT_EQ(i + 1, p.excluded[i][0]);
+  EXPECT_TRUE(p.excluded_truncated);
+  EXPECT_FALSE(p.windows_truncated);
+}
+
+// 24 excluded and 12 windows: the entries for this node's targets are kept even past the limit.
+TEST(PollControlJson, PolicyOverflowKeepsTheTargetsEntries) {
+  std::string ex = "{\"excluded_nodes\":[";
+  std::string nw = "\"node_windows\":{";
+  for (int i = 0; i < 24; i++) {
+    char key[65];
+    for (int j = 0; j < 32; j++) snprintf(key + 2 * j, 3, "%02x", (unsigned)(i + 1));
+    ex += std::string(i ? "," : "") + "\"" + key + "\"";
+    if (i < 12) nw += std::string(i ? "," : "") + "\"" + key + "\":" + std::to_string(4000 + i);
+  }
+  const std::string body = ex + "]," + nw + "}}";
+  uint8_t targets[2][poll::kPubKeySize];
+  memset(targets[0], 24, sizeof(targets[0]));   // the last excluded entry
+  memset(targets[1], 12, sizeof(targets[1]));   // the last window entry
+  poll::Policy p;
+  ASSERT_TRUE(poll::parsePolicyReply(body.data(), body.size(), p, nullptr, targets, 2));
+  EXPECT_TRUE(p.excluded_truncated);
+  EXPECT_TRUE(p.windows_truncated);
+  ASSERT_EQ(poll::kMaxExcluded, p.excluded_count);
+  EXPECT_TRUE(poll::policyExcluded(p, targets[0]));
+  EXPECT_TRUE(poll::policyExcluded(p, targets[1]));
+  ASSERT_EQ(poll::kMaxNodeWindows, p.node_window_count);
+  EXPECT_EQ(4011U, poll::policyWindow(p, targets[1], 0, 0));
+
+  // The owners reply's embedded policy is read the same way.
+  const std::string owners = "{\"nodes\":{},\"policy\":" + body + "}";
+  poll::OwnerEntry out[poll::kMaxTargets];
+  bool nodes_ok = false, has_policy = false;
+  poll::Policy q;
+  ASSERT_TRUE(poll::parseOwnersReply(owners.data(), owners.size(), targets, 2, out, &nodes_ok, &q, &has_policy));
+  ASSERT_TRUE(has_policy);
+  EXPECT_TRUE(poll::policyExcluded(q, targets[0]));
+  EXPECT_EQ(4011U, poll::policyWindow(q, targets[1], 0, 0));
+}
+
+TEST(PollControlJson, PolicyThatFitsIsNotTruncated) {
+  poll::Policy p;
+  const std::string body = "{\"excluded_nodes\":[\"" + hexKey('a') + "\"],\"node_windows\":{\"" + hexKey('b') + "\":4000}}";
+  ASSERT_TRUE(poll::parsePolicyReply(body.data(), body.size(), p));
+  EXPECT_FALSE(p.excluded_truncated);
+  EXPECT_FALSE(p.windows_truncated);
 }
 
 TEST(PollControlJson, PolicyNodeWindowsOverflowAndValidity) {
@@ -347,6 +392,7 @@ TEST(PollControlJson, PolicyNodeWindowsOverflowAndValidity) {
     EXPECT_EQ(i + 1, p.node_windows[i].node[0]);
     EXPECT_EQ((uint32_t)(1000 * (i + 1)), p.node_windows[i].window_s);
   }
+  EXPECT_TRUE(p.windows_truncated);
 }
 
 TEST(PollControlJson, RegistrationReply) {
