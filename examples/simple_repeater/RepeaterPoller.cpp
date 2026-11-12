@@ -31,6 +31,7 @@ const uint32_t kTickMs = 5000;
 const uint32_t kTxStuckMs = 30000;          // a packet neither sent nor failed by then was shed
 const uint32_t kMinRequestListenMs = 10000;
 const uint32_t kNowSpacingS = 60;            // `poll now` on one target at most this often
+const uint32_t kAheadSaveMs = 3600000UL;     // saves of a tag mark that ran ahead of the clock, at most this often
 const uint32_t kSaveRetryMs = 10000;         // between attempts to get an admin stop or drill result onto flash
 
 // Bench-only hooks; no environment sets these. POLL_TEST_INTERVAL_S replaces
@@ -123,7 +124,7 @@ RepeaterPoller::RepeaterPoller()
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
       rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), last_tick_ms_(0),
       last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), save_safety_(false),
-      save_retry_ms_(0), hold_note_(0) {
+      save_retry_ms_(0), ahead_save_ms_(0), ahead_saved_(false), hold_note_(0) {
   memset(&gate_, 0, sizeof(gate_));
   memset(stored_, 0, sizeof(stored_));
   memset(meta_, 0, sizeof(meta_));
@@ -577,7 +578,15 @@ void RepeaterPoller::tick() {
   // An admin stop must reach flash even while the drill runs.
   if (save_safety_ && (uint32_t)(millis() - save_retry_ms_) >= kSaveRetryMs) saveState("retry");
   if (busy()) return;
-  if (save_due_ || tag_hw_ - tag_hw_saved_ > kPollDay) saveState("tag high-water");
+  if (save_due_ || tag_hw_ - tag_hw_saved_ > kPollDay) {
+    saveState("tag high-water");
+  } else if (tag_hw_ != tag_hw_saved_ && tag_hw_ > host_->pollNow() &&
+             (!ahead_saved_ || (uint32_t)(millis() - ahead_save_ms_) >= kAheadSaveMs)) {
+    // After a backward clock step tags run ahead of it; an unclean reboot must not restart below them.
+    ahead_saved_ = true;
+    ahead_save_ms_ = millis();
+    saveState("tag ahead of the clock");
+  }
   if (!enabled_ || !has_id_ || store_state_ == poll::STATE_NEWER) return;
   const uint8_t hold = !clockOk() ? 1 : host_->pollDiscoveryBusy() ? 2 : 0;
   if (hold != hold_note_) {

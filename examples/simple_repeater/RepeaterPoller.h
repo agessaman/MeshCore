@@ -201,6 +201,8 @@ private:
   bool     save_due_;
   bool     save_safety_;   // an admin stop or drill result is not on flash yet
   uint32_t save_retry_ms_;
+  uint32_t ahead_save_ms_;
+  bool     ahead_saved_;   // ahead_save_ms_ is set
   uint8_t  hold_note_;     // why scheduled polling is waiting, logged on change
 
   void tick();
