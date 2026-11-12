@@ -291,39 +291,110 @@ TEST(PollSchedule, IsDueRecentFailuresDoNotBackOff) {
   EXPECT_TRUE(poll::isDue(t, kHour, now0, 0));
 }
 
-// -- nextSlot ---------------------------------------------------------------
+// -- nextDueAt --------------------------------------------------------------
 
-TEST(PollSchedule, NextSlotReportsNowWhenTheSlotIsDue) {
+TEST(PollSchedule, NextDueIsNowWhenTheSlotIsDue) {
   poll::TargetState t = blank();
   t.last_attempt = 6000;  // before the 7200 slot
-  EXPECT_EQ(8000U, poll::nextSlot(t, kHour, 8000, 0));
+  EXPECT_EQ(8000U, poll::nextDueAt(t, kHour, 8000, 0));
+  t.last_attempt = 0;     // never polled
+  EXPECT_EQ(8000U, poll::nextDueAt(t, kHour, 8000, 0));
 }
 
-TEST(PollSchedule, NextSlotReportsTheFollowingSlotOtherwise) {
+TEST(PollSchedule, NextDueWaitsForHalfAPeriodOrTheNextSlot) {
   poll::TargetState t = blank();
-  t.last_attempt = 7000;  // half a period not reached
-  EXPECT_EQ(10800U, poll::nextSlot(t, kHour, 8000, 0));
+  t.last_attempt = 7000;  // in this slot once half a period has passed
+  EXPECT_EQ(8800U, poll::nextDueAt(t, kHour, 8000, 0));
 
   t.last_attempt = 7200;  // already polled at this slot
-  EXPECT_EQ(10800U, poll::nextSlot(t, kHour, 8000, 0));
+  EXPECT_EQ(10800U, poll::nextDueAt(t, kHour, 8000, 0));
 
   t.last_attempt = 9000;  // clock stepped back
-  EXPECT_EQ(10800U, poll::nextSlot(t, kHour, 8000, 0));
+  EXPECT_EQ(10800U, poll::nextDueAt(t, kHour, 8000, 0));
 }
 
-TEST(PollSchedule, NextSlotForANeverPolledTargetIsNow) {
+TEST(PollSchedule, NextDueUsesThePhaseAndSurvivesAZeroInterval) {
   poll::TargetState t = blank();
-  EXPECT_EQ(8000U, poll::nextSlot(t, kHour, 8000, 0));
+  EXPECT_EQ(1800U, poll::nextDueAt(t, kHour, 1000, 600));
+  EXPECT_EQ(1000U, poll::nextDueAt(t, 0, 1000, 0));
 }
 
-TEST(PollSchedule, NextSlotUsesThePhase) {
+TEST(PollSchedule, NextDueShowsTheDailyBackoffs) {
+  const uint32_t now = 100 * kDay + 5 * kHour;
   poll::TargetState t = blank();
-  EXPECT_EQ(4200U, poll::nextSlot(t, kHour, 1000, 600));
+  t.code = poll::CODE_NO_BATTERY;
+  t.last_attempt = now - kHour;
+  t.last_success = t.last_attempt;
+  EXPECT_EQ(101 * kDay, poll::nextDueAt(t, kHour, now, 0));
+
+  t = blank();
+  t.code = poll::CODE_NO_REPLY;
+  t.no_reply_count = 5;
+  t.last_attempt = now - kHour;
+  t.unheard_since = now - 2 * kDay;
+  EXPECT_EQ(101 * kDay, poll::nextDueAt(t, kHour, now, 0));
 }
 
-TEST(PollSchedule, NextSlotSurvivesAZeroInterval) {
+TEST(PollSchedule, NextDueShowsTheQuickRetry) {
+  const uint32_t now = 100 * kDay;
   poll::TargetState t = blank();
-  EXPECT_EQ(1000U, poll::nextSlot(t, 0, 1000, 0));
+  t.code = poll::CODE_NO_REPLY;
+  t.no_reply_count = 1;
+  t.last_success = now - kHour;
+  t.last_attempt = now - 5 * 60;
+  t.unheard_since = t.last_attempt;
+  EXPECT_EQ(now + 15 * 60, poll::nextDueAt(t, kHour, now, 0));
+}
+
+TEST(PollSchedule, NextDueHonorsTheHoldAndTheAdminStop) {
+  poll::TargetState t = blank();
+  t.next_due_at = 9000;
+  EXPECT_EQ(9000U, poll::nextDueAt(t, kHour, 8000, 0));
+  t.admin_seen = true;
+  EXPECT_EQ(0xFFFFFFFFU, poll::nextDueAt(t, kHour, 8000, 0));
+}
+
+namespace {
+
+uint32_t lcg(uint32_t& s) {
+  s = s * 1664525u + 1013904223u;
+  return s >> 8;
+}
+
+}  // namespace
+
+// The display and the scheduler must agree: due at nextDueAt, never earlier.
+TEST(PollSchedule, NextDueAgreesWithIsDue) {
+  uint32_t seed = 12345;
+  const uint32_t base = 1000 * kDay;
+  const uint32_t intervals[] = {600, kHour, 2 * kHour, kDay, 2 * kDay};
+  const uint8_t codes[] = {poll::CODE_NONE, poll::CODE_OK, poll::CODE_NO_BATTERY, poll::CODE_NO_REPLY};
+  int scanned = 0;
+  for (int i = 0; i < 400; i++) {
+    poll::TargetState t = blank();
+    const uint32_t interval = intervals[lcg(seed) % 5];
+    const uint32_t phase = lcg(seed) % interval;
+    const uint32_t now = base + lcg(seed) % (3 * kDay);
+    t.code = codes[lcg(seed) % 4];
+    t.no_reply_count = (uint8_t)(lcg(seed) % 4);
+    t.flood_replies = (uint8_t)(lcg(seed) % 3);
+    t.last_attempt = lcg(seed) % 8 == 0 ? 0 : now - lcg(seed) % (2 * kDay) + (lcg(seed) % 10 == 0 ? kHour : 0);
+    t.last_success = lcg(seed) % 3 == 0 ? 0 : now - lcg(seed) % (2 * kDay) + (lcg(seed) % 10 == 0 ? kHour : 0);
+    t.unheard_since = (t.code == poll::CODE_NO_REPLY && lcg(seed) % 2) ? now - lcg(seed) % (2 * kDay) : 0;
+    t.next_due_at = lcg(seed) % 5 == 0 ? now + lcg(seed) % kDay : 0;
+
+    const uint32_t at = poll::nextDueAt(t, interval, now, phase);
+    ASSERT_TRUE(poll::isDue(t, interval, at, phase)) << "case " << i << " at " << at - now;
+    if (at == now) continue;
+    ASSERT_FALSE(poll::isDue(t, interval, at - 1, phase)) << "case " << i;
+    // Every second up to it, when that is cheap; a sample otherwise.
+    const uint32_t step = (at - now) <= 3 * kDay ? 1 : (at - now) / 50000 + 1;
+    for (uint32_t s = now; s < at; s += step) {
+      ASSERT_FALSE(poll::isDue(t, interval, s, phase)) << "case " << i << " early by " << at - s;
+    }
+    scanned++;
+  }
+  EXPECT_GT(scanned, 100);
 }
 
 // -- request cap ------------------------------------------------------------

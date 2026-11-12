@@ -1144,8 +1144,7 @@ void RepeaterPoller::cmdGetStatus(const char* arg, char* reply) {
   } else if (!enabled_) {
     strcpy(next, "off");
   } else {
-    uint32_t at = poll::nextSlot(t, meta_[idx].interval_s, now, meta_[idx].phase_s);
-    if (t.next_due_at > at) at = t.next_due_at;
+    const uint32_t at = poll::nextDueAt(t, meta_[idx].interval_s, now, meta_[idx].phase_s);
     snprintf(next, sizeof(next), "%lus", (unsigned long)(at > now ? at - now : 0));
   }
   const char* pw = t.learned_pw == poll::LEARNED_HELLO ? "hello" : t.learned_pw == poll::LEARNED_BLANK ? "blank" : "?";

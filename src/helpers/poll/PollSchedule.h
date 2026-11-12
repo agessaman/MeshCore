@@ -103,17 +103,67 @@ static inline bool isDue(const TargetState& t, uint32_t interval_s, uint32_t now
   return slotDue(last, now, interval_s, phase, true);
 }
 
-// Roughly when the normal schedule next polls, for status display.
-static inline uint32_t nextSlot(const TargetState& t, uint32_t interval_s, uint32_t now,
-                                uint32_t phase) {
-  if (interval_s == 0) return now;
-  uint32_t last = t.last_attempt;
-  int64_t slot = slotStart(now, interval_s, phase);
-  if ((int64_t)last < slot && elapsedSince(last, now) >= halfPeriod(interval_s)) return now;
-  int64_t next = slot + (int64_t)interval_s;
-  if (next <= 0) return 0;
-  if (next > (int64_t)0xFFFFFFFFUL) return 0xFFFFFFFFUL;
-  return (uint32_t)next;
+// Earliest moment at or after `from` that slotDue holds, for the same last.
+static inline uint32_t slotDueFrom(uint32_t last, uint32_t from, uint32_t every, uint32_t phase,
+                                   bool has_phase) {
+  if (every == 0 || slotDue(last, from, every, phase, has_phase)) return from;
+  int64_t at;
+  if (!has_phase) {
+    at = (int64_t)last + (int64_t)every;
+  } else {
+    // A slot that starts after last, and half a period past last.
+    int64_t after = slotStart(last, every, phase) + (int64_t)every;
+    int64_t half = (int64_t)last + (int64_t)halfPeriod(every);
+    at = after > half ? after : half;
+  }
+  if (at < (int64_t)from) at = from;
+  if (at > (int64_t)0xFFFFFFFFUL) return 0xFFFFFFFFUL;
+  return (uint32_t)at;
+}
+
+// isDue's rule as it stands at `from`: the earliest due moment under it, and in *ends the moment
+// a different rule takes over (0 if none does).
+static inline uint32_t dueUnderRuleAt(const TargetState& t, uint32_t interval_s, uint32_t from, uint32_t phase,
+                                      uint32_t retry_s, uint32_t* ends) {
+  *ends = 0;
+  const uint32_t last = t.last_attempt;
+  if (t.unheard_since != 0 && elapsedSince(t.unheard_since, from) >= kDay) {
+    uint32_t scaled = 0;
+    bool has_phase = scaledPhase(phase, interval_s, kDay, &scaled);
+    return slotDueFrom(last, from, kDay, scaled, has_phase);
+  }
+  if (t.unheard_since != 0) *ends = t.unheard_since + kDay;
+  if (t.flood_replies >= kFloodRepliesBeforeDaily || t.code == CODE_NO_BATTERY) {
+    uint32_t every = interval_s > kDay ? interval_s : kDay;
+    uint32_t scaled = 0;
+    bool has_phase = scaledPhase(phase, interval_s, every, &scaled);
+    return slotDueFrom(last, from, every, scaled, has_phase);
+  }
+  if (t.code == CODE_NO_REPLY && elapsedSince(t.last_success, from) < kDay &&
+      t.no_reply_count < kNoReplyFastTries) {
+    const uint32_t recent_ends = t.last_success + kDay;
+    if (*ends == 0 || recent_ends < *ends) *ends = recent_ends;
+    uint32_t retry = interval_s < retry_s ? interval_s : retry_s;
+    uint64_t at = (uint64_t)last + retry;
+    if (at < from) at = from;
+    return at > 0xFFFFFFFFUL ? 0xFFFFFFFFUL : (uint32_t)at;
+  }
+  return slotDueFrom(last, from, interval_s, phase, true);
+}
+
+// When isDue next becomes true, with every backoff applied; 0xFFFFFFFF for an admin stop.
+static inline uint32_t nextDueAt(const TargetState& t, uint32_t interval_s, uint32_t now, uint32_t phase,
+                                 uint32_t retry_s = 20 * 60) {
+  if (t.admin_seen) return 0xFFFFFFFFUL;
+  uint32_t from = t.next_due_at > now ? t.next_due_at : now;
+  // Each rule switch happens once (silence reaches a day, a success leaves the last day).
+  for (uint8_t pass = 0; pass < 4; pass++) {
+    uint32_t ends = 0;
+    const uint32_t at = dueUnderRuleAt(t, interval_s, from, phase, retry_s, &ends);
+    if (ends == 0 || ends <= from || at < ends) return at;
+    from = ends;
+  }
+  return from;
 }
 
 // Per-window request cap: true once max_requests polls started inside window_s.
