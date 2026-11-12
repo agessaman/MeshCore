@@ -462,6 +462,56 @@ TEST(MQTTConnectionPolicy, RapidLinkFlappingStillClimbs) {
   EXPECT_TRUE(Policy::outageCausedByLink(5000U, 0U, true, 0U));
 }
 
+// The 10 s status poll can report the edge well after the socket died, so the floor
+// runs to the stamped session end rather than to the polled edge.
+TEST(MQTTConnectionPolicy, LinkFlapFloorUsesTheSessionEndNotThePolledEdge) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(130000U, link_up, false, 125000U));
+  EXPECT_TRUE(Policy::outageCausedByLink(130000U, link_up, false, 130000U));
+  // A slot still up at the edge keeps the floor on the edge itself.
+  EXPECT_TRUE(Policy::outageCausedByLink(link_up + Policy::kLinkFlapFloorMs, link_up, true, 0U));
+  EXPECT_FALSE(Policy::outageCausedByLink(link_up + Policy::kLinkFlapFloorMs - 1U, link_up, true, 0U));
+}
+
+// An outage stamped before the link came up is outside this link-up period, so it
+// cannot move the floor and the edge stands.
+TEST(MQTTConnectionPolicy, OutageBeforeTheLinkCameUpStaysUnattributed) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(140000U, link_up, false, 95000U));
+  EXPECT_FALSE(Policy::outageCausedByLink(110000U, link_up, false, 95000U));
+}
+
+// The event task may stamp the disconnect a moment after the bridge read its clock.
+TEST(MQTTConnectionPolicy, OutageAfterTheEdgeKeepsTheEdgeFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(200000U, link_up, false, 200005U));
+  EXPECT_FALSE(Policy::outageCausedByLink(120000U, link_up, false, 120005U));
+}
+
+// The attribution window reaches kLinkDropAttributionMs past the edge as well.
+TEST(MQTTConnectionPolicy, AttributionWindowEndsTwentySecondsPastTheEdge) {
+  const uint32_t now = 300000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, 0U, false, now + Policy::kLinkDropAttributionMs));
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      now, 0U, false, now + Policy::kLinkDropAttributionMs + 1U));
+}
+
+// An outage stamped just before the rollover ties to an edge just after it.
+TEST(MQTTConnectionPolicy, AttributionWrapsFromOutageToEdge) {
+  const uint32_t outage = std::numeric_limits<uint32_t>::max() - 5000U;
+  const uint32_t now = 10000U;
+  const uint32_t link_up = outage - 60000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, link_up, false, outage));
+}
+
+// An outage stamped just after the rollover ties to an edge just before it.
+TEST(MQTTConnectionPolicy, AttributionWrapsFromEdgeToOutage) {
+  const uint32_t now = std::numeric_limits<uint32_t>::max() - 5000U;
+  const uint32_t outage = 10000U;
+  const uint32_t link_up = outage - 60000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, link_up, false, outage));
+}
+
 // The recovery retry runs at the held level; if its handshake then fails with the
 // link up, that is broker evidence like any other and the next attempt climbs one
 // rung (10 s, then 30 s), not the minutes an accumulated level used to cost.

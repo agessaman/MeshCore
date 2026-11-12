@@ -196,11 +196,19 @@ static const uint32_t kLinkFlapFloorMs = 30000UL;
 // Decided at the link-down edge, before the bridge closes live clients. A slot whose
 // session was up, or ended within kLinkDropAttributionMs of the edge, lost it to the
 // link. A slot already down before that (broker trouble) is not excused, and neither
-// is any slot when the link itself held for under kLinkFlapFloorMs. link_up_ms = 0
-// means the bridge never saw the up edge (link was up at start) and counts as held.
+// is any slot when the link itself held for under kLinkFlapFloorMs. The floor is
+// measured to the session's end when the slot stamps one, since the 10 s status poll
+// can report the edge well after the real drop. link_up_ms = 0 means the bridge never
+// saw the up edge (link was up at start) and counts as held.
 static inline bool outageCausedByLink(uint32_t now, uint32_t link_up_ms, bool slot_connected,
                                       uint32_t outage_started_ms) {
-  if (link_up_ms != 0 && elapsedMs(now, link_up_ms) < kLinkFlapFloorMs) return false;
+  // Trust the outage stamp only inside the current link-up period, at or before now.
+  uint32_t link_end = now;
+  if (!slot_connected && outage_started_ms != 0 && link_up_ms != 0 &&
+      elapsedMs(outage_started_ms, link_up_ms) <= elapsedMs(now, link_up_ms)) {
+    link_end = outage_started_ms;
+  }
+  if (link_up_ms != 0 && elapsedMs(link_end, link_up_ms) < kLinkFlapFloorMs) return false;
   if (slot_connected) return true;
   if (outage_started_ms == 0) return false;
   // The event task may stamp the disconnect a moment after the bridge read its clock.
