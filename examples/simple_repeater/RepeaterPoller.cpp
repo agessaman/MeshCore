@@ -1391,7 +1391,7 @@ void RepeaterPoller::resetCorescope() {
   memset(&reg_, 0, sizeof(reg_));
   has_shared_ = false;
   shared_at_ = 0;
-  ctl_ever_ = false;
+  // The session spacing is the node's, not the server's: ctl_ever_ and ctl_filed_ms_ stay.
   ctl_want_ = 0;   // an answer still on its way came from the old URL
   ctl_last_ = CTL_NEVER;
   const poll::SavedGate open = {false, false, false, 0};
