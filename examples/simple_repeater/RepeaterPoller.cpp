@@ -403,6 +403,15 @@ void RepeaterPoller::foldSlots() {
   fold_full_logged_ = full;   // every save folds: say it once per spell without room
 }
 
+// A slot changing hands: nothing asked of CoreScope for its last target, and no waiting `poll now`, carries over.
+void RepeaterPoller::detachSlot(uint8_t i) {
+  policy_covered_ &= (uint16_t)~(1U << i);
+  for (uint8_t k = 0; k < poll::kMaxTargets; k++) {
+    if (ctl_slot_[k] == (int8_t)i) ctl_slot_[k] = -1;
+  }
+  if (now_idx_ == (int8_t)i) now_idx_ = -1;
+}
+
 bool RepeaterPoller::roomFor(const uint8_t* pub) {
   if (!host_) return true;
   PollSettings s;
@@ -463,7 +472,7 @@ void RepeaterPoller::readSettings() {
     foldSlots();   // its stop must outlive the slot even if no save has succeeded yet
     memset(&meta_[i], 0, sizeof(meta_[i]));
     memset(&states_[i], 0, sizeof(states_[i]));
-    policy_covered_ &= (uint16_t)~(1U << i);
+    detachSlot(i);
   }
   // Add new ones and refresh the per-target settings.
   for (uint8_t p = 0; p < s.count; p++) {
@@ -479,7 +488,7 @@ void RepeaterPoller::readSettings() {
       memset(&meta_[idx], 0, sizeof(meta_[idx]));
       memset(&states_[idx], 0, sizeof(states_[idx]));
       meta_[idx].used = true;
-      policy_covered_ &= (uint16_t)~(1U << idx);   // the policy in use was not read for this target
+      detachSlot((uint8_t)idx);   // the policy in use was not read for this target
       memcpy(meta_[idx].pub, s.targets[p], poll::kPubKeySize);
       states_[idx].temperature_c10 = INT16_MIN;
       restoreStored((uint8_t)idx);
@@ -1281,6 +1290,12 @@ bool RepeaterPoller::controlFileableNow() const {
 void RepeaterPoller::resolveNow(uint32_t now) {
   if (now_idx_ < 0) return;
   const uint8_t idx = (uint8_t)now_idx_;
+  if (!enabled_ || !has_url_) {
+    // It waited on a CoreScope check that polling being switched off, or the URL cleared, has called off.
+    now_idx_ = -1;
+    POLL_LOG("poll now dropped: polling or the CoreScope URL was switched off");
+    return;
+  }
   // The session itself gives up at kControlTimeoutS; a claim ahead of it at kClaimTimeoutMs.
   const bool expired = (uint32_t)(millis() - now_ms_) >= poll::kControlTimeoutS * 1000UL + kClaimTimeoutMs + kTickMs;
   if ((ctl_pending_ || ctl_deferred_) && !expired) return;
@@ -1444,6 +1459,7 @@ void RepeaterPoller::resetCorescope() {
   poll::policyDefaults(policy_);
   policy_answered_ = false;
   policy_covered_ = 0;
+  now_idx_ = -1;   // a `poll now` waiting on the old server's answer is not decided on the new one's defaults
   memset(owners_, 0, sizeof(owners_));
   owners_ok_at_ = 0;
   memset(&claim_, 0, sizeof(claim_));

@@ -346,6 +346,7 @@ private:
   bool nowRefused(uint8_t idx, uint32_t now, char* reply, bool local_only);
   bool controlFileableNow() const;
   void resolveNow(uint32_t now);
+  void detachSlot(uint8_t i);
   void scheduleTick(uint32_t now);
   poll::CycleInput cycleInputFor(uint8_t idx, bool test, uint32_t now) const;
   void noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now);
