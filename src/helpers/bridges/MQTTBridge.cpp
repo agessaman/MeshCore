@@ -804,7 +804,8 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #ifdef WITH_SNMP
       _snmp_agent(nullptr),
 #endif
-      _last_slot_reconnect_ms(0), _guard_armed_by_slot(-1), _guard_armer_first_setup(false)
+      _last_slot_reconnect_ms(0), _guard_armed_by_slot(-1), _guard_armer_first_setup(false),
+      _link_up_ms(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _packet_queue_storage(nullptr)
@@ -846,6 +847,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].max_backoff_failures = 0;
     _slots[i].circuit_breaker_tripped = false;
     _slots[i].link_retry_pending = false;
+    _slots[i].link_caused_outage = false;
     _slots[i].last_reconnect_attempt = 0;
     _slots[i].last_log_time = 0;
     _slots[i].port = 1883;
@@ -2396,6 +2398,7 @@ bool MQTTBridge::setupSlot(int index) {
   slot.max_backoff_failures = 0;
   slot.circuit_breaker_tripped = false;
   slot.link_retry_pending = false;
+  slot.link_caused_outage = false;
 
   // Start or reconnect according to what the SDK client actually is, not what
   // the network is doing. esp_mqtt_client_start() fails on an already-started
@@ -3103,9 +3106,11 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       const bool link_retry = slot.link_retry_pending &&
           __atomic_load_n(&slot.connect_count, __ATOMIC_ACQUIRE) == slot.link_retry_connects;
       slot.link_retry_pending = false;
+      const bool link_caused = link_retry && slot.link_caused_outage;
+      slot.link_caused_outage = false;
       MQTTConnectionPolicy::BackoffAdvance advance = link_retry
           ? MQTTConnectionPolicy::advanceBackoffForLinkRecovery(
-                slot.reconnect_backoff, slot.max_backoff_failures)
+                slot.reconnect_backoff, slot.max_backoff_failures, link_caused)
           : MQTTConnectionPolicy::advanceBackoff(
                 slot.reconnect_backoff, slot.max_backoff_failures);
       slot.reconnect_backoff = advance.reconnect_backoff;
@@ -3115,7 +3120,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker tripped after %d failures at max backoff - stopping reconnect attempts. Reconfigure slot to retry.", index + 1, slot.max_backoff_failures);
         return;
       }
-      MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d, int_heap=%d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures,
+      MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d%s, int_heap=%d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures,
+          link_caused ? ", link outage: held" : "",
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       MQTT_DEBUG_PRINTLN("  radio_state=%d, last_rx=%lums ago",
           _radio ? _radio->getRadioState() : -1,
@@ -3147,6 +3153,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         slot.max_backoff_failures = failures_before;
         slot.circuit_breaker_tripped = breaker_before;
         slot.link_retry_pending = link_retry;
+        slot.link_caused_outage = link_caused;
       }
     }
   }
@@ -3778,6 +3785,10 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
       NetworkPolicy::mqttActions(transition);
   if (actions.disconnect_started_slots) {
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      // Before the close below, which would make every session look like it ended here.
+      _slots[i].link_caused_outage = MQTTConnectionPolicy::outageCausedByLink(
+          static_cast<uint32_t>(now), static_cast<uint32_t>(_link_up_ms), _slots[i].connected,
+          static_cast<uint32_t>(_slots[i].current_outage_started_ms));
       closeLiveClientForLinkTransition(i);
       _slots[i].connected = false;
       noteSlotConnected(i, false);
@@ -3787,6 +3798,7 @@ bool MQTTBridge::handleNetworkConnection(unsigned long now) {
   }
 
   if (actions.retry_disconnected_slots_now) {
+    _link_up_ms = now;
     const uint32_t probe_ms = MQTTConnectionPolicy::breakerProbeMs(
       _breaker_probe_min.load(std::memory_order_relaxed));
     // Link recovery gets one immediate attempt without forgiving broker

@@ -579,7 +579,9 @@ published (or on `clear crash`), so it survives boots where MQTT never connects.
 **Connections.** Each slot reconnects with exponential backoff, then drops to a slow
 periodic retry (`mqtt.breaker.interval`, default 30 min). Packets queue while a slot is down. When the network route changes
 (Ethernet to WiFi or back), every slot disconnects cleanly and retries at once on the new
-route. Each medium keeps its own DHCP DNS servers.
+route. Each medium keeps its own DHCP DNS servers. When Wi-Fi or Ethernet drops and
+comes back, every slot retries at once; a session the outage cut does not count against
+the broker, unless the link keeps dropping within 30 s of coming up.
 
 **Self-heal.** With `mqtt.selfheal on`, the node alerts and reboots 1 min later when a
 bridge stop never completes (10 min), an MQTT client cannot be stopped (30 min), or every
