@@ -88,6 +88,12 @@ static inline bool reconnectGuardReleased(uint32_t now, uint32_t last_cross_slot
   return elapsedMs(now, last_cross_slot_ms) >= kFirstSetupMinGapMs;
 }
 
+// A reconnect may arm that early release only when the next outcome event is its own:
+// no older attempt in flight and no DISCONNECTED still owed by a session closed before it.
+static inline bool reconnectArmsEarlyRelease(bool attempt_pending, bool disconnect_owed) {
+  return !attempt_pending && !disconnect_owed;
+}
+
 // One reconfigure per pass. A request that does not open a connection is not
 // held for the handshake guard; a connecting one is, so the caller can arm
 // that guard and the next request waits its turn.

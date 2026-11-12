@@ -133,6 +133,15 @@ TEST(MQTTConnectionPolicy, ReconnectKeepsTheFullGuardAfterARenewalProbeOrReconfi
   EXPECT_FALSE(Policy::reconnectGuardReleased(armed + 14999U, armed, false, true));
 }
 
+TEST(MQTTConnectionPolicy, ReconnectArmsTheEarlyReleaseOnlyWhenNoOlderEventIsOutstanding) {
+  EXPECT_TRUE(Policy::reconnectArmsEarlyRelease(false, false));
+  // An older attempt's outcome would clear the pending flag for this one.
+  EXPECT_FALSE(Policy::reconnectArmsEarlyRelease(true, false));
+  // So would the late DISCONNECTED of a session whose soft disconnect timed out.
+  EXPECT_FALSE(Policy::reconnectArmsEarlyRelease(false, true));
+  EXPECT_FALSE(Policy::reconnectArmsEarlyRelease(true, true));
+}
+
 TEST(MQTTConnectionPolicy, ReconnectGuardReleaseSurvivesClockRollover) {
   const uint32_t armed = 0xFFFFFF00U;
   EXPECT_FALSE(Policy::reconnectGuardReleased(armed + 1999U, armed, true, true));

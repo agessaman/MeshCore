@@ -301,6 +301,10 @@ private:
   // (including an ignored late CONNECTED) or a deliberate stop.
   volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
 
+  // Set by the bridge task while a soft-disconnected session's DISCONNECTED is still to
+  // come; cleared at the end of that event's handler or by a deliberate stop.
+  volatile bool _slot_disconnect_owed[RUNTIME_MQTT_SLOTS];
+
   // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
   // All NTP I/O must run on Core 0; the CLI thread
   // (Core 1) sets _ntp_force_requested and blocks in requestForcedNtpSync()
@@ -597,6 +601,7 @@ private:
   // Close a live client because the route changed under it: bounded where that
   // is enough, a real stop where an in-flight attempt has to be cancelled.
   void closeLiveClientForLinkTransition(int index);
+  esp_err_t softDisconnectSlot(int index, unsigned long timeout_ms = 5000);
   // Stop a live client, recording Stopped (proven) or Quarantined (not joined).
   void stopSlotClient(int index);
   // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a
