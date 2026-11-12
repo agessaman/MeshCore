@@ -727,8 +727,8 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
 
 void RepeaterPoller::pushEvent(uint8_t ev, bool flooded) {
   if (event_count_ >= kEventQueue) {
-    // Never drop a TX report: the machines wait for it. Replies beyond this are duplicates.
-    if (ev != poll::EV_TX_DONE && ev != poll::EV_TX_FAILED) return;
+    // Never drop a TX report (the machines wait for it) or an admin answer. Other replies beyond this are duplicates.
+    if (ev != poll::EV_TX_DONE && ev != poll::EV_TX_FAILED && ev != poll::EV_LOGIN_ADMIN) return;
     memmove(events_, events_ + 1, sizeof(events_[0]) * (kEventQueue - 1));
     event_count_--;
   }
@@ -746,6 +746,8 @@ void RepeaterPoller::processEvents() {
     const bool listen = e.ev == poll::EV_TX_DONE &&
                         (inflight_act_ == poll::ACT_SEND_LOGIN || inflight_act_ == poll::ACT_SEND_REQUEST);
     apply(s);
+    // An event ahead of the admin answer may have queued another packet.
+    if (e.ev == poll::EV_LOGIN_ADMIN) recallForAdmin();
     if (listen && s.act == poll::ACT_WAIT && !poll::isNoChange(s) && run_kind_ != RUN_NONE) {
       listening_ = true;
       listen_act_ = inflight_act_;
@@ -822,12 +824,23 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
       POLL_LOG("rx login %s tag=%lu %s snr=%.2f", cls == poll::REPLY_LOGIN_ADMIN ? "admin" : "guest",
                (unsigned long)r.tag, flooded ? "flooded" : "direct", snr);
       pushEvent(cls == poll::REPLY_LOGIN_ADMIN ? poll::EV_LOGIN_ADMIN : poll::EV_LOGIN_GUEST, flooded);
+      // The dispatcher sends right after this tap returns, before the loop could stop the next packet.
+      if (cls == poll::REPLY_LOGIN_ADMIN) recallForAdmin();
       break;
     default:
       POLL_LOG("rx ignored tag=%lu len=%u %s", (unsigned long)r.tag, (unsigned)r.len, flooded ? "flooded" : "direct");
       break;
   }
   memset(plain, 0, sizeof(plain));
+}
+
+// After an admin answer nothing more may go out under the exchange; a packet already on the air cannot be recalled.
+void RepeaterPoller::recallForAdmin() {
+  if (run_kind_ != RUN_EXCHANGE || !inflight_ || sigOf(inflight_) != inflight_sig_) return;
+  if (!host_->pollCancelQueued(inflight_)) return;
+  POLL_LOG("tx %s cancelled: admin answer received", actLabel(inflight_act_, inflight_pw_));
+  inflight_ = NULL;
+  pushEvent(poll::EV_TX_FAILED, false);
 }
 
 void RepeaterPoller::finishRun() {

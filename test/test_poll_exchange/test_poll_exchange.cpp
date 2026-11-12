@@ -883,6 +883,36 @@ TEST(PollExchange, AdminAnswerDuringTheRequestSendIsHeldThenFinishes) {
   EXPECT_EQ(XR_ADMIN, x.result().reason);
 }
 
+TEST(PollExchange, AdminAnswerThenRecalledPacketFinishesWithoutAnotherSend) {
+  // The owner cancels the queued request on the admin answer and reports it failed.
+  TargetState t;
+  memset(&t, 0, sizeof(t));
+  PollExchange x;
+  Step s = x.start(t, defaultExchangeConfig(), kNow);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow);
+  s = x.onEvent(t, EV_LOGIN_GUEST, false, kNow + 1);
+  ASSERT_EQ(ACT_SEND_TEACH, s.act);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow + 1);
+  s = x.onEvent(t, EV_TIMER, false, kNow + 2);
+  ASSERT_EQ(ACT_SEND_REQUEST, s.act);
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_ADMIN, false, kNow + 2)));
+  s = x.onEvent(t, EV_TX_FAILED, false, kNow + 2);
+  EXPECT_EQ(ACT_FINISH, s.act);
+  EXPECT_TRUE(x.result().admin);
+  EXPECT_EQ(XR_ADMIN, x.result().reason);
+  EXPECT_EQ(0, x.result().requests);
+
+  // Same while the first login is still queued.
+  memset(&t, 0, sizeof(t));
+  s = x.start(t, defaultExchangeConfig(), kNow);
+  ASSERT_EQ(ACT_SEND_LOGIN, s.act);
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_ADMIN, false, kNow)));
+  s = x.onEvent(t, EV_TX_FAILED, false, kNow);
+  EXPECT_EQ(ACT_FINISH, s.act);
+  EXPECT_EQ(XR_ADMIN, x.result().reason);
+  EXPECT_EQ(0, x.result().logins);
+}
+
 TEST(PollExchange, LoginAnswersIgnoredBeforeAnyLoginWasHandedOver) {
   TargetState t;
   memset(&t, 0, sizeof(t));

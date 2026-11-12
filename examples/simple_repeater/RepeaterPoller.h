@@ -209,6 +209,7 @@ private:
   uint32_t nextTag();
   void pushEvent(uint8_t ev, bool flooded);
   void processEvents();
+  void recallForAdmin();
   void finishRun();
   void endRun();
   void abortRun(const char* why);
