@@ -155,6 +155,12 @@ extern const uint8_t rootca_crt_bundle_end[] asm("_binary_src_certs_x509_crt_bun
 // TLS slots are set up in sequence (each connect() launches an async task).
 static bool s_ca_bundle_loaded = false;
 
+#if defined(WITH_REPEATER_POLL)
+// Global ownership survives orphaning and bridge restart until TLS is destroyed.
+static std::atomic<bool> s_poll_tls_alive(false);
+static std::atomic<bool> s_poll_session_alive(false);
+#endif
+
 // PSRAM-aware allocation: prefer PSRAM on ESP32 when BOARD_HAS_PSRAM, fallback to internal heap or malloc.
 // Use psram_free() for any pointer returned by psram_malloc().
 static void* psram_malloc(size_t size) {
@@ -900,7 +906,6 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   _poll_session = nullptr;
   _poll_ctl_seen_ms = 0;
   _poll_session_started_ms = 0;
-  _poll_session_tls = false;
   _poll_claim_buf = nullptr;
   _poll_claim_len = 0;
   _poll_claim_slot = 0;
@@ -2123,6 +2128,9 @@ bool MQTTBridge::canActivateSlot(int index) const {
 bool MQTTBridge::setupSlot(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
+#if defined(WITH_REPEATER_POLL)
+  if (s_poll_tls_alive.load(std::memory_order_acquire)) return false;
+#endif
 
   if (!slot.enabled) {
     teardownSlot(index);
@@ -2700,6 +2708,9 @@ void MQTTBridge::teardownSlot(int index, TeardownReason reason) {
 // leaves _started false while initial_connect_done stays set. Not a link transition,
 // which only disconnects the session and keeps the client task.
 esp_err_t MQTTBridge::reconnectSlotClient(int index) {
+#if defined(WITH_REPEATER_POLL)
+  if (s_poll_tls_alive.load(std::memory_order_acquire)) return ESP_ERR_INVALID_STATE;
+#endif
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return ESP_ERR_INVALID_ARG;
   MQTTSlot& slot = _slots[index];
   if (slot.client == nullptr) return ESP_ERR_INVALID_STATE;
@@ -2752,6 +2763,9 @@ void MQTTBridge::beginDeferredSlotSetup() {
 }
 
 void MQTTBridge::maintainSlotConnections() {
+#if defined(WITH_REPEATER_POLL)
+  if (s_poll_tls_alive.load(std::memory_order_acquire)) return;
+#endif
   // Renewal and reconnect need an identity and a link; a first setup needs only the link.
   const bool link_up = _network->isConnected();
   const bool can_maintain = _identity != nullptr && link_up;
@@ -3771,6 +3785,9 @@ void MQTTBridge::applyPendingSlotReconfigures() {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (!_slot_reconfigure_pending[i]) continue;
     const bool opens = pendingReconfigureConnects(i);
+#if defined(WITH_REPEATER_POLL)
+    if (opens && s_poll_tls_alive.load(std::memory_order_acquire)) continue;
+#endif
     if (!MQTTConnectionPolicy::slotReconfigureDue(
             true, opens,
             static_cast<uint32_t>(now_ms),
@@ -4936,10 +4953,6 @@ bool MQTTBridge::publishNeighbors() {
   #define POLL_BRIDGE_LOG(...) do {} while (0)
 #endif
 
-// One session task at a time across bridge restarts: a task abandoned by a
-// stop still owns the client's body buffer until it exits.
-static std::atomic<bool> s_poll_session_alive(false);
-
 // A session stuck in DNS past its budget is abandoned, not waited on.
 static const uint32_t POLL_SESSION_GRACE_MS = 3000;
 // Preconditions that never come true end the request with started = false.
@@ -4978,6 +4991,9 @@ static void pollSessionTask(void* arg) {
   if (!s->state.compare_exchange_strong(expected, POLL_SESSION_DONE, std::memory_order_acq_rel)) {
     // The bridge stopped or gave up on this session; nobody else frees it.
     freePollSession(s);
+  }
+  if (s_poll_tls_alive.exchange(false, std::memory_order_acq_rel)) {
+    POLL_BRIDGE_LOG("control TLS guard released");
   }
   s_poll_session_alive.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
@@ -5099,20 +5115,6 @@ void MQTTBridge::servicePollControl() {
     }
   }
 
-  // Hold the cross-slot guard for as long as an HTTPS session task lives, even
-  // an abandoned one: its TLS working set is still on the internal heap.
-  if (_poll_session_tls) {
-    if (s_poll_session_alive.load(std::memory_order_acquire)) {
-      if (MQTTConnectionPolicy::elapsedMs(now, (uint32_t)_last_slot_reconnect_ms) +
-              2000UL >= MQTTConnectionPolicy::kReconnectGuardMs) {
-        _last_slot_reconnect_ms = now;
-        _guard_armed_by_slot = -1;
-      }
-    } else {
-      _poll_session_tls = false;
-    }
-  }
-
   if (_poll_session) return;
   if (_poll_ctl_state.load(std::memory_order_acquire) != poll::CONTROL_REQUESTED) {
     _poll_ctl_seen_ms = 0;
@@ -5171,7 +5173,8 @@ void MQTTBridge::servicePollControl() {
     // Arm the cross-slot guard the way a renewal bounce does.
     _last_slot_reconnect_ms = now;
     _guard_armed_by_slot = -1;
-    _poll_session_tls = true;
+    s_poll_tls_alive.store(true, std::memory_order_release);
+    POLL_BRIDGE_LOG("control TLS guard acquired");
   }
 
   s_poll_session_alive.store(true, std::memory_order_release);
@@ -5181,6 +5184,7 @@ void MQTTBridge::servicePollControl() {
   // feeds the task watchdog, and yields to every MQTT task.
   if (xTaskCreatePinnedToCore(pollSessionTask, "PollCtl", POLL_SESSION_STACK, s,
                               tskIDLE_PRIORITY, &handle, MQTT_TASK_CORE) != pdPASS) {
+    s_poll_tls_alive.store(false, std::memory_order_release);
     s_poll_session_alive.store(false, std::memory_order_release);
     freePollSession(s);
     POLL_BRIDGE_LOG("control session not started: task create failed");

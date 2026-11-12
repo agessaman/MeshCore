@@ -485,7 +485,6 @@ private:
   MQTTPollSession* _poll_session;            // MQTT task only; the session in flight
   uint32_t _poll_ctl_seen_ms;              // MQTT task: first pass that saw REQUESTED, 0 = none
   uint32_t _poll_session_started_ms;       // MQTT task
-  bool _poll_session_tls;                  // MQTT task: the session holds the handshake guard
   // Claim hand-off: same pattern as the neighbors snapshot, one slot, QoS 1.
   char* _poll_claim_buf;
   size_t _poll_claim_len;
