@@ -50,6 +50,7 @@ does not reflect the GoogleTest count — run the built binary directly
 | `test_poll_registration` | `src/helpers/poll/PollRegistration.h` | guest-key registration message and POST body goldens; own-key refusal; 6 h / 404 / 300 s retry timing; 24 h own-key lifetime |
 | `test_utils` | `src/Utils.cpp` | `Utils::toHex` (upstream) |
 | `test_poll_schedule` | `src/helpers/poll/PollSchedule.h` | guest-key poll scheduling: per-target phase spreading and slot boundaries; the half-period guard; 20 min quick retries; daily silence, flood and no-battery backoff; next-slot display; per-window request cap; send-history ring and result folding; oldest-first pick with the 60 s scheduled gap |
+| `test_poll_state_store` | `src/helpers/poll/PollStateStore.h` | repeater-poll flash record: byte layout and CRC32; field round trip; empty, truncated, trailing-byte, bit-flip and impossible-value rejection; newer version reported without parsing; choosing among primary/temp/backup copies by sequence |
 
 ## Conventions (and how to add a suite)
 

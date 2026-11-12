@@ -414,6 +414,58 @@ silent for long stretches, raise the interval or set `0`.
 `set snmp on|off` and `set snmp.community <string>` (default `public`) take effect after a
 restart. See [MQTT_SNMP.md](MQTT_SNMP.md).
 
+### Repeater Polling
+
+Repeater observers can poll neighbor repeaters for battery voltage and temperature, the way
+the CoreScope Observer Plus plugin does with a guest key. Polling uses a separate polling
+identity created on the node, never the node key. The node doesn't publish readings itself:
+the repeater's reply is uploaded with the rest of the packet feed, and CoreScope decodes it.
+CoreScope coordination (policy, owners, key registration, claims) isn't wired up yet. Until it
+is, the node polls every target it is given, at most twice per hour-long window.
+
+| Command | Purpose | Default |
+|---------|---------|---------|
+| `set poll.url <https://...>` | CoreScope base URL | blank |
+| `set poll.slot <1-6>` | MQTT slot that feeds that CoreScope | unset |
+| `set poll.consent yes\|no` | Agree to register the polling key with CoreScope | no |
+| `set poll on\|off` | Master switch. `on` needs url, slot and consent, and creates the polling key | off |
+| `set poll.interval <30-1440>` | Minutes between polls of one target (never faster than the window) | 60 |
+| `set poll.status <1\|3\|6\|12\|24>` | Hours between status requests (others ask for telemetry) | 6 |
+| `set poll.community on\|off` | Share polling with other CoreScope observers (used once CoreScope control lands) | on |
+| `poll add <64-hex key \| neighbor prefix>` | Add a target (up to 8). A prefix must match exactly one heard neighbor | |
+| `poll remove <key>`, `poll clear`, `poll list` | Edit or show targets | |
+| `poll pw <key> auto\|blank\|hello` | Guest password to try | auto |
+| `poll now <key or prefix>` | One poll outside the schedule. Replies `queued`, `busy`, or an error. Works with polling off; needs the polling key, a synced clock, a direct route, and 60 s since that target's last poll | |
+| `poll enable <key or prefix>` | Clear an admin stop | |
+| `get poll` | Switch, target count, key source, gate, clock | |
+| `get poll.status` | One short entry per target: number, key prefix, last result | |
+| `get poll.status <n>` | Target n: result, age, battery, temperature, route and SNR, role, next poll, login state, flood count | |
+| `get poll.key` | Polling public key (the private key is never shown) | |
+
+`get mqtt.status` ends with `, poll: <ok>/<targets>` while polling is on.
+
+Safety rules:
+
+- Only direct neighbors are polled: a target must be in the neighbor table and heard within
+  the last day. Every poll packet is sent direct with an empty path, behind forwarded traffic.
+  Nothing is ever flooded. A target out of reach shows `not_direct` and gets no packet.
+- The only passwords sent are blank and `hello`. If a repeater answers the polling key as
+  admin, polling of that repeater stops, the node sends `setperm <polling key> 0`, and it checks
+  that the grant is gone. The repeater stays stopped until `poll enable`.
+- No polling until a validated NTP reply this boot. Request timestamps never go backwards,
+  across reboots too. They're kept in `/poll_state` with the polling key.
+- One poll runs at a time, and never during neighbor-scope discovery. Discovery waits for a
+  poll on the air to finish.
+
+Debug builds (`MQTT_DEBUG`) log every step on serial with a `POLL:` prefix.
+
+Build gate: `WITH_REPEATER_POLL` is on for repeater observers with PSRAM and a neighbor
+table (`MAX_NEIGHBOURS`). Boards without PSRAM opt in with `REPEATER_POLL_WITHOUT_PSRAM`, and
+any build can turn it off with `REPEATER_POLL_DISABLE`. The room server isn't supported.
+For bench tests only, `POLL_TEST_INTERVAL_S=<n>` sets the interval and window to n seconds,
+and `POLL_TEST_DAY_S=<n>` shortens the day used for the admin recheck, route age and status
+period.
+
 ### Diagnostics
 
 | Command | Shows |
