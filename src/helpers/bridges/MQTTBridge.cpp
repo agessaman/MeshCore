@@ -1550,7 +1550,7 @@ void MQTTBridge::mqttTaskLoop() {
     if (_stop_requested.load(std::memory_order_acquire)) {
       MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop - tearing down clients on Core 0");
 #if defined(WITH_REPEATER_POLL)
-      // Before the clients go: a session may still be reading the shared CA bundle.
+      // End a running session first so its TLS working set is not competing with teardown.
       stopPollControl();
 #endif
       // Drop queued reconfigures so shutdown does not start a handshake.
@@ -5051,11 +5051,17 @@ void MQTTBridge::servicePollClaim() {
   _poll_claim_state.store(ok ? poll::CLAIM_PUBLISHED : poll::CLAIM_FAILED, std::memory_order_release);
 }
 
-void MQTTBridge::finishPollControl(bool started) {
-  memset(&_poll_ctl_box->res, 0, sizeof(_poll_ctl_box->res));
-  _poll_ctl_box->res.started = started;
-  _poll_ctl_box->res.finished_at = (uint32_t)time(nullptr);
-  poll::policyDefaults(_poll_ctl_box->res.policy);
+void MQTTBridge::finishPollControl(bool started, uint8_t timed_out_want) {
+  memset(_poll_ctl_box->req.reg_body, 0, sizeof(_poll_ctl_box->req.reg_body));
+  poll::ControlResult& r = _poll_ctl_box->res;
+  memset(&r, 0, sizeof(r));
+  r.started = started;
+  r.finished_at = (uint32_t)time(nullptr);
+  poll::policyDefaults(r.policy);
+  if (timed_out_want & poll::WANT_OWNERS) r.owners_status = poll::CTL_ERR_TIMEOUT;
+  if (timed_out_want & poll::WANT_POLICY) r.policy_status = poll::CTL_ERR_TIMEOUT;
+  if (timed_out_want & poll::WANT_REGISTER) r.reg_status = poll::CTL_ERR_TIMEOUT;
+  if (timed_out_want & poll::WANT_SHARED_KEY) r.shared_status = poll::CTL_ERR_TIMEOUT;
   _poll_ctl_state.store(poll::CONTROL_DONE, std::memory_order_release);
 }
 
@@ -5073,15 +5079,10 @@ void MQTTBridge::servicePollControl() {
                                            std::memory_order_acq_rel)) {
         // The task frees its copy when it gets out; report what was asked as timed out.
         POLL_BRIDGE_LOG("control session overran its budget, abandoned");
-        const uint8_t want = s->req.want;
-        const bool reg = s->req.reg_body_len > 0;
+        uint8_t want = s->req.want;
+        if (s->req.reg_body_len == 0) want &= (uint8_t)~poll::WANT_REGISTER;
         _poll_session = nullptr;
-        finishPollControl(true);
-        poll::ControlResult& r = _poll_ctl_box->res;
-        if (want & poll::WANT_OWNERS) r.owners_status = poll::CTL_ERR_TIMEOUT;
-        if (want & poll::WANT_POLICY) r.policy_status = poll::CTL_ERR_TIMEOUT;
-        if ((want & poll::WANT_REGISTER) && reg) r.reg_status = poll::CTL_ERR_TIMEOUT;
-        if (want & poll::WANT_SHARED_KEY) r.shared_status = poll::CTL_ERR_TIMEOUT;
+        finishPollControl(true, want);
       } else {
         done = true;
       }

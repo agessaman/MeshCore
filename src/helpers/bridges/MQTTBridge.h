@@ -496,7 +496,7 @@ private:
   std::atomic<bool> _poll_used;
   void servicePollControl();
   void servicePollClaim();
-  void finishPollControl(bool started);
+  void finishPollControl(bool started, uint8_t timed_out_want = 0);
   void stopPollControl();
 #endif
 
