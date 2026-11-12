@@ -159,6 +159,7 @@ private:
   uint8_t  poll_tag_count_;
   const mesh::Packet* inflight_;
   uint32_t inflight_ms_;
+  uint32_t inflight_sig_;
   uint8_t  inflight_act_;
   uint8_t  inflight_pw_;
   uint32_t inflight_tag_;

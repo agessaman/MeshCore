@@ -48,6 +48,11 @@ const uint32_t kScheduledGapS = 60;
 
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
 
+// Type and both hashes: a shed packet's pool slot reused by other traffic must not read as ours.
+uint32_t sigOf(const mesh::Packet* pkt) {
+  return ((uint32_t)pkt->getPayloadType() << 16) | ((uint32_t)pkt->payload[0] << 8) | pkt->payload[1];
+}
+
 void hex8(char* out, const uint8_t* pub) { mesh::Utils::toHex(out, pub, 4); }
 
 const char* actLabel(uint8_t act, uint8_t pw) {
@@ -101,7 +106,7 @@ RepeaterPoller::RepeaterPoller()
       key_created_at_(0), tag_hw_(0), tag_hw_saved_(0), count_(0), enabled_(false), consent_(false),
       interval_min_(60), status_hours_(6), run_kind_(RUN_NONE), run_idx_(-1), run_scheduled_(false),
       run_quick_(false), run_learned_before_(0), poll_tag_count_(0), inflight_(NULL), inflight_ms_(0),
-      inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
+      inflight_sig_(0), inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
       rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), last_tick_ms_(0),
       last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), hold_note_(0) {
@@ -459,10 +464,12 @@ void RepeaterPoller::loop() {
 
   const uint32_t now_ms = millis();
   if (inflight_ && (uint32_t)(now_ms - inflight_ms_) >= kTxStuckMs) {
-    if (host_->pollIsTransmitting(inflight_)) {
+    // Pool slots are static, so the bytes are readable; a changed signature means it was shed and reused.
+    const bool ours = sigOf(inflight_) == inflight_sig_;
+    if (ours && host_->pollIsTransmitting(inflight_)) {
       inflight_ms_ = now_ms;   // on the air right now: its report is coming
     } else {
-      bool cancelled = host_->pollCancelQueued(inflight_);
+      bool cancelled = ours && host_->pollCancelQueued(inflight_);
       POLL_LOG("tx %s %s after %lus", actLabel(inflight_act_, inflight_pw_),
                cancelled ? "cancelled" : "shed by the queue", (unsigned long)(kTxStuckMs / 1000));
       inflight_ = NULL;
@@ -712,6 +719,7 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
   }
   host_->pollSendDirect(pkt);
   inflight_ = pkt;
+  inflight_sig_ = sigOf(pkt);
   inflight_ms_ = millis();
   inflight_act_ = s.act;
   inflight_pw_ = s.pw;
@@ -753,7 +761,7 @@ void RepeaterPoller::processEvents() {
 }
 
 void RepeaterPoller::onTx(const mesh::Packet* pkt) {
-  if (!pkt || pkt != inflight_) return;
+  if (!pkt || pkt != inflight_ || sigOf(pkt) != inflight_sig_) return;
   inflight_ = NULL;
   if (inflight_tag_) POLL_LOG("tx %s tag=%lu sent", actLabel(inflight_act_, inflight_pw_), (unsigned long)inflight_tag_);
   else POLL_LOG("tx %s sent", actLabel(inflight_act_, inflight_pw_));
@@ -761,7 +769,7 @@ void RepeaterPoller::onTx(const mesh::Packet* pkt) {
 }
 
 void RepeaterPoller::onTxFail(const mesh::Packet* pkt) {
-  if (!pkt || pkt != inflight_) return;
+  if (!pkt || pkt != inflight_ || sigOf(pkt) != inflight_sig_) return;
   inflight_ = NULL;
   POLL_LOG("tx %s failed", actLabel(inflight_act_, inflight_pw_));
   pushEvent(poll::EV_TX_FAILED, false);
@@ -907,9 +915,8 @@ void RepeaterPoller::endRun() {
 
 void RepeaterPoller::abortRun(const char* why) {
   if (run_kind_ == RUN_NONE) return;
-  if (inflight_ && !host_->pollCancelQueued(inflight_)) {
-    // Already on the air; its report is ignored once the run is gone.
-  }
+  // A packet already on the air finishes; its report is ignored once the run is gone.
+  if (inflight_ && sigOf(inflight_) == inflight_sig_) host_->pollCancelQueued(inflight_);
   POLL_LOG("aborted: %s", why);
   endRun();
 }
