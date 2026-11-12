@@ -276,7 +276,7 @@ static inline void ownerEntryFrom(JsonObjectConst e, OwnerEntry& out) {
 
 // An /owners reply. Returns false when the body is not a JSON object. owners[]
 // is index-aligned with targets; *nodes_ok says the reply had a "nodes" object;
-// *has_policy says it carried a policy object, parsed into *policy.
+// *has_policy says a valid owners envelope carried a policy, parsed into *policy.
 static inline bool parseOwnersReply(const char* body, size_t len,
                                     const uint8_t (*targets)[kPubKeySize], uint8_t target_count,
                                     OwnerEntry owners[kMaxTargets], bool* nodes_ok,
@@ -317,7 +317,7 @@ static inline bool parseOwnersReply(const char* body, size_t len,
     }
   }
 
-  if (policy) {
+  if (policy && !nodes.isNull()) {
     JsonObjectConst p = root["policy"].as<JsonObjectConst>();
     if (!p.isNull()) {
       parsePolicyObject(p, *policy);

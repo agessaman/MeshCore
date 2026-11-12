@@ -152,6 +152,26 @@ TEST(PollControlJson, OwnersWithoutNodesIsNotOk) {
   EXPECT_FALSE(o.out[0].present);
 }
 
+TEST(PollControlJson, InvalidOwnersEnvelopeCannotSupplyPolicy) {
+  Owners o;
+  const char* invalid[] = {
+      "{\"nodes\":null,\"policy\":{}}",
+      "{\"policy\":{\"paused\":true}}",
+      "{\"nodes\":[],\"policy\":{\"paused\":true}}",
+      "{\"nodes\":42,\"policy\":{\"paused\":true}}",
+      "{\"nodes\":\"bad\",\"policy\":{\"paused\":true}}"};
+  for (const char* body : invalid) {
+    ASSERT_TRUE(o.parse("{\"nodes\":{},\"policy\":{\"paused\":true}}", 0));
+    ASSERT_TRUE(o.nodes_ok);
+    ASSERT_TRUE(o.has_policy);
+    ASSERT_TRUE(o.parse(body, 0)) << body;
+    EXPECT_FALSE(o.nodes_ok) << body;
+    EXPECT_FALSE(o.has_policy) << body;
+    EXPECT_FALSE(o.policy.paused) << body;
+    EXPECT_EQ(poll::kDirectDefaultS, o.policy.direct_s);
+  }
+}
+
 TEST(PollControlJson, OwnersEntryFieldTypes) {
   Owners o;
   fill(o.targets[0], 0x01);
