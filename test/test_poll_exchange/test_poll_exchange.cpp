@@ -52,6 +52,7 @@ struct Sim {
   std::vector<uint8_t> tx;            // every ACT_SEND_* in order, failed or not
   std::set<size_t> fail_tx;           // indices into tx reported as EV_TX_FAILED
   std::vector<uint32_t> waits;
+  bool rx_before_tx_report = false;   // the owner processes RX before the TX report
   PollExchange x;
   PollAdminDrill drill;
 
@@ -117,6 +118,11 @@ struct Sim {
         bool fail = fail_tx.count(idx) != 0;
         if (!fail) hear(s);
         clock_ms += 50;
+        while (rx_before_tx_report && !air.empty() && air.front().at <= clock_ms) {
+          Pending p = air.front();
+          air.erase(air.begin());
+          EXPECT_TRUE(isNoChange(feed(p.ev, p.flooded))) << "held until the TX report";
+        }
         s = feed(fail ? EV_TX_FAILED : EV_TX_DONE, false);
         ASSERT_FALSE(isNoChange(s)) << "a TX report must move the machine on";
         continue;
@@ -694,7 +700,7 @@ TEST(PollExchange, DataReplyBeforeAnyRequestIsIgnored) {
   Step s = x.start(t, defaultExchangeConfig(), kNow);
   ASSERT_EQ(ACT_SEND_LOGIN, s.act);
   EXPECT_FALSE(x.expectsData());
-  EXPECT_FALSE(x.expectsLogin());   // the login has not left yet
+  EXPECT_TRUE(x.expectsLogin());   // handed over: its answer may beat the TX report
   EXPECT_TRUE(isNoChange(x.onEvent(t, EV_DATA_REPLY, false, kNow)));
   x.onEvent(t, EV_TX_DONE, false, kNow);
   EXPECT_TRUE(x.expectsLogin());
@@ -740,14 +746,17 @@ TEST(PollExchange, LoginAnswerHeldWhileTheNextLoginIsQueuedBelongsToTheEarlierPa
   ASSERT_EQ(PW_HELLO, s.pw);
   EXPECT_TRUE(x.expectsLogin());
   EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_GUEST, true, kNow + 18)));
-  EXPECT_FALSE(x.expectsLogin());
+  EXPECT_TRUE(x.expectsLogin());   // stays true so a late admin answer still arrives
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_GUEST, false, kNow + 18)));   // second guest: ignored
   s = x.onEvent(t, EV_TX_DONE, false, kNow + 19);
   ASSERT_EQ(ACT_WAIT, s.act);
   EXPECT_EQ(15000u, s.wait_ms);   // flood clear
   EXPECT_EQ(LEARNED_BLANK, t.learned_pw);
   EXPECT_EQ(2, x.result().logins);
-  // A second answer (to hello) is not expected any more.
+  // A second guest answer (to hello) is ignored, but the owner still feeds login answers.
+  EXPECT_TRUE(x.expectsLogin());
   EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_GUEST, false, kNow + 20)));
+  EXPECT_EQ(LEARNED_BLANK, t.learned_pw);
 }
 
 TEST(PollExchange, HeldAdminAnswerOutranksAHeldDataReply) {
@@ -776,6 +785,131 @@ TEST(PollExchange, HeldAdminAnswerOutranksAHeldDataReply) {
   EXPECT_EQ(ACT_FINISH, s.act);
   EXPECT_TRUE(x.result().admin);
   EXPECT_EQ(XR_ADMIN, x.result().reason);
+}
+
+// ---- login answers are never dropped -------------------------------------------
+
+TEST(PollExchange, AdminAnswerBeforeTheFirstLoginsTxReportIsKept) {
+  // Already admin under blank, guest password hello: losing this answer would let hello demote the entry.
+  Sim s;
+  s.rep.admin = true;
+  s.rep.accepts_hello = true;
+  s.rep.login_delay_ms = 10;
+  s.rx_before_tx_report = true;
+  const ExchangeResult& r = s.poll();
+  EXPECT_EQ(acts({ACT_SEND_LOGIN}), s.tx);
+  EXPECT_TRUE(r.admin);
+  EXPECT_EQ(XR_ADMIN, r.reason);
+  EXPECT_EQ(1, r.logins);
+  EXPECT_EQ((std::vector<uint8_t>{PW_BLANK}), s.rep.login_pws);
+}
+
+TEST(PollExchange, GuestAnswerBeforeTheFirstLoginsTxReportIsCreditedToThatLogin) {
+  Sim s;
+  s.cfg.personal = true;
+  s.t.status_checked_at = kNow;
+  s.rep.login_delay_ms = 10;
+  s.rx_before_tx_report = true;
+  const ExchangeResult& r = s.poll();
+  EXPECT_EQ(acts({ACT_SEND_LOGIN, ACT_SEND_TEACH, ACT_SEND_REQUEST}), s.tx);
+  EXPECT_TRUE(r.login_answered);
+  EXPECT_TRUE(r.got_reply);
+  EXPECT_EQ(LEARNED_BLANK, s.t.learned_pw);
+
+  TargetState t;   // the same by hand, hello only
+  memset(&t, 0, sizeof(t));
+  t.learned_pw = LEARNED_HELLO;
+  PollExchange x;
+  Step st = x.start(t, defaultExchangeConfig(), kNow);
+  ASSERT_EQ(PW_HELLO, st.pw);
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_GUEST, false, kNow)));
+  st = x.onEvent(t, EV_TX_DONE, false, kNow);
+  EXPECT_EQ(ACT_SEND_TEACH, st.act);   // first contact: teach, no flood wait
+  EXPECT_TRUE(x.result().login_answered);
+}
+
+TEST(PollExchange, AdminAnswerAfterAHeldGuestAnswerOverridesIt) {
+  TargetState t;
+  memset(&t, 0, sizeof(t));
+  PollExchange x;
+  Step s = x.start(t, defaultExchangeConfig(), kNow);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow);       // blank out
+  s = x.onEvent(t, EV_TIMER, false, kNow + 10);    // listen over
+  s = x.onEvent(t, EV_TIMER, false, kNow + 18);    // gap over
+  ASSERT_EQ(ACT_SEND_LOGIN, s.act);                // hello handed, two logins outstanding
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_GUEST, true, kNow + 18)));
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_ADMIN, false, kNow + 18)));
+  s = x.onEvent(t, EV_TX_DONE, false, kNow + 19);
+  EXPECT_EQ(ACT_FINISH, s.act);
+  EXPECT_TRUE(x.result().admin);
+  EXPECT_EQ(XR_ADMIN, x.result().reason);
+  EXPECT_EQ(LEARNED_NONE, t.learned_pw);
+  EXPECT_EQ(0u, t.route_sent_at);
+}
+
+TEST(PollExchange, AdminAnswerAfterAnAcceptedGuestAnswerFinishesAtOnce) {
+  TargetState t;
+  memset(&t, 0, sizeof(t));
+  PollExchange x;
+  Step s = x.start(t, defaultExchangeConfig(), kNow);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow);
+  s = x.onEvent(t, EV_LOGIN_GUEST, true, kNow + 1);
+  ASSERT_EQ(15000u, s.wait_ms);                     // flood clear
+  EXPECT_TRUE(x.expectsLogin());
+  s = x.onEvent(t, EV_LOGIN_ADMIN, false, kNow + 2);
+  EXPECT_EQ(ACT_FINISH, s.act);
+  EXPECT_TRUE(x.result().admin);
+  EXPECT_EQ(XR_ADMIN, x.result().reason);
+  EXPECT_EQ(0, x.result().teaches);
+  EXPECT_EQ(0, x.result().requests);
+}
+
+TEST(PollExchange, AdminAnswerDuringTheRequestSendIsHeldThenFinishes) {
+  TargetState t;
+  memset(&t, 0, sizeof(t));
+  PollExchange x;
+  Step s = x.start(t, defaultExchangeConfig(), kNow);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow);
+  s = x.onEvent(t, EV_LOGIN_GUEST, false, kNow + 1);
+  ASSERT_EQ(ACT_SEND_TEACH, s.act);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow + 1);
+  s = x.onEvent(t, EV_TIMER, false, kNow + 2);
+  ASSERT_EQ(ACT_SEND_REQUEST, s.act);
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_ADMIN, false, kNow + 2)));
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_DATA_REPLY, false, kNow + 2)));
+  s = x.onEvent(t, EV_TX_DONE, false, kNow + 3);
+  EXPECT_EQ(ACT_FINISH, s.act);
+  EXPECT_TRUE(x.result().admin);
+  EXPECT_EQ(XR_ADMIN, x.result().reason);
+}
+
+TEST(PollExchange, LoginAnswersIgnoredBeforeAnyLoginWasHandedOver) {
+  TargetState t;
+  memset(&t, 0, sizeof(t));
+  t.logged_in_at = kNow - 60;
+  t.login_checked_at = kNow - 25 * 3600;   // recheck: teach goes first
+  PollExchange x;
+  Step s = x.start(t, defaultExchangeConfig(), kNow);
+  ASSERT_EQ(ACT_SEND_TEACH, s.act);
+  EXPECT_FALSE(x.expectsLogin());
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_ADMIN, false, kNow)));
+  s = x.onEvent(t, EV_TX_DONE, false, kNow);
+  ASSERT_EQ(ACT_WAIT, s.act);
+  EXPECT_FALSE(x.result().admin);
+}
+
+TEST(PollExchange, EveryThirdMissCadenceAtTheTopOfTheCounter) {
+  const uint8_t counts[] = {253, 254, 255};
+  const int logins[] = {0, 2, 0};   // 254 + 1 = 255 is a multiple of 3
+  for (int i = 0; i < 3; i++) {
+    Sim s;
+    s.steadyState();
+    s.rep.answer_requests = false;
+    s.rep.accepts_blank = s.rep.accepts_hello = false;
+    s.t.no_reply_count = counts[i];
+    s.poll();
+    EXPECT_EQ(logins[i], s.count(ACT_SEND_LOGIN)) << (int)counts[i];
+  }
 }
 
 TEST(PollExchange, ZeroTimingNeverLooksLikeNoChange) {
@@ -880,6 +1014,36 @@ TEST(PollAdminDrill, LateGuestAnswerInTheGapCounts) {
   s.rep.login_delay_ms = 24000;   // after the 20 s listen, inside the 8 s gap
   EXPECT_TRUE(s.runDrill());
   EXPECT_EQ(1, s.rep.logins);
+}
+
+TEST(PollAdminDrill, GuestAnswerBeforeTheLoginsTxReportIsHeld) {
+  PollAdminDrill d;
+  d.start(kNow);
+  d.onEvent(EV_TX_DONE, false, kNow);
+  Step s = d.onEvent(EV_TIMER, false, kNow + 10);
+  ASSERT_EQ(ACT_SEND_LOGIN, s.act);
+  EXPECT_TRUE(d.expectsLogin());
+  EXPECT_TRUE(isNoChange(d.onEvent(EV_LOGIN_GUEST, false, kNow + 10)));
+  EXPECT_TRUE(d.active());
+  s = d.onEvent(EV_TX_DONE, false, kNow + 10);
+  EXPECT_EQ(ACT_FINISH, s.act);
+  EXPECT_TRUE(d.removed());
+}
+
+TEST(PollAdminDrill, AnswersBeforeTxReportInTheHarness) {
+  Sim s;
+  s.rep.admin = true;
+  s.rep.login_delay_ms = 10;
+  s.rx_before_tx_report = true;
+  EXPECT_TRUE(s.runDrill());
+  EXPECT_EQ(acts({ACT_SEND_SETPERM, ACT_SEND_LOGIN}), s.tx);
+
+  Sim st;
+  st.rep.admin = st.rep.stubborn = true;
+  st.rep.login_delay_ms = 10;
+  st.rx_before_tx_report = true;
+  EXPECT_FALSE(st.runDrill());
+  EXPECT_EQ(3, st.drill.adminAnswers());
 }
 
 TEST(PollAdminDrill, DataRepliesAreIgnored) {

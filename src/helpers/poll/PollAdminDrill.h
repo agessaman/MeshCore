@@ -43,8 +43,8 @@ class PollAdminDrill {
   bool active() const { return phase_ != PH_IDLE && phase_ != PH_DONE; }
   bool removed() const { return removed_; }
 
-  // A verifying login is on the air and its answer would be read now.
-  bool expectsLogin() const { return active() && login_out_ && !held_guest_; }
+  // True from the first verifying ACT_SEND_LOGIN, even before its TX report, to the end of the drill.
+  bool expectsLogin() const { return active() && login_handed_; }
 
   uint8_t adminAnswers() const { return admin_answers_; }   // verifying logins still answered as admin
   uint8_t rounds() const { return round_; }
@@ -72,7 +72,7 @@ class PollAdminDrill {
     admin_answers_ = 0;
     removed_ = false;
     setperm_sent_ = false;
-    login_out_ = false;
+    login_handed_ = false;
     round_login_ok_ = false;
     held_guest_ = false;
   }
@@ -102,6 +102,7 @@ class PollAdminDrill {
     phase_ = PH_LOGIN_TX;
     Step s = act(ACT_SEND_LOGIN);
     s.pw = PW_BLANK;
+    login_handed_ = true;
     return s;
   }
 
@@ -121,10 +122,7 @@ class PollAdminDrill {
         return wait(PH_SETTLE, kDrillSettleMs);
       case PH_LOGIN_TX:
         round_login_ok_ = ok;
-        if (ok) {
-          logins_++;
-          login_out_ = true;
-        }
+        if (ok) logins_++;
         if (held_guest_) return finish(true);
         // setperm 0 deleted the ACL entry and its route, so teach again or the answer floods past us.
         phase_ = PH_TEACH_TX;
@@ -154,6 +152,7 @@ class PollAdminDrill {
       admin_answers_++;
       return stepNoChange();
     }
+    if (held_guest_) return stepNoChange();
     if (awaitingTx()) {
       held_guest_ = true;
       return stepNoChange();
@@ -168,7 +167,7 @@ class PollAdminDrill {
   uint8_t admin_answers_;
   bool    removed_;
   bool    setperm_sent_;
-  bool    login_out_;       // a verifying login has left the radio
+  bool    login_handed_;    // a verifying login was handed to the owner
   bool    round_login_ok_;  // this round's login left the radio
   bool    held_guest_;
 };

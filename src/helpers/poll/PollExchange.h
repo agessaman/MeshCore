@@ -168,11 +168,9 @@ class PollExchange {
 
   bool active() const { return phase_ != PH_IDLE && phase_ != PH_DONE; }
 
-  // An answer to a login already on the air, during its listen or the gap after it.
-  bool expectsLogin() const {
-    if (!active() || !login_out_ || res_.login_answered || held_login_) return false;
-    return phase_ == PH_LOGIN_LISTEN || phase_ == PH_LOGIN_GAP || phase_ == PH_LOGIN_TX;
-  }
+  // True from the first ACT_SEND_LOGIN to the end of the poll, so an admin answer is never dropped.
+  // A guest answer after one was already taken is ignored.
+  bool expectsLogin() const { return active() && login_handed_; }
 
   // Any time after the first request, so a late reply during a gap or a later step still counts.
   bool expectsData() const { return active() && req_asked_ && !res_.got_reply; }
@@ -211,7 +209,9 @@ class PollExchange {
     pw_next_ = 0;
     pws_[0] = pws_[1] = PW_BLANK;
     out_pw_ = PW_BLANK;
+    handed_pw_ = PW_BLANK;
     answer_pw_ = PW_BLANK;
+    login_handed_ = false;
     in_acl_ = false;
     req_asked_ = false;
     login_out_ = false;
@@ -259,6 +259,8 @@ class PollExchange {
     tried_++;
     Step s = send(PH_LOGIN_TX, ACT_SEND_LOGIN);
     s.pw = pws_[pw_next_++];
+    handed_pw_ = s.pw;
+    login_handed_ = true;
     return s;
   }
 
@@ -358,8 +360,17 @@ class PollExchange {
 
   Step onLoginAnswer(TargetState& t, bool admin, bool flooded) {
     if (!expectsLogin()) return stepNoChange();
-    answer_pw_ = out_pw_;  // the answer belongs to the last login that left, not one still queued
+    if (admin) {
+      if (res_.admin || (held_login_ && held_admin_)) return stepNoChange();
+    } else if (res_.login_answered || held_login_) {
+      return stepNoChange();
+    }
+    if (!admin) {
+      // With an earlier login on the air the answer is most likely to that one; otherwise to the unreported one.
+      answer_pw_ = login_out_ ? out_pw_ : handed_pw_;
+    }
     if (awaitingTx()) {
+      // An admin answer replaces a held guest answer.
       held_login_ = true;
       held_admin_ = admin;
       held_flooded_ = flooded;
@@ -369,8 +380,8 @@ class PollExchange {
   }
 
   Step acceptLogin(TargetState& t, bool admin, bool flooded) {
+    if (!res_.login_answered) res_.login_flooded = flooded;
     res_.login_answered = true;
-    res_.login_flooded = flooded;
     t.login_checked_at = now_;
     t.key_login_fails = 0;
     if (admin) {
@@ -416,7 +427,9 @@ class PollExchange {
   uint8_t  pw_count_;
   uint8_t  pw_next_;
   uint8_t  out_pw_;      // password of the last login that left the radio
+  uint8_t  handed_pw_;   // password of the last login handed to the owner
   uint8_t  answer_pw_;
+  bool     login_handed_;
   bool     in_acl_;
   bool     req_asked_;
   bool     login_out_;
