@@ -159,7 +159,8 @@ reconnection per slot.
   its session ended within 20 s of the edge (either side: the socket usually fails before
   the 10 s Wi-Fi status poll reports the drop). That retry then holds the ladder where it
   was. Any other outage (the slot was already failing), or any drop when the link had been
-  up for under 30 s (`kLinkFlapFloorMs`), advances it as usual; the recovery retry still
+  up for under 30 s (`kLinkFlapFloorMs`), or 40 s for a slot still marked connected at the
+  polled edge, advances it as usual; the recovery retry still
   cannot trip the breaker itself. Refusals, handshake failures and quick drops while the
   link stays up never take this path.
 - After 3 more failures at the top rung (~15 min) the slot's circuit breaker trips and

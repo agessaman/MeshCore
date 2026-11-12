@@ -581,7 +581,8 @@ periodic retry (`mqtt.breaker.interval`, default 30 min). Packets queue while a 
 (Ethernet to WiFi or back), every slot disconnects cleanly and retries at once on the new
 route. Each medium keeps its own DHCP DNS servers. When Wi-Fi or Ethernet drops and
 comes back, every slot retries at once; a session the outage cut does not count against
-the broker, unless the link keeps dropping within 30 s of coming up.
+the broker, unless the link keeps dropping within 30 s of coming up (40 s when the slot is
+still marked connected at the polled edge).
 
 **Self-heal.** With `mqtt.selfheal on`, the node alerts and reboots 1 min later when a
 bridge stop never completes (10 min), an MQTT client cannot be stopped (30 min), or every

@@ -456,8 +456,10 @@ TEST(MQTTConnectionPolicy, RapidLinkFlappingStillClimbs) {
   }
   EXPECT_EQ(5, s.backoff);
   EXPECT_FALSE(s.tripped);
-  EXPECT_FALSE(Policy::outageCausedByLink(t + Policy::kLinkFlapFloorMs - 1U, t, true, 0U));
-  EXPECT_TRUE(Policy::outageCausedByLink(t + Policy::kLinkFlapFloorMs, t, true, 0U));
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      t + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs - 1U, t, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(
+      t + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs, t, true, 0U));
   // Link up since the bridge started (no edge seen) counts as held.
   EXPECT_TRUE(Policy::outageCausedByLink(5000U, 0U, true, 0U));
 }
@@ -468,9 +470,36 @@ TEST(MQTTConnectionPolicy, LinkFlapFloorUsesTheSessionEndNotThePolledEdge) {
   const uint32_t link_up = 100000U;
   EXPECT_FALSE(Policy::outageCausedByLink(130000U, link_up, false, 125000U));
   EXPECT_TRUE(Policy::outageCausedByLink(130000U, link_up, false, 130000U));
-  // A slot still up at the edge keeps the floor on the edge itself.
-  EXPECT_TRUE(Policy::outageCausedByLink(link_up + Policy::kLinkFlapFloorMs, link_up, true, 0U));
-  EXPECT_FALSE(Policy::outageCausedByLink(link_up + Policy::kLinkFlapFloorMs - 1U, link_up, true, 0U));
+  // A slot still up at the edge has no stamp, so its floor runs to the edge plus the
+  // poll slack; the slack is added because the edge trails the physical drop.
+  EXPECT_TRUE(Policy::outageCausedByLink(
+      link_up + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs, link_up, true, 0U));
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      link_up + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs - 1U, link_up, true, 0U));
+}
+
+// A slot still marked connected at the polled edge has no stamp, so it gets the slack:
+// up at 100 s, dropped at 125 s, edge at 130 s reads as 30 s but the link lasted 25 s.
+TEST(MQTTConnectionPolicy, UnstampedSlotGetsThePollSlackOnTheFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(130000U, link_up, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(140000U, link_up, true, 0U));
+  // Link up since the bridge started (no edge seen) skips the floor entirely.
+  EXPECT_TRUE(Policy::outageCausedByLink(5000U, 0U, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(900000U, 0U, true, 0U));
+}
+
+// A stamp after the edge is unusable, so the slot falls back to the polled edge and
+// takes the slack with it.
+TEST(MQTTConnectionPolicy, FutureStampUsesThePolledEdgeFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(135000U, link_up, false, 135005U));
+  EXPECT_TRUE(Policy::outageCausedByLink(140000U, link_up, false, 140005U));
+}
+
+// A stamped session end keeps the 30 s floor; the slack applies only to the polled edge.
+TEST(MQTTConnectionPolicy, StampedSlotIgnoresThePollSlack) {
+  EXPECT_TRUE(Policy::outageCausedByLink(131000U, 100000U, false, 130000U));
 }
 
 // An outage stamped before the link came up is outside this link-up period, so it
