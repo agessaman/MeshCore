@@ -87,19 +87,53 @@ TEST(PollPolicy, ClampLeavesInteriorValuesAndCapsCounts) {
   EXPECT_EQ(7200U, p.grace_s);
   EXPECT_EQ(1, p.max_requests);
   EXPECT_EQ(poll::kMaxExcluded, p.excluded_count);
-  EXPECT_EQ(poll::kMaxNodeWindows, p.node_window_count);
+  EXPECT_EQ(1, p.node_window_count);  // the seven unset entries are dropped
   EXPECT_EQ(86400U, p.node_windows[0].window_s);
   EXPECT_EQ('\0', p.version[sizeof(p.version) - 1]);
   EXPECT_EQ('\0', p.min_plugin_version[sizeof(p.min_plugin_version) - 1]);
 }
 
-TEST(PollPolicy, ZeroNodeWindowRisesToTheDirectFloor) {
-  // A stored 0 would mean "poll continuously". The slot stays; the floor applies.
+TEST(PollPolicy, ZeroNodeWindowIsDroppedSoTheHopDefaultApplies) {
+  // A stored 0 means "no window for this node", as the plugin reads it.
   poll::Policy p = defaults();
+  uint8_t node[poll::kPubKeySize];
+  fillKey(node, 0x44);
+  memcpy(p.node_windows[0].node, node, poll::kPubKeySize);
   p.node_windows[0].window_s = 0;
   p.node_window_count = 1;
+
   poll::policyClamp(p);
-  EXPECT_EQ(1800U, p.node_windows[0].window_s);
+
+  EXPECT_EQ(0, p.node_window_count);
+  EXPECT_EQ(3600U, poll::policyWindow(p, node, 0, 0));
+  EXPECT_EQ(7200U, poll::policyWindow(p, node, 1, 0));
+}
+
+TEST(PollPolicy, ClampKeepsOnlyTheValidNodeWindowsInOrder) {
+  poll::Policy p = defaults();
+  uint8_t a[poll::kPubKeySize];
+  uint8_t b[poll::kPubKeySize];
+  uint8_t c[poll::kPubKeySize];
+  fillKey(a, 0x0a);
+  fillKey(b, 0x0b);
+  fillKey(c, 0x0c);
+  memcpy(p.node_windows[0].node, a, poll::kPubKeySize);
+  p.node_windows[0].window_s = 0;
+  memcpy(p.node_windows[1].node, b, poll::kPubKeySize);
+  p.node_windows[1].window_s = 3600;
+  memcpy(p.node_windows[2].node, c, poll::kPubKeySize);
+  p.node_windows[2].window_s = 0;
+  memcpy(p.node_windows[3].node, a, poll::kPubKeySize);
+  p.node_windows[3].window_s = 5U * 3600U;
+  p.node_window_count = 4;
+
+  poll::policyClamp(p);
+
+  ASSERT_EQ(2, p.node_window_count);
+  EXPECT_EQ(0, memcmp(p.node_windows[0].node, b, poll::kPubKeySize));
+  EXPECT_EQ(3600U, p.node_windows[0].window_s);
+  EXPECT_EQ(0, memcmp(p.node_windows[1].node, a, poll::kPubKeySize));
+  EXPECT_EQ(5U * 3600U, p.node_windows[1].window_s);
 }
 
 TEST(PollPolicy, VersionCompareIsNumericAndTreatsGarbageAsZero) {

@@ -180,7 +180,7 @@ static inline void jsonString(Out& o, const char* s) {
     } else {
       uint32_t cp = 0;
       if (!utf8Next(p, cp)) {
-        o.ch((char)b);  // malformed input: keep the byte rather than invent one
+        uEscape(o, 0xfffd);  // malformed input: one replacement per bad byte
       } else if (cp <= 0xffff) {
         uEscape(o, cp);
       } else {

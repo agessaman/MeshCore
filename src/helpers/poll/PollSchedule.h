@@ -148,13 +148,12 @@ static inline void recordResult(TargetState& t, uint8_t code, uint32_t now, bool
   t.code = code;
   t.retried = was_quick_retry;
   if (code == CODE_NO_REPLY) {
-    if (t.no_reply_count != 255) t.no_reply_count++;
+    // Past 255 the count returns to 253 so the modulo-3 login cadence stays exact.
+    t.no_reply_count = (t.no_reply_count == 255) ? 253 : (uint8_t)(t.no_reply_count + 1);
     if (t.unheard_since == 0) t.unheard_since = now;
-    // A target merely out of reach hasn't changed its guest password, so a
-    // learned "hello" is kept through an outage of this length.
-    if (elapsedSince(t.unheard_since, now) >= 7 * kDay && t.learned_pw == LEARNED_HELLO) {
-      t.learned_pw = LEARNED_NONE;
-    }
+    // A target merely out of reach hasn't changed its guest password, so the
+    // learned one is kept through an outage of this length, whatever it is.
+    if (elapsedSince(t.unheard_since, now) >= 7 * kDay) t.learned_pw = LEARNED_NONE;
     return;
   }
   // Any answer at all proves the target alive: stop the silence clock.

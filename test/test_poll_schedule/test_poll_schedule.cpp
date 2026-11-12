@@ -444,12 +444,27 @@ TEST(PollSchedule, RecordResultNoReplyCountsAndKeepsTheFirstMiss) {
   EXPECT_EQ(100U, t.unheard_since);
 }
 
-TEST(PollSchedule, RecordResultNoReplySaturatesTheMissCount) {
+TEST(PollSchedule, RecordResultNoReplyWrapsTheMissCountToKeepTheCadence) {
   poll::TargetState t = blank();
   t.no_reply_count = 255;
   t.unheard_since = 100;
   poll::recordResult(t, poll::CODE_NO_REPLY, 200, false);
-  EXPECT_EQ(255, t.no_reply_count);
+  EXPECT_EQ(253, t.no_reply_count);
+}
+
+TEST(PollSchedule, RecordResultNoReplyKeepsTheEveryThirdMissCadencePastSaturation) {
+  poll::TargetState t = blank();
+  t.no_reply_count = 250;
+  t.unheard_since = 100;
+  uint32_t now = 200;
+  uint32_t unbounded = 250;
+  for (int i = 0; i < 12; i++) {  // two wraps past 255
+    now += 60;
+    unbounded++;
+    poll::recordResult(t, poll::CODE_NO_REPLY, now, false);
+    EXPECT_EQ((unbounded + 1) % 3, (t.no_reply_count + 1) % 3) << i;
+    EXPECT_GE(t.no_reply_count, 2);
+  }
 }
 
 TEST(PollSchedule, RecordResultForgetsHelloAfterSevenDaysUnheard) {
@@ -465,12 +480,17 @@ TEST(PollSchedule, RecordResultForgetsHelloAfterSevenDaysUnheard) {
   EXPECT_EQ(poll::LEARNED_NONE, t.learned_pw);
 }
 
-TEST(PollSchedule, RecordResultKeepsALearnedBlankPassword) {
+TEST(PollSchedule, RecordResultForgetsBlankAfterSevenDaysUnheard) {
   poll::TargetState t = blank();
   t.learned_pw = poll::LEARNED_BLANK;
   t.unheard_since = 1000;
-  poll::recordResult(t, poll::CODE_NO_REPLY, 1000 + 8 * kDay, false);
+
+  poll::recordResult(t, poll::CODE_NO_REPLY, 1000 + 7 * kDay - 1, false);
   EXPECT_EQ(poll::LEARNED_BLANK, t.learned_pw);
+
+  t.no_reply_count = 0;
+  poll::recordResult(t, poll::CODE_NO_REPLY, 1000 + 7 * kDay, false);
+  EXPECT_EQ(poll::LEARNED_NONE, t.learned_pw);
 }
 
 TEST(PollSchedule, RecordResultKeepsTheMissClockForUnsentPolls) {

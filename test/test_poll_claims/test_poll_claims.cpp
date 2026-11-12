@@ -105,6 +105,45 @@ TEST(PollClaims, OriginEscapingMatchesEnsureAscii) {
   expectClaim(expected, origin, kTs + 1, "x\"y", false, &n, 1);
 }
 
+TEST(PollClaims, MalformedUtf8BecomesReplacementChars) {
+  initKeys();
+  std::string lone = "ab";
+  lone.push_back((char)0x80);
+  lone += "cd";
+  struct Case {
+    std::string in;
+    std::string out;
+  };
+  const Case cases[] = {
+      // Multi-byte characters cut by a byte-wise truncation.
+      {std::string("abc\xc3"), "\"abc\\ufffd\""},
+      {std::string("abc\xe2\x82"), "\"abc\\ufffd\\ufffd\""},
+      {std::string("abc\xf0\x9f\x98"), "\"abc\\ufffd\\ufffd\\ufffd\""},
+      // A stray continuation byte is a bad byte of its own.
+      {lone, "\"ab\\ufffdcd\""},
+      // Overlong and out-of-range sequences.
+      {std::string("\xe0\x80\x80"), "\"\\ufffd\""},
+      {std::string("\xf5\x80"), "\"\\ufffd\\ufffd\""},
+  };
+  for (const Case& c : cases) {
+    char buf[1024];
+    const size_t len = build(buf, sizeof(buf), c.in.c_str(), kTs, "", true, nullptr, 0);
+    ASSERT_GT(len, 0u) << c.out;
+    const std::string json(buf, len);
+    const std::string key = "\"origin\": ";
+    const size_t start = json.find(key) + key.size();
+    const size_t end = json.find(", \"origin_id\"", start);
+    EXPECT_EQ(c.out, json.substr(start, end - start)) << c.out;
+  }
+}
+
+TEST(PollClaims, ReplacementCharsNeedRoomLikeAnyOtherText) {
+  initKeys();
+  const std::string expected =
+      R"json({"v": 2, "origin": "abc\ufffd", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "nodes": []})json";
+  expectClaim(expected, "abc\xc3", kTs, "", true, nullptr, 0);
+}
+
 TEST(PollClaims, SnrRoundsLikePython) {
   initKeys();
   struct Case {

@@ -91,6 +91,14 @@ static inline void policyClamp(Policy& p) {
   p.min_plugin_version[sizeof(p.min_plugin_version) - 1] = '\0';
   if (p.excluded_count > kMaxExcluded) p.excluded_count = kMaxExcluded;
   if (p.node_window_count > kMaxNodeWindows) p.node_window_count = kMaxNodeWindows;
+  // A zero window is unset, not a floor: drop it so the node keeps the hop default.
+  uint8_t kept = 0;
+  for (uint8_t i = 0; i < p.node_window_count; i++) {
+    if (p.node_windows[i].window_s == 0) continue;
+    if (kept != i) p.node_windows[kept] = p.node_windows[i];
+    kept++;
+  }
+  p.node_window_count = kept;
   // Same floor and ceiling as direct_s, whatever direct_s itself was set to.
   for (uint8_t i = 0; i < p.node_window_count; i++) {
     p.node_windows[i].window_s =
