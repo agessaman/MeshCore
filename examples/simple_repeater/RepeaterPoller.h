@@ -290,6 +290,7 @@ private:
   poll::RegistrationState reg_;
   mesh::LocalIdentity shared_id_;    // CoreScope's shared key, when one was fetched
   bool     has_shared_;
+  bool     shared_renew_failed_;     // a renewal of the expired shared key failed: it is no longer used
   uint32_t shared_at_;
   uint8_t  key_in_use_;              // poll::KeyChoice
   uint8_t  acl_pub_[8];              // the key the cached secrets and login state belong to; zero = the stored own key
@@ -328,6 +329,7 @@ private:
   void serviceControl();
   void takeControl(uint32_t now);
   void noSession(uint8_t outcome, uint32_t now);
+  void sharedRenewalFailed(uint32_t now);
   void applyControl(const poll::ControlResult& res, uint32_t now);
   void discardUnasked();
   void fileControl(uint32_t now, bool registering, bool want_shared);

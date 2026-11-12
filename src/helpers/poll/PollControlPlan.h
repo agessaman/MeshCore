@@ -54,6 +54,14 @@ static inline bool sharedKeyWanted(bool have_shared, uint32_t shared_at,
   return true;
 }
 
+// A shared key is cached a day; past that it stays in use only until a renewal fails, as the
+// plugin replaces an expired cache entry with the failed lookup.
+static inline bool sharedKeyUsable(bool have_shared, uint32_t shared_at, bool renewal_failed,
+                                   uint32_t now) {
+  if (!have_shared) return false;
+  return elapsedSec(now, shared_at) < kSharedKeyMaxAgeS || !renewal_failed;
+}
+
 static inline uint8_t controlWants(bool community, bool registering, bool want_shared) {
   // The client skips the policy GET when the owners reply carried one.
   uint8_t w = WANT_POLICY;

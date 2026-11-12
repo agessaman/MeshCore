@@ -1353,6 +1353,7 @@ void RepeaterPoller::initControl() {
   claim_sent_at_ = 0;
   memset(&reg_, 0, sizeof(reg_));
   has_shared_ = false;
+  shared_renew_failed_ = false;
   shared_at_ = 0;
   key_in_use_ = poll::KEY_NONE;
   memset(acl_pub_, 0, sizeof(acl_pub_));   // the flash record's learned passwords are the own key's
@@ -1391,6 +1392,7 @@ void RepeaterPoller::resetCorescope() {
   claim_sent_at_ = 0;
   memset(&reg_, 0, sizeof(reg_));
   has_shared_ = false;
+  shared_renew_failed_ = false;
   shared_at_ = 0;
   // The session spacing is the node's, not the server's: ctl_ever_ and ctl_filed_ms_ stay.
   ctl_want_ = 0;   // an answer still on its way came from the old URL
@@ -1510,7 +1512,8 @@ void RepeaterPoller::serviceControl() {
 }
 
 void RepeaterPoller::updateKey(uint32_t now) {
-  const uint8_t want = poll::chooseKey(reg_, has_shared_, now);
+  const bool shared = poll::sharedKeyUsable(has_shared_, shared_at_, shared_renew_failed_, now);
+  const uint8_t want = poll::chooseKey(reg_, shared, now);
   if (want == key_in_use_ || busy()) return;   // a run keeps the key it started with
   char pfx[9] = "-";
   if (want == poll::KEY_OWN) hex8(pfx, poll_id_.pub_key);
@@ -1727,6 +1730,14 @@ void RepeaterPoller::noSession(uint8_t outcome, uint32_t now) {
   memset(ctl_status_, 0, sizeof(ctl_status_));
   // Counts toward a stale policy like the plugin's "CoreScope unreachable".
   poll::applyPolicyAnswer(policy_, false, 0, policy_, now, kFastPolicy);
+  if (ctl_want_ & poll::WANT_SHARED_KEY) sharedRenewalFailed(now);
+}
+
+// Only an expired key is dropped; a running exchange keeps it, since the key switch waits for the run.
+void RepeaterPoller::sharedRenewalFailed(uint32_t now) {
+  if (!has_shared_ || shared_renew_failed_ || poll::elapsedSec(now, shared_at_) < poll::kSharedKeyMaxAgeS) return;
+  shared_renew_failed_ = true;
+  POLL_LOG("CoreScope shared key expired and its renewal failed: not used until one is fetched");
 }
 
 __attribute__((noinline)) void RepeaterPoller::takeControl(uint32_t now) {
@@ -1817,6 +1828,7 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
     }
   }
 
+  bool shared_taken = false;
   if (res.shared_ok) {
     const uint8_t h = res.shared_pub[0];
     if (h == 0x00 || h == 0xFF || h == host_->pollNodeHash()) {
@@ -1829,10 +1841,13 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
       const bool changed = !has_shared_ || memcmp(shared_id_.pub_key, res.shared_pub, PUB_KEY_SIZE) != 0;
       if (changed && busy() && key_in_use_ == poll::KEY_SHARED) {
         POLL_LOG("CoreScope shared key changed during a poll; taken next time");
+        shared_taken = true;   // answered; not a failed renewal
       } else {
         shared_id_.readFrom(keys, sizeof(keys));
         has_shared_ = true;
         shared_at_ = now;
+        shared_renew_failed_ = false;
+        shared_taken = true;
         if (changed) {
           bindKey();
           char pfx[9];
@@ -1843,6 +1858,7 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
       wipe(keys, sizeof(keys));
     }
   }
+  if ((want & poll::WANT_SHARED_KEY) && !shared_taken) sharedRenewalFailed(now);
 
   char o[8], p[8], r[8], k[8];
   fmtStatus(o, sizeof(o), want & poll::WANT_OWNERS, res.owners_status);

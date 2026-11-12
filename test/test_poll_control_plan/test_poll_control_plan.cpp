@@ -209,6 +209,15 @@ TEST(PollControlPlan, StalePolicyDoublesTheWindowOnlyWhenCoreScopeIsUnreachable)
   EXPECT_EQ(3600U, poll::policyWindow(p, nullptr, 0, kNow + 7 * 3600));
 }
 
+TEST(PollControlPlan, AnExpiredSharedKeyGoesOnlyWhenItsRenewalFails) {
+  EXPECT_FALSE(poll::sharedKeyUsable(false, kNow, false, kNow));
+  EXPECT_TRUE(poll::sharedKeyUsable(true, kNow - 3600, false, kNow));
+  EXPECT_TRUE(poll::sharedKeyUsable(true, kNow - 3600, true, kNow));   // a failure inside the day changes nothing
+  EXPECT_TRUE(poll::sharedKeyUsable(true, kNow - poll::kDay, false, kNow));   // renewal not answered yet
+  EXPECT_FALSE(poll::sharedKeyUsable(true, kNow - poll::kDay, true, kNow));
+  EXPECT_EQ(poll::KEY_NONE, poll::chooseKey(reg(), poll::sharedKeyUsable(true, kNow - poll::kDay, true, kNow), kNow));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
