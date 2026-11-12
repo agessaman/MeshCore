@@ -19,7 +19,7 @@
 static_assert(PATH_HASH_SIZE == 1, "poll packets carry one-byte hashes");
 static_assert(PUB_KEY_SIZE == poll::kPubKeySize, "key size");
 static_assert(PRV_KEY_SIZE == poll::kPrvKeySize, "private key size");
-static_assert(sizeof(RepeaterPoller) <= 5188, "repeater poller RAM budget");
+static_assert(sizeof(RepeaterPoller) <= 5196, "repeater poller RAM budget");
 
 namespace {
 
@@ -633,6 +633,7 @@ void RepeaterPoller::startPoll(uint8_t idx, bool scheduled) {
   const uint32_t now = host_->pollNow();
   const PollControl c = controlFor(idx);
 
+  bindKey();   // a secret is only ever reused with the key it was made from
   if (!meta_[idx].secret_ok) {
     pollKey().calcSharedSecret(meta_[idx].secret, meta_[idx].pub);
     meta_[idx].secret_ok = true;
@@ -1354,7 +1355,7 @@ void RepeaterPoller::initControl() {
   has_shared_ = false;
   shared_at_ = 0;
   key_in_use_ = poll::KEY_NONE;
-  acl_key_ = poll::KEY_OWN;   // what the flash record's learned passwords were learned under
+  memset(acl_pub_, 0, sizeof(acl_pub_));   // the flash record's learned passwords are the own key's
   started_at_ = 0;
   gated_at_ = 0;
   url_hash_ = 0;
@@ -1517,11 +1518,27 @@ void RepeaterPoller::updateKey(uint32_t now) {
   POLL_LOG("polling key %s %s (was %s)", keyName(want), pfx, keyName(key_in_use_));
   key_in_use_ = want;
   key_note_ = 0;
-  if (want == poll::KEY_NONE || want == acl_key_) return;
-  // A target keeps one ACL entry per key: nothing learned under the other key carries over.
+  bindKey();
+}
+
+// Secrets and login state belong to one public key; any change of identity, a new shared key
+// included, starts them over.
+void RepeaterPoller::bindKey() {
+  if (key_in_use_ == poll::KEY_NONE || busy()) return;
+  const uint8_t* pub = pollKey().pub_key;
+  static const uint8_t kUnbound[sizeof(acl_pub_)] = {0};
+  if (memcmp(acl_pub_, kUnbound, sizeof(acl_pub_)) == 0) {
+    if (key_in_use_ == poll::KEY_OWN) {
+      memcpy(acl_pub_, pub, sizeof(acl_pub_));
+      return;
+    }
+  } else if (memcmp(acl_pub_, pub, sizeof(acl_pub_)) == 0) {
+    return;
+  }
+  // A target keeps one ACL entry per key: nothing learned under another key carries over.
   bool learned = false;
   for (uint8_t k = 0; k < poll::kStoredTargets; k++) learned = learned || stored_[k].learned_pw != poll::LEARNED_NONE;
-  acl_key_ = want;
+  memcpy(acl_pub_, pub, sizeof(acl_pub_));
   forgetKeyState();
   if (learned) save_due_ = true;
 }
@@ -1817,10 +1834,7 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
         has_shared_ = true;
         shared_at_ = now;
         if (changed) {
-          if (key_in_use_ == poll::KEY_SHARED) {
-            for (uint8_t i = 0; i < kSlots; i++) meta_[i].secret_ok = false;
-            if (acl_key_ == poll::KEY_SHARED) forgetKeyState();
-          }
+          bindKey();
           char pfx[9];
           hex8(pfx, shared_id_.pub_key);
           POLL_LOG("CoreScope shared key %s", pfx);

@@ -292,7 +292,7 @@ private:
   bool     has_shared_;
   uint32_t shared_at_;
   uint8_t  key_in_use_;              // poll::KeyChoice
-  uint8_t  acl_key_;                 // the key the per-target login state was learned under
+  uint8_t  acl_pub_[8];              // the key the cached secrets and login state belong to; zero = the stored own key
   uint32_t started_at_;              // first tick with a synced clock
   uint32_t gated_at_;                // last time the gate was seen closed
   uint32_t url_hash_;                // a new CoreScope starts its state over
@@ -337,6 +337,7 @@ private:
   void takeClaim(uint32_t now);
   void maybeClaim(uint32_t now);
   void updateKey(uint32_t now);
+  void bindKey();
   void scheduleTick(uint32_t now);
   poll::CycleInput cycleInputFor(uint8_t idx, bool test, uint32_t now) const;
   void noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now);
