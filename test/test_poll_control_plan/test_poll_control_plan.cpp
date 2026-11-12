@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "helpers/poll/PollControlPlan.h"
+#include "helpers/poll/PollDecisions.h"
 
 namespace {
 
@@ -81,6 +82,20 @@ TEST(PollControlPlan, NeverWithoutSwitchUrlOrClock) {
   off = n;
   off.clock_ok = false;
   EXPECT_FALSE(poll::controlNeeded(off));
+}
+
+TEST(PollControlPlan, FirstSessionFilesWhileNoClaimCanBeSent) {
+  // Boot, key still none: the hold is on because no claim has gone out, and
+  // that asks for the session that registers the key. A claim published later
+  // is what sets claim_unanswered, so its absence cannot block this one.
+  const uint32_t started = kNow;
+  poll::ControlNeed n = need();
+  n.policy_answered = false;
+  n.registration_due = true;
+  n.starting = poll::startupHold(true, true, started, 0, 0, started);
+  n.claim_unanswered = false;
+  EXPECT_TRUE(n.starting);
+  EXPECT_TRUE(poll::controlNeeded(n));
 }
 
 TEST(PollControlPlan, OneSessionPerPeriod) {

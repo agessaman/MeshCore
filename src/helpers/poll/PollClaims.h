@@ -346,25 +346,44 @@ struct ClaimTiming {
   uint32_t signature;
   bool     sent_once;
   bool     last_community;
+  bool     last_listed;    // the last claim named nodes
 };
 
+static_assert(sizeof(ClaimTiming) == 16, "last_listed fits the existing word");
+
+// key is poll::KeyChoice. Zero is KEY_NONE: no polling key, so no node is named.
+static inline bool claimMayList(uint8_t key) { return key != 0; }
+
+// A list already published is taken back by one empty claim, then nothing
+// until a polling key is in use again.
+static inline bool emptyClaimOwed(const ClaimTiming& t, bool may_list) {
+  return !may_list && t.sent_once && t.last_listed;
+}
+
 // Every attempt starts the 60 s retry clock, as claims.py does, so a route
-// change right after a publish waits for it too.
+// change right after a publish waits for it too. may_list is claimMayList(key):
+// without a key the claim names no nodes, and one empty claim retracts a list
+// already sent this boot.
 static inline bool claimDue(const ClaimTiming& t, uint32_t signature, bool community,
-                            uint32_t now) {
-  if (!community && !(t.sent_once && t.last_community)) return false;  // off, and already said so
-  const bool changed = signature != t.signature || community != t.last_community;
+                            bool may_list, uint32_t now) {
+  const bool owe_empty = emptyClaimOwed(t, may_list);
+  if (!may_list && !owe_empty) return false;  // no key, and no list to take back
+  if (!community && !(t.sent_once && t.last_community) && !owe_empty) return false;  // off, and already said so
+  const bool changed = signature != t.signature || community != t.last_community ||
+                       may_list != t.last_listed;
   if (!changed && elapsedSec(now, t.sent_at) < kClaimEverySec) return false;
   if (elapsedSec(now, t.tried_at) < kClaimRetrySec) return false;
   return true;
 }
 
-static inline void claimSent(ClaimTiming& t, uint32_t signature, bool community, uint32_t now) {
+static inline void claimSent(ClaimTiming& t, uint32_t signature, bool community, bool listed,
+                            uint32_t now) {
   t.sent_at = now;
   t.tried_at = now;
   t.signature = signature;
   t.sent_once = true;
   t.last_community = community;
+  t.last_listed = listed;
 }
 
 static inline void claimFailed(ClaimTiming& t, uint32_t now) {

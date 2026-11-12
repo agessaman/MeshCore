@@ -213,6 +213,12 @@ TEST(PollRegistration, OwnKeyLastsTwentyFourHours) {
   EXPECT_EQ(poll::KEY_NONE, poll::chooseKey(s, false, base + 86400));
 }
 
+TEST(PollRegistration, ClaimListsNodesOnlyWithAKey) {
+  EXPECT_FALSE(poll::claimMayList(poll::KEY_NONE));
+  EXPECT_TRUE(poll::claimMayList(poll::KEY_OWN));
+  EXPECT_TRUE(poll::claimMayList(poll::KEY_SHARED));
+}
+
 TEST(PollRegistration, NoOwnKeyFallsBackToShared) {
   const uint32_t base = kTs;
   poll::RegistrationState s{false, false, 0, 0, 0};

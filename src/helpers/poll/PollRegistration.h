@@ -93,6 +93,8 @@ static inline void registrationResult(RegistrationState& s, int http_status, boo
 
 enum KeyChoice : uint8_t { KEY_NONE = 0, KEY_OWN, KEY_SHARED };
 
+static_assert(KEY_NONE == 0, "claimMayList treats 0 as no polling key");
+
 // CoreScope drops a key 24 h after its last registration, so stop using it then.
 static inline uint8_t chooseKey(const RegistrationState& s, bool have_shared_key, uint32_t now) {
   if (s.ok && elapsedSec(now, s.ok_at) < kDay) return KEY_OWN;

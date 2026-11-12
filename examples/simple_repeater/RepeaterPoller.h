@@ -284,6 +284,7 @@ private:
   poll::ClaimTiming claim_;
   bool     claim_pending_;
   bool     claim_pending_community_;
+  bool     claim_pending_listed_;    // the claim in flight names nodes
   uint32_t claim_pending_sig_;
   uint32_t claim_filed_ms_;
   uint32_t claim_sent_at_;           // last claim the bridge took this boot, 0 = none

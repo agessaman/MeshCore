@@ -67,6 +67,7 @@ const uint32_t kClaimTimeoutMs = 60000;      // a claim the bridge never answere
 const uint8_t kNoteWaitCtl = 1;
 const uint8_t kNoteRefused = 2;
 const uint8_t kNoteClaimRefused = 4;
+const uint8_t kNoteClaimsHeld = 8;
 
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
 
@@ -1418,6 +1419,7 @@ void RepeaterPoller::initControl() {
   memset(&claim_, 0, sizeof(claim_));
   claim_pending_ = false;
   claim_pending_community_ = false;
+  claim_pending_listed_ = false;
   claim_pending_sig_ = 0;
   claim_filed_ms_ = 0;
   claim_sent_at_ = 0;
@@ -1629,7 +1631,7 @@ void RepeaterPoller::takeClaim(uint32_t now) {
   }
   claim_pending_ = false;
   if (r == poll::CLAIM_PUBLISHED) {
-    poll::claimSent(claim_, claim_pending_sig_, claim_pending_community_, now);
+    poll::claimSent(claim_, claim_pending_sig_, claim_pending_community_, claim_pending_listed_, now);
     claim_sent_at_ = now;
     POLL_LOG("claim published to slot %u%s", (unsigned)claim_slot_, claim_pending_community_ ? "" : " (community off)");
   } else {
@@ -1640,30 +1642,39 @@ void RepeaterPoller::takeClaim(uint32_t now) {
 }
 
 // One claim per target this observer can reach and may poll, as claims.py does. Claims go out
-// while paused, gated or on standby so CoreScope keeps the roles current.
+// while paused, gated or on standby so CoreScope keeps the roles current. No polling key: the
+// list is withheld, and one empty claim takes back a list already published this boot.
 __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
   if (claim_pending_ || claim_slot_ == 0) return;
+  const bool may_list = poll::claimMayList(key_in_use_);
+  if (may_list) ctl_note_ &= (uint8_t)~kNoteClaimsHeld;
+  else if (!(ctl_note_ & kNoteClaimsHeld)) {
+    POLL_LOG("claims held: no polling key in use");
+    ctl_note_ |= kNoteClaimsHeld;
+  }
   poll::ClaimNode nodes[poll::kMaxTargets];
   uint8_t n = 0;
-  for (uint8_t p = 0; p < count_ && n < poll::kMaxTargets; p++) {
-    for (uint8_t i = 0; i < kSlots; i++) {
-      if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
-      int8_t snr = 0;
-      // An admin-stopped target is never polled here, so it is not offered either.
-      if (states_[i].admin_seen || !directRoute(i, &snr) || poll::policyExcludesTarget(policy_, meta_[i].pub, policyCovers(i))) break;
-      poll::ClaimNode& c = nodes[n++];
-      memset(&c, 0, sizeof(c));
-      memcpy(c.node, meta_[i].pub, poll::kPubKeySize);
-      c.reply_hops = 0;
-      c.personal_key = key_in_use_ == poll::KEY_OWN;
-      c.has_snr = true;
-      c.snr_x4 = snr;
-      break;
+  if (may_list) {
+    for (uint8_t p = 0; p < count_ && n < poll::kMaxTargets; p++) {
+      for (uint8_t i = 0; i < kSlots; i++) {
+        if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
+        int8_t snr = 0;
+        // An admin-stopped target is never polled here, so it is not offered either.
+        if (states_[i].admin_seen || !directRoute(i, &snr) || poll::policyExcludesTarget(policy_, meta_[i].pub, policyCovers(i))) break;
+        poll::ClaimNode& c = nodes[n++];
+        memset(&c, 0, sizeof(c));
+        memcpy(c.node, meta_[i].pub, poll::kPubKeySize);
+        c.reply_hops = 0;
+        c.personal_key = key_in_use_ == poll::KEY_OWN;
+        c.has_snr = true;
+        c.snr_x4 = snr;
+        break;
+      }
     }
   }
-  const uint32_t sig = poll::claimSignature(nodes, n, community_);
-  if (!poll::claimDue(claim_, sig, community_, now)) return;
-  if (n == 0) return;   // nothing to claim, nothing to take back
+  const uint32_t sig = poll::claimSignature(n ? nodes : nullptr, n, community_);
+  if (!poll::claimDue(claim_, sig, community_, may_list, now)) return;
+  if (may_list && n == 0) return;   // nothing to claim, nothing to take back
 
   char json[poll::kClaimJsonMax + 1];
   char tag[48];
@@ -1671,7 +1682,7 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
   snprintf(tag, sizeof(tag), "meshcore.observer_fw/%s", host_->pollFirmwareVersion());
   host_->pollNodePub(self_pub);
   const size_t len = poll::buildClaimJson(json, sizeof(json), host_->pollNodeName(), self_pub, now, tag,
-                                          policy_.version, community_, nodes, n);
+                                          policy_.version, community_, n ? nodes : nullptr, n);
   if (len == 0) {
     poll::claimFailed(claim_, now);
     POLL_LOG("claim not built (too long)");
@@ -1687,9 +1698,15 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
   claim_pending_ = true;
   claim_pending_sig_ = sig;
   claim_pending_community_ = community_;
+  claim_pending_listed_ = n > 0;
   claim_filed_ms_ = millis();
-  POLL_LOG("claim filed: %u node%s, community %s, %u bytes", (unsigned)n, n == 1 ? "" : "s", community_ ? "on" : "off",
-           (unsigned)len);
+  if (n == 0) {
+    POLL_LOG("claim filed: empty, no polling key in use, community %s, %u bytes", community_ ? "on" : "off",
+             (unsigned)len);
+  } else {
+    POLL_LOG("claim filed: %u node%s, community %s, %u bytes", (unsigned)n, n == 1 ? "" : "s", community_ ? "on" : "off",
+             (unsigned)len);
+  }
 }
 
 void RepeaterPoller::maybeFileControl(uint32_t now) {
@@ -1710,6 +1727,7 @@ void RepeaterPoller::maybeFileControl(uint32_t now) {
   const uint32_t since = (uint32_t)(millis() - ctl_filed_ms_) / 1000UL;
   if (!poll::controlAllowed(ctl_pending_, ctl_ever_, since, kCtlEveryS)) return;
   // A claim on its way goes first, so the owners answer already reflects it (the startup hold needs that).
+  // No claim is filed while the polling key is none, so the registering session is not held for one.
   if (claim_pending_) {
     ctl_deferred_ = true;
     return;

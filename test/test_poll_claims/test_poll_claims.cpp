@@ -276,64 +276,140 @@ TEST(PollClaims, SignatureHandlesDuplicateNodes) {
 
 TEST(PollClaims, ClaimTimingEveryThirtyMinutes) {
   const uint32_t base = kTs;
-  poll::ClaimTiming t{0, 0, 0, false, false};
-  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, base));
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, true, base));
 
-  poll::claimSent(t, 0x12345678u, true, base);
+  poll::claimSent(t, 0x12345678u, true, true, base);
   EXPECT_TRUE(t.sent_once);
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, base + 1799));
-  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, base + 1800));
+  EXPECT_TRUE(t.last_listed);
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, true, base + 1799));
+  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, true, base + 1800));
   // A failed attempt does not move the 30 min clock.
   poll::claimFailed(t, base + 900);
-  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, base + 1800));
+  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, true, base + 1800));
 }
 
 TEST(PollClaims, SignatureChangeWaitsForTheRetryGate) {
   const uint32_t base = kTs;
-  poll::ClaimTiming t{0, 0, 0, false, false};
-  poll::claimSent(t, 0x11111111u, true, base);
-  EXPECT_FALSE(poll::claimDue(t, 0x22222222u, true, base + 59));
-  EXPECT_TRUE(poll::claimDue(t, 0x22222222u, true, base + 60));
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  poll::claimSent(t, 0x11111111u, true, true, base);
+  EXPECT_FALSE(poll::claimDue(t, 0x22222222u, true, true, base + 59));
+  EXPECT_TRUE(poll::claimDue(t, 0x22222222u, true, true, base + 60));
   // After a failed attempt too.
   poll::claimFailed(t, base + 100);
-  EXPECT_FALSE(poll::claimDue(t, 0x22222222u, true, base + 159));
-  EXPECT_TRUE(poll::claimDue(t, 0x22222222u, true, base + 160));
+  EXPECT_FALSE(poll::claimDue(t, 0x22222222u, true, true, base + 159));
+  EXPECT_TRUE(poll::claimDue(t, 0x22222222u, true, true, base + 160));
 }
 
 TEST(PollClaims, FailedAttemptRetriesAfterSixtySeconds) {
   const uint32_t base = kTs;
-  poll::ClaimTiming t{0, 0, 0, false, false};
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
   poll::claimFailed(t, base);
-  EXPECT_FALSE(poll::claimDue(t, 0xabcdef01u, true, base + 59));
-  EXPECT_TRUE(poll::claimDue(t, 0xabcdef01u, true, base + 60));
+  EXPECT_FALSE(poll::claimDue(t, 0xabcdef01u, true, true, base + 59));
+  EXPECT_TRUE(poll::claimDue(t, 0xabcdef01u, true, true, base + 60));
 }
 
 TEST(PollClaims, CommunityOffSendsOneLastClaim) {
   const uint32_t base = kTs;
-  poll::ClaimTiming t{0, 0, 0, false, false};
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, base));  // nothing to take back
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, true, base));  // nothing to take back
 
-  poll::claimSent(t, 0x12345678u, true, base);
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, base + 59));
-  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, false, base + 60));
+  poll::claimSent(t, 0x12345678u, true, true, base);
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, true, base + 59));
+  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, false, true, base + 60));
 
-  poll::claimSent(t, 0x12345678u, false, base + 60);
+  poll::claimSent(t, 0x12345678u, false, true, base + 60);
   EXPECT_FALSE(t.last_community);
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, base + 3600));
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, base + 999999));
+  EXPECT_TRUE(t.last_listed);  // the notice still names the nodes
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, true, base + 3600));
+  EXPECT_FALSE(poll::claimDue(t, 0x99999999u, false, true, base + 999999));  // a route change waits until it is on
 
   // Turning it back on is a change, so it goes at once (after the retry gate).
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, base + 119));
-  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, base + 120));
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, true, base + 119));
+  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, true, base + 120));
+}
+
+TEST(PollClaims, NoKeyNamesNoNodesUntilOneWasPublished) {
+  EXPECT_FALSE(poll::claimMayList(0));
+  EXPECT_TRUE(poll::claimMayList(1));
+  EXPECT_TRUE(poll::claimMayList(2));
+
+  const uint32_t base = kTs;
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  EXPECT_FALSE(poll::emptyClaimOwed(t, false));
+  // Boot: the key is none and nothing has been claimed, so nothing goes out.
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, false, base));
+  EXPECT_FALSE(poll::claimDue(t, 0, true, false, base + 999999));
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, false, base));
+}
+
+TEST(PollClaims, LostKeySendsOneEmptyClaim) {
+  const uint32_t base = kTs;
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  poll::claimSent(t, 0x12345678u, true, true, base);
+  EXPECT_TRUE(poll::emptyClaimOwed(t, false));
+  EXPECT_FALSE(poll::emptyClaimOwed(t, true));
+  EXPECT_FALSE(poll::claimDue(t, 0, true, false, base + 59));
+  EXPECT_TRUE(poll::claimDue(t, 0, true, false, base + 60));
+
+  // A failed retraction leaves the debt, and retries on the same clock.
+  poll::claimFailed(t, base + 60);
+  EXPECT_TRUE(t.last_listed);
+  EXPECT_FALSE(poll::claimDue(t, 0, true, false, base + 119));
+  EXPECT_TRUE(poll::claimDue(t, 0, true, false, base + 120));
+
+  poll::claimSent(t, 0, true, false, base + 120);
+  EXPECT_FALSE(t.last_listed);
+  EXPECT_FALSE(poll::emptyClaimOwed(t, false));
+  EXPECT_FALSE(poll::claimDue(t, 0, true, false, base + 180));
+  EXPECT_FALSE(poll::claimDue(t, 0x99u, true, false, base + 999999));
+  EXPECT_FALSE(poll::claimDue(t, 0, false, false, base + 999999));  // community flipping waits for a key
+
+  // A key in use again is a change, so the normal claim follows the retry gate.
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, true, base + 179));
+  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, true, base + 180));
+}
+
+TEST(PollClaims, LostKeyAfterCommunityOffStillRetracts) {
+  const uint32_t base = kTs;
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  poll::claimSent(t, 0x12345678u, true, true, base);
+  poll::claimSent(t, 0x12345678u, false, true, base + 60);
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, true, base + 3600));
+  // The off notice named nodes, so losing the key still owes an empty claim.
+  EXPECT_FALSE(poll::claimDue(t, 0, false, false, base + 119));
+  EXPECT_TRUE(poll::claimDue(t, 0, false, false, base + 120));
+  poll::claimSent(t, 0, false, false, base + 120);
+  EXPECT_FALSE(t.last_community);
+  EXPECT_FALSE(t.last_listed);
+  EXPECT_FALSE(poll::claimDue(t, 0, false, false, base + 999999));
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, false, base + 999999));
+}
+
+TEST(PollClaims, KeylessCommunityOffIsOneEmptyClaim) {
+  const uint32_t base = kTs;
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  poll::claimSent(t, 0x12345678u, true, true, base);
+  // Both debts at once: one empty claim says community is off and drops the nodes.
+  EXPECT_TRUE(poll::claimDue(t, 0, false, false, base + 60));
+  poll::claimSent(t, 0, false, false, base + 60);
+  EXPECT_FALSE(t.last_community);
+  EXPECT_FALSE(t.last_listed);
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, false, base + 999999));
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, false, base + 999999));
+  // The off notice already went out, so a key does not resume the list until community is on.
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, false, true, base + 999999));
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, true, base + 119));
+  EXPECT_TRUE(poll::claimDue(t, 0x12345678u, true, true, base + 120));
 }
 
 TEST(PollClaims, ClockJumpsNeverLookDue) {
   const uint32_t base = kTs;
-  poll::ClaimTiming t{base + 100, base + 100, 0x12345678u, true, true};
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, base));
+  poll::ClaimTiming t{base + 100, base + 100, 0x12345678u, true, true, true};
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, true, base));
   t.sent_at = base;
   t.tried_at = base + 100;
-  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, base));
+  EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, true, base));
 }
 
 }  // namespace
