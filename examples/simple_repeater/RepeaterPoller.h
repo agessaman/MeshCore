@@ -125,6 +125,8 @@ private:
     uint8_t  pw_mode;
     uint8_t  note;         // last schedule decision logged
     uint8_t  list_pos;     // position in the operator's list
+    bool     admin_held;   // an admin answer to this target's exchange not yet fed to it; outside the queue
+    bool     admin_held_flooded;
     uint32_t phase_s;
     uint32_t interval_s;
     uint32_t guest_answer_print;   // loginAnswerPrint of the last guest login answer taken

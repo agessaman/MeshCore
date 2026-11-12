@@ -847,6 +847,33 @@ TEST(PollExchange, AdminAnswerAfterAHeldGuestAnswerOverridesIt) {
   EXPECT_EQ(0u, t.route_sent_at);
 }
 
+TEST(PollExchange, AdminAnswerFedBeforeTheLastLoginsFailedReportWins) {
+  // The owner latches admin answers and feeds them ahead of a queued TX report, never after.
+  TargetState t;
+  memset(&t, 0, sizeof(t));
+  PollExchange x;
+  Step s = x.start(t, defaultExchangeConfig(), kNow);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow);       // blank out
+  s = x.onEvent(t, EV_TIMER, false, kNow + 10);    // listen over
+  s = x.onEvent(t, EV_TIMER, false, kNow + 18);    // gap over
+  ASSERT_EQ(ACT_SEND_LOGIN, s.act);                // hello handed: the last login
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_ADMIN, false, kNow + 19)));
+  s = x.onEvent(t, EV_TX_FAILED, false, kNow + 19);
+  EXPECT_EQ(ACT_FINISH, s.act);
+  EXPECT_EQ(XR_ADMIN, x.result().reason);
+
+  // The other order ends the exchange on the failure and the answer finds nothing to stop.
+  memset(&t, 0, sizeof(t));
+  s = x.start(t, defaultExchangeConfig(), kNow);
+  s = x.onEvent(t, EV_TX_DONE, false, kNow);
+  s = x.onEvent(t, EV_TIMER, false, kNow + 10);
+  s = x.onEvent(t, EV_TIMER, false, kNow + 18);
+  s = x.onEvent(t, EV_TX_FAILED, false, kNow + 19);
+  ASSERT_EQ(ACT_FINISH, s.act);
+  EXPECT_TRUE(isNoChange(x.onEvent(t, EV_LOGIN_ADMIN, false, kNow + 19)));
+  EXPECT_FALSE(x.result().admin);
+}
+
 TEST(PollExchange, AdminAnswerAfterAnAcceptedGuestAnswerFinishesAtOnce) {
   TargetState t;
   memset(&t, 0, sizeof(t));

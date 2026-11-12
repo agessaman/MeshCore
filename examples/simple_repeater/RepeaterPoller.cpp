@@ -818,9 +818,12 @@ bool RepeaterPoller::inflightIntact() const { return inflight_ && sameSig(sigOf(
 
 void RepeaterPoller::pushEvent(uint8_t ev, bool flooded) {
   if (event_count_ >= kEventQueue) {
-    // Never drop a TX report (the machines wait for it) or an admin answer. Other replies beyond this are duplicates.
-    if (ev != poll::EV_TX_DONE && ev != poll::EV_TX_FAILED && ev != poll::EV_LOGIN_ADMIN) return;
-    memmove(events_, events_ + 1, sizeof(events_[0]) * (kEventQueue - 1));
+    // Only a TX report (the machines wait for it) makes room; an exchange's admin answer is latched outside the queue.
+    if (ev != poll::EV_TX_DONE && ev != poll::EV_TX_FAILED) return;
+    uint8_t drop = 0;
+    while (drop < kEventQueue && (events_[drop].ev == poll::EV_TX_DONE || events_[drop].ev == poll::EV_TX_FAILED)) drop++;
+    if (drop == kEventQueue) return;
+    memmove(events_ + drop, events_ + drop + 1, sizeof(events_[0]) * (kEventQueue - 1 - drop));
     event_count_--;
   }
   events_[event_count_].ev = ev;
@@ -829,10 +832,20 @@ void RepeaterPoller::pushEvent(uint8_t ev, bool flooded) {
 }
 
 void RepeaterPoller::processEvents() {
-  while (event_count_ > 0 && run_kind_ != RUN_NONE) {
-    Event e = events_[0];
-    memmove(events_, events_ + 1, sizeof(events_[0]) * (kEventQueue - 1));
-    event_count_--;
+  while (run_kind_ != RUN_NONE) {
+    Event e;
+    if (run_kind_ == RUN_EXCHANGE && meta_[run_idx_].admin_held) {
+      // Ahead of a queued TX report that could end the exchange first; a pending report still resolves it.
+      meta_[run_idx_].admin_held = false;
+      e.ev = poll::EV_LOGIN_ADMIN;
+      e.flooded = meta_[run_idx_].admin_held_flooded;
+    } else if (event_count_ > 0) {
+      e = events_[0];
+      memmove(events_, events_ + 1, sizeof(events_[0]) * (kEventQueue - 1));
+      event_count_--;
+    } else {
+      break;
+    }
     poll::Step s = feed(e.ev, e.flooded);
     const bool listen = e.ev == poll::EV_TX_DONE &&
                         (inflight_act_ == poll::ACT_SEND_LOGIN || inflight_act_ == poll::ACT_SEND_REQUEST);
@@ -922,7 +935,12 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
       else meta_[idx].guest_answer_print = print;
       POLL_LOG("rx login %s tag=%lu %s snr=%.2f", cls == poll::REPLY_LOGIN_ADMIN ? "admin" : "guest",
                (unsigned long)r.tag, flooded ? "flooded" : "direct", snr);
-      pushEvent(cls == poll::REPLY_LOGIN_ADMIN ? poll::EV_LOGIN_ADMIN : poll::EV_LOGIN_GUEST, flooded);
+      if (cls == poll::REPLY_LOGIN_ADMIN && run_kind_ == RUN_EXCHANGE) {
+        meta_[idx].admin_held = true;
+        meta_[idx].admin_held_flooded = flooded;
+      } else {
+        pushEvent(cls == poll::REPLY_LOGIN_ADMIN ? poll::EV_LOGIN_ADMIN : poll::EV_LOGIN_GUEST, flooded);
+      }
       // The dispatcher sends right after this tap returns, before the loop could stop the next packet.
       if (cls == poll::REPLY_LOGIN_ADMIN) recallForAdmin();
       break;
