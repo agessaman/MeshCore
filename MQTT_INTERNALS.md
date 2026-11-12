@@ -152,6 +152,17 @@ reconnection per slot.
   (`BACKOFF_STABLE_RESET_MS`), which is longer than the 75 s keepalive — a link that can't
   survive one keepalive round-trip keeps its earned rung instead of hammering TLS
   handshakes at the 10 s rung. CONNACK alone does not reset it.
+- The ladder advances just before each due reconnect, charging the failure that preceded
+  it. When the link comes back, each disconnected slot gets one immediate retry
+  (`link_retry_pending`). At the link-down edge, before live clients are closed,
+  `outageCausedByLink()` blames the outage on the link if the slot was still connected or
+  its session ended within 20 s of the edge (either side: the socket usually fails before
+  the 10 s Wi-Fi status poll reports the drop). That retry then holds the ladder where it
+  was. Any other outage (the slot was already failing), or any drop when the link had been
+  up for under 30 s (`kLinkFlapFloorMs`), or 40 s for a slot still marked connected at the
+  polled edge, advances it as usual; the recovery retry still
+  cannot trip the breaker itself. Refusals, handshake failures and quick drops while the
+  link stays up never take this path.
 - After 3 more failures at the top rung (~15 min) the slot's circuit breaker trips and
   routine reconnects stop. A tripped slot is probed once every 30 minutes (with a fresh
   JWT where applicable); a successful connect clears the breaker, as does reconfiguring
