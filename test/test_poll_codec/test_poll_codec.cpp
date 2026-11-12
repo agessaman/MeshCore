@@ -333,9 +333,28 @@ TEST(PollPacketCodec, LoginAnswerRepeatingTheLastIsAReplay) {
   EXPECT_FALSE(poll::loginAnswerRepeats(1000, 0, 0));
   EXPECT_TRUE(poll::loginAnswerRepeats(1000, 1000, 0));
   EXPECT_TRUE(poll::loginAnswerRepeats(1000, 0, 1000));
-  // An older stamp is fine: a target without a clock source restarts low after a reboot.
   EXPECT_FALSE(poll::loginAnswerRepeats(999, 1000, 2000));
   EXPECT_FALSE(poll::loginAnswerRepeats(0, 0, 0));
+}
+
+TEST(PollPacketCodec, LoginAnswerPrintTellsARebootFromACopy) {
+  // As the stock repeater answers: code, legacy, admin, perms, random blob, firmware level, padding.
+  const uint8_t first[] = {0x00, 0x00, 0x01, 0x03, 0x11, 0x22, 0x33, 0x44, 0x02, 0, 0, 0};
+  const uint8_t copy_path[] = {0x00, 0x00, 0x01, 0x03, 0x11, 0x22, 0x33, 0x44, 0x02, 0, 0, 0, 0, 0, 0, 0};
+  const uint8_t rebooted[] = {0x00, 0x00, 0x01, 0x03, 0x55, 0x22, 0x33, 0x44, 0x02, 0, 0, 0};
+  poll::Reply a = {1000u, first, sizeof(first)};
+  poll::Reply b = {1000u, copy_path, sizeof(copy_path)};
+  poll::Reply c = {1000u, rebooted, sizeof(rebooted)};   // same first unique stamp after a reboot
+  poll::Reply d = {1001u, first, sizeof(first)};
+  const uint32_t pa = poll::loginAnswerPrint(a);
+  EXPECT_EQ(pa, poll::loginAnswerPrint(b));
+  EXPECT_NE(pa, poll::loginAnswerPrint(c));
+  EXPECT_NE(pa, poll::loginAnswerPrint(d));
+  EXPECT_TRUE(poll::loginAnswerRepeats(poll::loginAnswerPrint(b), 0, pa));
+  EXPECT_FALSE(poll::loginAnswerRepeats(poll::loginAnswerPrint(c), 0, pa));
+
+  poll::Reply none = {0u, nullptr, 0};
+  EXPECT_NE(0u, poll::loginAnswerPrint(none));
 }
 
 TEST(PollPacketCodec, LoginShapeAdminGuestAndNeither) {

@@ -201,11 +201,20 @@ static inline uint8_t classifyReply(const Reply& r, const TargetState& t, const 
   return r.data[2] == 1 ? REPLY_LOGIN_ADMIN : REPLY_LOGIN_GUEST;
 }
 
-// A login answer stamped exactly like the last guest or admin answer taken from this target
-// is a replay or a duplicate copy. Answers need not increase: a target with no clock source
-// goes back after a reboot. 0 means none taken yet.
-static inline bool loginAnswerRepeats(uint32_t tag, uint32_t last_guest, uint32_t last_admin) {
-  return tag != 0 && (tag == last_guest || tag == last_admin);
+// A login answer's identity: its stamp plus the code, flags and random blob after it. A clockless
+// target can repeat a stamp after a reboot, never the blob; trailing bytes differ by wrapping. Never 0.
+static inline uint32_t loginAnswerPrint(const Reply& r) {
+  uint32_t h = 2166136261UL;   // FNV-1a
+  for (uint8_t i = 0; i < 4; i++) h = (h ^ (uint8_t)(r.tag >> (8 * i))) * 16777619UL;
+  const size_t n = r.data ? (r.len < 8 ? r.len : 8) : 0;
+  for (size_t i = 0; i < n; i++) h = (h ^ r.data[i]) * 16777619UL;
+  return h ? h : 1;
+}
+
+// An answer printed exactly like the last guest or admin answer taken from this target is a
+// replay or a duplicate copy. 0 means none taken yet.
+static inline bool loginAnswerRepeats(uint32_t print, uint32_t last_guest, uint32_t last_admin) {
+  return print != 0 && (print == last_guest || print == last_admin);
 }
 
 }  // namespace poll
