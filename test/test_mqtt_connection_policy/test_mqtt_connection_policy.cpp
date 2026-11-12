@@ -347,6 +347,213 @@ TEST(MQTTConnectionPolicy, LinkRecoveryRetryBelowThresholdMatchesOrdinaryAdvance
   }
 }
 
+namespace {
+struct LadderSlot {
+  uint8_t backoff = 0;
+  uint8_t failures = 0;
+  bool tripped = false;
+};
+
+// One drop: link up at link_up, slot connected at connected_at, the socket fails
+// at disconnect_at, the edge arrives at edge, and the link-recovery retry follows.
+uint8_t runLinkDrop(LadderSlot& s, uint32_t link_up, uint32_t disconnect_at, uint32_t edge,
+                    bool connected_at_edge) {
+  const uint32_t outage_start = connected_at_edge ? 0U : disconnect_at;
+  const bool link_caused =
+      Policy::outageCausedByLink(edge, link_up, connected_at_edge, outage_start);
+  Policy::BackoffAdvance a =
+      Policy::advanceBackoffForLinkRecovery(s.backoff, s.failures, link_caused);
+  s.backoff = a.reconnect_backoff;
+  s.failures = a.max_backoff_failures;
+  s.tripped = a.circuit_breaker_tripped;
+  EXPECT_TRUE(a.should_reconnect);
+  return s.backoff;
+}
+}  // namespace
+
+// The V4 bench pattern: drops every 105-150 s, sessions just under the 120 s stable
+// clear, the socket failing up to 9 s before the polled edge. Ten drops stay at 0.
+TEST(MQTTConnectionPolicy, LinkOutagesOfShortSessionsDoNotClimbTheLadder) {
+  LadderSlot s;
+  uint32_t t = 100000U;
+  for (int drop = 0; drop < 10; ++drop) {
+    const uint32_t link_up = t;
+    const uint32_t disconnect_at = t + 110000U;
+    const uint32_t edge = disconnect_at + 9000U;
+    EXPECT_EQ(0, runLinkDrop(s, link_up, disconnect_at, edge, drop % 2 == 0)) << drop;
+    EXPECT_EQ(0, s.failures);
+    EXPECT_FALSE(s.tripped);
+    t = edge + 20000U;
+  }
+}
+
+// The edge may land before or after the event task stamps the disconnect.
+TEST(MQTTConnectionPolicy, LinkAttributionDoesNotRelyOnEdgeOrder) {
+  const uint32_t link_up = 1000U;
+  const uint32_t edge = 200000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, false, edge - 1000U));
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, false, edge - Policy::kLinkDropAttributionMs));
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, false, edge + 5U));
+  EXPECT_FALSE(Policy::outageCausedByLink(edge, link_up, false, edge - Policy::kLinkDropAttributionMs - 1U));
+  // Never disconnected and not connected: nothing ties it to the link.
+  EXPECT_FALSE(Policy::outageCausedByLink(edge, link_up, false, 0U));
+  // Wraps: link up just before the counter rolled over.
+  const uint32_t wrapped_up = std::numeric_limits<uint32_t>::max() - 59999U;
+  EXPECT_TRUE(Policy::outageCausedByLink(40000U, wrapped_up, false, 39000U));
+}
+
+// A slot already failing against its broker when the link drops keeps the old rule:
+// the recovery attempt advances but cannot trip, and the next ordinary failure trips.
+TEST(MQTTConnectionPolicy, BrokerOutageBeforeLinkDropStillClimbsAndTrips) {
+  const uint32_t edge = 900000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(edge, 1000U, false, edge - 300000U));
+  Policy::BackoffAdvance r = Policy::advanceBackoffForLinkRecovery(5, 2, false);
+  EXPECT_EQ(3, r.max_backoff_failures);
+  EXPECT_FALSE(r.circuit_breaker_tripped);
+  EXPECT_TRUE(Policy::advanceBackoff(r.reconnect_backoff, r.max_backoff_failures).circuit_breaker_tripped);
+}
+
+// Refusals, handshake failures and quick drops with the link up never pass through
+// the link-recovery path, so they climb and trip exactly as before.
+TEST(MQTTConnectionPolicy, BrokerFailuresWithLinkUpStillClimbAndTrip) {
+  LadderSlot s;
+  int attempts = 0;
+  while (!s.tripped && attempts < 20) {
+    Policy::BackoffAdvance a = Policy::advanceBackoff(s.backoff, s.failures);
+    s.backoff = a.reconnect_backoff;
+    s.failures = a.max_backoff_failures;
+    s.tripped = a.circuit_breaker_tripped;
+    ++attempts;
+  }
+  EXPECT_TRUE(s.tripped);
+  EXPECT_EQ(8, attempts);  // five rungs, then three failures at the top
+}
+
+// A held ladder keeps what the broker earned: link drops neither add nor forgive.
+TEST(MQTTConnectionPolicy, LinkCausedOutageHoldsAnEarnedLevel) {
+  for (uint8_t backoff = 0; backoff <= 5; ++backoff) {
+    for (uint8_t failures = 0; failures < 3; ++failures) {
+      Policy::BackoffAdvance r = Policy::advanceBackoffForLinkRecovery(backoff, failures, true);
+      EXPECT_EQ(backoff, r.reconnect_backoff);
+      EXPECT_EQ(failures, r.max_backoff_failures);
+      EXPECT_FALSE(r.circuit_breaker_tripped);
+      EXPECT_TRUE(r.should_reconnect);
+    }
+  }
+}
+
+// A link that drops again within kLinkFlapFloorMs of coming up is not excused, so a
+// Wi-Fi flapping every few seconds still climbs to the long rungs.
+TEST(MQTTConnectionPolicy, RapidLinkFlappingStillClimbs) {
+  LadderSlot s;
+  uint32_t t = 500000U;
+  for (int drop = 0; drop < 5; ++drop) {
+    const uint32_t link_up = t;
+    const uint32_t edge = t + 12000U;  // up 12 s, the session dies with it
+    runLinkDrop(s, link_up, edge - 1000U, edge, false);
+    t = edge + 3000U;
+  }
+  EXPECT_EQ(5, s.backoff);
+  EXPECT_FALSE(s.tripped);
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      t + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs - 1U, t, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(
+      t + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs, t, true, 0U));
+  // Link up since the bridge started (no edge seen) counts as held.
+  EXPECT_TRUE(Policy::outageCausedByLink(5000U, 0U, true, 0U));
+}
+
+// The 10 s status poll can report the edge well after the socket died, so the floor
+// runs to the stamped session end rather than to the polled edge.
+TEST(MQTTConnectionPolicy, LinkFlapFloorUsesTheSessionEndNotThePolledEdge) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(130000U, link_up, false, 125000U));
+  EXPECT_TRUE(Policy::outageCausedByLink(130000U, link_up, false, 130000U));
+  // A slot still up at the edge has no stamp, so its floor runs to the edge plus the
+  // poll slack; the slack is added because the edge trails the physical drop.
+  EXPECT_TRUE(Policy::outageCausedByLink(
+      link_up + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs, link_up, true, 0U));
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      link_up + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs - 1U, link_up, true, 0U));
+}
+
+// A slot still marked connected at the polled edge has no stamp, so it gets the slack:
+// up at 100 s, dropped at 125 s, edge at 130 s reads as 30 s but the link lasted 25 s.
+TEST(MQTTConnectionPolicy, UnstampedSlotGetsThePollSlackOnTheFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(130000U, link_up, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(140000U, link_up, true, 0U));
+  // Link up since the bridge started (no edge seen) skips the floor entirely.
+  EXPECT_TRUE(Policy::outageCausedByLink(5000U, 0U, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(900000U, 0U, true, 0U));
+}
+
+// A stamp after the edge is unusable, so the slot falls back to the polled edge and
+// takes the slack with it.
+TEST(MQTTConnectionPolicy, FutureStampUsesThePolledEdgeFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(135000U, link_up, false, 135005U));
+  EXPECT_TRUE(Policy::outageCausedByLink(140000U, link_up, false, 140005U));
+}
+
+// A stamped session end keeps the 30 s floor; the slack applies only to the polled edge.
+TEST(MQTTConnectionPolicy, StampedSlotIgnoresThePollSlack) {
+  EXPECT_TRUE(Policy::outageCausedByLink(131000U, 100000U, false, 130000U));
+}
+
+// An outage stamped before the link came up is outside this link-up period, so it
+// cannot move the floor and the edge stands.
+TEST(MQTTConnectionPolicy, OutageBeforeTheLinkCameUpStaysUnattributed) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(140000U, link_up, false, 95000U));
+  EXPECT_FALSE(Policy::outageCausedByLink(110000U, link_up, false, 95000U));
+}
+
+// The event task may stamp the disconnect a moment after the bridge read its clock.
+TEST(MQTTConnectionPolicy, OutageAfterTheEdgeKeepsTheEdgeFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(200000U, link_up, false, 200005U));
+  EXPECT_FALSE(Policy::outageCausedByLink(120000U, link_up, false, 120005U));
+}
+
+// The attribution window reaches kLinkDropAttributionMs past the edge as well.
+TEST(MQTTConnectionPolicy, AttributionWindowEndsTwentySecondsPastTheEdge) {
+  const uint32_t now = 300000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, 0U, false, now + Policy::kLinkDropAttributionMs));
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      now, 0U, false, now + Policy::kLinkDropAttributionMs + 1U));
+}
+
+// An outage stamped just before the rollover ties to an edge just after it.
+TEST(MQTTConnectionPolicy, AttributionWrapsFromOutageToEdge) {
+  const uint32_t outage = std::numeric_limits<uint32_t>::max() - 5000U;
+  const uint32_t now = 10000U;
+  const uint32_t link_up = outage - 60000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, link_up, false, outage));
+}
+
+// An outage stamped just after the rollover ties to an edge just before it.
+TEST(MQTTConnectionPolicy, AttributionWrapsFromEdgeToOutage) {
+  const uint32_t now = std::numeric_limits<uint32_t>::max() - 5000U;
+  const uint32_t outage = 10000U;
+  const uint32_t link_up = outage - 60000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, link_up, false, outage));
+}
+
+// The recovery retry runs at the held level; if its handshake then fails with the
+// link up, that is broker evidence like any other and the next attempt climbs one
+// rung (10 s, then 30 s), not the minutes an accumulated level used to cost.
+TEST(MQTTConnectionPolicy, FailedHandshakeRightAfterLinkUpClimbsOneRung) {
+  LadderSlot s;
+  runLinkDrop(s, 1000U, 150000U, 152000U, false);
+  EXPECT_EQ(0, s.backoff);
+  EXPECT_EQ(10000U, Policy::reconnectBackoffMs(s.backoff));
+  Policy::BackoffAdvance next = Policy::advanceBackoff(s.backoff, s.failures);
+  EXPECT_EQ(1, next.reconnect_backoff);
+  EXPECT_EQ(30000U, Policy::reconnectBackoffMs(next.reconnect_backoff));
+}
+
 TEST(MQTTConnectionPolicy, JwtLifetimeUsesCappedPerSlotStagger) {
   EXPECT_EQ(86400U, Policy::jwtLifetimeSecs(86400U, 0));
   EXPECT_EQ(86100U, Policy::jwtLifetimeSecs(86400U, 1));

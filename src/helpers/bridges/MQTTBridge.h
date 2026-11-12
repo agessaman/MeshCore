@@ -171,6 +171,7 @@ private:
     uint8_t max_backoff_failures;   // consecutive failures at max backoff level
     bool circuit_breaker_tripped;   // true = stop reconnecting until reconfigured
     bool link_retry_pending;        // next reconnect follows link recovery; it cannot trip the breaker
+    bool link_caused_outage;        // bridge task: last link-down edge blamed this slot's outage on the link
     uint32_t connect_count;         // onConnect callbacks since boot (release/acquire with connected)
     uint32_t link_retry_connects;   // connect_count when link_retry_pending was armed
     unsigned long connected_at_ms;  // millis() of last successful connect (0 = not connected);
@@ -529,6 +530,7 @@ private:
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s, less once the armer is done)
   int8_t _guard_armed_by_slot;             // slot whose first setup or reconnect armed that guard; -1 = anything else
   bool _guard_armer_first_setup;           // that handshake was a first setup
+  unsigned long _link_up_ms;               // bridge task: millis() of the last link up edge, 0 = none seen
   // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
   std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
   // Free-stack bytes each task last measured for itself; 0 = no sample yet.
