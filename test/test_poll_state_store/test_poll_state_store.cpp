@@ -243,40 +243,34 @@ TEST(PollStateStore, EncodeNeverWritesAnOutOfRangeLearnedPassword) {
 }
 
 TEST(PollStateStore, PickPrefersTheHighestValidSeq) {
-  poll::StateRecord recs[3];
-  for (auto& r : recs) poll::stateClear(r);
-  recs[0].seq = 4;
-  recs[1].seq = 5;
-  recs[2].seq = 3;
+  uint32_t seqs[3] = {4, 5, 3};
   uint8_t results[3] = {poll::STATE_OK, poll::STATE_OK, poll::STATE_OK};
   uint8_t why = 0xFF;
-  EXPECT_EQ(1, poll::pickState(results, recs, 3, &why));
+  EXPECT_EQ(1, poll::pickState(results, seqs, 3, &why));
   EXPECT_EQ(poll::STATE_OK, why);
 
   results[1] = poll::STATE_CORRUPT;   // an interrupted temp write
-  EXPECT_EQ(0, poll::pickState(results, recs, 3, &why));
+  EXPECT_EQ(0, poll::pickState(results, seqs, 3, &why));
   EXPECT_EQ(poll::STATE_OK, why);
 }
 
 TEST(PollStateStore, PickReportsNewerAnywhere) {
-  poll::StateRecord recs[2];
-  for (auto& r : recs) poll::stateClear(r);
+  uint32_t seqs[2] = {9, 0};
   uint8_t results[2] = {poll::STATE_OK, poll::STATE_NEWER};
   uint8_t why = 0xFF;
-  EXPECT_EQ(-1, poll::pickState(results, recs, 2, &why));
+  EXPECT_EQ(-1, poll::pickState(results, seqs, 2, &why));
   EXPECT_EQ(poll::STATE_NEWER, why);
 }
 
 TEST(PollStateStore, PickWithNothingUsable) {
-  poll::StateRecord recs[3];
-  for (auto& r : recs) poll::stateClear(r);
+  uint32_t seqs[3] = {0, 0, 0};
   uint8_t empty[3] = {poll::STATE_EMPTY, poll::STATE_EMPTY, poll::STATE_EMPTY};
   uint8_t why = 0xFF;
-  EXPECT_EQ(-1, poll::pickState(empty, recs, 3, &why));
+  EXPECT_EQ(-1, poll::pickState(empty, seqs, 3, &why));
   EXPECT_EQ(poll::STATE_EMPTY, why);
 
   uint8_t bad[3] = {poll::STATE_EMPTY, poll::STATE_CORRUPT, poll::STATE_EMPTY};
-  EXPECT_EQ(-1, poll::pickState(bad, recs, 3, &why));
+  EXPECT_EQ(-1, poll::pickState(bad, seqs, 3, &why));
   EXPECT_EQ(poll::STATE_CORRUPT, why);
 }
 

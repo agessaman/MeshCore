@@ -177,8 +177,9 @@ static inline uint8_t decodeState(const uint8_t* in, size_t len, StateRecord* ou
 // Which copy to use when several files may exist (primary, temp, backup after
 // an interrupted swap). A newer-firmware copy anywhere wins so nothing is
 // overwritten; otherwise the highest seq among valid copies. Returns the
-// chosen index, or -1 when no copy is usable; *result says why.
-static inline int pickState(const uint8_t* results, const StateRecord* records, uint8_t n,
+// chosen index, or -1 when no copy is usable; *result says why. seqs[i] is
+// read only where results[i] is STATE_OK.
+static inline int pickState(const uint8_t* results, const uint32_t* seqs, uint8_t n,
                             uint8_t* result) {
   int best = -1;
   bool any_corrupt = false;
@@ -189,7 +190,7 @@ static inline int pickState(const uint8_t* results, const StateRecord* records, 
     }
     if (results[i] == STATE_CORRUPT) any_corrupt = true;
     if (results[i] != STATE_OK) continue;
-    if (best < 0 || records[i].seq > records[best].seq) best = i;
+    if (best < 0 || seqs[i] > seqs[best]) best = i;
   }
   if (result) *result = best >= 0 ? STATE_OK : (any_corrupt ? STATE_CORRUPT : STATE_EMPTY);
   return best;
