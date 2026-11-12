@@ -28,12 +28,13 @@ struct ControlNeed {
   bool starting;           // the startup hold is active
   bool policy_answered;    // the policy endpoint answered 200 or 404 this boot
   bool target_due;         // a target's scheduled slot is due now
+  bool manual_due;         // a `poll now` waits on a check first, as the plugin's Test refreshes the policy
 };
 
 static inline bool controlNeeded(const ControlNeed& n) {
   if (!n.enabled || !n.has_url || !n.clock_ok) return false;
   return n.registration_due || n.claim_unanswered || n.gate_closed || n.starting ||
-         !n.policy_answered || n.target_due;
+         !n.policy_answered || n.target_due || n.manual_due;
 }
 
 // One session at a time, at most one per every_s, whatever is due.

@@ -19,7 +19,7 @@
 static_assert(PATH_HASH_SIZE == 1, "poll packets carry one-byte hashes");
 static_assert(PUB_KEY_SIZE == poll::kPubKeySize, "key size");
 static_assert(PRV_KEY_SIZE == poll::kPrvKeySize, "private key size");
-static_assert(sizeof(RepeaterPoller) <= 5196, "repeater poller RAM budget");
+static_assert(sizeof(RepeaterPoller) <= 5204, "repeater poller RAM budget");
 
 namespace {
 
@@ -603,6 +603,7 @@ void RepeaterPoller::tick() {
   // An admin stop must reach flash even while the drill runs.
   if (save_safety_ && (uint32_t)(millis() - save_retry_ms_) >= kSaveRetryMs) saveState("retry");
   serviceControl();
+  resolveNow(host_->pollNow());
   if (gate_save_due_ && (uint32_t)(millis() - save_retry_ms_) >= kSaveRetryMs) saveState("saved gate");
   if (busy()) return;
   if (save_due_ || tag_hw_ - tag_hw_saved_ > kPollDay) {
@@ -1213,11 +1214,36 @@ void RepeaterPoller::cmdNow(const char* arg, char* reply) {
     else strcpy(reply, "Error: usage poll now <target key or prefix>");
     return;
   }
-  poll::TargetState& t = states_[idx];
   const uint32_t now = host_->pollNow();
-  const PollControl c = controlFor((uint8_t)idx);
+  if (now_idx_ >= 0) {
+    strcpy(reply, now_idx_ == idx ? "waiting on CoreScope" : "busy (another poll now waits on CoreScope)");
+    return;
+  }
+  // As the plugin's Test refreshes the policy first: wait for a session under way, or file one when the
+  // spacing allows, then decide on what is known.
+  const bool under_way = ctl_pending_ || ctl_deferred_;
+  reply[0] = 0;
+  if (enabled_ && has_url_ && (under_way || controlFileableNow()) && !nowRefused((uint8_t)idx, now, reply, true)) {
+    now_idx_ = idx;
+    memcpy(now_pfx_, meta_[idx].pub, sizeof(now_pfx_));
+    now_ms_ = millis();
+    strcpy(reply, under_way ? "waiting on CoreScope (session under way)" : "waiting on CoreScope (checking first)");
+    return;
+  }
+  if (reply[0]) return;
+  if (!nowRefused((uint8_t)idx, now, reply, false)) {
+    startPoll((uint8_t)idx, false);
+    strcpy(reply, "queued");
+  }
+}
+
+// The `poll now` checks. local_only: only those CoreScope cannot change (run before waiting on it).
+bool RepeaterPoller::nowRefused(uint8_t idx, uint32_t now, char* reply, bool local_only) {
+  poll::TargetState& t = states_[idx];
+  const PollControl c = controlFor(idx);
   // As the plugin's Test: CoreScope's gate and exclusions apply, its cap, roles and freshness do not.
-  const poll::Decision d = poll::decideCycle(t, cycleInputFor((uint8_t)idx, true, now), now);
+  const poll::Decision d = poll::decideCycle(t, cycleInputFor(idx, true, now), now);
+  reply[0] = 0;
   if (store_state_ == poll::STATE_NEWER) {
     strcpy(reply, "Error: poll state is from newer firmware");
   } else if (!has_id_) {
@@ -1226,24 +1252,53 @@ void RepeaterPoller::cmdNow(const char* arg, char* reply) {
     strcpy(reply, "Error: admin stop; clear it with poll enable <key>");
   } else if (!clockOk()) {
     strcpy(reply, "Error: clock not synced");
-  } else if (c.gate != poll::GATE_OPEN) {
+  } else if (!local_only && c.gate != poll::GATE_OPEN) {
     snprintf(reply, 160, "Error: polling %s", poll::gateName(c.gate));
-  } else if (!d.poll) {
+  } else if (!local_only && !d.poll) {
     strcpy(reply, "Error: excluded by CoreScope");
-  } else if (key_in_use_ == poll::KEY_NONE) {
+  } else if (!local_only && key_in_use_ == poll::KEY_NONE) {
     strcpy(reply, "Error: no polling key in use (not registered with CoreScope, no shared key)");
   } else if (busy() || host_->pollDiscoveryBusy()) {
     strcpy(reply, "busy");
   } else if (t.last_attempt && t.last_attempt <= now && now - t.last_attempt < kNowSpacingS) {
     snprintf(reply, 160, "Error: polled %lus ago; wait %lus", (unsigned long)(now - t.last_attempt),
              (unsigned long)(kNowSpacingS - (now - t.last_attempt)));
-  } else if (!directRoute((uint8_t)idx, NULL)) {
+  } else if (!directRoute(idx, NULL)) {
     t.code = poll::CODE_NOT_DIRECT;
     strcpy(reply, "Error: not_direct (not heard as a neighbor in the last day)");
-  } else {
-    startPoll((uint8_t)idx, false);
-    strcpy(reply, "queued");
   }
+  return reply[0] != 0;
+}
+
+bool RepeaterPoller::controlFileableNow() const {
+  if (ctl_pending_) return false;
+  const uint32_t since = (uint32_t)(millis() - ctl_filed_ms_) / 1000UL;
+  if (!poll::controlAllowed(false, ctl_ever_, since, kCtlEveryS)) return false;
+  return ctl_retry_ms_ == 0 || (uint32_t)(millis() - ctl_retry_ms_) >= kCtlRetryMs;
+}
+
+// A waiting `poll now` is decided once no session is under way: answered, refused, or timed out.
+void RepeaterPoller::resolveNow(uint32_t now) {
+  if (now_idx_ < 0) return;
+  const uint8_t idx = (uint8_t)now_idx_;
+  // The session itself gives up at kControlTimeoutS; a claim ahead of it at kClaimTimeoutMs.
+  const bool expired = (uint32_t)(millis() - now_ms_) >= poll::kControlTimeoutS * 1000UL + kClaimTimeoutMs + kTickMs;
+  if ((ctl_pending_ || ctl_deferred_) && !expired) return;
+  if ((busy() || host_->pollDiscoveryBusy()) && !expired) return;
+  now_idx_ = -1;
+  char pfx[9];
+  hex8(pfx, now_pfx_);
+  if (!meta_[idx].used || meta_[idx].orphan || memcmp(meta_[idx].pub, now_pfx_, sizeof(now_pfx_)) != 0) {
+    POLL_LOG("poll now %s dropped: target removed", pfx);
+    return;
+  }
+  char why[160];
+  if (nowRefused(idx, now, why, false)) {
+    POLL_LOG("poll now %s not sent: %s", pfx, why);
+    return;
+  }
+  POLL_LOG("poll now %s: CoreScope checked, sending", pfx);
+  startPoll(idx, false);
 }
 
 void RepeaterPoller::cmdEnable(const char* arg, char* reply) {
@@ -1377,6 +1432,9 @@ void RepeaterPoller::initControl() {
   memset(ctl_status_, 0, sizeof(ctl_status_));
   memset(skip_, 0, sizeof(skip_));
   policy_covered_ = 0;
+  now_idx_ = -1;
+  memset(now_pfx_, 0, sizeof(now_pfx_));
+  now_ms_ = 0;
   ctl_note_ = 0;
   key_note_ = 0;
 }
@@ -1631,6 +1689,7 @@ void RepeaterPoller::maybeFileControl(uint32_t now) {
   need.starting = startingAt(now);
   need.policy_answered = policy_answered_;
   need.target_due = anyTargetDue(now);
+  need.manual_due = now_idx_ >= 0;
   if (!poll::controlNeeded(need)) return;
   const uint32_t since = (uint32_t)(millis() - ctl_filed_ms_) / 1000UL;
   if (!poll::controlAllowed(ctl_pending_, ctl_ever_, since, kCtlEveryS)) return;

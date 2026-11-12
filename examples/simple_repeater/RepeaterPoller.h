@@ -313,6 +313,9 @@ private:
   uint32_t ctl_last_at_;
   int16_t  ctl_status_[4];           // owners, policy, registration, shared key
   uint8_t  skip_[kSlots];            // poll::SkipReason of the last decision
+  int8_t   now_idx_;                 // a `poll now` waiting on CoreScope, -1 = none
+  uint8_t  now_pfx_[4];
+  uint32_t now_ms_;
   uint16_t policy_covered_;          // slot bits: targets named in the request the policy in use answered
   uint8_t  ctl_note_;                // log-once notes
   uint8_t  key_note_;
@@ -340,6 +343,9 @@ private:
   void maybeClaim(uint32_t now);
   void updateKey(uint32_t now);
   void bindKey();
+  bool nowRefused(uint8_t idx, uint32_t now, char* reply, bool local_only);
+  bool controlFileableNow() const;
+  void resolveNow(uint32_t now);
   void scheduleTick(uint32_t now);
   poll::CycleInput cycleInputFor(uint8_t idx, bool test, uint32_t now) const;
   void noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now);

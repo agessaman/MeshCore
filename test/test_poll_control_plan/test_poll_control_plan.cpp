@@ -61,6 +61,11 @@ TEST(PollControlPlan, EachTriggerAloneIsEnough) {
   n = need();
   n.target_due = true;
   EXPECT_TRUE(poll::controlNeeded(n));
+  n = need();
+  n.manual_due = true;
+  EXPECT_TRUE(poll::controlNeeded(n));
+  n.enabled = false;
+  EXPECT_FALSE(poll::controlNeeded(n));
 }
 
 TEST(PollControlPlan, NeverWithoutSwitchUrlOrClock) {
