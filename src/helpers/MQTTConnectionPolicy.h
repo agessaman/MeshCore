@@ -384,6 +384,51 @@ static inline StaleTokenAction classifyStaleToken(bool minted, bool connected,
   return broker_enforces_exp ? StaleTokenAction::Bounce : StaleTokenAction::KeepAlive;
 }
 
+// A renewal or corrected-clock bounce keeps the full guard and the one-handshake-per-pass budget.
+static inline bool bounceHandshakeAllowed(bool handshake_this_pass, uint32_t now,
+                                          uint32_t last_cross_slot_ms) {
+  return !handshake_this_pass && !reconnectGuardActive(now, last_cross_slot_ms);
+}
+
+// A renewal opens a handshake when the broker will act on the old token's exp, or no session is live.
+static inline bool renewalBounceNeeded(bool old_token_imminent, bool broker_enforces_exp,
+                                       bool connected) {
+  return (old_token_imminent && broker_enforces_exp) || !connected;
+}
+
+enum class RenewalStep : uint8_t {
+  None,      // not due, or throttled
+  Wait,      // bounce needed but the guard is busy: touch nothing, retry next pass
+  Renew,     // mint and stage; the live session keeps running
+  Bounce,    // mint, close the session, reconnect, arm the guard
+};
+
+// Wait is decided before minting or disconnecting, so a waiting slot keeps its live session.
+static inline RenewalStep renewalStep(bool due, bool attempt_allowed, bool bounce_needed,
+                                      bool handshake_allowed) {
+  if (!due || !attempt_allowed) return RenewalStep::None;
+  if (!bounce_needed) return RenewalStep::Renew;
+  return handshake_allowed ? RenewalStep::Bounce : RenewalStep::Wait;
+}
+
+enum class OwedBounceStep : uint8_t {
+  Settled,    // nothing to open: the fresh token is in use, or the broker tolerates the old one
+  Wait,       // guard busy: leave the session alone
+  Reconnect,  // client is down: start it, or wake one that is waiting
+  Bounce,     // live session the broker will reject: close it, then reconnect
+};
+
+// A slot owed a corrected-clock bounce takes its turn through the guard like a renewal.
+static inline OwedBounceStep owedBounceStep(bool fresh_token_applied, bool connected,
+                                            bool broker_enforces_exp, bool handshake_allowed) {
+  if (fresh_token_applied) return OwedBounceStep::Settled;
+  const StaleTokenAction action = classifyStaleToken(true, connected, broker_enforces_exp);
+  if (action == StaleTokenAction::KeepAlive) return OwedBounceStep::Settled;
+  if (!handshake_allowed) return OwedBounceStep::Wait;
+  return action == StaleTokenAction::Reconnect ? OwedBounceStep::Reconnect
+                                               : OwedBounceStep::Bounce;
+}
+
 // Which clock to fall back on when no NTP server answered.
 enum class ClockSource : uint8_t {
   None,    // nothing plausible to work from — stay unsynced

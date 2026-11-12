@@ -584,6 +584,154 @@ TEST(StaleToken, FailedMintNeverReconnects) {
   EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, false));
 }
 
+using Policy::RenewalStep;
+using Policy::OwedBounceStep;
+
+TEST(RenewalGuard, BounceNeededOnlyForEnforcedExpOrNoSession) {
+  EXPECT_TRUE(Policy::renewalBounceNeeded(/*imminent=*/true, /*enforces=*/true, /*connected=*/true));
+  EXPECT_FALSE(Policy::renewalBounceNeeded(true, false, true));
+  EXPECT_FALSE(Policy::renewalBounceNeeded(false, true, true));
+  EXPECT_TRUE(Policy::renewalBounceNeeded(false, false, false));
+}
+
+TEST(RenewalGuard, BounceKeepsTheFullGuardAndPassBudget) {
+  const uint32_t armed = 100000U;
+  EXPECT_FALSE(Policy::bounceHandshakeAllowed(false, armed + 2000U, armed));
+  EXPECT_FALSE(Policy::bounceHandshakeAllowed(false, armed + 14999U, armed));
+  EXPECT_TRUE(Policy::bounceHandshakeAllowed(false, armed + 15000U, armed));
+  // Another slot launched a handshake earlier in this pass.
+  EXPECT_FALSE(Policy::bounceHandshakeAllowed(true, armed + 60000U, armed));
+}
+
+TEST(RenewalGuard, DueRenewalWithIdleGuardBouncesInTheSamePass) {
+  const uint32_t last = 100000U;
+  const uint32_t now = last + 60000U;
+  EXPECT_EQ(RenewalStep::Bounce,
+            Policy::renewalStep(true, true, true, Policy::bounceHandshakeAllowed(false, now, last)));
+}
+
+TEST(RenewalGuard, DueRenewalWaitsWhileTheGuardIsBusy) {
+  const uint32_t last = 100000U;
+  EXPECT_EQ(RenewalStep::Wait,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(false, last + 5000U, last)));
+  EXPECT_EQ(RenewalStep::Wait,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(true, last + 60000U, last)));
+}
+
+TEST(RenewalGuard, RenewalWithoutABounceNeverWaits) {
+  EXPECT_EQ(RenewalStep::Renew, Policy::renewalStep(true, true, false, false));
+  EXPECT_EQ(RenewalStep::None, Policy::renewalStep(false, true, true, true));
+  EXPECT_EQ(RenewalStep::None, Policy::renewalStep(true, false, true, true));
+}
+
+namespace {
+// Mirrors maintainSlotConnection()'s order: decide, and only on Bounce touch the session.
+struct FakeSlot {
+  bool connected = true;
+  bool owed = false;
+  bool fresh_applied = false;
+  int soft_disconnects = 0;
+  int handshakes = 0;
+  uint32_t started_at = 0;
+};
+
+struct FakeGuard {
+  uint32_t last = 0;
+  bool this_pass = false;
+  void startPass(uint32_t now) { this_pass = Policy::reconnectGuardActive(now, last); }
+  void arm(uint32_t now) { last = now; this_pass = true; }
+};
+
+void renewalPass(FakeSlot& s, FakeGuard& g, uint32_t now) {
+  const RenewalStep step = Policy::renewalStep(
+      true, true, Policy::renewalBounceNeeded(true, true, s.connected),
+      Policy::bounceHandshakeAllowed(g.this_pass, now, g.last));
+  if (step != RenewalStep::Bounce) return;
+  s.soft_disconnects++;
+  s.handshakes++;
+  s.started_at = now;
+  g.arm(now);
+}
+
+void owedPass(FakeSlot& s, FakeGuard& g, uint32_t now) {
+  if (!s.owed) return;
+  const OwedBounceStep step = Policy::owedBounceStep(
+      s.fresh_applied, s.connected, true, Policy::bounceHandshakeAllowed(g.this_pass, now, g.last));
+  if (step == OwedBounceStep::Wait) return;
+  s.owed = false;
+  if (step == OwedBounceStep::Settled) return;
+  if (step == OwedBounceStep::Bounce) s.soft_disconnects++;
+  s.handshakes++;
+  s.started_at = now;
+  g.arm(now);
+}
+}  // namespace
+
+TEST(RenewalGuard, DeferredRenewalLeavesTheSessionAloneThenStartsWhenTheGuardClears) {
+  FakeGuard g;
+  FakeSlot s;
+  const uint32_t armed = 200000U;
+  // An earlier slot launched a handshake in this same pass.
+  g.startPass(armed);
+  g.arm(armed);
+  renewalPass(s, g, armed);
+  EXPECT_EQ(0, s.soft_disconnects);
+  EXPECT_EQ(0, s.handshakes);
+  for (uint32_t now = armed + 500U; now < armed + 15000U; now += 500U) {
+    g.startPass(now);
+    renewalPass(s, g, now);
+    ASSERT_EQ(0, s.soft_disconnects) << "touched at " << now;
+  }
+  g.startPass(armed + 15000U);
+  renewalPass(s, g, armed + 15000U);
+  EXPECT_EQ(1, s.soft_disconnects);
+  EXPECT_EQ(1, s.handshakes);
+  EXPECT_EQ(armed + 15000U, s.started_at);
+}
+
+TEST(RenewalGuard, OwedCorrectedClockBouncesRunOnePerGuardWindowWithNoneSkipped) {
+  FakeGuard g;
+  g.last = 1000U;
+  FakeSlot slots[5];
+  for (auto& s : slots) s.owed = true;
+  slots[3].connected = false;  // a down client reconnects without a bounce
+  const uint32_t t0 = 50000U;
+  for (uint32_t now = t0; now < t0 + 120000U; now += 250U) {
+    g.startPass(now);
+    for (auto& s : slots) owedPass(s, g, now);
+  }
+  for (int i = 0; i < 5; i++) {
+    EXPECT_FALSE(slots[i].owed) << "slot " << i;
+    EXPECT_EQ(1, slots[i].handshakes) << "slot " << i;
+    if (i > 0) {
+      EXPECT_GE(slots[i].started_at - slots[i - 1].started_at, Policy::kReconnectGuardMs);
+    }
+  }
+  EXPECT_EQ(0, slots[3].soft_disconnects);
+  EXPECT_EQ(1, slots[4].soft_disconnects);
+  // The fifth handshake starts four guard windows after the first.
+  EXPECT_EQ(slots[0].started_at + 4U * Policy::kReconnectGuardMs, slots[4].started_at);
+}
+
+TEST(RenewalGuard, OwedSlotAlreadyOnTheFreshTokenSettlesWithoutAHandshake) {
+  EXPECT_EQ(OwedBounceStep::Settled, Policy::owedBounceStep(true, true, true, false));
+  EXPECT_EQ(OwedBounceStep::Settled, Policy::owedBounceStep(false, true, false, false));
+  EXPECT_EQ(OwedBounceStep::Wait, Policy::owedBounceStep(false, false, true, false));
+  EXPECT_EQ(OwedBounceStep::Reconnect, Policy::owedBounceStep(false, false, false, true));
+  EXPECT_EQ(OwedBounceStep::Bounce, Policy::owedBounceStep(false, true, true, true));
+
+  FakeGuard g;
+  FakeSlot slots[2];
+  slots[0].owed = slots[1].owed = true;
+  slots[0].fresh_applied = true;
+  g.startPass(100000U);
+  for (auto& s : slots) owedPass(s, g, 100000U);
+  EXPECT_EQ(0, slots[0].handshakes);
+  EXPECT_EQ(1, slots[1].handshakes);
+}
+
 using Policy::ClockSource;
 
 // 2026-01-01, the bridge's plausibility floor, and the 2024 placeholder
