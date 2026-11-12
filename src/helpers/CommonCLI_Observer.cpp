@@ -33,6 +33,7 @@
 #include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
 #include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
+#include "poll/PollPrefsPolicy.h"
 #include "MQTTPacketFilter.h"
 #include "MQTTTopicRouter.h"   // mqttSlotIata() — a slot's effective region code
 #include "ObserverSelfHealRtc.h"  // last self-heal cause and count for get mqtt.selfheal
@@ -126,7 +127,8 @@ static bool isObserverPrefsSetCommand(const char* config) {
       strncmp(config, "wifi.", 5) == 0 ||
       strncmp(config, "timezone", 8) == 0 ||
       strncmp(config, "alert", 5) == 0 ||
-      strncmp(config, "display.", 8) == 0;
+      strncmp(config, "display.", 8) == 0 ||
+      strncmp(config, "poll", 4) == 0;
 }
 
 // Keep observer setters atomic from the caller's perspective. The live object
@@ -231,6 +233,256 @@ bool CommonCLI::persistObserverPrefs(char* reply) {
   return false;
 #endif
 }
+
+#ifdef WITH_MQTT_BRIDGE
+enum class PollSetResult { NotMine, Done, Changed };
+
+static bool pollToken(const char* config, const char* literal) {
+  const size_t n = strlen(literal);
+  if (memcmp(config, literal, n) != 0) return false;
+  const char next = config[n];
+  return next == '\0' || next == ' ' || next == '\r' || next == '\n';
+}
+
+static const char* pollValue(const char* config, const char* literal) {
+  const char* p = config + strlen(literal);
+  while (*p == ' ') p++;
+  return p;
+}
+
+static bool pollCopyWord(const char* src, char* dest, size_t dest_len, bool* extra) {
+  while (*src == ' ') src++;
+  size_t n = 0;
+  while (src[n] && src[n] != ' ' && src[n] != '\r' && src[n] != '\n') n++;
+  const char* rest = src + n;
+  while (*rest == ' ' || *rest == '\r' || *rest == '\n') rest++;
+  if (extra) *extra = *rest != '\0';
+  if (n == 0 || n >= dest_len) {
+    if (dest_len) dest[0] = '\0';
+    return false;
+  }
+  memcpy(dest, src, n);
+  dest[n] = '\0';
+  return true;
+}
+
+static void pollNoteCleared(MQTTPrefs* prefs, const char* which, char* reply) {
+  if (prefs->poll_enabled) {
+    prefs->poll_enabled = 0;
+    snprintf(reply, 160, "OK - %s cleared, polling off", which);
+  } else {
+    strcpy(reply, "OK");
+  }
+}
+
+static bool pollParseUnsigned(const char* text, int* out) {
+  if (!text || *text == '\0') return false;
+  int value = 0;
+  for (const char* p = text; *p; p++) {
+    if (*p < '0' || *p > '9') return false;
+    if (value > 100000) return false;
+    value = value * 10 + (*p - '0');
+  }
+  *out = value;
+  return true;
+}
+
+static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
+                                  const char* config, char* reply) {
+  const bool mine = pollToken(config, "poll on") || pollToken(config, "poll off") ||
+                    pollToken(config, "poll.url") || pollToken(config, "poll.slot") ||
+                    pollToken(config, "poll.interval") || pollToken(config, "poll.status") ||
+                    pollToken(config, "poll.community") || pollToken(config, "poll.consent");
+  if (!mine) return PollSetResult::NotMine;
+  if (!cb->supportsRepeaterPoll()) {
+    strcpy(reply, "Error: not supported on this build");
+    return PollSetResult::Done;
+  }
+
+  if (pollToken(config, "poll off")) {
+    if (pollValue(config, "poll off")[0] != '\0') {
+      strcpy(reply, "Error: usage set poll off");
+      return PollSetResult::Done;
+    }
+    prefs->poll_enabled = 0;
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
+  if (pollToken(config, "poll on")) {
+    if (pollValue(config, "poll on")[0] != '\0') {
+      strcpy(reply, "Error: usage set poll on");
+      return PollSetResult::Done;
+    }
+    if (!poll::pollUrlHasScheme(prefs->poll_url)) {
+      strcpy(reply, "Error: poll.url is not set");
+    } else if (prefs->poll_slot == 0) {
+      strcpy(reply, "Error: poll.slot is not set");
+    } else if (prefs->poll_slot > RUNTIME_MQTT_SLOTS) {
+      snprintf(reply, 160, "Error: poll.slot must be 1-%d", RUNTIME_MQTT_SLOTS);
+    } else if (prefs->poll_consent == 0) {
+      strcpy(reply, "Error: poll.consent is not set");
+    } else {
+      prefs->poll_enabled = 1;
+      strcpy(reply, "OK");
+      return PollSetResult::Changed;
+    }
+    return PollSetResult::Done;
+  }
+  if (pollToken(config, "poll.url")) {
+    const char* raw = pollValue(config, "poll.url");
+    size_t n = strlen(raw);
+    while (n > 0 && (raw[n - 1] == ' ' || raw[n - 1] == '\r' || raw[n - 1] == '\n')) n--;
+    if (n == 0 || (n == 4 && memcmp(raw, "none", 4) == 0)) {
+      prefs->poll_url[0] = '\0';
+      pollNoteCleared(prefs, "poll.url", reply);
+      return PollSetResult::Changed;
+    }
+    if (n >= sizeof(prefs->poll_url)) {
+      snprintf(reply, 160, "Error: url too long (max %u chars)",
+               (unsigned)(sizeof(prefs->poll_url) - 1));
+      return PollSetResult::Done;
+    }
+    char url[MQTT_POLL_URL_LEN];
+    memcpy(url, raw, n);
+    url[n] = '\0';
+    bool changed = false;
+    if (!poll::normalizePollUrl(url, &changed)) {
+      strcpy(reply, "Error: url must start with http:// or https://");
+      return PollSetResult::Done;
+    }
+    memcpy(prefs->poll_url, url, sizeof(prefs->poll_url));
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
+  if (pollToken(config, "poll.slot")) {
+    char word[16];
+    bool extra = false;
+    if (!pollCopyWord(pollValue(config, "poll.slot"), word, sizeof(word), &extra) || extra) {
+      snprintf(reply, 160, "Error: slot must be 1-%d, or 0 to clear", RUNTIME_MQTT_SLOTS);
+      return PollSetResult::Done;
+    }
+    if (strcmp(word, "none") == 0 || strcmp(word, "0") == 0) {
+      prefs->poll_slot = 0;
+      pollNoteCleared(prefs, "poll.slot", reply);
+      return PollSetResult::Changed;
+    }
+    int slot = 0;
+    if (!pollParseUnsigned(word, &slot) || slot < 1 || slot > RUNTIME_MQTT_SLOTS) {
+      snprintf(reply, 160, "Error: slot must be 1-%d, or 0 to clear", RUNTIME_MQTT_SLOTS);
+      return PollSetResult::Done;
+    }
+    prefs->poll_slot = static_cast<uint8_t>(slot);
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
+  if (pollToken(config, "poll.interval")) {
+    char word[12];
+    bool extra = false;
+    int minutes = 0;
+    if (!pollCopyWord(pollValue(config, "poll.interval"), word, sizeof(word), &extra) || extra ||
+        !pollParseUnsigned(word, &minutes) || !poll::pollIntervalValid(minutes)) {
+      snprintf(reply, 160, "Error: interval must be %u-%u minutes",
+               (unsigned)MQTT_POLL_INTERVAL_MIN, (unsigned)MQTT_POLL_INTERVAL_MAX);
+      return PollSetResult::Done;
+    }
+    prefs->poll_interval_min = static_cast<uint16_t>(minutes);
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
+  if (pollToken(config, "poll.status")) {
+    char word[8];
+    bool extra = false;
+    int hours = 0;
+    if (!pollCopyWord(pollValue(config, "poll.status"), word, sizeof(word), &extra) || extra ||
+        !pollParseUnsigned(word, &hours) || !poll::pollStatusHoursValid(hours)) {
+      strcpy(reply, "Error: status hours must be 1, 3, 6, 12, or 24");
+      return PollSetResult::Done;
+    }
+    prefs->poll_status_hours = static_cast<uint8_t>(hours);
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
+  if (pollToken(config, "poll.community")) {
+    char word[8];
+    bool extra = false;
+    if (!pollCopyWord(pollValue(config, "poll.community"), word, sizeof(word), &extra) || extra ||
+        (strcmp(word, "on") != 0 && strcmp(word, "off") != 0)) {
+      strcpy(reply, "Error: use on or off");
+      return PollSetResult::Done;
+    }
+    prefs->poll_community = word[1] == 'n' ? 1 : 0;
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
+  char word[8];
+  bool extra = false;
+  if (!pollCopyWord(pollValue(config, "poll.consent"), word, sizeof(word), &extra) || extra ||
+      (strcmp(word, "yes") != 0 && strcmp(word, "no") != 0)) {
+    strcpy(reply, "Error: use yes or no");
+    return PollSetResult::Done;
+  }
+  if (strcmp(word, "no") == 0) {
+    prefs->poll_consent = 0;
+    pollNoteCleared(prefs, "poll.consent", reply);
+  } else {
+    prefs->poll_consent = 1;
+    strcpy(reply, "OK");
+  }
+  return PollSetResult::Changed;
+}
+
+static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
+                         const char* config, char* reply) {
+  // Longer token first. `get poll`, `get poll.status`, and `get poll.key`
+  // belong to the poller and must stay unmatched here.
+  const bool mine = strcmp(config, "poll.status.hours") == 0 ||
+                    strcmp(config, "poll.url") == 0 || strcmp(config, "poll.slot") == 0 ||
+                    strcmp(config, "poll.interval") == 0 || strcmp(config, "poll.community") == 0 ||
+                    strcmp(config, "poll.consent") == 0;
+  if (!mine) return false;
+  if (!cb->supportsRepeaterPoll()) {
+    strcpy(reply, "Error: not supported on this build");
+    return true;
+  }
+  if (strcmp(config, "poll.status.hours") == 0) {
+    sprintf(reply, "> %u", (unsigned)prefs->poll_status_hours);
+  } else if (strcmp(config, "poll.url") == 0) {
+    sprintf(reply, "> %s", prefs->poll_url);
+  } else if (strcmp(config, "poll.slot") == 0) {
+    sprintf(reply, "> %u", (unsigned)prefs->poll_slot);
+  } else if (strcmp(config, "poll.interval") == 0) {
+    sprintf(reply, "> %u", (unsigned)prefs->poll_interval_min);
+  } else if (strcmp(config, "poll.community") == 0) {
+    strcpy(reply, prefs->poll_community ? "> on" : "> off");
+  } else {
+    strcpy(reply, prefs->poll_consent ? "> yes" : "> no");
+  }
+  return true;
+}
+
+static void pollKeyError(poll::TargetEdit edit, char* reply, bool full_key) {
+  switch (edit) {
+    case poll::TargetEdit::Duplicate:
+      strcpy(reply, "Error: target already configured");
+      break;
+    case poll::TargetEdit::Full:
+      strcpy(reply, "Error: target list is full");
+      break;
+    case poll::TargetEdit::NotFound:
+      strcpy(reply, "Error: no matching target");
+      break;
+    case poll::TargetEdit::Ambiguous:
+      strcpy(reply, "Error: ambiguous prefix");
+      break;
+    case poll::TargetEdit::BadMode:
+      strcpy(reply, "Error: use auto, blank, or hello");
+      break;
+    default:
+      strcpy(reply, full_key ? "Error: key must be 64 hex chars" : "Error: key must be hex");
+      break;
+  }
+}
+#endif
 
 bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
@@ -976,7 +1228,12 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       sprintf(reply, "OK - alert.interval %d min", mins);
     }
   } else {
-    handled = false;
+    const PollSetResult poll_set = applyPollSet(&_mqtt_prefs, _callbacks, config, reply);
+    if (poll_set == PollSetResult::NotMine) {
+      handled = false;
+    } else if (poll_set == PollSetResult::Changed && !persistObserverPrefs(reply)) {
+      return true;
+    }
   }
   return handled;
 #else
@@ -1319,6 +1576,9 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     sprintf(reply, "> %u min", (unsigned)_mqtt_prefs.alert_min_interval_min);
   } else if (memcmp(config, "alert", 5) == 0 && (config[5] == 0 || config[5] == '\n' || config[5] == '\r')) {
     sprintf(reply, "> %s", _mqtt_prefs.alert_enabled ? "on" : "off");
+  } else if (applyPollGet(&_mqtt_prefs, _callbacks, config, reply)) {
+    // Longer poll.status.hours is matched inside applyPollGet, ahead of the
+    // poller's `get poll`, `get poll.status`, and `get poll.key`.
   } else {
     handled = false;
   }
@@ -1503,9 +1763,122 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     }
     return true;
   }
+  // Top-level `poll add|remove|clear|list|pw`. `poll enable` and `poll now`
+  // belong to the poller and stay unrecognized here.
+  if (handlePollObserverCommand(command, reply)) return true;
   return false;
 #else
   (void)sender_timestamp; (void)command; (void)reply;
   return false;
 #endif
 }
+
+#ifdef WITH_MQTT_BRIDGE
+bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
+  if (memcmp(command, "poll", 4) != 0) return false;
+  if (command[4] != '\0' && command[4] != ' ') return false;
+  const char* rest = command + 4;
+  while (*rest == ' ') rest++;
+  if (*rest == '\0') return false;
+
+  char verb[16];
+  size_t vi = 0;
+  while (rest[vi] && rest[vi] != ' ' && vi + 1 < sizeof(verb)) {
+    verb[vi] = rest[vi];
+    vi++;
+  }
+  verb[vi] = '\0';
+  if (rest[vi] && rest[vi] != ' ') return false;
+  const char* arg = rest + vi;
+  while (*arg == ' ') arg++;
+
+  const bool known = strcmp(verb, "add") == 0 || strcmp(verb, "remove") == 0 ||
+                     strcmp(verb, "clear") == 0 || strcmp(verb, "list") == 0 ||
+                     strcmp(verb, "pw") == 0;
+  if (!known) return false;
+
+  if (!_callbacks->supportsRepeaterPoll()) {
+    strcpy(reply, "Error: not supported on this build");
+    return true;
+  }
+
+  char key[80];
+  bool extra = false;
+  if (strcmp(verb, "list") == 0) {
+    if (arg[0] != '\0') {
+      strcpy(reply, "Error: usage poll list");
+      return true;
+    }
+    if (!poll::formatTargetList(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, reply, 160)) {
+      strcpy(reply, "Error: poll list too long");
+    }
+    return true;
+  }
+
+  ObserverPrefsRollbackScope rollback(&_observer_prefs_rollback, _mqtt_prefs, true);
+  if (!rollback.available()) {
+    strcpy(reply, "Error: insufficient memory to update observer setting");
+    return true;
+  }
+
+  bool changed = false;
+  if (strcmp(verb, "clear") == 0) {
+    if (arg[0] != '\0') {
+      strcpy(reply, "Error: usage poll clear");
+      return true;
+    }
+    poll::clearTargets(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode);
+    strcpy(reply, "OK");
+    changed = true;
+  } else if (strcmp(verb, "add") == 0) {
+    if (!pollCopyWord(arg, key, sizeof(key), &extra) || extra) {
+      strcpy(reply, "Error: key must be 64 hex chars");
+    } else {
+      const poll::TargetEdit edit =
+          poll::addTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key);
+      if (edit == poll::TargetEdit::Ok) {
+        strcpy(reply, "OK");
+        changed = true;
+      } else {
+        pollKeyError(edit, reply, true);
+      }
+    }
+  } else if (strcmp(verb, "remove") == 0) {
+    if (!pollCopyWord(arg, key, sizeof(key), &extra) || extra) {
+      strcpy(reply, "Error: key must be hex");
+    } else {
+      const poll::TargetEdit edit =
+          poll::removeTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key);
+      if (edit == poll::TargetEdit::Ok) {
+        strcpy(reply, "OK");
+        changed = true;
+      } else {
+        pollKeyError(edit, reply, false);
+      }
+    }
+  } else {
+    if (!pollCopyWord(arg, key, sizeof(key), &extra) || !extra) {
+      strcpy(reply, "Error: usage poll pw <key> auto|blank|hello");
+    } else {
+      const char* mode_text = arg;
+      while (*mode_text && *mode_text != ' ') mode_text++;
+      while (*mode_text == ' ') mode_text++;
+      uint8_t mode = 0;
+      if (!poll::parsePwMode(mode_text, &mode)) {
+        strcpy(reply, "Error: use auto, blank, or hello");
+      } else {
+        const poll::TargetEdit edit = poll::setTargetPwMode(
+            _mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key, mode);
+        if (edit == poll::TargetEdit::Ok) {
+          strcpy(reply, "OK");
+          changed = true;
+        } else {
+          pollKeyError(edit, reply, false);
+        }
+      }
+    }
+  }
+  if (changed && !persistObserverPrefs(reply)) return true;
+  return true;
+}
+#endif

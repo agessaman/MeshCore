@@ -430,6 +430,9 @@ public:
   virtual bool resolveAlertScope(TransportKey& /*dest*/) {
     return false; // no op by default
   }
+
+  // Repeater-poll CLI. The poller overrides this on builds that include it.
+  virtual bool supportsRepeaterPoll() { return false; }
 };
 
 #ifdef WITH_MQTT_BRIDGE
@@ -486,6 +489,9 @@ class CommonCLI {
   // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
   // also live in CommonCLI_Observer.cpp; returns true if it handled the command.
   bool handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply);
+#ifdef WITH_MQTT_BRIDGE
+  bool handlePollObserverCommand(const char* command, char* reply);
+#endif
 
 public:
   CommonCLI(mesh::MainBoard& board, mesh::RTCClock& rtc, SensorManager& sensors, RegionMap& region_map, ClientACL& acl, NodePrefs* prefs, CommonCLICallbacks* callbacks)
