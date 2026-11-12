@@ -1683,6 +1683,9 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "alert", 5) == 0 && (config[5] == 0 || config[5] == '\n' || config[5] == '\r')) {
     sprintf(reply, "> %s", _mqtt_prefs.alert_enabled ? "on" : "off");
 #if defined(WITH_REPEATER_POLL) && defined(POLL_TEST_CONTROL_CLI)
+  } else if ((strcmp(config, "poll.ctl") == 0 || strcmp(config, "poll.ctl.res") == 0) &&
+             _callbacks->repeaterPollControlPending()) {
+    strcpy(reply, "> busy");   // the poller's own session owns the mailbox until it is answered
   } else if (benchPollControlGet(config, &_mqtt_prefs, _callbacks->getSelfId().pub_key, reply)) {
     // bench only
 #endif

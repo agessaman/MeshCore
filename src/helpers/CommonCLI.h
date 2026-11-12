@@ -441,6 +441,8 @@ public:
   virtual bool repeaterPollRoomFor(const uint8_t* /*pub*/) { return true; }
   // `get mqtt.status`: append the poll summary when polling is on and it fits.
   virtual void appendRepeaterPollStatus(char* /*reply*/, size_t /*reply_size*/) {}
+  // The poller is waiting on a CoreScope control session it filed (the bench command stays out).
+  virtual bool repeaterPollControlPending() { return false; }
 };
 
 #ifdef WITH_MQTT_BRIDGE
