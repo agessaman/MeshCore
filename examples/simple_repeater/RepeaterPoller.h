@@ -60,6 +60,14 @@ public:
   virtual void pollReadSettings(PollSettings& out) = 0;
 };
 
+// What identifies a queued packet when only its pool slot is known.
+struct PollPacketSig {
+  uint8_t  header;
+  uint8_t  path_len;
+  uint16_t payload_len;
+  uint32_t hash;
+};
+
 // The "may I poll this target now" inputs. Fixed in this phase; CoreScope fills it later.
 struct PollControl {
   uint8_t  role;           // poll::Role
@@ -163,7 +171,7 @@ private:
   uint8_t  poll_tag_count_;
   const mesh::Packet* inflight_;
   uint32_t inflight_ms_;
-  uint32_t inflight_sig_;
+  PollPacketSig inflight_sig_;
   uint8_t  inflight_act_;
   uint8_t  inflight_pw_;
   uint32_t inflight_tag_;
@@ -214,6 +222,7 @@ private:
   mesh::Packet* buildDatagram(uint8_t type, const mesh::LocalIdentity& sender, uint8_t idx,
                               const uint8_t* plain, size_t len);
   uint32_t nextTag();
+  bool inflightIntact() const;
   void pushEvent(uint8_t ev, bool flooded);
   void processEvents();
   void recallForAdmin();

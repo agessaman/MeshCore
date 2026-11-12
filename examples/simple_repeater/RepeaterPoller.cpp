@@ -50,9 +50,21 @@ const uint32_t kScheduledGapS = 60;
 
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
 
-// Type and both hashes: a shed packet's pool slot reused by other traffic must not read as ours.
-uint32_t sigOf(const mesh::Packet* pkt) {
-  return ((uint32_t)pkt->getPayloadType() << 16) | ((uint32_t)pkt->payload[0] << 8) | pkt->payload[1];
+// The whole packet as queued: a shed packet's pool slot reused by forwarded traffic must not read as ours.
+PollPacketSig sigOf(const mesh::Packet* pkt) {
+  PollPacketSig s;
+  s.header = pkt->header;
+  s.path_len = pkt->path_len;
+  s.payload_len = pkt->payload_len;
+  const size_t n = pkt->payload_len < sizeof(pkt->payload) ? pkt->payload_len : sizeof(pkt->payload);
+  uint32_t h = 2166136261UL;   // FNV-1a
+  for (size_t i = 0; i < n; i++) h = (h ^ pkt->payload[i]) * 16777619UL;
+  s.hash = h;
+  return s;
+}
+
+bool sameSig(const PollPacketSig& a, const PollPacketSig& b) {
+  return a.header == b.header && a.path_len == b.path_len && a.payload_len == b.payload_len && a.hash == b.hash;
 }
 
 void hex8(char* out, const uint8_t* pub) { mesh::Utils::toHex(out, pub, 4); }
@@ -108,7 +120,7 @@ RepeaterPoller::RepeaterPoller()
       key_created_at_(0), tag_hw_(0), tag_hw_saved_(0), count_(0), enabled_(false), consent_(false),
       interval_min_(60), status_hours_(6), run_kind_(RUN_NONE), run_idx_(-1), run_scheduled_(false),
       run_quick_(false), run_learned_before_(0), poll_tag_count_(0), inflight_(NULL), inflight_ms_(0),
-      inflight_sig_(0), inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
+      inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
       rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), last_tick_ms_(0),
       last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), save_safety_(false),
@@ -119,6 +131,7 @@ RepeaterPoller::RepeaterPoller()
   memset(states_, 0, sizeof(states_));
   memset(poll_tags_, 0, sizeof(poll_tags_));
   memset(events_, 0, sizeof(events_));
+  memset(&inflight_sig_, 0, sizeof(inflight_sig_));
 }
 
 void RepeaterPoller::begin(RepeaterPollHost* host, FILESYSTEM* fs) {
@@ -528,7 +541,7 @@ void RepeaterPoller::loop() {
   const uint32_t now_ms = millis();
   if (inflight_ && (uint32_t)(now_ms - inflight_ms_) >= kTxStuckMs) {
     // Pool slots are static, so the bytes are readable; a changed signature means it was shed and reused.
-    const bool ours = sigOf(inflight_) == inflight_sig_;
+    const bool ours = inflightIntact();
     if (ours && host_->pollIsTransmitting(inflight_)) {
       inflight_ms_ = now_ms;   // on the air right now: its report is coming
     } else {
@@ -790,6 +803,8 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
   return true;
 }
 
+bool RepeaterPoller::inflightIntact() const { return inflight_ && sameSig(sigOf(inflight_), inflight_sig_); }
+
 void RepeaterPoller::pushEvent(uint8_t ev, bool flooded) {
   if (event_count_ >= kEventQueue) {
     // Never drop a TX report (the machines wait for it) or an admin answer. Other replies beyond this are duplicates.
@@ -824,7 +839,7 @@ void RepeaterPoller::processEvents() {
 }
 
 void RepeaterPoller::onTx(const mesh::Packet* pkt) {
-  if (!pkt || pkt != inflight_ || sigOf(pkt) != inflight_sig_) return;
+  if (!pkt || pkt != inflight_ || !inflightIntact()) return;
   inflight_ = NULL;
   if (inflight_tag_) POLL_LOG("tx %s tag=%lu sent", actLabel(inflight_act_, inflight_pw_), (unsigned long)inflight_tag_);
   else POLL_LOG("tx %s sent", actLabel(inflight_act_, inflight_pw_));
@@ -832,7 +847,7 @@ void RepeaterPoller::onTx(const mesh::Packet* pkt) {
 }
 
 void RepeaterPoller::onTxFail(const mesh::Packet* pkt) {
-  if (!pkt || pkt != inflight_ || sigOf(pkt) != inflight_sig_) return;
+  if (!pkt || pkt != inflight_ || !inflightIntact()) return;
   inflight_ = NULL;
   POLL_LOG("tx %s failed", actLabel(inflight_act_, inflight_pw_));
   pushEvent(poll::EV_TX_FAILED, false);
@@ -901,7 +916,7 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
 
 // After an admin answer nothing more may go out under the exchange; a packet already on the air cannot be recalled.
 void RepeaterPoller::recallForAdmin() {
-  if (run_kind_ != RUN_EXCHANGE || !inflight_ || sigOf(inflight_) != inflight_sig_) return;
+  if (run_kind_ != RUN_EXCHANGE || !inflightIntact()) return;
   if (!host_->pollCancelQueued(inflight_)) return;
   POLL_LOG("tx %s cancelled: admin answer received", actLabel(inflight_act_, inflight_pw_));
   inflight_ = NULL;
@@ -994,7 +1009,7 @@ void RepeaterPoller::endRun() {
 void RepeaterPoller::abortRun(const char* why) {
   if (run_kind_ == RUN_NONE) return;
   // A packet already on the air finishes; its report is ignored once the run is gone.
-  if (inflight_ && sigOf(inflight_) == inflight_sig_) host_->pollCancelQueued(inflight_);
+  if (inflightIntact()) host_->pollCancelQueued(inflight_);
   POLL_LOG("aborted: %s", why);
   endRun();
 }
