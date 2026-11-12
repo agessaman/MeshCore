@@ -2941,6 +2941,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
                              esp_err_to_name(rc));
           return;
         }
+        // This handshake is the link-recovery attempt; a later retry is an ordinary one.
+        slot.link_retry_pending = false;
         reconnect_attempted = true;
         _last_slot_reconnect_ms = now_millis;
         _guard_armed_by_slot = -1;
@@ -3055,6 +3057,8 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
             return;
           }
           MQTT_TRACE_HEAP("renewal:after-reconnect", index);
+          // This handshake is the link-recovery attempt; a later retry is an ordinary one.
+          slot.link_retry_pending = false;
           reconnect_attempted = true;
           _last_slot_reconnect_ms = now_millis;
           _guard_armed_by_slot = -1;
