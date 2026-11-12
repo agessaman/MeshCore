@@ -5074,13 +5074,14 @@ void MQTTBridge::servicePollControl() {
     if (!done && (uint32_t)(now - _poll_session_started_ms) >=
                      poll::kControlBudgetMs + POLL_SESSION_GRACE_MS) {
       s->abort.store(true, std::memory_order_release);
+      // Read before the swap: once orphaned, the task may free its copy at any moment.
+      uint8_t want = s->req.want;
+      if (s->req.reg_body_len == 0) want &= (uint8_t)~poll::WANT_REGISTER;
       uint8_t expected = POLL_SESSION_RUNNING;
       if (s->state.compare_exchange_strong(expected, POLL_SESSION_ORPHANED,
                                            std::memory_order_acq_rel)) {
         // The task frees its copy when it gets out; report what was asked as timed out.
         POLL_BRIDGE_LOG("control session overran its budget, abandoned");
-        uint8_t want = s->req.want;
-        if (s->req.reg_body_len == 0) want &= (uint8_t)~poll::WANT_REGISTER;
         _poll_session = nullptr;
         finishPollControl(true, want);
       } else {
