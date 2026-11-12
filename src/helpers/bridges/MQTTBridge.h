@@ -301,6 +301,10 @@ private:
   // (including an ignored late CONNECTED) or a deliberate stop.
   volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
 
+  // Set by the bridge task while a soft-disconnected session's DISCONNECTED is still to
+  // come; cleared at the end of that event's handler or by a deliberate stop.
+  volatile bool _slot_disconnect_owed[RUNTIME_MQTT_SLOTS];
+
   // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
   // All NTP I/O must run on Core 0; the CLI thread
   // (Core 1) sets _ntp_force_requested and blocks in requestForcedNtpSync()
@@ -522,8 +526,9 @@ private:
   unsigned long _last_config_warning; // Throttle configuration mismatch warnings
   static const unsigned long CONFIG_WARNING_INTERVAL = 300000; // Log every 5 minutes max
 
-  unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
-  int8_t _guard_armed_by_slot;             // slot whose first setup armed that guard; -1 = anything else
+  unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s, less once the armer is done)
+  int8_t _guard_armed_by_slot;             // slot whose first setup or reconnect armed that guard; -1 = anything else
+  bool _guard_armer_first_setup;           // that handshake was a first setup
   // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
   std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
   // Free-stack bytes each task last measured for itself; 0 = no sample yet.
@@ -596,6 +601,7 @@ private:
   // Close a live client because the route changed under it: bounded where that
   // is enough, a real stop where an in-flight attempt has to be cancelled.
   void closeLiveClientForLinkTransition(int index);
+  esp_err_t softDisconnectSlot(int index, unsigned long timeout_ms = 5000);
   // Stop a live client, recording Stopped (proven) or Quarantined (not joined).
   void stopSlotClient(int index);
   // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a

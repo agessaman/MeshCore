@@ -71,12 +71,27 @@ static inline bool firstSetupHandshakeDone(bool armer_enabled, bool armer_has_cl
 
 // A first setup may start before the 15 s guard expires when the guard was armed
 // by another first setup whose handshake is done, but not within kFirstSetupMinGapMs.
-// Anything else (retries, reconnects, reconfigures) keeps the full guard.
+// A first setup never follows a reconnect, renewal, probe or reconfigure early.
 static inline bool firstSetupGuardReleased(uint32_t now, uint32_t last_cross_slot_ms,
                                            bool first_attempt, bool armed_by_first_setup,
                                            bool armer_handshake_done) {
   if (!first_attempt || !armed_by_first_setup || !armer_handshake_done) return false;
   return elapsedMs(now, last_cross_slot_ms) >= kFirstSetupMinGapMs;
+}
+
+// A reconnect may start before the 15 s guard expires when the handshake that armed it
+// (a first setup or another reconnect) is over, but not within kFirstSetupMinGapMs.
+// Renewals, reconfigures and breaker probes keep the full guard.
+static inline bool reconnectGuardReleased(uint32_t now, uint32_t last_cross_slot_ms,
+                                          bool armed_by_handshake, bool armer_handshake_done) {
+  if (!armed_by_handshake || !armer_handshake_done) return false;
+  return elapsedMs(now, last_cross_slot_ms) >= kFirstSetupMinGapMs;
+}
+
+// A reconnect may arm that early release only when the next outcome event is its own:
+// no older attempt in flight and no DISCONNECTED still owed by a session closed before it.
+static inline bool reconnectArmsEarlyRelease(bool attempt_pending, bool disconnect_owed) {
+  return !attempt_pending && !disconnect_owed;
 }
 
 // One reconfigure per pass. A request that does not open a connection is not
