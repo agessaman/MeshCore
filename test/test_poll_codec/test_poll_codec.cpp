@@ -14,7 +14,7 @@ static_assert(poll::kCipherBlockSize == CIPHER_BLOCK_SIZE, "CIPHER_BLOCK_SIZE");
 static_assert(poll::kMinCandidatePayload == 2u + CIPHER_MAC_SIZE + CIPHER_BLOCK_SIZE,
               "candidate minimum");
 static_assert(poll::kMaxPathBytes == MAX_PATH_SIZE, "MAX_PATH_SIZE");
-static_assert(poll::kSetPermFlags == (uint8_t)((0 & 3) | (TXT_TYPE_CLI_COMMAND << 2)),
+static_assert(poll::kSetPermFlags == (uint8_t)((0 & 3) | (TXT_TYPE_CLI_DATA << 2)),
               "CLI command flags");
 
 namespace {

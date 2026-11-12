@@ -23,7 +23,7 @@ static const uint32_t kDay = 24UL * 3600UL;
 static const uint8_t kReqStatus = 0x01;
 static const uint8_t kReqTelemetry = 0x03;
 static const uint8_t kRespServerLoginOk = 0x00;
-static const uint8_t kTxtTypeCliCommand = 0x01;
+static const uint8_t kTxtTypeCliData = 0x01;
 
 // Outcome of one poll, kept per target as the last code.
 enum Code : uint8_t {

@@ -28,10 +28,10 @@ static const size_t kMinCandidatePayload =
 // BaseChatMesh::sendRequest(req_type) plaintext is always this long.
 static const size_t kRequestPlainLen = 13;
 
-// sendCommandData: (attempt & 3) | (txt_type << 2). TXT_TYPE_CLI_COMMAND is 3
-// (TxtDataHelpers.h), attempt 0, so the flags byte is 0x0C. The repeater also
-// runs the command for TXT_TYPE_CLI_DATA (flags 0x04).
-static const uint8_t kSetPermFlags = 0x0C;
+// sendCommandData: (attempt & 3) | (txt_type << 2), attempt 0. TXT_TYPE_CLI_DATA (1)
+// rather than TXT_TYPE_CLI_COMMAND (3): repeaters built before the latter existed
+// drop it, and the removal must work on every release.
+static const uint8_t kSetPermFlags = (uint8_t)(kTxtTypeCliData << 2);
 
 // createPathReturn with no extra writes this dummy type, then 4 random bytes.
 static const uint8_t kPathExtraNone = 0xFF;
