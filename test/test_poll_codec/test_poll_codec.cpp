@@ -329,6 +329,15 @@ TEST(PollPacketCodec, LoginAnswerStampedLikeOurLoginIsStillALogin) {
   EXPECT_EQ(poll::REPLY_IGNORE, poll::classifyReply(r, t, nullptr, 0, true, false));
 }
 
+TEST(PollPacketCodec, LoginAnswerRepeatingTheLastIsAReplay) {
+  EXPECT_FALSE(poll::loginAnswerRepeats(1000, 0, 0));
+  EXPECT_TRUE(poll::loginAnswerRepeats(1000, 1000, 0));
+  EXPECT_TRUE(poll::loginAnswerRepeats(1000, 0, 1000));
+  // An older stamp is fine: a target without a clock source restarts low after a reboot.
+  EXPECT_FALSE(poll::loginAnswerRepeats(999, 1000, 2000));
+  EXPECT_FALSE(poll::loginAnswerRepeats(0, 0, 0));
+}
+
 TEST(PollPacketCodec, LoginShapeAdminGuestAndNeither) {
   poll::TargetState t = BlankTarget();
   poll::Reply r;

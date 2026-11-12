@@ -912,6 +912,13 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
       break;
     case poll::REPLY_LOGIN_GUEST:
     case poll::REPLY_LOGIN_ADMIN:
+      if (poll::loginAnswerRepeats(r.tag, meta_[idx].guest_answer_ts, meta_[idx].admin_answer_ts)) {
+        POLL_LOG("rx login %s tag=%lu repeats the last answer, ignored", cls == poll::REPLY_LOGIN_ADMIN ? "admin" : "guest",
+                 (unsigned long)r.tag);
+        break;
+      }
+      if (cls == poll::REPLY_LOGIN_ADMIN) meta_[idx].admin_answer_ts = r.tag;
+      else meta_[idx].guest_answer_ts = r.tag;
       POLL_LOG("rx login %s tag=%lu %s snr=%.2f", cls == poll::REPLY_LOGIN_ADMIN ? "admin" : "guest",
                (unsigned long)r.tag, flooded ? "flooded" : "direct", snr);
       pushEvent(cls == poll::REPLY_LOGIN_ADMIN ? poll::EV_LOGIN_ADMIN : poll::EV_LOGIN_GUEST, flooded);

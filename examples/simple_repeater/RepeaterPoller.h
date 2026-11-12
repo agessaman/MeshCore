@@ -127,6 +127,8 @@ private:
     uint8_t  list_pos;     // position in the operator's list
     uint32_t phase_s;
     uint32_t interval_s;
+    uint32_t guest_answer_ts;   // timestamp of the last guest login answer taken
+    uint32_t admin_answer_ts;   // timestamp of the last admin login answer taken
     uint8_t  pub[poll::kPubKeySize];
     uint8_t  secret[PUB_KEY_SIZE];
   };
