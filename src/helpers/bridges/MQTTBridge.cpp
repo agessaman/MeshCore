@@ -5177,8 +5177,10 @@ void MQTTBridge::servicePollControl() {
   s_poll_session_alive.store(true, std::memory_order_release);
   _poll_ctl_state.store(poll::CONTROL_RUNNING, std::memory_order_release);
   TaskHandle_t handle = nullptr;
+  // Idle priority: a multi-second TLS step then time-slices with IDLE0, which
+  // feeds the task watchdog, and yields to every MQTT task.
   if (xTaskCreatePinnedToCore(pollSessionTask, "PollCtl", POLL_SESSION_STACK, s,
-                              MQTT_TASK_PRIORITY, &handle, MQTT_TASK_CORE) != pdPASS) {
+                              tskIDLE_PRIORITY, &handle, MQTT_TASK_CORE) != pdPASS) {
     s_poll_session_alive.store(false, std::memory_order_release);
     freePollSession(s);
     POLL_BRIDGE_LOG("control session not started: task create failed");
@@ -5196,7 +5198,7 @@ void MQTTBridge::stopPollControl() {
   if (!s) return;
   _poll_session = nullptr;
   s->abort.store(true, std::memory_order_release);
-  // The abort is seen within a read poll; a connect or DNS wait is not interruptible.
+  // The abort is seen within a read poll; DNS, connect and a TLS handshake step are not interruptible.
   for (int i = 0; i < 100 && s->state.load(std::memory_order_acquire) != POLL_SESSION_DONE; i++) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }

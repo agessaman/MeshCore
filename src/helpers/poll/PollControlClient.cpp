@@ -69,6 +69,12 @@ struct WipingAllocator : ArduinoJson::Allocator {
 class BundleTlsClient : public WiFiClientSecure {
  public:
   void useLoadedBundle() { _use_ca_bundle = true; }
+  // Set the fields directly: setTimeout() also pokes the socket, which after a
+  // failed connect is a stale descriptor.
+  void setLimits(int connect_ms, unsigned long handshake_ms) {
+    _timeout = connect_ms;
+    sslclient->handshake_timeout = handshake_ms;
+  }
 };
 
 bool expired(uint32_t deadline) { return (int32_t)(millis() - deadline) >= 0; }
@@ -90,6 +96,7 @@ struct Conn {
   BundleTlsClient* tls = nullptr;
   Client* c = nullptr;
   bool reusable = false;   // the last reply left the connection open and framed
+  int16_t failed = 0;      // a connect or handshake failed; the session makes no more
   uint8_t rbuf[256];
   size_t rpos = 0;
   size_t rlen = 0;
@@ -182,23 +189,26 @@ int16_t connectConn(Conn& k, uint32_t deadline, const ControlEnv& env) {
   if (!activeNetworkLink().resolveHost(k.base.host, ip)) {
     return aborted(env) ? CTL_ERR_LINK : CTL_ERR_CONNECT;
   }
-  uint32_t budget = remainingMs(deadline);
-  if (budget < 250) return CTL_ERR_TIMEOUT;
-  if (budget > kControlConnectMs) budget = kControlConnectMs;
+  const uint32_t left = remainingMs(deadline);
+  if (left < 250) return CTL_ERR_TIMEOUT;
+  const uint32_t connect_ms = left < kControlConnectMs ? left : kControlConnectMs;
+  const uint32_t t0 = millis();
   int ok = 0;
   if (k.tls) {
-    const uint32_t secs = (budget + 999) / 1000;
-    k.tls->setTimeout(secs);
-    k.tls->setHandshakeTimeout(secs);
+    k.tls->setLimits((int)connect_ms, left < kControlHandshakeMs ? left : kControlHandshakeMs);
     ok = k.tls->connect(ip, k.base.port, k.base.host, nullptr, nullptr, nullptr);
   } else {
-    ok = k.plain->connect(ip, k.base.port, (int32_t)budget);
+    ok = k.plain->connect(ip, k.base.port, (int32_t)connect_ms);
   }
+  const uint32_t took = millis() - t0;
   if (!ok) {
+    POLL_CTL_LOG("connect failed (%s) after %lums", k.tls ? "tls" : "tcp", (unsigned long)took);
     k.close();
     if (aborted(env)) return CTL_ERR_LINK;
     return expired(deadline) ? CTL_ERR_TIMEOUT : CTL_ERR_CONNECT;
   }
+  POLL_CTL_LOG("connected (%s) in %lums", k.tls ? "tls" : "tcp", (unsigned long)took);
+  (void)took;
   return 0;
 }
 
@@ -374,6 +384,11 @@ Reply request(Conn& k, const char* method, const char* path, const char* body, s
               uint32_t session_deadline, const ControlEnv& env) {
   Reply out = {0, 0, false};
   const uint32_t t0 = millis();
+  if (k.failed != 0) {
+    // One connection attempt per session: a host that failed once fails the rest.
+    out.status = k.failed;
+    return out;
+  }
   if (expired(session_deadline)) return out;   // 0: not made
   if (aborted(env)) {
     out.status = CTL_ERR_LINK;
@@ -409,6 +424,7 @@ Reply request(Conn& k, const char* method, const char* path, const char* body, s
       const int16_t c = connectConn(k, session_deadline, env);
       if (c != 0) {
         out.status = c;
+        k.failed = c;
         break;
       }
     }
@@ -479,6 +495,8 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   const uint32_t deadline = t0 + kControlBudgetMs;
   const uint32_t int_before = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   const uint32_t blk_before = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  // Boot-wide low-water; a drop across the session means the session set it.
+  const uint32_t low_before = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
   const bool want_reg = (req.want & WANT_REGISTER) && req.reg_body_len > 0 &&
                         req.reg_body_len <= sizeof(req.reg_body);
 
@@ -488,11 +506,11 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   if (!k || !s_body) setup = CTL_ERR_NO_MEMORY;
   else if (!parseHttpBase(req.url, k->base)) setup = CTL_ERR_CONNECT;
   else if (k->base.tls && !env.tls_bundle_ready) setup = CTL_ERR_CONNECT;
-  POLL_CTL_LOG("control session %s (%s) int_heap=%u max_blk=%u",
+  POLL_CTL_LOG("control session %s (%s) int_heap=%u max_blk=%u int_low=%u",
                setup == 0 ? "started" : "not started",
                setup == 0 ? (k->base.tls ? "https" : "http")
                           : (setup == CTL_ERR_NO_MEMORY ? "no memory" : "bad url or no CA bundle"),
-               (unsigned)int_before, (unsigned)blk_before);
+               (unsigned)int_before, (unsigned)blk_before, (unsigned)low_before);
   if (setup != 0) {
     if (req.want & WANT_OWNERS) res.owners_status = setup;
     if (req.want & WANT_POLICY) res.policy_status = setup;
@@ -573,12 +591,14 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   k->destroy();
   delete k;
   POLL_CTL_LOG("control session done in %lums: owners=%d policy=%d reg=%d shared=%d "
-               "int_heap=%u->%u max_blk=%u->%u",
+               "int_heap=%u->%u max_blk=%u->%u int_low=%u->%u",
                (unsigned long)(millis() - t0), (int)res.owners_status, (int)res.policy_status,
                (int)res.reg_status, (int)res.shared_status, (unsigned)int_before,
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)blk_before,
-               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-  (void)int_before; (void)blk_before; (void)t0;
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+               (unsigned)low_before,
+               (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+  (void)int_before; (void)blk_before; (void)low_before; (void)t0;
 }
 
 }  // namespace poll

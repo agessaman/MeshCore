@@ -15,8 +15,11 @@
 namespace poll {
 
 static const uint32_t kControlConnectMs = 5000;
+// mbedTLS checks its limit only between handshake steps, and one step that
+// verifies a P-384 chain in software takes about 5 s on an ESP32-S3.
+static const uint32_t kControlHandshakeMs = 12000;
 static const uint32_t kControlResponseMs = 5000;
-static const uint32_t kControlBudgetMs = 15000;
+static const uint32_t kControlBudgetMs = 25000;
 static const uint16_t kControlBodyMax = 6144;
 
 // Negative request statuses (see ControlResult).
