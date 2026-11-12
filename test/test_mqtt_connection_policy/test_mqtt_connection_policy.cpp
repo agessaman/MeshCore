@@ -732,6 +732,161 @@ TEST(RenewalGuard, OwedSlotAlreadyOnTheFreshTokenSettlesWithoutAHandshake) {
   EXPECT_EQ(1, slots[1].handshakes);
 }
 
+namespace {
+// Mirrors one maintenance pass over slot 0, whose ordinary reconnect is always rejected
+// locally (arm, call fails, roll back), and slot 1, whose renewal bounce is due.
+struct StarveSim {
+  bool restore_on_reject = true;
+  bool yield_to_waiting = true;
+  uint32_t last = 0;
+  int8_t armer = -1;
+  uint8_t waiting_mask = 0;
+  uint32_t retry_last_attempt = 0;
+  int retry_attempts = 0;
+  uint32_t first_retry_at = 0;
+  bool renewal_due = true;
+  int renewal_handshakes = 0;
+  uint32_t renewal_started_at = 0;
+
+  void pass(uint32_t now) {
+    bool this_pass = Policy::reconnectGuardActive(now, last);
+    uint8_t seen = 0;
+    // Slot 0: ordinary backoff reconnect, rolled back to rung 0 on every local rejection.
+    const bool yield = yield_to_waiting && Policy::yieldsToWaitingBounce(waiting_mask, 0);
+    const bool released = this_pass && armer >= 0 &&
+        Policy::reconnectGuardReleased(now, last, true, /*armer_handshake_done=*/true);
+    if (!yield && (!this_pass || released) && Policy::reconnectDue(now, retry_last_attempt, 0, 0)) {
+      retry_last_attempt = now;
+      const uint32_t last_before = last;
+      const int8_t armer_before = armer;
+      this_pass = true;
+      last = now;
+      armer = Policy::reconnectArmsEarlyRelease(false, false) ? 0 : -1;
+      if (retry_attempts++ == 0) first_retry_at = now;
+      if (restore_on_reject) {
+        last = last_before;
+        armer = armer_before;
+      }
+    }
+    // Slot 1: renewal bounce through the guard.
+    const RenewalStep step = Policy::renewalStep(
+        renewal_due, true, true, Policy::bounceHandshakeAllowed(this_pass, now, last));
+    if (step == RenewalStep::Wait) {
+      seen |= 2U;
+    } else if (step == RenewalStep::Bounce) {
+      renewal_handshakes++;
+      renewal_started_at = now;
+      renewal_due = false;
+      last = now;
+      armer = -1;
+      this_pass = true;
+    }
+    waiting_mask = seen;
+  }
+
+  void run(uint32_t from, uint32_t to) {
+    for (uint32_t now = from; now <= to; now += 100U) pass(now);
+  }
+};
+}  // namespace
+
+TEST(RenewalGuard, WithoutRestoreRepeatedLocalRejectionsStarveARenewal) {
+  // The failure being fixed: each rejected retry re-stamps the guard every 10 s.
+  StarveSim sim;
+  sim.restore_on_reject = false;
+  sim.yield_to_waiting = false;
+  sim.last = 1000U;  // the last real handshake, by slot 0 itself
+  sim.armer = 0;
+  sim.retry_last_attempt = 1000U;
+  sim.run(2000U, 600000U);
+  EXPECT_EQ(0, sim.renewal_handshakes);
+  EXPECT_GT(sim.retry_attempts, 50);
+}
+
+TEST(RenewalGuard, RejectedAttemptRestoresTheGuardSoTheWaitingBounceGoesOneWindowAfterTheRealHandshake) {
+  StarveSim sim;
+  sim.yield_to_waiting = false;  // the restore alone is enough
+  sim.last = 1000U;
+  sim.armer = 0;
+  sim.retry_last_attempt = 1000U;
+  sim.run(2000U, 600000U);
+  EXPECT_EQ(1, sim.renewal_handshakes);
+  EXPECT_EQ(1000U + Policy::kReconnectGuardMs, sim.renewal_started_at);
+  EXPECT_EQ(11000U, sim.first_retry_at);  // a rejected retry ran inside the window and did not extend it
+}
+
+TEST(RenewalGuard, RepeatedLocalRejectionsDoNotStarveAnotherSlotsRenewal) {
+  StarveSim sim;
+  sim.last = 1000U;
+  sim.armer = 0;
+  sim.retry_last_attempt = 1000U;
+  sim.run(2000U, 600000U);
+  EXPECT_EQ(1, sim.renewal_handshakes);
+  EXPECT_EQ(1000U + Policy::kReconnectGuardMs, sim.renewal_started_at);
+  // The retrying slot stood aside while the renewal waited, then resumed after its real guard.
+  EXPECT_EQ(sim.renewal_started_at + Policy::kReconnectGuardMs, sim.first_retry_at);
+  EXPECT_GT(sim.retry_attempts, 50);
+}
+
+TEST(RenewalGuard, YieldIsOnlyToOtherWaitingSlots) {
+  EXPECT_FALSE(Policy::yieldsToWaitingBounce(0, 0));
+  EXPECT_FALSE(Policy::yieldsToWaitingBounce(1U << 2, 2));
+  EXPECT_TRUE(Policy::yieldsToWaitingBounce(1U << 2, 0));
+  EXPECT_TRUE(Policy::yieldsToWaitingBounce((1U << 2) | (1U << 0), 0));
+}
+
+TEST(RenewalGuard, OwedDispatchMintsWhenTheStagedTokenAgedIntoTheBuffer) {
+  const uint32_t now = 1800000000U;
+  const uint32_t buffer = 300U;
+  // Clear of buffer plus the handshake margin: dispatch as staged.
+  EXPECT_FALSE(Policy::owedDispatchNeedsMint(true, true, now, now + buffer + 61U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, true, now, now + buffer + 60U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, true, now, now + 10U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, true, now, now - 1U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, false, now, now + 86400U, buffer));
+}
+
+TEST(RenewalGuard, OwedDispatchWithAnAgedTokenMintsFirstAndHandshakesOnce) {
+  const uint32_t buffer = 300U;
+  const uint32_t lifetime = 86400U;
+  const uint32_t now = 1800000000U;
+  const uint32_t staged_cases[] = {now + 120U, now - 30U, now + lifetime};
+  for (uint32_t staged : staged_cases) {
+    uint32_t token_exp = staged;
+    uint32_t applied = now - 5000U;  // pre-correction credential
+    int mints = 0;
+    int handshakes = 0;
+    // Dispatch: refresh if needed, then the single reconnect records the token as applied.
+    if (Policy::owedDispatchNeedsMint(true, true, now, token_exp, buffer)) {
+      mints++;
+      token_exp = now + lifetime;
+    }
+    handshakes++;
+    applied = token_exp;
+    // Later passes: the renewal path must not find this credential due again.
+    for (uint32_t t = now + 1U; t < now + 3600U; t += 60U) {
+      if (Policy::tokenNeedsRenewal(true, t, applied, buffer)) handshakes++;
+    }
+    EXPECT_EQ(staged == now + lifetime ? 0 : 1, mints) << staged;
+    EXPECT_EQ(1, handshakes) << staged;
+    EXPECT_GT(applied, now + buffer);
+  }
+}
+
+TEST(RenewalGuard, FailedOwedReconnectIsRetriedByTheRenewalPathUnderTheGuard) {
+  // The owed flag is cleared at dispatch; a failed reconnect leaves the applied expiry stale.
+  const uint32_t now_s = 1800000000U;
+  const uint32_t stale_applied = now_s - 5000U;
+  ASSERT_TRUE(Policy::tokenNeedsRenewal(true, now_s, stale_applied, 300U));
+  const uint32_t armed = 400000U;
+  EXPECT_EQ(RenewalStep::Wait,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(false, armed + 1000U, armed)));
+  EXPECT_EQ(RenewalStep::Bounce,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(false, armed + 15000U, armed)));
+}
+
 using Policy::ClockSource;
 
 // 2026-01-01, the bridge's plausibility floor, and the 2024 placeholder

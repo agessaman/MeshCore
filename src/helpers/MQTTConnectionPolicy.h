@@ -411,6 +411,21 @@ static inline RenewalStep renewalStep(bool due, bool attempt_allowed, bool bounc
   return handshake_allowed ? RenewalStep::Bounce : RenewalStep::Wait;
 }
 
+// While another slot's renewal or owed bounce waits, ordinary reconnects and probes stand
+// aside, so it takes the next idle guard window instead of losing it to a retry loop.
+static inline bool yieldsToWaitingBounce(uint8_t waiting_mask, int slot_index) {
+  return (waiting_mask & ~(1U << slot_index)) != 0;
+}
+
+// The staged corrected-clock token must outlast the handshake and stay clear of the renewal
+// buffer, or the dispatch would present expired credentials or be followed by a second bounce.
+static inline bool owedDispatchNeedsMint(bool time_synced, bool has_token, uint32_t current_time,
+                                         uint32_t staged_expires_at,
+                                         uint32_t renewal_buffer_secs) {
+  return !canReuseJwtForReconnect(time_synced, has_token, false, current_time,
+                                  staged_expires_at, renewal_buffer_secs);
+}
+
 enum class OwedBounceStep : uint8_t {
   Settled,    // nothing to open: the fresh token is in use, or the broker tolerates the old one
   Wait,       // guard busy: leave the session alone
