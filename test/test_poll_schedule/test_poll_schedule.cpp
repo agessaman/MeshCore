@@ -346,6 +346,16 @@ TEST(PollSchedule, NextDueShowsTheQuickRetry) {
   EXPECT_EQ(now + 15 * 60, poll::nextDueAt(t, kHour, now, 0));
 }
 
+TEST(PollSchedule, NextDueAgreesWithIsDueOnAZeroIntervalQuickRetry) {
+  poll::TargetState t = blank();
+  t.code = poll::CODE_NO_REPLY;
+  t.no_reply_count = 1;
+  t.last_success = 500;
+  t.last_attempt = 2000;   // ahead of the clock
+  EXPECT_TRUE(poll::isDue(t, 0, 1000, 0));
+  EXPECT_EQ(1000U, poll::nextDueAt(t, 0, 1000, 0));
+}
+
 TEST(PollSchedule, NextDueHonorsTheHoldAndTheAdminStop) {
   poll::TargetState t = blank();
   t.next_due_at = 9000;

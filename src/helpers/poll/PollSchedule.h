@@ -144,6 +144,8 @@ static inline uint32_t dueUnderRuleAt(const TargetState& t, uint32_t interval_s,
     const uint32_t recent_ends = t.last_success + kDay;
     if (*ends == 0 || recent_ends < *ends) *ends = recent_ends;
     uint32_t retry = interval_s < retry_s ? interval_s : retry_s;
+    // isDue measures elapsed time, which a future last holds at zero: a zero retry is due at once.
+    if (elapsedSince(last, from) >= retry) return from;
     uint64_t at = (uint64_t)last + retry;
     if (at < from) at = from;
     return at > 0xFFFFFFFFUL ? 0xFFFFFFFFUL : (uint32_t)at;
