@@ -46,6 +46,7 @@ does not reflect the GoogleTest count — run the built binary directly
 | `test_touch_tap_detector` | `src/helpers/ui/TouchTapDetector.h` | debounced rising-edge detection for the polled Expansion Kit touch panel: idle quiet; one tap per touch; long presses do not repeat; sub-debounce blips ignored; contact bounce still counts once; minimum gap between accepted taps; `millis()` rollover; reset semantics |
 | `test_poll_exchange` | `src/helpers/poll/PollExchange.h`, `src/helpers/poll/PollAdminDrill.h` | repeater-poll exchange against a scripted repeater on a fake clock: first-contact login/flood-clear/teach/request; one-request steady state; fast-path repeat and every-3rd-miss login; 24 h admin recheck; password order (override, learned, personal, daily alternation); flood accounting; late replies and login answers; TX failures; held events; admin removal drill |
 | `test_utils` | `src/Utils.cpp` | `Utils::toHex` (upstream) |
+| `test_poll_schedule` | `src/helpers/poll/PollSchedule.h` | guest-key poll scheduling: per-target phase spreading and slot boundaries; the half-period guard; 20 min quick retries; daily silence, flood and no-battery backoff; next-slot display; per-window request cap; send-history ring and result folding; oldest-first pick with the 60 s scheduled gap |
 
 ## Conventions (and how to add a suite)
 
