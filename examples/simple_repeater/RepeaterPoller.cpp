@@ -18,6 +18,7 @@
 static_assert(PATH_HASH_SIZE == 1, "poll packets carry one-byte hashes");
 static_assert(PUB_KEY_SIZE == poll::kPubKeySize, "key size");
 static_assert(PRV_KEY_SIZE == poll::kPrvKeySize, "private key size");
+static_assert(sizeof(RepeaterPoller) <= 3584, "repeater poller RAM budget");
 
 namespace {
 
