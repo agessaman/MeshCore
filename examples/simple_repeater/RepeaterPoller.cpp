@@ -31,7 +31,6 @@ const uint32_t kTickMs = 5000;
 const uint32_t kTxStuckMs = 30000;          // a packet neither sent nor failed by then was shed
 const uint32_t kMinRequestListenMs = 10000;
 const uint32_t kNowSpacingS = 60;            // `poll now` on one target at most this often
-const uint8_t  kPoolReserve = 5;
 const uint32_t kSaveRetryMs = 10000;         // between attempts to get an admin stop or drill result onto flash
 
 // Bench-only hooks; no environment sets these. POLL_TEST_INTERVAL_S replaces
@@ -791,7 +790,10 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
     POLL_LOG("tx %s not queued: %s", actLabel(s.act, s.pw), n ? "packet pool low" : "build failed");
     return false;
   }
-  host_->pollSendDirect(pkt);
+  if (!host_->pollSendDirect(pkt)) {
+    POLL_LOG("tx %s not queued: refused by the packet queue", actLabel(s.act, s.pw));
+    return false;
+  }
   inflight_ = pkt;
   inflight_sig_ = sigOf(pkt);
   inflight_ms_ = millis();

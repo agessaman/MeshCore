@@ -1064,9 +1064,11 @@ void MyMesh::sendNodeDiscoverReq() {
   }
 }
 
+static const int PACKET_POOL_SIZE = 32;
+
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
-    : mesh::Mesh(radio, ms, rng, rtc, *createObserverPacketManager(32), tables),
+    : mesh::Mesh(radio, ms, rng, rtc, *createObserverPacketManager(PACKET_POOL_SIZE), tables),
 #if REPEATER_HISTORY_SLOTS > 0
       battery_history(REPEATER_HISTORY_SLOTS, REPEATER_HISTORY_INTERVAL_SECS),
       noise_history(REPEATER_HISTORY_SLOTS, REPEATER_HISTORY_INTERVAL_SECS),
@@ -2515,8 +2517,8 @@ void MyMesh::appendRepeaterPollStatus(char* reply, size_t reply_size) {
   if (n > 0 && used + (size_t)n < reply_size) memcpy(reply + used, extra, (size_t)n + 1);
 }
 
-// RxReservePacketManager keeps a four-packet floor; one more keeps its void queue API from shedding a poll.
-static const int POLL_MIN_FREE_PACKETS = 5;
+// The manager sheds a priority-2 packet when fewer than its reserve stay free once it is taken.
+static const int POLL_MIN_FREE_PACKETS = observerRxReserve(PACKET_POOL_SIZE) + 1;
 
 mesh::Packet* MyMesh::pollObtainPacket() {
   if (_mgr->getFreeCount() < POLL_MIN_FREE_PACKETS) return NULL;
@@ -2530,12 +2532,17 @@ mesh::Packet* MyMesh::pollCreateLogin(const mesh::LocalIdentity& poll_id, const 
 }
 
 // Same on-air form as sendDirect(pkt, NULL, 0); priority 2 lets forwarding go first. Never flooded.
-void MyMesh::pollSendDirect(mesh::Packet* pkt) {
+bool MyMesh::pollSendDirect(mesh::Packet* pkt) {
   pkt->header &= ~PH_ROUTE_MASK;
   pkt->header |= ROUTE_TYPE_DIRECT;
   pkt->path_len = 0;
   getTables()->markSeen(pkt);
   sendPacket(pkt, 2, 0);
+  // The queue API is void and frees what it refuses; only a packet found queued is still ours.
+  for (int i = _mgr->getOutboundTotal() - 1; i >= 0; i--) {
+    if (_mgr->getOutboundByIdx(i) == pkt) return true;
+  }
+  return false;
 }
 
 bool MyMesh::pollCancelQueued(const mesh::Packet* pkt) {

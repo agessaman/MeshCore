@@ -539,7 +539,7 @@ public:
   mesh::Packet* pollObtainPacket() override;
   mesh::Packet* pollCreateLogin(const mesh::LocalIdentity& poll_id, const mesh::Identity& target,
                                 const uint8_t* secret, const uint8_t* plain, size_t len) override;
-  void pollSendDirect(mesh::Packet* pkt) override;
+  bool pollSendDirect(mesh::Packet* pkt) override;
   bool pollCancelQueued(const mesh::Packet* pkt) override;
   bool pollIsTransmitting(const mesh::Packet* pkt) override { return isCurrentOutbound(pkt); }
   void pollReleasePacket(mesh::Packet* pkt) override { releasePacket(pkt); }

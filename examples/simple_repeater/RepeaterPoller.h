@@ -40,8 +40,9 @@ public:
   // createAnonDatagram from the polling identity, with the same pool preflight.
   virtual mesh::Packet* pollCreateLogin(const mesh::LocalIdentity& poll_id, const mesh::Identity& target,
                                         const uint8_t* secret, const uint8_t* plain, size_t len) = 0;
-  // As sendDirect(pkt, NULL, 0) sends it, but behind forwarding (priority 2).
-  virtual void pollSendDirect(mesh::Packet* pkt) = 0;
+  // As sendDirect(pkt, NULL, 0) sends it, but behind forwarding (priority 2). False when the
+  // queue refused it; the packet is then already released and must not be touched.
+  virtual bool pollSendDirect(mesh::Packet* pkt) = 0;
   // Removes a still-queued packet and releases it; false when it is not queued.
   virtual bool pollCancelQueued(const mesh::Packet* pkt) = 0;
   virtual bool pollIsTransmitting(const mesh::Packet* pkt) = 0;
