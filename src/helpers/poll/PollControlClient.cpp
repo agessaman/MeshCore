@@ -89,6 +89,11 @@ bool aborted(const ControlEnv& env) {
   return !activeNetworkLink().isConnected();
 }
 
+int readReady(uint32_t deadline, const ControlEnv& env) {
+  if (aborted(env)) return -2;
+  return expired(deadline) ? 0 : 1;
+}
+
 struct Conn {
   HttpBase base;
   bool tls_ready = false;
@@ -119,6 +124,8 @@ struct Conn {
 // > 0 bytes read, 0 timeout, -1 peer closed, -2 link down or stop requested.
 int readSome(Conn& k, uint8_t* dst, size_t want, uint32_t deadline, const ControlEnv& env) {
   for (;;) {
+    const int ready = readReady(deadline, env);
+    if (ready <= 0) return ready;
     const int avail = k.c->available();
     if (avail > 0) {
       const int n = k.c->read(dst, (size_t)avail < want ? (size_t)avail : want);
@@ -126,13 +133,13 @@ int readSome(Conn& k, uint8_t* dst, size_t want, uint32_t deadline, const Contro
     } else if (!k.c->connected()) {
       return -1;
     }
-    if (aborted(env)) return -2;
-    if (expired(deadline)) return 0;
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
 int readByte(Conn& k, uint8_t* out, uint32_t deadline, const ControlEnv& env) {
+  const int ready = readReady(deadline, env);
+  if (ready <= 0) return ready;
   if (k.rpos == k.rlen) {
     const int n = readSome(k, k.rbuf, sizeof(k.rbuf), deadline, env);
     if (n <= 0) return n;
@@ -149,22 +156,10 @@ int16_t readFailure(int r) {
   return CTL_ERR_PROTOCOL;   // closed mid-reply
 }
 
-// One line without CRLF; longer lines are truncated but consumed. *total
-// counts header bytes. Returns 1, or a readByte failure code.
 int readLine(Conn& k, char* line, size_t cap, size_t* total, uint32_t deadline,
              const ControlEnv& env) {
-  size_t n = 0;
-  for (;;) {
-    uint8_t b = 0;
-    const int r = readByte(k, &b, deadline, env);
-    if (r <= 0) return r;
-    (*total)++;
-    if (b == '\n') break;
-    if (n + 1 < cap) line[n++] = (char)b;
-  }
-  if (n > 0 && line[n - 1] == '\r') n--;
-  line[n] = '\0';
-  return 1;
+  return readHttpLine([&](uint8_t* b) { return readByte(k, b, deadline, env); },
+                      line, cap, total);
 }
 
 int16_t connectConn(Conn& k, uint32_t deadline, const ControlEnv& env) {
@@ -225,6 +220,11 @@ bool appendBody(Conn& k, size_t want, size_t* len, uint32_t deadline, const Cont
     return false;
   }
   while (want > 0) {
+    const int ready = readReady(deadline, env);
+    if (ready <= 0) {
+      *fail = readFailure(ready);
+      return false;
+    }
     if (k.rpos < k.rlen) {
       size_t n = k.rlen - k.rpos;
       if (n > want) n = want;
@@ -269,10 +269,6 @@ Reply readReply(Conn& k, bool reused, uint32_t deadline, const ControlEnv& env) 
       const int h = readLine(k, line, sizeof(line), &header_bytes, deadline, env);
       if (h <= 0) {
         out.status = readFailure(h);
-        return out;
-      }
-      if (header_bytes > 8192) {
-        out.status = CTL_ERR_PROTOCOL;
         return out;
       }
       if (line[0] == '\0') break;
@@ -340,6 +336,11 @@ Reply readReply(Conn& k, bool reused, uint32_t deadline, const ControlEnv& env) 
     // Unframed: the body runs to the close.
     framed = false;
     for (;;) {
+      const int ready = readReady(deadline, env);
+      if (ready <= 0) {
+        out.status = readFailure(ready);
+        return out;
+      }
       if (len >= kControlBodyMax) {
         uint8_t extra = 0;
         const int r = readByte(k, &extra, deadline, env);

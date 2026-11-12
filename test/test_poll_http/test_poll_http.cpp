@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <string>
 
 #include "helpers/poll/PollHttp.h"
 
@@ -67,6 +68,44 @@ TEST(PollHttp, ChunkSize) {
   EXPECT_EQ(-1, poll::parseHttpChunkSize(""));
   EXPECT_EQ(-1, poll::parseHttpChunkSize("zz"));
   EXPECT_EQ(-1, poll::parseHttpChunkSize("fffffffff"));
+}
+
+TEST(PollHttp, LinesStopBeforeAnUnterminatedLineCanGrow) {
+  size_t reads = 0, total = 0;
+  char line[8];
+  auto endless = [&](uint8_t* b) { ++reads; *b = 'x'; return 1; };
+  EXPECT_EQ(-3, poll::readHttpLine(endless, line, sizeof(line), &total));
+  EXPECT_EQ(sizeof(line), reads);
+  EXPECT_EQ(reads, total);
+}
+
+TEST(PollHttp, TrailersShareTheFramingBudget) {
+  size_t reads = 0, total = 0;
+  char line[32];
+  const std::string trailer = "X: y\r\n";
+  auto repeated = [&](uint8_t* b) { *b = trailer[reads++ % trailer.size()]; return 1; };
+  int r;
+  do { r = poll::readHttpLine(repeated, line, sizeof(line), &total); } while (r == 1);
+  EXPECT_EQ(-3, r);
+  EXPECT_EQ(poll::kHttpFramingMax, reads);
+  EXPECT_EQ(reads, total);
+  EXPECT_EQ(-3, poll::readHttpLine(repeated, line, sizeof(line), &total));
+  EXPECT_EQ(poll::kHttpFramingMax, reads);
+}
+
+TEST(PollHttp, LineAcceptsFinalBudgetByteAndPropagatesReadFailures) {
+  char line[8];
+  size_t total = poll::kHttpFramingMax - 3, reads = 0;
+  auto input = [&](uint8_t* b) { *b = "x\r\n"[reads++]; return 1; };
+  EXPECT_EQ(1, poll::readHttpLine(input, line, sizeof(line), &total));
+  EXPECT_STREQ("x", line);
+  EXPECT_EQ(poll::kHttpFramingMax, total);
+  for (int failure : {0, -1, -2}) {
+    total = 0;
+    auto stopped = [&](uint8_t*) { return failure; };
+    EXPECT_EQ(failure, poll::readHttpLine(stopped, line, sizeof(line), &total));
+    EXPECT_EQ(0u, total);
+  }
 }
 
 int main(int argc, char** argv) {

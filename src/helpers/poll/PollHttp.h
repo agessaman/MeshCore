@@ -13,6 +13,28 @@ namespace poll {
 static const uint8_t kHttpHostMax = 90;
 static const uint8_t kHttpPrefixMax = 90;
 
+static const size_t kHttpFramingMax = 8192;
+
+// One bounded line; all headers, chunk framing and trailers share the byte budget.
+// Returns 1, a reader failure (0/-1/-2), or -3 for oversized framing.
+template <typename ReadByte>
+static inline int readHttpLine(ReadByte read_byte, char* line, size_t cap, size_t* total) {
+  size_t n = 0;
+  for (;;) {
+    if (*total >= kHttpFramingMax) return -3;
+    uint8_t b = 0;
+    const int r = read_byte(&b);
+    if (r <= 0) return r;
+    (*total)++;
+    if (b == '\n') break;
+    if (n + 1 >= cap) return -3;
+    line[n++] = (char)b;
+  }
+  if (n > 0 && line[n - 1] == '\r') n--;
+  line[n] = '\0';
+  return 1;
+}
+
 struct HttpBase {
   bool     tls;
   uint16_t port;
