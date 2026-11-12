@@ -164,6 +164,8 @@ int16_t connectConn(Conn& k, uint32_t deadline, const ControlEnv& env) {
   k.close();
   if (aborted(env)) return CTL_ERR_LINK;
   if (k.base.tls && !k.tls_ready) return CTL_ERR_CONNECT;
+  // operator new aborts on failure without exceptions; refuse before it can.
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 4096) return CTL_ERR_NO_MEMORY;
   if (!k.c) {
     if (k.base.tls) {
       k.tls = new (std::nothrow) BundleTlsClient();
@@ -275,6 +277,14 @@ Reply readReply(Conn& k, bool reused, uint32_t deadline, const ControlEnv& env) 
   int16_t fail = 0;
   size_t len = 0;
   bool framed = true;
+  // Only a 200 body is parsed. Another reply keeps its status even when its
+  // error page is large: a small framed one is drained, anything else closes.
+  if (status != 200 && !(f.content_length >= 0 && f.content_length <= (int32_t)kControlBodyMax &&
+                         !f.chunked)) {
+    k.reusable = false;
+    out.status = (int16_t)status;
+    return out;
+  }
   if (status == 204 || status == 304) {
     // no body
   } else if (f.chunked) {
@@ -343,7 +353,7 @@ Reply readReply(Conn& k, bool reused, uint32_t deadline, const ControlEnv& env) 
   }
   k.reusable = framed && !f.close && !(http10 && !f.keep_alive);
   out.status = (int16_t)status;
-  out.len = len;
+  out.len = status == 200 ? len : 0;
   return out;
 }
 
