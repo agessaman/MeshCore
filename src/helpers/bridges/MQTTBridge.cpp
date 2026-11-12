@@ -805,7 +805,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _snmp_agent(nullptr),
 #endif
       _last_slot_reconnect_ms(0), _guard_armed_by_slot(-1), _guard_armer_first_setup(false),
-      _link_up_ms(0)
+      _link_up_ms(0), _bounce_waiting_mask(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _packet_queue_storage(nullptr)
@@ -2636,6 +2636,9 @@ void MQTTBridge::teardownSlot(int index, TeardownReason reason) {
   slot.token_expires_at = 0;
   slot.applied_token_expires_at = 0;
   slot.last_token_renewal = 0;
+  // The owed bounce belonged to the credentials being cleared here.
+  slot.clock_bounce_owed = false;
+  slot.bounce_waiting = false;
   // The reconnect ladder is deliberately NOT cleared here. It describes the
   // endpoint this slot has been failing against, and that history still applies
   // until a replacement configuration actually commits — setupSlot() clears it
@@ -2740,6 +2743,9 @@ void MQTTBridge::maintainSlotConnections() {
   // this shares the "no simultaneous TLS handshakes" rule the reconnect guard enforces.
   bool setup_retry_this_cycle = false;
 
+  // Slots whose renewal or owed bounce waits this pass; ordinary retries yield to them next pass.
+  uint8_t waiting_seen = 0;
+
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (!_slots[i].enabled) continue;
 
@@ -2837,7 +2843,10 @@ void MQTTBridge::maintainSlotConnections() {
     if (!can_maintain || !_slots[i].client) continue;
 
     maintainSlotConnection(i, now_millis, current_time, time_synced, reconnect_attempted_this_cycle, teardown_attempted_this_cycle);
+    if (_slots[i].bounce_waiting) waiting_seen |= static_cast<uint8_t>(1U << i);
   }
+  // Only slots maintained this pass count, so a skipped slot cannot hold the others back.
+  _bounce_waiting_mask = waiting_seen;
 }
 
 void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted) {
@@ -2867,12 +2876,83 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   bool slot_uses_jwt = (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) ||
                        (!slot.preset && slot.audience[0] != '\0');
   if (slot_uses_jwt) {
+    const bool broker_enforces_exp = mqttPresetEnforcesTokenExp(slot.preset);
     // Renew (and below, reconnect) this many seconds before the token's exp
     // claim. Scaled to the slot's token lifetime — see renewalBufferSecs()
     // for why a flat 60 s lost the renewal race against brokers that enforce
     // exp on live sessions (waev's 55-minute tokens).
     const unsigned long renewal_buffer = MQTTConnectionPolicy::renewalBufferSecs(
         static_cast<uint32_t>(slotTokenLifetime(index)));
+    // Set again below only if this pass waits, so it never outlives the wait.
+    const bool was_waiting = slot.bounce_waiting;
+    slot.bounce_waiting = false;
+
+    // A corrected-clock token was staged by syncTimeWithNTP(); its reconnect takes a guard turn.
+    if (slot.clock_bounce_owed) {
+      const bool connected_now = slot.client->connected();
+      const MQTTConnectionPolicy::OwedBounceStep step = MQTTConnectionPolicy::owedBounceStep(
+          slot.token_expires_at != 0 && slot.applied_token_expires_at == slot.token_expires_at,
+          connected_now, broker_enforces_exp,
+          MQTTConnectionPolicy::bounceHandshakeAllowed(
+              reconnect_attempted, static_cast<uint32_t>(now_millis),
+              static_cast<uint32_t>(_last_slot_reconnect_ms)));
+      if (step == MQTTConnectionPolicy::OwedBounceStep::Wait) {
+        if (!was_waiting) {
+          MQTT_DEBUG_PRINTLN("MQTT%d corrected-clock reconnect waiting for the handshake guard",
+                             index + 1);
+        }
+        slot.bounce_waiting = true;
+        return;  // session untouched; the guard clears on a later pass
+      }
+      slot.clock_bounce_owed = false;
+      if (step == MQTTConnectionPolicy::OwedBounceStep::Settled) {
+        // A broker that ignores exp keeps the session; the staged token is settled.
+        slot.applied_token_expires_at = slot.token_expires_at;
+      } else {
+        // The staged token may have aged into the renewal buffer or expired while it waited.
+        if (MQTTConnectionPolicy::owedDispatchNeedsMint(
+                time_synced, slot.auth_token && slot.auth_token[0] != '\0',
+                static_cast<uint32_t>(current_time), static_cast<uint32_t>(slot.token_expires_at),
+                static_cast<uint32_t>(renewal_buffer))) {
+          // Same throttle stamp as a renewal, so a failed mint is retried once a minute.
+          slot.last_token_renewal = now_millis;
+          if (!createSlotAuthToken(index)) {
+            // Applied expiry is still stale, so the renewal path retries under the guard.
+            MQTT_DEBUG_PRINTLN("MQTT%d corrected-clock token refresh failed - left to renewal",
+                               index + 1);
+            return;
+          }
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
+          MQTT_DEBUG_PRINTLN("MQTT%d corrected-clock token aged while queued, re-minted", index + 1);
+        }
+        if (step == MQTTConnectionPolicy::OwedBounceStep::Bounce) {
+          MQTT_DEBUG_PRINTLN("MQTT%d bouncing for the corrected-clock token", index + 1);
+          const esp_err_t soft = softDisconnectSlot(index);
+          if (soft != ESP_OK) {
+            MQTT_DEBUG_PRINTLN("MQTT%d soft disconnect did not complete (%s)", index + 1,
+                               esp_err_to_name(soft));
+          }
+        } else {
+          MQTT_DEBUG_PRINTLN("MQTT%d reconnecting with the corrected-clock token", index + 1);
+        }
+        // Via the helper, so the re-created token is recorded as applied.
+        const esp_err_t rc = reconnectSlotClient(index);
+        if (rc != ESP_OK) {
+          // The renewal below stays due on the old applied expiry and retries under the guard.
+          MQTT_DEBUG_PRINTLN("MQTT%d corrected-clock reconnect failed (%s)", index + 1,
+                             esp_err_to_name(rc));
+          return;
+        }
+        // This handshake is the link-recovery attempt; a later retry is an ordinary one.
+        slot.link_retry_pending = false;
+        slot.link_caused_outage = false;
+        reconnect_attempted = true;
+        _last_slot_reconnect_ms = now_millis;
+        _guard_armed_by_slot = -1;
+        return;
+      }
+    }
+
     // Against the APPLIED expiry — the credential the live connection is using —
     // not the one sitting in the token buffer. Minting updates the buffer's
     // expiry immediately, so reading that here meant a renewal whose bounce
@@ -2888,31 +2968,48 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
     bool can_attempt_renewal = MQTTConnectionPolicy::renewalAttemptAllowed(
         static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_token_renewal));
 
-    if (token_needs_renewal && can_attempt_renewal) {
-      slot.last_token_renewal = now_millis;
+    const unsigned long old_token_expires_at = slot.applied_token_expires_at;
 
-      unsigned long old_token_expires_at = slot.applied_token_expires_at;
+    // Bounce the connection while WE control the timing whenever the old
+    // token is inside the renewal buffer — waiting for the broker to
+    // enforce exp mid-session means a FIN plus a trip through the backoff
+    // ladder instead of one clean reconnect. Same buffer as the renewal
+    // trigger above, so a renewal implies a proactive reconnect.
+    const bool old_token_expired_or_imminent = !time_synced ||
+                                        (old_token_expires_at == 0) ||
+                                        (current_time >= old_token_expires_at) ||
+                                        (time_synced && old_token_expires_at >= 1000000000 &&
+                                         current_time >= (old_token_expires_at - renewal_buffer));
+
+    // Only bounce for exp if this broker actually enforces it. A broker that
+    // leaves live sessions alone past expiry needs the fresh token at the next
+    // reconnect, not now, and the bounce's re-handshake is where contiguity goes.
+    const bool exp_forces_bounce = old_token_expired_or_imminent && broker_enforces_exp;
+    const bool connected_now = slot.client->connected();
+    const MQTTConnectionPolicy::RenewalStep renewal_step = MQTTConnectionPolicy::renewalStep(
+        token_needs_renewal, can_attempt_renewal,
+        MQTTConnectionPolicy::renewalBounceNeeded(old_token_expired_or_imminent,
+                                                  broker_enforces_exp, connected_now),
+        MQTTConnectionPolicy::bounceHandshakeAllowed(
+            reconnect_attempted, static_cast<uint32_t>(now_millis),
+            static_cast<uint32_t>(_last_slot_reconnect_ms)));
+
+    if (renewal_step == MQTTConnectionPolicy::RenewalStep::Wait) {
+      // Decided before minting or disconnecting, so the live session keeps publishing.
+      if (!was_waiting) {
+        MQTT_DEBUG_PRINTLN("MQTT%d token renewal waiting for the handshake guard", index + 1);
+      }
+      slot.bounce_waiting = true;
+      return;
+    }
+
+    if (renewal_step != MQTTConnectionPolicy::RenewalStep::None) {
+      slot.last_token_renewal = now_millis;
 
       if (createSlotAuthToken(index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d token renewed", index + 1);
 
-        // Bounce the connection while WE control the timing whenever the old
-        // token is inside the renewal buffer — waiting for the broker to
-        // enforce exp mid-session means a FIN plus a trip through the backoff
-        // ladder instead of one clean reconnect. Same buffer as the renewal
-        // trigger above, so a renewal implies a proactive reconnect.
-        bool old_token_expired_or_imminent = !time_synced ||
-                                            (old_token_expires_at == 0) ||
-                                            (current_time >= old_token_expires_at) ||
-                                            (time_synced && old_token_expires_at >= 1000000000 &&
-                                             current_time >= (old_token_expires_at - renewal_buffer));
-
-        // Only bounce for exp if this broker actually enforces it. A broker that
-        // leaves live sessions alone past expiry needs the fresh token at the next
-        // reconnect, not now, and the bounce's re-handshake is where contiguity goes.
-        const bool exp_forces_bounce =
-            old_token_expired_or_imminent && mqttPresetEnforcesTokenExp(slot.preset);
-        if (!exp_forces_bounce && old_token_expired_or_imminent && slot.client->connected()) {
+        if (!exp_forces_bounce && old_token_expired_or_imminent && connected_now) {
           MQTT_DEBUG_PRINTLN("MQTT%d token renewed, no bounce (broker does not enforce exp)",
               index + 1);
           // This broker does not act on exp, so the live session's older
@@ -2921,7 +3018,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           // minute for the rest of the token's life.
           slot.applied_token_expires_at = slot.token_expires_at;
         }
-        if (exp_forces_bounce || !slot.client->connected()) {
+        if (renewal_step == MQTTConnectionPolicy::RenewalStep::Bounce) {
           // Disconnect + reconnect with fresh credentials, reusing existing client
           // to avoid internal heap leak/fragmentation from destroy/create cycles
           MQTT_DEBUG_PRINTLN("MQTT%d token renewal: reconnecting with fresh credentials", index + 1);
@@ -2963,6 +3060,9 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
             return;
           }
           MQTT_TRACE_HEAP("renewal:after-reconnect", index);
+          // This handshake is the link-recovery attempt; a later retry is an ordinary one.
+          slot.link_retry_pending = false;
+          slot.link_caused_outage = false;
           reconnect_attempted = true;
           _last_slot_reconnect_ms = now_millis;
           _guard_armed_by_slot = -1;
@@ -3057,7 +3157,13 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   // Attempts a single reconnect every mqtt.breaker.interval minutes (default 30)
   const uint32_t probe_ms = MQTTConnectionPolicy::breakerProbeMs(
       _breaker_probe_min.load(std::memory_order_relaxed));
-  if (slot.circuit_breaker_tripped && !reconnect_attempted) {
+  const bool yield_to_bounce =
+      MQTTConnectionPolicy::yieldsToWaitingBounce(_bounce_waiting_mask, index);
+  // Guard as it stood before this attempt, restored if the attempt launches nothing.
+  const unsigned long guard_ms_before = _last_slot_reconnect_ms;
+  const int8_t guard_armer_before = _guard_armed_by_slot;
+  const bool guard_first_setup_before = _guard_armer_first_setup;
+  if (slot.circuit_breaker_tripped && !reconnect_attempted && !yield_to_bounce) {
     unsigned long probe_elapsed = MQTTConnectionPolicy::elapsedMs(
         static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_reconnect_attempt));
     if (MQTTConnectionPolicy::circuitBreakerProbeDue(
@@ -3077,7 +3183,12 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       }
       // Via the helper: reconnect() is a no-op on a client whose start failed,
       // which would probe forever without ever starting it.
-      reconnectSlotClient(index);
+      if (reconnectSlotClient(index) != ESP_OK) {
+        // No handshake started; the pass flag stays set, the guard reverts.
+        _last_slot_reconnect_ms = guard_ms_before;
+        _guard_armed_by_slot = guard_armer_before;
+        _guard_armer_first_setup = guard_first_setup_before;
+      }
       // If the connect callback fires and sets slot.connected = true,
       // it will clear circuit_breaker_tripped via the onConnect handler
     }
@@ -3094,7 +3205,7 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
               _slots[armer].enabled, _slots[armer].client != nullptr,
               _slot_attempt_pending[armer], _status_publish_pending[armer]));
   if (!slot.connected && slot.initial_connect_done && !slot.circuit_breaker_tripped &&
-      (!reconnect_attempted || guard_released)) {
+      !yield_to_bounce && (!reconnect_attempted || guard_released)) {
     if (MQTTConnectionPolicy::reconnectDue(
             static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_reconnect_attempt),
             slot.reconnect_backoff, static_cast<uint8_t>(index))) {
@@ -3154,6 +3265,10 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
         slot.circuit_breaker_tripped = breaker_before;
         slot.link_retry_pending = link_retry;
         slot.link_caused_outage = link_caused;
+        // No handshake started, so the guard reverts to the last real one; the pass flag stays set.
+        _last_slot_reconnect_ms = guard_ms_before;
+        _guard_armed_by_slot = guard_armer_before;
+        _guard_armer_first_setup = guard_first_setup_before;
       }
     }
   }
@@ -5190,25 +5305,13 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only, int attempts_per
                   "deferring to the reconnect ladder", i + 1);
               continue;
             }
-            // Staged only; the config is applied by connect()/reconnect() below.
+            // Staged only; the queued reconnect in maintainSlotConnection() applies it.
             _slots[i].client->setCredentials(_jwt_username, _slots[i].auth_token);
-            if (action == MQTTConnectionPolicy::StaleTokenAction::Reconnect) {
-              // Reuse the transport — the fault is stale credentials, not the transport —
-              // but via the helper, so a stopped client is started rather than no-opped.
-              reconnectSlotClient(i);
-            } else if (action == MQTTConnectionPolicy::StaleTokenAction::Bounce) {
-              MQTT_DEBUG_PRINTLN("MQTT%d bouncing for the corrected-clock token", i + 1);
-              const esp_err_t soft = softDisconnectSlot(i);
-              if (soft != ESP_OK) {
-                MQTT_DEBUG_PRINTLN("MQTT%d soft disconnect did not complete (%s)", i + 1,
-                                   esp_err_to_name(soft));
-              }
-              // Via the helper, so the re-created token is recorded as applied.
-              const esp_err_t rc = reconnectSlotClient(i);
-              if (rc != ESP_OK) {
-                MQTT_DEBUG_PRINTLN("MQTT%d corrected-clock reconnect failed (%s)", i + 1,
-                                   esp_err_to_name(rc));
-              }
+            if (action == MQTTConnectionPolicy::StaleTokenAction::Reconnect ||
+                action == MQTTConnectionPolicy::StaleTokenAction::Bounce) {
+              // Each reconnect opens a handshake, so maintainSlotConnection() runs them one per guard window.
+              _slots[i].clock_bounce_owed = true;
+              MQTT_DEBUG_PRINTLN("MQTT%d corrected-clock token staged, reconnect queued", i + 1);
             } else {
               MQTT_DEBUG_PRINTLN("MQTT%d token re-created, no bounce (broker does not enforce exp)",
                   i + 1);
