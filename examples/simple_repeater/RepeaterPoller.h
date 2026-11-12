@@ -134,6 +134,7 @@ private:
   mesh::LocalIdentity poll_id_;
   bool     has_id_;
   uint8_t  store_state_;   // poll::StateLoad of the last load
+  uint8_t  recovered_from_;   // state file holding the newest record when it is not the main one
   uint32_t seq_;
   uint32_t key_created_at_;
   uint32_t tag_hw_;
@@ -223,6 +224,7 @@ private:
   uint8_t readStateFile(const char* name, poll::StateRecord* out);
   void loadState();
   bool saveState(const char* why);
+  bool promoteRecovered();
 
   void cmdGetPoll(char* reply);
   void cmdGetStatus(const char* arg, char* reply);

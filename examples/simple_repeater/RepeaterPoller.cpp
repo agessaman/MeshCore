@@ -25,6 +25,7 @@ namespace {
 const char* const kStateFile = "/poll_state";
 const char* const kStateTmp = "/poll_state.tmp";
 const char* const kStateBak = "/poll_state.bak";
+const char* const kStateNames[3] = {kStateFile, kStateTmp, kStateBak};   // pickState's order
 
 const uint32_t kTickMs = 5000;
 const uint32_t kTxStuckMs = 30000;          // a packet neither sent nor failed by then was shed
@@ -103,7 +104,7 @@ bool hexPrefixMatches(const uint8_t* pub, const char* hex, size_t n) {
 }  // namespace
 
 RepeaterPoller::RepeaterPoller()
-    : host_(NULL), fs_(NULL), has_id_(false), store_state_(poll::STATE_EMPTY), seq_(0),
+    : host_(NULL), fs_(NULL), has_id_(false), store_state_(poll::STATE_EMPTY), recovered_from_(0), seq_(0),
       key_created_at_(0), tag_hw_(0), tag_hw_saved_(0), count_(0), enabled_(false), consent_(false),
       interval_min_(60), status_hours_(6), run_kind_(RUN_NONE), run_idx_(-1), run_scheduled_(false),
       run_quick_(false), run_learned_before_(0), poll_tag_count_(0), inflight_(NULL), inflight_ms_(0),
@@ -157,7 +158,7 @@ uint8_t RepeaterPoller::readStateFile(const char* name, poll::StateRecord* out) 
 }
 
 void RepeaterPoller::loadState() {
-  const char* names[3] = {kStateFile, kStateTmp, kStateBak};
+  const char* const* names = kStateNames;
   uint8_t results[3];
   uint32_t seqs[3];
   poll::StateRecord r;
@@ -194,12 +195,39 @@ void RepeaterPoller::loadState() {
   hex8(pfx, poll_id_.pub_key);
   POLL_LOG("state loaded from %s: seq=%lu key=%s tag_hw=%lu", names[best], (unsigned long)seq_,
            has_id_ ? pfx : "none", (unsigned long)tag_hw_);
-  // Rewrite after an interrupted swap, once the targets are known, so one file remains.
-  if (best != 0) save_due_ = true;
+  recovered_from_ = (uint8_t)best;
+  promoteRecovered();
+}
+
+// After an interrupted swap the newest record sits in the temp or backup copy, which the next
+// save would write over; move it to the main name first. Older copies go first so the newest
+// stays the only valid one at every step.
+bool RepeaterPoller::promoteRecovered() {
+  if (recovered_from_ == 0) return true;
+  const char* from = kStateNames[recovered_from_];
+  for (uint8_t i = 0; i < 3; i++) {
+    if (i == recovered_from_ || !fs_->exists(kStateNames[i])) continue;
+    if (!fs_->remove(kStateNames[i])) {
+      POLL_LOG("state: cannot remove %s", kStateNames[i]);
+      return false;
+    }
+  }
+  if (!fs_->rename(from, kStateFile)) {
+    POLL_LOG("state: cannot move %s to %s", from, kStateFile);
+    return false;
+  }
+  POLL_LOG("state: recovered copy %s moved to %s", from, kStateFile);
+  recovered_from_ = 0;
+  return true;
 }
 
 bool RepeaterPoller::saveState(const char* why) {
   if (!fs_ || store_state_ == poll::STATE_NEWER) return false;
+  if (!promoteRecovered()) {
+    POLL_LOG("state save failed (%s)%s", why, save_safety_ ? ", will retry" : "");
+    save_retry_ms_ = millis();
+    return false;
+  }
 
   poll::StateRecord r;
   uint8_t buf[poll::kStateRecordSize];
@@ -231,19 +259,23 @@ bool RepeaterPoller::saveState(const char* why) {
     f.close();
   }
   memset(buf, 0, sizeof(buf));
-  // SPIFFS will not rename onto an existing name: park the old copy, publish, then drop it.
-  if (ok && fs_->exists(kStateFile)) {
-    if (fs_->exists(kStateBak)) fs_->remove(kStateBak);
-    ok = fs_->rename(kStateFile, kStateBak);
+  if (ok) {
+    // The temp copy is complete and the newest from here on: never reuse its seq.
+    seq_ = r.seq;
+    // SPIFFS will not rename onto an existing name: park the old copy, publish, then drop it.
+    if (fs_->exists(kStateFile)) {
+      if (fs_->exists(kStateBak)) fs_->remove(kStateBak);
+      ok = fs_->rename(kStateFile, kStateBak);
+    }
+    if (ok) ok = fs_->rename(kStateTmp, kStateFile);
+    if (ok && fs_->exists(kStateBak)) fs_->remove(kStateBak);
+    if (!ok) recovered_from_ = 1;   // the next save moves the temp copy into place before writing
   }
-  if (ok) ok = fs_->rename(kStateTmp, kStateFile);
-  if (ok && fs_->exists(kStateBak)) fs_->remove(kStateBak);
   if (!ok) {
     POLL_LOG("state save failed (%s)%s", why, save_safety_ ? ", will retry" : "");
     save_retry_ms_ = millis();
     return false;
   }
-  seq_ = r.seq;
   store_state_ = poll::STATE_OK;
   tag_hw_saved_ = tag_hw_;
   save_due_ = false;
