@@ -1587,6 +1587,17 @@ void MQTTBridge::mqttTaskLoop() {
         return;
       }
 
+#if defined(WITH_REPEATER_POLL)
+      // Orphaned workers still own TLS resources, so they delay the same stop ack.
+      if (s_poll_session_alive.load(std::memory_order_acquire)) {
+        MQTT_DEBUG_PRINTLN("MQTT control worker still alive - withholding the bridge stop ack");
+        while (s_poll_session_alive.load(std::memory_order_acquire)) {
+          vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        MQTT_DEBUG_PRINTLN("MQTT control worker stopped - bridge stop ack may proceed");
+      }
+#endif
+
       // Record that the ordered teardown finished, but do NOT publish the ack
       // here: the owner treats the ack as permission to free everything this
       // task can reach, and between this point and vTaskDelete(nullptr) the task
