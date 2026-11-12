@@ -186,6 +186,8 @@ private:
   uint32_t id_retry_ms_;
   bool     ntp_seen_;
   bool     save_due_;
+  bool     save_safety_;   // an admin stop or drill result is not on flash yet
+  uint32_t save_retry_ms_;
   uint8_t  hold_note_;     // why scheduled polling is waiting, logged on change
 
   void tick();

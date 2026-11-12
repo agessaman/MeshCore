@@ -31,6 +31,7 @@ const uint32_t kTxStuckMs = 30000;          // a packet neither sent nor failed 
 const uint32_t kMinRequestListenMs = 10000;
 const uint32_t kNowSpacingS = 60;            // `poll now` on one target at most this often
 const uint8_t  kPoolReserve = 5;
+const uint32_t kSaveRetryMs = 10000;         // between attempts to get an admin stop or drill result onto flash
 
 // Bench-only hooks; no environment sets these. POLL_TEST_INTERVAL_S replaces
 // the interval and window; POLL_TEST_DAY_S shortens the day behind the admin
@@ -109,7 +110,8 @@ RepeaterPoller::RepeaterPoller()
       inflight_sig_(0), inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
       rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), last_tick_ms_(0),
-      last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), hold_note_(0) {
+      last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), save_safety_(false),
+      save_retry_ms_(0), hold_note_(0) {
   memset(&gate_, 0, sizeof(gate_));
   memset(stored_, 0, sizeof(stored_));
   memset(meta_, 0, sizeof(meta_));
@@ -255,20 +257,22 @@ bool RepeaterPoller::saveState(const char* why) {
   if (ok) ok = fs_->rename(kStateTmp, kStateFile);
   if (ok && fs_->exists(kStateBak)) fs_->remove(kStateBak);
   if (!ok) {
-    POLL_LOG("state save failed (%s)", why);
+    POLL_LOG("state save failed (%s)%s", why, save_safety_ ? ", will retry" : "");
+    save_retry_ms_ = millis();
     return false;
   }
   seq_ = r.seq;
   store_state_ = poll::STATE_OK;
   tag_hw_saved_ = tag_hw_;
   save_due_ = false;
+  save_safety_ = false;
   memcpy(stored_, r.targets, sizeof(stored_));
   POLL_LOG("state saved seq=%lu (%s)", (unsigned long)seq_, why);
   return true;
 }
 
 void RepeaterPoller::flush() {
-  if (tag_hw_ != tag_hw_saved_ || save_due_) saveState("flush");
+  if (tag_hw_ != tag_hw_saved_ || save_due_ || save_safety_) saveState("flush");
 }
 
 bool RepeaterPoller::ensureIdentity() {
@@ -499,6 +503,8 @@ void RepeaterPoller::tick() {
     id_retry_ms_ = millis();
     ensureIdentity();
   }
+  // An admin stop must reach flash even while the drill runs.
+  if (save_safety_ && (uint32_t)(millis() - save_retry_ms_) >= kSaveRetryMs) saveState("retry");
   if (busy()) return;
   if (save_due_ || tag_hw_ - tag_hw_saved_ > kPollDay) saveState("tag high-water");
   if (!enabled_ || !has_id_ || store_state_ == poll::STATE_NEWER) return;
@@ -856,6 +862,7 @@ void RepeaterPoller::finishRun() {
              drill_.removed() ? "removed" : "NOT confirmed", drill_.setpermSent() ? "sent" : "not sent",
              (unsigned)drill_.rounds(), (unsigned)drill_.logins(), (unsigned)drill_.teaches(),
              (unsigned)drill_.adminAnswers());
+    save_safety_ = true;
     saveState("admin drill");
     endRun();
     return;
@@ -897,6 +904,7 @@ void RepeaterPoller::finishRun() {
     t.admin_seen = true;
     t.admin_removed = false;
     note(idx, NOTE_ADMIN, 0);
+    save_safety_ = true;
     saveState("admin stop");
     POLL_LOG("admin drill start %s", pfx);
     run_kind_ = RUN_DRILL;
