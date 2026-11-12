@@ -5,7 +5,8 @@
 // src/helpers/poll: drives one PollExchange (or PollAdminDrill) at a time from
 // the mesh loop, builds its packets, reads replies off the RX tap, and keeps
 // the small flash record. CoreScope control (policy, owners, registration,
-// claims) is not here yet: controlFor() is where it will plug in.
+// shared key, claims) is filed with the bridge and decided here, in the order
+// the plugin's poll cycle uses.
 
 #include <helpers/poll/PollBuild.h>
 
@@ -14,8 +15,12 @@
 #include <Mesh.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/poll/PollAdminDrill.h>
+#include <helpers/poll/PollClaims.h>
+#include <helpers/poll/PollControlTypes.h>
+#include <helpers/poll/PollCycle.h>
 #include <helpers/poll/PollExchange.h>
 #include <helpers/poll/PollPolicy.h>
+#include <helpers/poll/PollRegistration.h>
 #include <helpers/poll/PollReplyParsers.h>
 #include <helpers/poll/PollStateStore.h>
 
@@ -28,6 +33,9 @@ struct PollSettings {
   uint8_t  count;                                       // packed: targets[0..count)
   uint8_t  targets[poll::kMaxTargets][poll::kPubKeySize];
   uint8_t  pw_mode[poll::kMaxTargets];                  // PasswordMode
+  char     url[poll::kControlUrlMax];                   // CoreScope base URL, "" = none
+  uint8_t  slot;                                        // 1-based MQTT slot for the claim, 0 = unset
+  bool     community;                                   // share polling with other observers
 };
 
 // What the poller needs from the mesh. MyMesh implements it; the poller never
@@ -59,6 +67,17 @@ public:
   virtual bool pollDiscoveryBusy() = 0;
   virtual uint8_t pollNodeHash() = 0;           // the node key's first byte
   virtual void pollReadSettings(PollSettings& out) = 0;
+  // The node identity, public half only: claim origin and origin_id, registration observer_id.
+  virtual void pollNodePub(uint8_t* out) = 0;
+  virtual const char* pollNodeName() = 0;
+  virtual const char* pollFirmwareVersion() = 0;
+  // Signs the polling key's registration with the node key; nothing else is ever signed with it.
+  virtual void pollSignRegistration(uint8_t* sig, const uint8_t* msg, size_t len) = 0;
+  // The bridge's CoreScope hand-offs; none block, all refuse while the bridge is stopped or busy.
+  virtual bool pollRequestControl(const poll::ControlRequest& req) = 0;
+  virtual bool pollTakeControlResult(poll::ControlResult& out) = 0;
+  virtual bool pollRequestClaim(const char* json, size_t len, uint8_t slot) = 0;
+  virtual uint8_t pollTakeClaimResult() = 0;
 };
 
 // What identifies a queued packet when only its pool slot is known.
@@ -69,7 +88,7 @@ struct PollPacketSig {
   uint32_t hash;
 };
 
-// The "may I poll this target now" inputs. Fixed in this phase; CoreScope fills it later.
+// The "may I poll this target now" inputs, from CoreScope's policy and owners.
 struct PollControl {
   uint8_t  role;           // poll::Role
   uint8_t  gate;           // poll::Gate
@@ -108,6 +127,9 @@ public:
 
   // False when listing pub would leave no room for a removed target's unverified admin stop.
   bool roomFor(const uint8_t* pub);
+
+  // A CoreScope control session filed by the poller has not been answered yet.
+  bool controlPending() const { return ctl_pending_; }
 
 private:
   enum RunKind : uint8_t { RUN_NONE = 0, RUN_EXCHANGE, RUN_DRILL };
@@ -249,6 +271,75 @@ private:
   void cmdNow(const char* arg, char* reply);
   void cmdEnable(const char* arg, char* reply);
   bool enableRemoved(const char* arg, char* reply);
+
+  // CoreScope control
+  enum CtlOutcome : uint8_t { CTL_NEVER = 0, CTL_DONE, CTL_NO_SESSION, CTL_TIMEOUT };
+
+  poll::Policy policy_;              // in use: the defaults, or the last 200 this boot
+  bool     policy_answered_;         // the policy endpoint answered 200 or 404 this boot
+  bool     gate_save_due_;           // the saved gate changed and is not on flash yet
+  uint8_t  gate_now_;                // poll::Gate as last worked out
+  poll::OwnerEntry owners_[kSlots];  // per slot; cleared when the owners reply lapses
+  uint32_t owners_ok_at_;
+  poll::ClaimTiming claim_;
+  bool     claim_pending_;
+  bool     claim_pending_community_;
+  uint32_t claim_pending_sig_;
+  uint32_t claim_filed_ms_;
+  uint32_t claim_sent_at_;           // last claim the bridge took this boot, 0 = none
+  poll::RegistrationState reg_;
+  mesh::LocalIdentity shared_id_;    // CoreScope's shared key, when one was fetched
+  bool     has_shared_;
+  uint32_t shared_at_;
+  uint8_t  key_in_use_;              // poll::KeyChoice
+  uint8_t  acl_key_;                 // the key the per-target login state was learned under
+  uint32_t started_at_;              // first tick with a synced clock
+  uint32_t gated_at_;                // last time the gate was seen closed
+  uint32_t url_hash_;                // a new CoreScope starts its state over
+  bool     has_url_;
+  bool     community_;
+  uint8_t  claim_slot_;
+  bool     ctl_pending_;
+  bool     ctl_deferred_;            // needed and allowed, held back until the claim in flight is answered
+  bool     ctl_ever_;
+  uint8_t  ctl_want_;
+  uint32_t ctl_filed_ms_;
+  uint32_t ctl_retry_ms_;            // a refused filing is tried again after this
+  uint8_t  ctl_count_;               // targets in the pending request
+  int8_t   ctl_slot_[poll::kMaxTargets];
+  uint8_t  ctl_pfx_[poll::kMaxTargets][4];
+  uint8_t  ctl_last_;                // CtlOutcome
+  uint32_t ctl_last_at_;
+  int16_t  ctl_status_[4];           // owners, policy, registration, shared key
+  uint8_t  skip_[kSlots];            // poll::SkipReason of the last decision
+  uint8_t  ctl_note_;                // log-once notes
+  uint8_t  key_note_;
+
+  const mesh::LocalIdentity& pollKey() const { return key_in_use_ == poll::KEY_SHARED ? shared_id_ : poll_id_; }
+  void initControl();
+  void resetCorescope();
+  uint32_t startupHoldS() const;
+  uint32_t windowFor(uint8_t idx, uint32_t now) const;
+  uint8_t gateAt(uint32_t now) const;
+  bool startingAt(uint32_t now) const;
+  bool anyTargetDue(uint32_t now);
+  void readControlSettings(const PollSettings& s);
+  void serviceControl();
+  void takeControl(uint32_t now);
+  void noSession(uint8_t outcome, uint32_t now);
+  void applyControl(const poll::ControlResult& res, uint32_t now);
+  void discardUnasked();
+  void fileControl(uint32_t now, bool registering, bool want_shared);
+  void copyUrl(char* out, size_t cap);
+  bool buildRegistration(poll::ControlRequest& req, uint32_t now);
+  void maybeFileControl(uint32_t now);
+  void takeClaim(uint32_t now);
+  void maybeClaim(uint32_t now);
+  void updateKey(uint32_t now);
+  void scheduleTick(uint32_t now);
+  poll::CycleInput cycleInputFor(uint8_t idx, bool test, uint32_t now) const;
+  void noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now);
+  void fmtControl(char* out, size_t cap, uint32_t now) const;
 };
 
 #endif  // WITH_REPEATER_POLL

@@ -51,6 +51,8 @@ does not reflect the GoogleTest count — run the built binary directly
 | `test_utils` | `src/Utils.cpp` | `Utils::toHex` (upstream) |
 | `test_poll_schedule` | `src/helpers/poll/PollSchedule.h` | guest-key poll scheduling: per-target phase spreading and slot boundaries; the half-period guard; 20 min quick retries; daily silence, flood and no-battery backoff; next-slot display; per-window request cap; send-history ring and result folding; oldest-first pick with the 60 s scheduled gap |
 | `test_poll_state_store` | `src/helpers/poll/PollStateStore.h` | repeater-poll flash record: byte layout and CRC32; field round trip; empty, truncated, trailing-byte, bit-flip and impossible-value rejection; newer version reported without parsing; choosing among primary/temp/backup copies by sequence |
+| `test_poll_cycle` | `src/helpers/poll/PollCycle.h` | the plugin's pre-poll check order: gate and exclusions stop `poll now` too; request cap before the owner's role; paused/disabled roles; standby-since bookkeeping; startup hold; fresh skip, fail-open poller, holding standby, standby queue by rank, wait restart after a pause; next-due written by cap, fresh and standby skips only |
+| `test_poll_control_plan` | `src/helpers/poll/PollControlPlan.h` | when a CoreScope control session is needed and allowed (one per period); what it asks for; when the shared key is wanted; policy answers (200 replaces and clamps, 404 and failures keep the switches, stale doubling); saved gate across a restart; fast-mode floors |
 
 ## Conventions (and how to add a suite)
 

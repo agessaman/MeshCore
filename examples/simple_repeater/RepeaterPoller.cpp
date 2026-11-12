@@ -6,6 +6,7 @@
 #include <Packet.h>
 #include <Utils.h>
 #include <helpers/MQTTConnectionPolicy.h>
+#include <helpers/poll/PollControlPlan.h>
 #include <helpers/poll/PollPacketCodec.h>
 #include <helpers/poll/PollSchedule.h>
 
@@ -18,7 +19,7 @@
 static_assert(PATH_HASH_SIZE == 1, "poll packets carry one-byte hashes");
 static_assert(PUB_KEY_SIZE == poll::kPubKeySize, "key size");
 static_assert(PRV_KEY_SIZE == poll::kPrvKeySize, "private key size");
-static_assert(sizeof(RepeaterPoller) <= 3952, "repeater poller RAM budget");
+static_assert(sizeof(RepeaterPoller) <= 5184, "repeater poller RAM budget");
 
 namespace {
 
@@ -47,6 +48,25 @@ const uint32_t kScheduledGapS = (POLL_TEST_INTERVAL_S / 2) < 60 ? (POLL_TEST_INT
 #else
 const uint32_t kScheduledGapS = 60;
 #endif
+// Bench-only: POLL_TEST_CONTROL_EVERY_S replaces the spacing of CoreScope control sessions.
+#ifdef POLL_TEST_CONTROL_EVERY_S
+const uint32_t kCtlEveryS = POLL_TEST_CONTROL_EVERY_S;
+#else
+const uint32_t kCtlEveryS = poll::kControlEveryS;
+#endif
+// Under POLL_TEST_INTERVAL_S the policy's time floors drop to a minute, as in the plugin's fast mode.
+#ifdef POLL_TEST_INTERVAL_S
+const bool kFastPolicy = true;
+#else
+const bool kFastPolicy = false;
+#endif
+const uint32_t kCtlRetryMs = 30000;          // a session the bridge refused is filed again after this
+const uint32_t kClaimTimeoutMs = 60000;      // a claim the bridge never answered counts as failed
+
+// Log-once bits in ctl_note_.
+const uint8_t kNoteWaitCtl = 1;
+const uint8_t kNoteRefused = 2;
+const uint8_t kNoteClaimRefused = 4;
 
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
 
@@ -132,6 +152,7 @@ RepeaterPoller::RepeaterPoller()
   memset(poll_tags_, 0, sizeof(poll_tags_));
   memset(events_, 0, sizeof(events_));
   memset(&inflight_sig_, 0, sizeof(inflight_sig_));
+  initControl();
 }
 
 void RepeaterPoller::begin(RepeaterPollHost* host, FILESYSTEM* fs) {
@@ -293,6 +314,7 @@ bool RepeaterPoller::saveState(const char* why) {
   tag_hw_saved_ = tag_hw_;
   save_due_ = false;
   save_safety_ = false;
+  gate_save_due_ = false;
   POLL_LOG("state saved seq=%lu (%s)", (unsigned long)seq_, why);
   return true;
 }
@@ -423,6 +445,7 @@ void RepeaterPoller::readSettings() {
   interval_min_ = s.interval_min ? s.interval_min : 60;
   status_hours_ = s.status_hours;
   count_ = s.count;
+  readControlSettings(s);
 
   // Drop targets no longer listed; a running drill keeps its slot until it ends.
   for (uint8_t i = 0; i < kSlots; i++) {
@@ -482,28 +505,24 @@ void RepeaterPoller::readSettings() {
 }
 
 PollControl RepeaterPoller::controlFor(uint8_t idx) const {
-  (void)idx;
+  const uint32_t now = host_->pollNow();
   PollControl c;
-  c.role = poll::ROLE_POLLER;
-  c.gate = poll::GATE_OPEN;
-#ifdef POLL_TEST_INTERVAL_S
-  c.window_s = POLL_TEST_INTERVAL_S;
-#else
-  c.window_s = poll::kDirectDefaultS;
-#endif
-  c.max_requests = poll::kMaxRequestsDefault;
-  c.own_key = true;
+  c.role = poll::mapRole(community_, owners_[idx]);
+  c.gate = gateAt(now);
+  c.window_s = windowFor(idx, now);
+  c.max_requests = policy_.max_requests;
+  c.own_key = key_in_use_ == poll::KEY_OWN;
   return c;
 }
 
+// CoreScope's window is a floor: the local interval can only make polling slower.
 uint32_t RepeaterPoller::intervalFor(const PollControl& c) const {
 #ifdef POLL_TEST_INTERVAL_S
-  (void)c;
-  return POLL_TEST_INTERVAL_S;
+  const uint32_t local = POLL_TEST_INTERVAL_S;
 #else
-  uint32_t local = (uint32_t)interval_min_ * 60UL;
-  return local > c.window_s ? local : c.window_s;
+  const uint32_t local = (uint32_t)interval_min_ * 60UL;
 #endif
+  return local > c.window_s ? local : c.window_s;
 }
 
 bool RepeaterPoller::clockOk() {
@@ -581,6 +600,8 @@ void RepeaterPoller::tick() {
   }
   // An admin stop must reach flash even while the drill runs.
   if (save_safety_ && (uint32_t)(millis() - save_retry_ms_) >= kSaveRetryMs) saveState("retry");
+  serviceControl();
+  if (gate_save_due_ && (uint32_t)(millis() - save_retry_ms_) >= kSaveRetryMs) saveState("saved gate");
   if (busy()) return;
   if (save_due_ || tag_hw_ - tag_hw_saved_ > kPollDay) {
     saveState("tag high-water");
@@ -599,40 +620,7 @@ void RepeaterPoller::tick() {
     else if (hold == 2) POLL_LOG("waiting for neighbor discovery to finish");
   }
   if (hold) return;
-
-  const uint32_t now = host_->pollNow();
-  bool due[kSlots];
-  for (uint8_t i = 0; i < kSlots; i++) {
-    due[i] = false;
-    if (!meta_[i].used || meta_[i].orphan) continue;
-    poll::TargetState& t = states_[i];
-    if (t.admin_seen) {
-      note(i, NOTE_ADMIN, 0);
-      continue;
-    }
-    const PollControl c = controlFor(i);
-    if (c.role != poll::ROLE_POLLER || c.gate != poll::GATE_OPEN) continue;
-    if (!directRoute(i, NULL)) {
-      t.code = poll::CODE_NOT_DIRECT;
-      note(i, NOTE_NOT_DIRECT, 0);
-      continue;
-    }
-    if (t.next_due_at > now) continue;
-    if (!poll::isDue(t, meta_[i].interval_s, now, meta_[i].phase_s)) {
-      note(i, NOTE_WAIT, 0);
-      continue;
-    }
-    uint32_t until = 0;
-    if (poll::capReached(t, c.window_s, c.max_requests, now, &until)) {
-      t.next_due_at = until;
-      note(i, NOTE_CAP, until > now ? until - now : 0);
-      continue;
-    }
-    note(i, NOTE_DUE, 0);
-    due[i] = true;
-  }
-  int pick = poll::pickDue(states_, due, kSlots, now, last_scheduled_at_, kScheduledGapS);
-  if (pick >= 0) startPoll((uint8_t)pick, true);
+  scheduleTick(host_->pollNow());
 }
 
 // ---------------------------------------------------------------------------
@@ -644,7 +632,7 @@ void RepeaterPoller::startPoll(uint8_t idx, bool scheduled) {
   const PollControl c = controlFor(idx);
 
   if (!meta_[idx].secret_ok) {
-    poll_id_.calcSharedSecret(meta_[idx].secret, meta_[idx].pub);
+    pollKey().calcSharedSecret(meta_[idx].secret, meta_[idx].pub);
     meta_[idx].secret_ok = true;
   }
 
@@ -653,6 +641,7 @@ void RepeaterPoller::startPoll(uint8_t idx, bool scheduled) {
   poll::recordSend(t, now);
   t.next_due_at = 0;
   meta_[idx].note = NOTE_NONE;
+  skip_[idx] = poll::SKIP_NONE;
 
 #ifdef POLL_TEST_DAY_S
   // Clearing a stamp makes the machine treat that check as due.
@@ -761,7 +750,7 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
       n = poll::buildLoginPlain(plain, sizeof(plain), tag, s.pw);
       if (n) {
         mesh::Identity target(meta_[idx].pub);
-        pkt = host_->pollCreateLogin(poll_id_, target, meta_[idx].secret, plain, n);
+        pkt = host_->pollCreateLogin(pollKey(), target, meta_[idx].secret, plain, n);
       }
       break;
     }
@@ -778,20 +767,20 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
           memmove(poll_tags_, poll_tags_ + 1, sizeof(poll_tags_[0]) * (kMaxPollTags - 1));
           poll_tags_[kMaxPollTags - 1] = tag;
         }
-        pkt = buildDatagram(PAYLOAD_TYPE_REQ, poll_id_, idx, plain, n);
+        pkt = buildDatagram(PAYLOAD_TYPE_REQ, pollKey(), idx, plain, n);
       }
       break;
     }
     case poll::ACT_SEND_TEACH: {
       host_->pollRng()->random(rnd, sizeof(rnd));
       n = poll::buildTeachPlain(plain, sizeof(plain), NULL, 0, rnd);
-      if (n) pkt = buildDatagram(PAYLOAD_TYPE_PATH, poll_id_, idx, plain, n);
+      if (n) pkt = buildDatagram(PAYLOAD_TYPE_PATH, pollKey(), idx, plain, n);
       break;
     }
     case poll::ACT_SEND_SETPERM: {
       tag = nextTag();
-      n = poll::buildSetPermPlain(plain, sizeof(plain), tag, poll_id_.pub_key);
-      if (n) pkt = buildDatagram(PAYLOAD_TYPE_TXT_MSG, poll_id_, idx, plain, n);
+      n = poll::buildSetPermPlain(plain, sizeof(plain), tag, pollKey().pub_key);
+      if (n) pkt = buildDatagram(PAYLOAD_TYPE_TXT_MSG, pollKey(), idx, plain, n);
       break;
     }
     default:
@@ -885,7 +874,7 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
   if (run_kind_ == RUN_NONE || !has_id_ || !pkt) return;
   const uint8_t idx = (uint8_t)run_idx_;
   const uint8_t type = pkt->getPayloadType();
-  if (!poll::isCandidateReply(type, pkt->payload, pkt->payload_len, poll_id_.pub_key[0], meta_[idx].pub[0])) return;
+  if (!poll::isCandidateReply(type, pkt->payload, pkt->payload_len, pollKey().pub_key[0], meta_[idx].pub[0])) return;
   const bool expect_login = run_kind_ == RUN_EXCHANGE ? exchange_.expectsLogin() : drill_.expectsLogin();
   const bool expect_data = run_kind_ == RUN_EXCHANGE && exchange_.expectsData();
   if (!expect_login && !expect_data) return;
@@ -1095,6 +1084,9 @@ bool RepeaterPoller::handleCommand(const char* command, char* reply) {
     cmdGetPoll(reply);
   } else if (strcmp(command, "get poll.key") == 0) {
     cmdGetKey(reply);
+  } else if (strcmp(command, "get poll.control") == 0) {
+    readSettings();
+    fmtControl(reply, 160, host_->pollNow());
   } else if (strcmp(command, "get poll.status") == 0 || strncmp(command, "get poll.status ", 16) == 0) {
     cmdGetStatus(command + 15, reply);
   } else if (strncmp(command, "poll now", 8) == 0 && (command[8] == ' ' || command[8] == 0)) {
@@ -1111,11 +1103,17 @@ void RepeaterPoller::cmdGetPoll(char* reply) {
   readSettings();
   uint8_t ok = 0, total = 0;
   summary(&ok, &total);
-  // The saved gate is kept in flash for CoreScope control; until then the gate is always open.
-  snprintf(reply, 160, "> %s, targets %u (%u ok), key %s, gate %s, clock %s%s%s", enabled_ ? "on" : "off",
-           (unsigned)total, (unsigned)ok, has_id_ ? "own" : "none", "open", clockOk() ? "ok" : "not synced",
-           busy() ? ", polling now" : "",
-           store_state_ == poll::STATE_NEWER ? ", state from newer firmware (read-only)" : "");
+  const uint32_t now = host_->pollNow();
+  const uint8_t gate = gateAt(now);
+  const char* key = key_in_use_ == poll::KEY_OWN ? "own"
+                    : key_in_use_ == poll::KEY_SHARED ? "shared"
+                    : !has_id_ ? "none (no polling key yet)"
+                    : "none (not registered, no shared key)";
+  // CoreScope details are in `get poll.control`; this line stays under the reply buffer.
+  snprintf(reply, 160, "> %s, targets %u (%u ok), key %s, gate %s%s, clock %s%s%s", enabled_ ? "on" : "off",
+           (unsigned)total, (unsigned)ok, key, gate == poll::GATE_OPEN ? "open" : poll::gateName(gate),
+           gate != poll::GATE_OPEN && !policy_.ever_fetched ? " (saved)" : "", clockOk() ? "ok" : "not synced",
+           busy() ? ", polling now" : "", store_state_ == poll::STATE_NEWER ? ", state from newer fw (read-only)" : "");
 }
 
 void RepeaterPoller::cmdGetKey(char* reply) {
@@ -1188,8 +1186,17 @@ void RepeaterPoller::cmdGetStatus(const char* arg, char* reply) {
     snprintf(next, sizeof(next), "%lus", (unsigned long)(at > now ? at - now : 0));
   }
   const char* pw = t.learned_pw == poll::LEARNED_HELLO ? "hello" : t.learned_pw == poll::LEARNED_BLANK ? "blank" : "?";
-  snprintf(reply, 160, "> %s %s %s ago, %s, %s, %s, %s, next %s, login %s pw %s, flood %u%s", pfx,
-           poll::codeName(t.code), age, batt, temp, route, poll::roleName(controlFor((uint8_t)idx).role), next,
+  const uint8_t role = poll::mapRole(community_, owners_[idx]);
+  char role_txt[16];
+  if (role == poll::ROLE_STANDBY) {
+    snprintf(role_txt, sizeof(role_txt), "standby#%u", (unsigned)(owners_[idx].standby_rank ? owners_[idx].standby_rank : 1));
+  } else {
+    snprintf(role_txt, sizeof(role_txt), "%s", poll::roleName(role));
+  }
+  char skip[24] = "";
+  if (skip_[idx] != poll::SKIP_NONE && !t.admin_seen) snprintf(skip, sizeof(skip), ", skip %s", poll::skipReasonName(skip_[idx]));
+  snprintf(reply, 160, "> %s %s %s ago, %s, %s, %s, %s, next %s%s, login %s pw %s, flood %u%s", pfx,
+           poll::codeName(t.code), age, batt, temp, route, role_txt, next, skip,
            t.logged_in_at ? "acl" : "none", pw, (unsigned)t.flood_replies,
            t.admin_seen ? (t.admin_removed ? ", admin removed" : ", admin NOT removed") : "");
 }
@@ -1206,6 +1213,8 @@ void RepeaterPoller::cmdNow(const char* arg, char* reply) {
   poll::TargetState& t = states_[idx];
   const uint32_t now = host_->pollNow();
   const PollControl c = controlFor((uint8_t)idx);
+  // As the plugin's Test: CoreScope's gate and exclusions apply, its cap, roles and freshness do not.
+  const poll::Decision d = poll::decideCycle(t, cycleInputFor((uint8_t)idx, true, now), now);
   if (store_state_ == poll::STATE_NEWER) {
     strcpy(reply, "Error: poll state is from newer firmware");
   } else if (!has_id_) {
@@ -1216,6 +1225,10 @@ void RepeaterPoller::cmdNow(const char* arg, char* reply) {
     strcpy(reply, "Error: clock not synced");
   } else if (c.gate != poll::GATE_OPEN) {
     snprintf(reply, 160, "Error: polling %s", poll::gateName(c.gate));
+  } else if (!d.poll) {
+    strcpy(reply, "Error: excluded by CoreScope");
+  } else if (key_in_use_ == poll::KEY_NONE) {
+    strcpy(reply, "Error: no polling key in use (not registered with CoreScope, no shared key)");
   } else if (busy() || host_->pollDiscoveryBusy()) {
     strcpy(reply, "busy");
   } else if (t.last_attempt && t.last_attempt <= now && now - t.last_attempt < kNowSpacingS) {
@@ -1293,6 +1306,655 @@ bool RepeaterPoller::enableRemoved(const char* arg, char* reply) {
   if (saveState("re-enabled")) snprintf(reply, 160, "OK - %s (removed target) re-enabled", pfx);
   else snprintf(reply, 160, "OK - %s (removed target) re-enabled (not saved)", pfx);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// CoreScope control: policy, owners, registration, shared key and claims
+
+namespace {
+
+uint32_t fnv(const char* s) {
+  uint32_t h = 2166136261UL;
+  while (*s) h = (h ^ (uint8_t)*s++) * 16777619UL;
+  return h;
+}
+
+void wipe(void* p, size_t n) {
+  volatile uint8_t* b = static_cast<volatile uint8_t*>(p);
+  for (size_t i = 0; i < n; i++) b[i] = 0;
+}
+
+const char* keyName(uint8_t k) {
+  return k == poll::KEY_OWN ? "own" : k == poll::KEY_SHARED ? "shared" : "none";
+}
+
+void fmtStatus(char* out, size_t cap, bool wanted, int16_t status) {
+  if (!wanted) snprintf(out, cap, "-");
+  else snprintf(out, cap, "%d", (int)status);
+}
+
+}  // namespace
+
+void RepeaterPoller::initControl() {
+  poll::policyDefaults(policy_);
+  policy_answered_ = false;
+  gate_save_due_ = false;
+  gate_now_ = poll::GATE_OPEN;
+  memset(owners_, 0, sizeof(owners_));
+  owners_ok_at_ = 0;
+  memset(&claim_, 0, sizeof(claim_));
+  claim_pending_ = false;
+  claim_pending_community_ = false;
+  claim_pending_sig_ = 0;
+  claim_filed_ms_ = 0;
+  claim_sent_at_ = 0;
+  memset(&reg_, 0, sizeof(reg_));
+  has_shared_ = false;
+  shared_at_ = 0;
+  key_in_use_ = poll::KEY_NONE;
+  acl_key_ = poll::KEY_OWN;   // what the flash record's learned passwords were learned under
+  started_at_ = 0;
+  gated_at_ = 0;
+  url_hash_ = 0;
+  has_url_ = false;
+  community_ = true;
+  claim_slot_ = 0;
+  ctl_pending_ = false;
+  ctl_deferred_ = false;
+  ctl_ever_ = false;
+  ctl_want_ = 0;
+  ctl_filed_ms_ = 0;
+  ctl_retry_ms_ = 0;
+  ctl_count_ = 0;
+  memset(ctl_slot_, 0, sizeof(ctl_slot_));
+  memset(ctl_pfx_, 0, sizeof(ctl_pfx_));
+  ctl_last_ = CTL_NEVER;
+  ctl_last_at_ = 0;
+  memset(ctl_status_, 0, sizeof(ctl_status_));
+  memset(skip_, 0, sizeof(skip_));
+  ctl_note_ = 0;
+  key_note_ = 0;
+}
+
+// What one CoreScope said belongs to it; the plugin starts over when the URL changes.
+void RepeaterPoller::resetCorescope() {
+  poll::policyDefaults(policy_);
+  policy_answered_ = false;
+  memset(owners_, 0, sizeof(owners_));
+  owners_ok_at_ = 0;
+  memset(&claim_, 0, sizeof(claim_));
+  claim_sent_at_ = 0;
+  memset(&reg_, 0, sizeof(reg_));
+  has_shared_ = false;
+  shared_at_ = 0;
+  ctl_ever_ = false;
+  ctl_want_ = 0;   // an answer still on its way came from the old URL
+  ctl_last_ = CTL_NEVER;
+  const poll::SavedGate open = {false, false, false, 0};
+  if (!poll::savedGateEqual(gate_, open)) {
+    gate_ = open;
+    gate_save_due_ = true;
+  }
+  POLL_LOG("CoreScope URL changed: policy, owners, registration and shared key start over");
+}
+
+void RepeaterPoller::readControlSettings(const PollSettings& s) {
+  has_url_ = s.url[0] != 0;
+  community_ = s.community;
+  claim_slot_ = s.slot;
+  const uint32_t h = fnv(s.url);
+  if (h != url_hash_) {
+    if (url_hash_ != 0) resetCorescope();
+    url_hash_ = h;
+  }
+}
+
+uint32_t RepeaterPoller::startupHoldS() const {
+#ifdef POLL_TEST_INTERVAL_S
+  return 2 * kCtlEveryS + 60;
+#else
+  return poll::kStartupHoldS;
+#endif
+}
+
+uint32_t RepeaterPoller::windowFor(uint8_t idx, uint32_t now) const {
+#ifdef POLL_TEST_INTERVAL_S
+  if (!policy_.ever_fetched) return POLL_TEST_INTERVAL_S;
+#endif
+  // Direct neighbors only, so the one-hop window never applies.
+  return poll::policyWindow(policy_, meta_[idx].pub, 0, now);
+}
+
+uint8_t RepeaterPoller::gateAt(uint32_t now) const {
+  return poll::gateInForce(policy_, gate_, poll::kPluginVersion, now);
+}
+
+bool RepeaterPoller::startingAt(uint32_t now) const {
+  return poll::startupHold(community_, has_url_, started_at_, claim_sent_at_, owners_ok_at_, now, startupHoldS());
+}
+
+poll::CycleInput RepeaterPoller::cycleInputFor(uint8_t idx, bool test, uint32_t now) const {
+  poll::CycleInput in;
+  memset(&in, 0, sizeof(in));
+  const poll::OwnerEntry& e = owners_[idx];
+  in.test = test;
+  in.gate = gateAt(now);
+  in.excluded = poll::policyExcluded(policy_, meta_[idx].pub);
+  in.role = poll::mapRole(community_, e);
+  in.rank = e.standby_rank ? e.standby_rank : 1;
+  in.starting = startingAt(now);
+  in.has_url = has_url_;
+  in.window_s = windowFor(idx, now);
+  in.max_requests = policy_.max_requests;
+  in.grace_s = policy_.grace_s;
+  // The owners reply's latest_ts stands in for the plugin's per-poll battery lookup.
+  in.corescope_reachable = owners_ok_at_ != 0 && !poll::ownersLapsed(owners_ok_at_, now, poll::kOwnersReachableS);
+  in.latest_ts = e.present ? e.latest_ts : 0;
+  in.hold_from = started_at_ > gated_at_ ? started_at_ : gated_at_;
+#ifdef POLL_TEST_INTERVAL_S
+  in.hold_recheck_s = kCtlEveryS;
+#else
+  in.hold_recheck_s = poll::kHoldRecheckS;
+#endif
+  return in;
+}
+
+bool RepeaterPoller::anyTargetDue(uint32_t now) {
+  for (uint8_t i = 0; i < kSlots; i++) {
+    if (!meta_[i].used || meta_[i].orphan || states_[i].admin_seen) continue;
+    if (!directRoute(i, NULL)) continue;
+    if (poll::isDue(states_[i], meta_[i].interval_s, now, meta_[i].phase_s)) return true;
+  }
+  return false;
+}
+
+void RepeaterPoller::serviceControl() {
+  const uint32_t now = host_->pollNow();
+  const bool clock = clockOk();
+  ctl_deferred_ = false;
+  takeControl(now);
+  takeClaim(now);
+  if (!enabled_ || !has_id_ || store_state_ == poll::STATE_NEWER || !clock) return;
+  if (started_at_ == 0) started_at_ = now;
+
+  // Owners that stopped answering are forgotten: this observer then polls every target itself.
+  if (owners_ok_at_ != 0 && poll::ownersLapsed(owners_ok_at_, now)) {
+    bool any = false;
+    for (uint8_t i = 0; i < kSlots; i++) any = any || owners_[i].present;
+    if (any) {
+      memset(owners_, 0, sizeof(owners_));
+      POLL_LOG("CoreScope owners not answered for %lus: polling every target", (unsigned long)poll::kOwnersStaleS);
+    }
+  }
+
+  const uint8_t gate = gateAt(now);
+  if (gate != gate_now_) {
+    if (gate != poll::GATE_OPEN) {
+      POLL_LOG("CoreScope gate %s%s: nothing is sent, poll now included", poll::gateName(gate),
+               policy_.ever_fetched ? "" : " (saved)");
+    } else {
+      POLL_LOG("CoreScope gate %s lifted, polling resumes", poll::gateName(gate_now_));
+    }
+    gate_now_ = gate;
+  }
+  if (gate != poll::GATE_OPEN) gated_at_ = now;
+
+  updateKey(now);
+  maybeClaim(now);
+  maybeFileControl(now);
+}
+
+void RepeaterPoller::updateKey(uint32_t now) {
+  const uint8_t want = poll::chooseKey(reg_, has_shared_, now);
+  if (want == key_in_use_ || busy()) return;   // a run keeps the key it started with
+  char pfx[9] = "-";
+  if (want == poll::KEY_OWN) hex8(pfx, poll_id_.pub_key);
+  else if (want == poll::KEY_SHARED) hex8(pfx, shared_id_.pub_key);
+  POLL_LOG("polling key %s %s (was %s)", keyName(want), pfx, keyName(key_in_use_));
+  key_in_use_ = want;
+  key_note_ = 0;
+  if (want == poll::KEY_NONE || want == acl_key_) return;
+  // A target keeps one ACL entry per key: nothing learned under the other key carries over.
+  bool learned = false;
+  for (uint8_t k = 0; k < poll::kStoredTargets; k++) learned = learned || stored_[k].learned_pw != poll::LEARNED_NONE;
+  acl_key_ = want;
+  forgetKeyState();
+  if (learned) save_due_ = true;
+}
+
+void RepeaterPoller::takeClaim(uint32_t now) {
+  if (!claim_pending_) return;
+  uint8_t r = host_->pollTakeClaimResult();
+  if (r == poll::CLAIM_PENDING) {
+    if ((uint32_t)(millis() - claim_filed_ms_) < kClaimTimeoutMs) return;
+    r = poll::CLAIM_FAILED;
+  }
+  claim_pending_ = false;
+  if (r == poll::CLAIM_PUBLISHED) {
+    poll::claimSent(claim_, claim_pending_sig_, claim_pending_community_, now);
+    claim_sent_at_ = now;
+    POLL_LOG("claim published to slot %u%s", (unsigned)claim_slot_, claim_pending_community_ ? "" : " (community off)");
+  } else {
+    // A bridge stop drops the answer (CLAIM_NONE): that is a failure too.
+    poll::claimFailed(claim_, now);
+    POLL_LOG("claim to slot %u failed; retry in %lus", (unsigned)claim_slot_, (unsigned long)poll::kClaimRetrySec);
+  }
+}
+
+// One claim per target this observer can reach and may poll, as claims.py does. Claims go out
+// while paused, gated or on standby so CoreScope keeps the roles current.
+__attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
+  if (claim_pending_ || claim_slot_ == 0) return;
+  poll::ClaimNode nodes[poll::kMaxTargets];
+  uint8_t n = 0;
+  for (uint8_t p = 0; p < count_ && n < poll::kMaxTargets; p++) {
+    for (uint8_t i = 0; i < kSlots; i++) {
+      if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
+      int8_t snr = 0;
+      // An admin-stopped target is never polled here, so it is not offered either.
+      if (states_[i].admin_seen || !directRoute(i, &snr) || poll::policyExcluded(policy_, meta_[i].pub)) break;
+      poll::ClaimNode& c = nodes[n++];
+      memset(&c, 0, sizeof(c));
+      memcpy(c.node, meta_[i].pub, poll::kPubKeySize);
+      c.reply_hops = 0;
+      c.personal_key = key_in_use_ == poll::KEY_OWN;
+      c.has_snr = true;
+      c.snr_x4 = snr;
+      break;
+    }
+  }
+  const uint32_t sig = poll::claimSignature(nodes, n, community_);
+  if (!poll::claimDue(claim_, sig, community_, now)) return;
+  if (n == 0) return;   // nothing to claim, nothing to take back
+
+  char json[poll::kClaimJsonMax + 1];
+  char tag[48];
+  uint8_t self_pub[poll::kPubKeySize];
+  snprintf(tag, sizeof(tag), "meshcore.observer_fw/%s", host_->pollFirmwareVersion());
+  host_->pollNodePub(self_pub);
+  const size_t len = poll::buildClaimJson(json, sizeof(json), host_->pollNodeName(), self_pub, now, tag,
+                                          policy_.version, community_, nodes, n);
+  if (len == 0) {
+    poll::claimFailed(claim_, now);
+    POLL_LOG("claim not built (too long)");
+    return;
+  }
+  if (!host_->pollRequestClaim(json, len, claim_slot_)) {
+    poll::claimFailed(claim_, now);
+    if (!(ctl_note_ & kNoteClaimRefused)) POLL_LOG("claim not handed to the bridge (stopped or busy); retry in %lus", (unsigned long)poll::kClaimRetrySec);
+    ctl_note_ |= kNoteClaimRefused;
+    return;
+  }
+  ctl_note_ &= (uint8_t)~kNoteClaimRefused;
+  claim_pending_ = true;
+  claim_pending_sig_ = sig;
+  claim_pending_community_ = community_;
+  claim_filed_ms_ = millis();
+  POLL_LOG("claim filed: %u node%s, community %s, %u bytes", (unsigned)n, n == 1 ? "" : "s", community_ ? "on" : "off",
+           (unsigned)len);
+}
+
+void RepeaterPoller::maybeFileControl(uint32_t now) {
+  if (ctl_pending_ || !has_url_) return;
+  const bool registering = poll::registrationDue(reg_, now);
+  poll::ControlNeed need;
+  need.enabled = enabled_;
+  need.has_url = has_url_;
+  need.clock_ok = true;
+  need.registration_due = registering;
+  need.claim_unanswered = community_ && claim_sent_at_ != 0 && claim_sent_at_ >= owners_ok_at_;
+  need.gate_closed = gate_now_ != poll::GATE_OPEN;
+  need.starting = startingAt(now);
+  need.policy_answered = policy_answered_;
+  need.target_due = anyTargetDue(now);
+  if (!poll::controlNeeded(need)) return;
+  const uint32_t since = (uint32_t)(millis() - ctl_filed_ms_) / 1000UL;
+  if (!poll::controlAllowed(ctl_pending_, ctl_ever_, since, kCtlEveryS)) return;
+  // A claim on its way goes first, so the owners answer already reflects it (the startup hold needs that).
+  if (claim_pending_) {
+    ctl_deferred_ = true;
+    return;
+  }
+  if (ctl_retry_ms_ != 0 && (uint32_t)(millis() - ctl_retry_ms_) < kCtlRetryMs) return;
+  const bool want_shared = poll::sharedKeyWanted(has_shared_, shared_at_, reg_, registering, now);
+  discardUnasked();
+  fileControl(now, registering, want_shared);
+}
+
+// A finished session nobody here asked for (a timed-out one, or the bench command's) would keep
+// the mailbox from taking a new request; drop it without applying it.
+__attribute__((noinline)) void RepeaterPoller::discardUnasked() {
+  poll::ControlResult res;
+  if (!host_->pollTakeControlResult(res)) return;
+  wipe(&res, sizeof(res));
+  POLL_LOG("dropped a CoreScope answer the poller was not waiting for");
+}
+
+// Own frames, so the request on the stack does not sit on top of the settings copy or the signing buffers.
+__attribute__((noinline)) void RepeaterPoller::copyUrl(char* out, size_t cap) {
+  PollSettings s;
+  host_->pollReadSettings(s);
+  strncpy(out, s.url, cap - 1);
+  out[cap - 1] = '\0';
+}
+
+// Signed by the node key, which only signs; the uploaded private key is the polling key's.
+__attribute__((noinline)) bool RepeaterPoller::buildRegistration(poll::ControlRequest& req, uint32_t now) {
+  char msg[192];
+  uint8_t sig[SIGNATURE_SIZE];
+  const size_t mlen = poll::buildRegistrationMessage(msg, sizeof(msg), req.observer_pub, poll_id_.pub_key, now);
+  if (mlen == 0) return false;
+  host_->pollSignRegistration(sig, (const uint8_t*)msg, mlen);
+  mesh::Identity node(req.observer_pub);
+  if (!node.verify(sig, (const uint8_t*)msg, (int)mlen)) return false;
+  uint8_t keys[PRV_KEY_SIZE + PUB_KEY_SIZE];
+  poll_id_.writeTo(keys, sizeof(keys));
+  req.reg_body_len = (uint16_t)poll::buildRegistrationBody(req.reg_body, sizeof(req.reg_body), req.observer_pub,
+                                                           poll_id_.pub_key, keys, PRV_KEY_SIZE, now, sig);
+  wipe(keys, sizeof(keys));
+  return req.reg_body_len != 0;
+}
+
+__attribute__((noinline)) void RepeaterPoller::fileControl(uint32_t now, bool registering, bool want_shared) {
+  poll::ControlRequest req;
+  memset(&req, 0, sizeof(req));
+  copyUrl(req.url, sizeof(req.url));
+  host_->pollNodePub(req.observer_pub);
+  ctl_count_ = 0;
+  for (uint8_t p = 0; p < count_; p++) {
+    for (uint8_t i = 0; i < kSlots; i++) {
+      if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
+      if (ctl_count_ >= poll::kMaxTargets) break;
+      memcpy(req.targets[ctl_count_], meta_[i].pub, poll::kPubKeySize);
+      ctl_slot_[ctl_count_] = (int8_t)i;
+      memcpy(ctl_pfx_[ctl_count_], meta_[i].pub, sizeof(ctl_pfx_[0]));
+      ctl_count_++;
+      break;
+    }
+  }
+  req.target_count = ctl_count_;
+
+  if (registering && !buildRegistration(req, now)) {
+    registering = false;
+    req.reg_body_len = 0;
+    poll::registrationResult(reg_, 0, false, now);   // retried like a failed answer
+    POLL_LOG("registration not built: the node key gave no verifiable signature");
+  }
+  req.want = poll::controlWants(community_, registering, want_shared);
+  const bool ok = host_->pollRequestControl(req);
+  wipe(req.reg_body, sizeof(req.reg_body));
+  if (!ok) {
+    ctl_retry_ms_ = millis() | 1UL;
+    if (!(ctl_note_ & kNoteRefused)) POLL_LOG("CoreScope session not filed: bridge stopped or busy; retry in %lus", (unsigned long)(kCtlRetryMs / 1000));
+    ctl_note_ |= kNoteRefused;
+    return;
+  }
+  ctl_note_ &= (uint8_t)~kNoteRefused;
+  ctl_retry_ms_ = 0;
+  ctl_pending_ = true;
+  ctl_ever_ = true;
+  ctl_want_ = req.want;
+  ctl_filed_ms_ = millis();
+  POLL_LOG("CoreScope session filed:%s%s%s%s", (req.want & poll::WANT_OWNERS) ? " owners" : "",
+           (req.want & poll::WANT_POLICY) ? " policy" : "", (req.want & poll::WANT_REGISTER) ? " register" : "",
+           (req.want & poll::WANT_SHARED_KEY) ? " shared-key" : "");
+}
+
+void RepeaterPoller::noSession(uint8_t outcome, uint32_t now) {
+  ctl_last_ = outcome;
+  ctl_last_at_ = now;
+  memset(ctl_status_, 0, sizeof(ctl_status_));
+  // Counts toward a stale policy like the plugin's "CoreScope unreachable".
+  poll::applyPolicyAnswer(policy_, false, 0, policy_, now, kFastPolicy);
+}
+
+__attribute__((noinline)) void RepeaterPoller::takeControl(uint32_t now) {
+  if (!ctl_pending_) return;
+  if ((uint32_t)(millis() - ctl_filed_ms_) >= poll::kControlTimeoutS * 1000UL) {
+    // A bridge stop or restart empties the mailbox without an answer.
+    ctl_pending_ = false;
+    noSession(CTL_TIMEOUT, now);
+    POLL_LOG("CoreScope session not answered in %lus: treated as not started", (unsigned long)poll::kControlTimeoutS);
+    return;
+  }
+  poll::ControlResult res;
+  if (!host_->pollTakeControlResult(res)) return;
+  ctl_pending_ = false;
+  applyControl(res, now);
+  wipe(&res, sizeof(res));
+}
+
+void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) {
+  const uint8_t want = ctl_want_;
+  if (want == 0) {
+    POLL_LOG("dropped a CoreScope answer for the previous URL");
+    return;
+  }
+  if (!res.started) {
+    noSession(CTL_NO_SESSION, now);
+    POLL_LOG("CoreScope session did not start (link, clock or handshake guard)");
+    return;
+  }
+  ctl_last_ = CTL_DONE;
+  ctl_last_at_ = now;
+  ctl_status_[0] = res.owners_status;
+  ctl_status_[1] = res.policy_status;
+  ctl_status_[2] = res.reg_status;
+  ctl_status_[3] = res.shared_status;
+
+  // Policy: only a 200 replaces the copy in use; a 404 or a failure keeps its switches.
+  char before[sizeof(policy_.version)];
+  memcpy(before, policy_.version, sizeof(before));
+  const bool had_policy = policy_.ever_fetched;
+  const uint8_t pa = poll::applyPolicyAnswer(policy_, res.policy_ok, res.policy_status, res.policy, now, kFastPolicy);
+  if (pa != poll::POLICY_KEPT) policy_answered_ = true;
+  if (pa == poll::POLICY_APPLIED) {
+    if (!had_policy || strcmp(before, policy_.version) != 0) {
+      POLL_LOG("CoreScope policy %s: window %lus grace %lus cap %u, %u excluded", policy_.version[0] ? policy_.version : "-",
+               (unsigned long)policy_.direct_s, (unsigned long)policy_.grace_s, (unsigned)policy_.max_requests,
+               (unsigned)policy_.excluded_count);
+    }
+    const poll::SavedGate g = poll::savedGateFrom(policy_, poll::kPluginVersion);
+    if (!poll::savedGateEqual(g, gate_)) {
+      gate_ = g;
+      gate_save_due_ = true;   // rare: written only when the switches change
+    }
+  } else if (pa == poll::POLICY_NONE && !had_policy) {
+    POLL_LOG("CoreScope has no polling policy (404): defaults apply");
+  } else if (pa == poll::POLICY_KEPT) {
+    POLL_LOG("CoreScope policy: status %d; keeping the %s", (int)res.policy_status, had_policy ? "fetched copy" : "saved gate and defaults");
+  }
+
+  // Owners, index-aligned with the request's targets; a target that left the list meanwhile is skipped.
+  if ((want & poll::WANT_OWNERS) && res.owners_ok) {
+    memset(owners_, 0, sizeof(owners_));
+    for (uint8_t k = 0; k < ctl_count_ && k < poll::kMaxTargets; k++) {
+      const int8_t i = ctl_slot_[k];
+      if (i < 0 || !meta_[i].used || memcmp(meta_[i].pub, ctl_pfx_[k], sizeof(ctl_pfx_[0])) != 0) continue;
+      owners_[i] = res.owners[k];
+    }
+    owners_ok_at_ = now;
+  }
+
+  if (want & poll::WANT_REGISTER) {
+    const bool was_ok = reg_.ok, was_unsupported = reg_.unsupported;
+    poll::registrationResult(reg_, res.reg_status, res.reg_body_ok, now);
+    if (reg_.ok && res.reg_status == 200) {
+      if (!was_ok) POLL_LOG("own polling key registered with CoreScope");
+    } else if (reg_.unsupported) {
+      if (!was_unsupported) POLL_LOG("CoreScope takes no per-observer keys (404): using the shared key");
+    } else {
+      POLL_LOG("polling key registration failed: status %d%s", (int)res.reg_status, reg_.ok ? " (earlier one still valid)" : "");
+    }
+  }
+
+  if (res.shared_ok) {
+    const uint8_t h = res.shared_pub[0];
+    if (h == 0x00 || h == 0xFF || h == host_->pollNodeHash()) {
+      // Replies to it would read as reserved or as addressed to the node itself.
+      POLL_LOG("CoreScope shared key refused: its hash collides with a reserved or the node's own");
+    } else {
+      uint8_t keys[PRV_KEY_SIZE + PUB_KEY_SIZE];
+      memcpy(keys, res.shared_prv, PRV_KEY_SIZE);
+      memcpy(keys + PRV_KEY_SIZE, res.shared_pub, PUB_KEY_SIZE);
+      const bool changed = !has_shared_ || memcmp(shared_id_.pub_key, res.shared_pub, PUB_KEY_SIZE) != 0;
+      if (changed && busy() && key_in_use_ == poll::KEY_SHARED) {
+        POLL_LOG("CoreScope shared key changed during a poll; taken next time");
+      } else {
+        shared_id_.readFrom(keys, sizeof(keys));
+        has_shared_ = true;
+        shared_at_ = now;
+        if (changed) {
+          if (key_in_use_ == poll::KEY_SHARED) {
+            for (uint8_t i = 0; i < kSlots; i++) meta_[i].secret_ok = false;
+            if (acl_key_ == poll::KEY_SHARED) forgetKeyState();
+          }
+          char pfx[9];
+          hex8(pfx, shared_id_.pub_key);
+          POLL_LOG("CoreScope shared key %s", pfx);
+        }
+      }
+      wipe(keys, sizeof(keys));
+    }
+  }
+
+  char o[8], p[8], r[8], k[8];
+  fmtStatus(o, sizeof(o), want & poll::WANT_OWNERS, res.owners_status);
+  fmtStatus(p, sizeof(p), want & poll::WANT_POLICY, res.policy_status);
+  fmtStatus(r, sizeof(r), want & poll::WANT_REGISTER, res.reg_status);
+  fmtStatus(k, sizeof(k), (want & poll::WANT_SHARED_KEY) || res.shared_status != 0, res.shared_status);
+  POLL_LOG("CoreScope answered: owners %s policy %s register %s shared-key %s", o, p, r, k);
+}
+
+void RepeaterPoller::noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now) {
+  poll::TargetState& t = states_[idx];
+  const uint8_t prev = skip_[idx];
+  skip_[idx] = d.poll ? (uint8_t)poll::SKIP_NONE : d.reason;
+  t.role = poll::mapRole(community_, owners_[idx]);
+  t.standby_rank = t.role == poll::ROLE_STANDBY ? (owners_[idx].standby_rank ? owners_[idx].standby_rank : 1) : 0;
+  char pfx[9];
+  hex8(pfx, meta_[idx].pub);
+  if (d.poll) {
+    if (t.role == poll::ROLE_STANDBY) {
+      POLL_LOG("%s standby#%u: newest reading is older than the window plus grace; stepping in", pfx,
+               (unsigned)t.standby_rank);
+    }
+    return;
+  }
+  // The gate is logged once for every target; the others once per change.
+  if (d.reason == prev || d.reason == poll::SKIP_GATE) return;
+  if (d.until > now) {
+    POLL_LOG("%s skip %s (%s), looks again in %lus", pfx, poll::skipReasonName(d.reason), poll::roleName(t.role),
+             (unsigned long)(d.until - now));
+  } else {
+    POLL_LOG("%s skip %s (%s)", pfx, poll::skipReasonName(d.reason), poll::roleName(t.role));
+  }
+}
+
+// poll_cycle.py: the targets whose slot is due, oldest attempt first, then skip_reason on each
+// until one is chosen. One scheduled poll at a time.
+void RepeaterPoller::scheduleTick(uint32_t now) {
+  if (!ctl_pending_) ctl_note_ &= (uint8_t)~kNoteWaitCtl;
+  bool due[kSlots];
+  bool any = false;
+  for (uint8_t i = 0; i < kSlots; i++) {
+    due[i] = false;
+    if (!meta_[i].used || meta_[i].orphan) continue;
+    poll::TargetState& t = states_[i];
+    if (t.admin_seen) {
+      note(i, NOTE_ADMIN, 0);
+      continue;
+    }
+    if (!directRoute(i, NULL)) {
+      t.code = poll::CODE_NOT_DIRECT;
+      note(i, NOTE_NOT_DIRECT, 0);
+      continue;
+    }
+    if (!poll::isDue(t, meta_[i].interval_s, now, meta_[i].phase_s)) {
+      note(i, NOTE_WAIT, 0);
+      continue;
+    }
+    due[i] = true;
+    any = true;
+  }
+  if (!any) return;
+  // The decision is made on fresh data when a session is on its way; it is bounded, so this cannot hang.
+  if (ctl_pending_ || ctl_deferred_) {
+    if (!(ctl_note_ & kNoteWaitCtl)) POLL_LOG("a target is due: waiting for the CoreScope answer");
+    ctl_note_ |= kNoteWaitCtl;
+    return;
+  }
+  for (;;) {
+    const int pick = poll::pickDue(states_, due, kSlots, now, last_scheduled_at_, kScheduledGapS);
+    if (pick < 0) return;
+    due[pick] = false;
+    const poll::Decision d = poll::decideCycle(states_[pick], cycleInputFor((uint8_t)pick, false, now), now);
+    noteSkip((uint8_t)pick, d, now);
+    if (!d.poll) continue;
+    if (key_in_use_ == poll::KEY_NONE) {
+      // The plugin falls back to its companion path here; this firmware has none, so nothing is sent.
+      if (!key_note_) POLL_LOG("a target is due but no polling key is in use (not registered with CoreScope, no shared key)");
+      key_note_ = 1;
+      return;
+    }
+    note((uint8_t)pick, NOTE_DUE, 0);
+    startPoll((uint8_t)pick, true);
+    return;
+  }
+}
+
+void RepeaterPoller::fmtControl(char* out, size_t cap, uint32_t now) const {
+  char reg[32], pol[40], own[24], ctl[48], clm[24], age[12];
+  if (reg_.tried_at == 0) {
+    strcpy(reg, "never");
+  } else if (reg_.ok) {
+    fmtAge(age, sizeof(age), poll::elapsedSec(now, reg_.ok_at));
+    snprintf(reg, sizeof(reg), "ok %s%s", age, poll::chooseKey(reg_, false, now) == poll::KEY_OWN ? "" : " (lapsed)");
+  } else if (reg_.unsupported) {
+    strcpy(reg, "unsupported");
+  } else {
+    snprintf(reg, sizeof(reg), "failed %d", (int)reg_.last_status);
+  }
+  if (policy_.ever_fetched) {
+    fmtAge(age, sizeof(age), poll::elapsedSec(now, policy_.fetched_at));
+    snprintf(pol, sizeof(pol), "%s %s%s", policy_.version[0] ? policy_.version : "-", age,
+             poll::policyStale(policy_, now) ? " stale" : "");
+  } else {
+    strcpy(pol, policy_answered_ ? "none (404)" : "-");
+  }
+  if (!community_) {
+    strcpy(own, "off");
+  } else if (owners_ok_at_) {
+    fmtAge(own, sizeof(own), poll::elapsedSec(now, owners_ok_at_));
+  } else {
+    strcpy(own, "-");
+  }
+  fmtAge(age, sizeof(age), poll::elapsedSec(now, ctl_last_at_));
+  if (ctl_pending_) {
+    strcpy(ctl, "pending");
+  } else if (ctl_last_ == CTL_NEVER) {
+    strcpy(ctl, "-");
+  } else if (ctl_last_ == CTL_NO_SESSION) {
+    snprintf(ctl, sizeof(ctl), "no session %s", age);
+  } else if (ctl_last_ == CTL_TIMEOUT) {
+    snprintf(ctl, sizeof(ctl), "timeout %s", age);
+  } else {
+    char o[8], p[8], r[8], k[8];
+    fmtStatus(o, sizeof(o), ctl_status_[0] != 0, ctl_status_[0]);
+    fmtStatus(p, sizeof(p), ctl_status_[1] != 0, ctl_status_[1]);
+    fmtStatus(r, sizeof(r), ctl_status_[2] != 0, ctl_status_[2]);
+    fmtStatus(k, sizeof(k), ctl_status_[3] != 0, ctl_status_[3]);
+    snprintf(ctl, sizeof(ctl), "%s/%s/%s/%s %s", o, p, r, k, age);
+  }
+  if (claim_pending_) {
+    strcpy(clm, "pending");
+  } else if (claim_sent_at_) {
+    fmtAge(age, sizeof(age), poll::elapsedSec(now, claim_sent_at_));
+    snprintf(clm, sizeof(clm), "%s%s", age, claim_.last_community ? "" : " (off)");
+  } else {
+    strcpy(clm, "-");
+  }
+  snprintf(out, cap, "> reg %s, policy %s, owners %s, ctl %s, claim %s", reg, pol, own, ctl, clm);
 }
 
 #endif  // WITH_REPEATER_POLL

@@ -534,6 +534,7 @@ public:
   int resolveRepeaterPollPrefix(const char* hex, uint8_t* pub_out) override { return pollResolveNeighborPrefix(hex, pub_out); }
   bool repeaterPollRoomFor(const uint8_t* pub) override { return _poller.roomFor(pub); }
   void appendRepeaterPollStatus(char* reply, size_t reply_size) override;
+  bool repeaterPollControlPending() override { return _poller.controlPending(); }
 
   // RepeaterPollHost
   mesh::Packet* pollObtainPacket() override;
@@ -553,6 +554,16 @@ public:
   bool pollDiscoveryBusy() override { return pollDiscoveryActive(); }
   uint8_t pollNodeHash() override { return self_id.pub_key[0]; }
   void pollReadSettings(PollSettings& out) override;
+  void pollNodePub(uint8_t* out) override { memcpy(out, self_id.pub_key, PUB_KEY_SIZE); }
+  const char* pollNodeName() override { return _prefs.node_name; }
+  const char* pollFirmwareVersion() override { return FIRMWARE_VERSION; }
+  void pollSignRegistration(uint8_t* sig, const uint8_t* msg, size_t len) override { self_id.sign(sig, msg, (int)len); }
+  bool pollRequestControl(const poll::ControlRequest& req) override { return bridge && bridge->requestPollControl(req); }
+  bool pollTakeControlResult(poll::ControlResult& out) override { return bridge && bridge->takePollControlResult(out); }
+  bool pollRequestClaim(const char* json, size_t len, uint8_t slot) override {
+    return bridge && bridge->requestPublishPollClaim(json, len, slot);
+  }
+  uint8_t pollTakeClaimResult() override { return bridge ? bridge->takePollClaimResult() : (uint8_t)poll::CLAIM_NONE; }
 #endif
 
   // To check if there is pending work
