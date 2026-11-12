@@ -13,6 +13,9 @@
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
 #include <helpers/MQTTNeighborsPolicy.h>
 #endif
+#ifdef WITH_REPEATER_POLL
+#include <helpers/poll/PollPrefsPolicy.h>
+#endif
 #if REPEATER_HISTORY_SLOTS > 0
 #include <helpers/sensors/LPPDataHelpers.h>
 #endif
@@ -586,6 +589,9 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+#ifdef WITH_REPEATER_POLL
+  _poller.onRx(pkt);
+#endif
 #ifdef DISPLAY_ACTIVITY_DASHBOARD
   // Valid parsed RF packet: the only event the dashboard's window counts.
   _activity.recordPacket(millis(), (uint16_t)len, _radio->getEstAirtimeFor(len),
@@ -621,6 +627,9 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#ifdef WITH_REPEATER_POLL
+  _poller.onTx(pkt);
+#endif
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
       && neighbor_discover_next < neighbor_discover_count) {
@@ -663,6 +672,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 }
 
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
+#ifdef WITH_REPEATER_POLL
+  _poller.onTxFail(pkt);
+#endif
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
       && neighbor_discover_next < neighbor_discover_count) {
@@ -1222,6 +1234,9 @@ void MyMesh::prepareBridgeStart(MQTTBridge* b, bool restart) {
 }
 
 bool MyMesh::flashFromManifest(char* reply) {
+#ifdef WITH_REPEATER_POLL
+  _poller.flush();   // a successful flash reboots without returning
+#endif
   return _cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, reply);
 }
 #endif
@@ -1332,6 +1347,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
+#endif
+
+#ifdef WITH_REPEATER_POLL
+  _poller.begin(this, _fs);
 #endif
 }
 
@@ -1703,6 +1722,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     command += 3;
   }
 
+#ifdef WITH_REPEATER_POLL
+  if (_poller.handleCommand(command, reply)) return;
+#endif
+
   // handle ACL related commands
   if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
     char* hex = &command[8];
@@ -1752,6 +1775,15 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     while (*sub == ' ') sub++;
     if (*sub != 0) {
       strcpy(reply, "Err - discover.scopes has no options");
+#ifdef WITH_REPEATER_POLL
+    } else if (_poller.busy() && !neighbor_discover_active) {
+      // Queue the scope pass behind the poll exchange on the air; the loop starts it after.
+      if (neighborDiscoverReady(reply)) {
+        neighbor_table_refresh_active = true;
+        neighbor_table_refresh_periodic = false;
+        strcpy(reply, "OK - scopes queued behind a poll exchange");
+      }
+#endif
     } else if (pending_discover_tag != 0 &&
                !millisHasNowPassed(pending_discover_until) &&
                !neighbor_discover_active) {
@@ -1892,6 +1924,10 @@ void MyMesh::loop() {
   _alerter.onLoop(now);
 #endif
 
+#ifdef WITH_REPEATER_POLL
+  _poller.loop();
+#endif
+
 #if defined(WITH_MQTT_NEIGHBORS)
   // Two-stage periodic neighbors publication:
   //   stage 1 - zero-hop node-discover refreshes the neighbour table (60s window)
@@ -1912,7 +1948,11 @@ void MyMesh::loop() {
       neighbor_table_refresh_active = false;
       neighbor_table_refresh_periodic = false;
       next_neighbors_publish = 0;
-    } else if (pending_discover_tag == 0 || millisHasNowPassed(pending_discover_until)) {
+    } else if ((pending_discover_tag == 0 || millisHasNowPassed(pending_discover_until))
+#ifdef WITH_REPEATER_POLL
+               && !_poller.busy()   // a poll exchange on the air finishes first
+#endif
+               ) {
       // 60s zero-hop window done -> begin the per-neighbour scope queries
       bool was_periodic = neighbor_table_refresh_periodic;
       pending_discover_tag = 0;
@@ -1929,7 +1969,11 @@ void MyMesh::loop() {
         MESH_DEBUG_PRINTLN("MQTT %s neighbor scope discovery failed: %s", origin_str, tmp_reply);
       }
     }
-  } else if (periodic_neighbors_enabled && bridge && bridge->isRunning()) {
+  } else if (periodic_neighbors_enabled && bridge && bridge->isRunning()
+#ifdef WITH_REPEATER_POLL
+             && !_poller.busy()   // stays due until the poll exchange ends
+#endif
+             ) {
     if (next_neighbors_publish == 0 ||
         (next_neighbors_publish != 0 && millisHasNowPassed(next_neighbors_publish))) {
       if (pending_discover_tag == 0 || millisHasNowPassed(pending_discover_until)) {
@@ -2451,6 +2495,110 @@ bool MyMesh::startNeighborDiscover(char* reply, bool periodic) {
   return true;
 }
 #endif // WITH_MQTT_NEIGHBORS
+
+#ifdef WITH_REPEATER_POLL
+bool MyMesh::pollDiscoveryActive() const {
+#if defined(WITH_MQTT_NEIGHBORS)
+  return neighbor_discover_active || neighbor_table_refresh_active;
+#else
+  return false;
+#endif
+}
+
+void MyMesh::appendRepeaterPollStatus(char* reply, size_t reply_size) {
+  if (!_poller.enabled()) return;
+  uint8_t ok = 0, total = 0;
+  _poller.summary(&ok, &total);
+  char extra[24];
+  int n = snprintf(extra, sizeof(extra), ", poll: %u/%u", (unsigned)ok, (unsigned)total);
+  size_t used = strlen(reply);
+  if (n > 0 && used + (size_t)n < reply_size) memcpy(reply + used, extra, (size_t)n + 1);
+}
+
+// RxReservePacketManager keeps a four-packet floor; one more keeps its void queue API from shedding a poll.
+static const int POLL_MIN_FREE_PACKETS = 5;
+
+mesh::Packet* MyMesh::pollObtainPacket() {
+  if (_mgr->getFreeCount() < POLL_MIN_FREE_PACKETS) return NULL;
+  return obtainNewPacket();
+}
+
+mesh::Packet* MyMesh::pollCreateLogin(const mesh::LocalIdentity& poll_id, const mesh::Identity& target,
+                                      const uint8_t* secret, const uint8_t* plain, size_t len) {
+  if (_mgr->getFreeCount() < POLL_MIN_FREE_PACKETS) return NULL;
+  return createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, poll_id, target, secret, plain, len);
+}
+
+// Same on-air form as sendDirect(pkt, NULL, 0); priority 2 lets forwarding go first. Never flooded.
+void MyMesh::pollSendDirect(mesh::Packet* pkt) {
+  pkt->header &= ~PH_ROUTE_MASK;
+  pkt->header |= ROUTE_TYPE_DIRECT;
+  pkt->path_len = 0;
+  getTables()->markSeen(pkt);
+  sendPacket(pkt, 2, 0);
+}
+
+bool MyMesh::pollCancelQueued(const mesh::Packet* pkt) {
+  for (int i = _mgr->getOutboundTotal() - 1; i >= 0; i--) {
+    if (_mgr->getOutboundByIdx(i) == pkt) {
+      mesh::Packet* removed = _mgr->removeOutboundByIdx(i);
+      if (removed) releasePacket(removed);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MyMesh::pollNeighbor(const uint8_t* pub, uint32_t* heard_at, int8_t* snr_x4) {
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp == 0) continue;
+    if (memcmp(neighbours[i].id.pub_key, pub, PUB_KEY_SIZE) != 0) continue;
+    if (heard_at) *heard_at = neighbours[i].heard_timestamp;
+    if (snr_x4) *snr_x4 = neighbours[i].snr;
+    return true;
+  }
+  return false;
+}
+
+int MyMesh::pollResolveNeighborPrefix(const char* hex, uint8_t* pub_out) {
+  size_t n = hex ? strlen(hex) : 0;
+  if (n == 0 || n > PUB_KEY_SIZE * 2) return 0;
+  int matches = 0;
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp == 0) continue;
+    char full[PUB_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(full, neighbours[i].id.pub_key, PUB_KEY_SIZE);
+    if (strncasecmp(full, hex, n) != 0) continue;
+    if (++matches == 1 && pub_out) memcpy(pub_out, neighbours[i].id.pub_key, PUB_KEY_SIZE);
+  }
+  return matches;
+}
+
+bool MyMesh::pollNtpSeen() {
+  return bridge && bridge->ntpEvidenceAgeMs() != MQTTBridge::kNoNtpEvidence;
+}
+
+// The neighbor-scope query's reply window (see neighborDiscoverQueryTimeoutMs).
+uint32_t MyMesh::pollReplyWindowMs() {
+  uint32_t response_airtime = _radio->getEstAirtimeFor(MAX_PACKET_PAYLOAD + 2);
+  return SERVER_RESPONSE_DELAY + getCADFailMaxDuration() + 360UL + response_airtime * 2UL;
+}
+
+void MyMesh::pollReadSettings(PollSettings& out) {
+  const MQTTPrefs* obs = _cli.getObserverPrefs();
+  memset(&out, 0, sizeof(out));
+  out.enabled = obs->poll_enabled != 0;
+  out.consent = obs->poll_consent != 0;
+  out.interval_min = obs->poll_interval_min;
+  out.status_hours = obs->poll_status_hours;
+  for (int i = 0; i < MQTT_POLL_MAX_TARGETS && out.count < poll::kMaxTargets; i++) {
+    if (poll::targetIsEmpty(obs->poll_targets[i])) continue;
+    memcpy(out.targets[out.count], obs->poll_targets[i], PUB_KEY_SIZE);
+    out.pw_mode[out.count] = obs->poll_pw_mode[i];
+    out.count++;
+  }
+}
+#endif  // WITH_REPEATER_POLL
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {

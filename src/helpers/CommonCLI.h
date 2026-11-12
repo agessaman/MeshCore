@@ -433,6 +433,12 @@ public:
 
   // Repeater-poll CLI. The poller overrides this on builds that include it.
   virtual bool supportsRepeaterPoll() { return false; }
+  // `set poll on`: create the polling key if there is none; false refuses the switch.
+  virtual bool ensureRepeaterPollKey() { return false; }
+  // `poll add <prefix>`: heard neighbors whose key starts with hex; pub_out set when exactly one.
+  virtual int resolveRepeaterPollPrefix(const char* /*hex*/, uint8_t* /*pub_out*/) { return 0; }
+  // `get mqtt.status`: append the poll summary when polling is on and it fits.
+  virtual void appendRepeaterPollStatus(char* /*reply*/, size_t /*reply_size*/) {}
 };
 
 #ifdef WITH_MQTT_BRIDGE

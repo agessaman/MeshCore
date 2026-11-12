@@ -321,6 +321,8 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
       snprintf(reply, 160, "Error: poll.slot must be 1-%d", RUNTIME_MQTT_SLOTS);
     } else if (prefs->poll_consent == 0) {
       strcpy(reply, "Error: poll.consent is not set");
+    } else if (!cb->ensureRepeaterPollKey()) {
+      strcpy(reply, "Error: could not create the polling key");
     } else {
       prefs->poll_enabled = 1;
       strcpy(reply, "OK");
@@ -1287,6 +1289,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     MQTTBridge::formatMqttStatsReply(reply, 160);
   } else if (memcmp(config, "mqtt.status", 11) == 0) {
     MQTTBridge::formatMqttStatusReply(reply, 160, &_mqtt_prefs);
+    _callbacks->appendRepeaterPollStatus(reply, 160);
   } else if (memcmp(config, "mqtt.packets", 12) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.mqtt_packets_enabled ? "on" : "off");
   } else if (memcmp(config, "mqtt.raw", 8) == 0) {
@@ -1831,8 +1834,20 @@ bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
     strcpy(reply, "OK");
     changed = true;
   } else if (strcmp(verb, "add") == 0) {
-    if (!pollCopyWord(arg, key, sizeof(key), &extra) || extra) {
-      strcpy(reply, "Error: key must be 64 hex chars");
+    int matches = -1;
+    const bool word_ok = pollCopyWord(arg, key, sizeof(key), &extra) && !extra;
+    if (word_ok && strlen(key) < 64) {
+      // A shorter word is a neighbor key prefix; it must name exactly one heard neighbor.
+      uint8_t pub[MQTT_POLL_PUBKEY_SIZE];
+      matches = _callbacks->resolveRepeaterPollPrefix(key, pub);
+      if (matches == 1) poll::formatTargetHex(pub, key);
+    }
+    if (!word_ok) {
+      strcpy(reply, "Error: key must be 64 hex chars or a neighbor prefix");
+    } else if (matches == 0) {
+      strcpy(reply, "Error: no heard neighbor has that prefix");
+    } else if (matches > 1) {
+      snprintf(reply, 160, "Error: prefix matches %d neighbors", matches);
     } else {
       const poll::TargetEdit edit =
           poll::addTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key);
