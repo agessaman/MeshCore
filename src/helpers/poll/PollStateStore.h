@@ -207,7 +207,9 @@ static inline bool storedKeyIn(const uint8_t* pub, const uint8_t (*keys)[kPubKey
 
 // Where to write an entry for pub: its own, an empty one, or the one least worth
 // keeping among keys not in keep[]. An entry outranking `rank` is taken only when
-// must is set (a listed target always gets one). -1 when nothing may be taken.
+// must is set (a listed target gets one when it can). An unverified stop is never
+// taken: a list change made while a save failed can leave flash with no room. -1
+// when nothing may be taken.
 static inline int storedSlotFor(const StoredTarget* stored, uint8_t n, const uint8_t* pub, uint8_t rank,
                                 bool must, const uint8_t (*keep)[kPubKeySize], uint8_t n_keep) {
   int empty = -1, victim = -1;
@@ -221,7 +223,7 @@ static inline int storedSlotFor(const StoredTarget* stored, uint8_t n, const uin
     if (victim < 0 || storedRank(stored[i]) < storedRank(stored[victim])) victim = i;
   }
   if (empty >= 0) return empty;
-  if (victim < 0) return -1;
+  if (victim < 0 || storedRank(stored[victim]) == RANK_STOP) return -1;
   if (!must && storedRank(stored[victim]) >= rank) return -1;
   return victim;
 }

@@ -124,7 +124,7 @@ RepeaterPoller::RepeaterPoller()
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
       rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), last_tick_ms_(0),
       last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), save_safety_(false),
-      save_retry_ms_(0), ahead_save_ms_(0), ahead_saved_(false), hold_note_(0) {
+      save_retry_ms_(0), ahead_save_ms_(0), ahead_saved_(false), hold_note_(0), fold_full_logged_(false) {
   memset(&gate_, 0, sizeof(gate_));
   memset(stored_, 0, sizeof(stored_));
   memset(meta_, 0, sizeof(meta_));
@@ -347,6 +347,7 @@ void RepeaterPoller::forgetKeyState() {
 void RepeaterPoller::foldSlots() {
   uint8_t keep[kSlots][poll::kPubKeySize];
   uint8_t n_keep = 0;
+  bool full = false;
   for (uint8_t i = 0; i < kSlots; i++) {
     if (meta_[i].used) memcpy(keep[n_keep++], meta_[i].pub, poll::kPubKeySize);
   }
@@ -361,8 +362,10 @@ void RepeaterPoller::foldSlots() {
     const int k = poll::storedSlotFor(stored_, poll::kStoredTargets, e.pub, rank, !meta_[i].orphan, keep, n_keep);
     char pfx[9];
     if (k < 0) {
+      if (rank == poll::RANK_NONE) continue;
+      full = true;
       hex8(pfx, e.pub);
-      if (rank == poll::RANK_STOP) POLL_LOG("admin stop of %s not kept: no room", pfx);
+      if (!fold_full_logged_) POLL_LOG("%s of %s not kept: no room", rank == poll::RANK_LEARNED ? "password" : "admin stop", pfx);
       continue;
     }
     poll::StoredTarget& slot = stored_[k];
@@ -375,6 +378,7 @@ void RepeaterPoller::foldSlots() {
     }
     slot = e;
   }
+  fold_full_logged_ = full;   // every save folds: say it once per spell without room
 }
 
 bool RepeaterPoller::roomFor(const uint8_t* pub) {

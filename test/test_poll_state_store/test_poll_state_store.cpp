@@ -374,6 +374,25 @@ TEST(PollStateStore, EvictionTakesNoStopThenVerifiedThenRefuses) {
   EXPECT_EQ(1, poll::storedSlotFor(st, 3, pub, poll::RANK_NONE, true, nullptr, 0));
 }
 
+TEST(PollStateStore, ListedTargetNeverDisplacesAnUnverifiedStop) {
+  // Flash after a failed save: B's stop was cleared only in RAM, then C was listed in the room it freed.
+  poll::StoredTarget st[poll::kStoredTargets];
+  uint8_t keep[poll::kMaxTargets][32];
+  for (uint8_t i = 0; i < 7; i++) {
+    st[i] = entry((uint8_t)(0xA0 + i), false, false, 0);   // listed
+    memset(keep[i], 0xA0 + i, 32);
+  }
+  for (uint8_t i = 7; i < poll::kStoredTargets; i++) st[i] = entry((uint8_t)(0x10 + i), true, false, 0);
+  uint8_t c[32];
+  memset(c, 0xC0, 32);
+  memcpy(keep[7], c, 32);
+  EXPECT_EQ(-1, poll::storedSlotFor(st, poll::kStoredTargets, c, poll::RANK_LEARNED, true, keep, 8));
+  EXPECT_EQ(-1, poll::storedSlotFor(st, poll::kStoredTargets, c, poll::RANK_STOP, true, keep, 8));
+  // Once one of them is verified, it is the one that goes.
+  st[9] = entry(0x19, true, true, 0);
+  EXPECT_EQ(9, poll::storedSlotFor(st, poll::kStoredTargets, c, poll::RANK_LEARNED, true, keep, 8));
+}
+
 TEST(PollStateStore, EvictionSkipsKeptKeys) {
   poll::StoredTarget st[2];
   st[0] = entry(0x10, false, false, poll::LEARNED_BLANK);
