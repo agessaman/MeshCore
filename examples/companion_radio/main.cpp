@@ -158,33 +158,55 @@ static void loopDuringDisplayRefresh();
 #endif
 
 #ifdef HAS_ESP_MDNS
-static bool startMdns() {
-  String nodeName = the_mesh.getNodeName();
-  String sanitizedNodeName;
-  sanitizedNodeName.reserve(nodeName.length());
-  for (size_t i = 0; i < nodeName.length(); ++i) {
+static bool mdns_started = false;
+static char mdns_node_name[32];   // node name the responder currently advertises
+
+// "meshcore_" prefix + sanitized node name, capped at 63 chars (max DNS label length)
+static void buildMdnsName(const char* nodeName, char mdnsName[64]) {
+  size_t pos = snprintf(mdnsName, 64, "meshcore_");
+  for (size_t i = 0; nodeName[i] != '\0' && pos < 63; ++i) {
     const char c = nodeName[i];
     if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
         (c >= '0' && c <= '9') || c == '-' || c == '_') {
-      sanitizedNodeName += c;
+      mdnsName[pos++] = c;
     }
   }
+  mdnsName[pos] = '\0';
+}
 
-  String mdnsName = "meshcore_";
-  mdnsName += sanitizedNodeName;
-  if (!MDNS.begin(mdnsName.c_str())) {
+static void startMdns() {
+  const char* nodeName = the_mesh.getNodeName();
+  char mdnsName[64];
+  buildMdnsName(nodeName, mdnsName);
+
+  if (!MDNS.begin(mdnsName)) {
     WIFI_DEBUG_PRINTLN("mDNS failed to start!");
-    return false;
   } else {
     MDNS.addService("meshcore", "tcp", TCP_PORT);
-    MDNS.addServiceTxt("meshcore", "tcp", "node-name", the_mesh.getNodeName());
+    MDNS.addServiceTxt("meshcore", "tcp", "node-name", nodeName);
     MDNS.addServiceTxt("meshcore", "tcp", "firmware-version", FIRMWARE_VERSION);
-    String protocol; protocol+=FIRMWARE_VER_CODE;
-    MDNS.addServiceTxt("meshcore", "tcp", "protocol-version", protocol.c_str());
+    char protocol[12];
+    snprintf(protocol, sizeof(protocol), "%d", (int)FIRMWARE_VER_CODE);
+    MDNS.addServiceTxt("meshcore", "tcp", "protocol-version", (const char*)protocol);
     MDNS.addServiceTxt("meshcore", "tcp", "build-date", __DATE__);
     MDNS.addServiceTxt("meshcore", "tcp", "build-time", __TIME__);
+    strncpy(mdns_node_name, nodeName, sizeof(mdns_node_name) - 1);
+    mdns_node_name[sizeof(mdns_node_name) - 1] = '\0';
+    mdns_started = true;
   }
-  return true;
+}
+
+// the node name can change at runtime (app or CLI), so keep the advertised name in step
+static void refreshMdnsName() {
+  const char* nodeName = the_mesh.getNodeName();
+  if (!mdns_started || strncmp(nodeName, mdns_node_name, sizeof(mdns_node_name) - 1) == 0) return;
+
+  char mdnsName[64];
+  buildMdnsName(nodeName, mdnsName);
+  mdns_hostname_set(mdnsName);
+  MDNS.addServiceTxt("meshcore", "tcp", "node-name", nodeName);
+  strncpy(mdns_node_name, nodeName, sizeof(mdns_node_name) - 1);
+  mdns_node_name[sizeof(mdns_node_name) - 1] = '\0';
 }
 #endif
 
@@ -401,6 +423,10 @@ void loop() {
 #endif
   }
 
+#ifdef HAS_ESP_MDNS
+  refreshMdnsName();
+#endif
+
 #if defined(ENABLE_WIFI_INTERFACE) && defined(WITH_MQTT_BRIDGE)
   {
     // (Re)open the listener whenever the link comes up; begin() is a no-op once listening.
@@ -411,8 +437,7 @@ void loop() {
 #ifdef HAS_ESP_MDNS
       // The network link brings WiFi up after setup(), so the responder starts on a link-up;
       // a failed start is retried on the next one.
-      static bool mdns_started = false;
-      if (!mdns_started) mdns_started = startMdns();
+      if (!mdns_started) startMdns();
 #endif
     }
     wifi_was_connected = wifi_up;
