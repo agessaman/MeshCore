@@ -67,6 +67,7 @@ const bool kFastPolicy = false;
 const uint32_t kCtlRetryMs = 30000;          // a session the bridge refused is filed again after this
 const uint32_t kClaimTimeoutMs = 60000;      // a claim the bridge never answered counts as failed
 const uint32_t kReadingRetryMs = 60000;      // a reading the bridge could not publish waits this long
+const size_t kJsonBufSize = (poll::kClaimJsonMax > poll::kReadingJsonMax ? poll::kClaimJsonMax : poll::kReadingJsonMax) + 1;
 
 // Log-once bits in ctl_note_.
 const uint8_t kNoteWaitCtl = 1;
@@ -1721,7 +1722,8 @@ void RepeaterPoller::takeClaim(uint32_t now) {
 // list is withheld, and one empty claim takes back a list already published this boot.
 __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
   if (claim_pending_ || claim_slot_ == 0) return;
-  const bool may_list = poll::claimMayList(key_in_use_);
+  const poll::ClaimOptions opts = claimOptions();
+  const bool may_list = poll::claimMayList(key_in_use_, opts.accepts_requests);
   if (may_list) ctl_note_ &= (uint8_t)~kNoteClaimsHeld;
   else if (!(ctl_note_ & kNoteClaimsHeld)) {
     POLL_LOG("claims held: no polling key in use");
@@ -1734,30 +1736,44 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
       for (uint8_t i = 0; i < kSlots; i++) {
         if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
         int8_t snr = 0;
-        // An admin-stopped target is never polled here, so it is not offered either.
-        if (states_[i].admin_seen || !directRoute(i, &snr) || poll::policyExcludesTarget(policy_, meta_[i].pub, policyCovers(i))) break;
+        const bool direct = directRoute(i, &snr);
+        if (poll::policyExcludesTarget(policy_, meta_[i].pub, policyCovers(i))) break;
+        // An admin-stopped or unreachable target is never polled here; only the extended claim reports it.
+        if (!opts.extended && (states_[i].admin_seen || !direct)) break;
         poll::ClaimNode& c = nodes[n++];
         memset(&c, 0, sizeof(c));
         memcpy(c.node, meta_[i].pub, poll::kPubKeySize);
         c.reply_hops = 0;
         c.personal_key = key_in_use_ == poll::KEY_OWN;
-        c.has_snr = true;
-        c.snr_x4 = snr;
+        c.has_snr = direct;
+        c.snr_x4 = direct ? (opts.extended ? poll::clampSnrX4(snr) : snr) : 0;
+        if (opts.extended) {
+          const poll::TargetState& t = states_[i];
+          c.key = poll::CLAIM_KEY_OWN;   // a JSON mode always polls under the own key
+          c.state = poll::claimStateFor(t, false);
+          c.misses = t.no_reply_count;
+          c.last_attempt = t.last_attempt;
+          c.last_ok = t.last_success;
+        }
         break;
       }
     }
   }
-  const uint32_t sig = poll::claimSignature(n ? nodes : nullptr, n, community_);
+  const uint32_t sig = poll::claimSignature(n ? nodes : nullptr, n, community_, opts);
   if (!poll::claimDue(claim_, sig, community_, may_list, now)) return;
-  if (may_list && n == 0) return;   // nothing to claim, nothing to take back
+  if (may_list && n == 0 && !opts.accepts_requests) return;   // nothing to claim, nothing to take back
+  char* json = jsonBuffer();
+  if (!json) {
+    poll::claimFailed(claim_, now);
+    return;
+  }
 
-  char json[poll::kClaimJsonMax + 1];
   char tag[48];
   uint8_t self_pub[poll::kPubKeySize];
   snprintf(tag, sizeof(tag), "meshcore.observer_fw/%s", host_->pollFirmwareVersion());
   host_->pollNodePub(self_pub);
-  const size_t len = poll::buildClaimJson(json, sizeof(json), host_->pollNodeName(), self_pub, now, tag,
-                                          policy_.version, community_, n ? nodes : nullptr, n);
+  const size_t len = poll::buildClaimJson(json, kJsonBufSize, host_->pollNodeName(), self_pub, now, tag,
+                                          policy_.version, community_, n ? nodes : nullptr, n, opts);
   if (len == 0) {
     poll::claimFailed(claim_, now);
     POLL_LOG("claim not built (too long)");
@@ -1773,7 +1789,7 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
   claim_pending_ = true;
   claim_pending_sig_ = sig;
   claim_pending_community_ = community_;
-  claim_pending_listed_ = n > 0;
+  claim_pending_listed_ = may_list;
   claim_filed_ms_ = millis();
   if (n == 0) {
     POLL_LOG("claim filed: empty, no polling key in use, community %s, %u bytes", community_ ? "on" : "off",
@@ -1787,6 +1803,23 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
 // ---------------------------------------------------------------------------
 // Readings in a JSON mode
 
+// Claims and readings are built here, off the loop task's stack, just before the bridge copies them.
+char* RepeaterPoller::jsonBuffer() {
+  if (!json_) json_ = static_cast<char*>(pollAlloc(kJsonBufSize));
+  if (!json_ && !(ctl_note_ & kNoteNoReadingMem)) POLL_LOG("no memory for the claim and reading buffer");
+  if (!json_) ctl_note_ |= kNoteNoReadingMem;
+  return json_;
+}
+
+// Every claim option is decided here; requested targets are not offered yet.
+poll::ClaimOptions RepeaterPoller::claimOptions() const {
+  poll::ClaimOptions o;
+  o.extended = poll::modeIsJson(mode_);
+  o.accepts_requests = false;
+  o.request_slots = 0;
+  return o;
+}
+
 uint8_t RepeaterPoller::readingFormat() const {
   if (mode_ == poll::MODE_JSON) return poll::kReadingV1;
   if (mode_ == poll::MODE_TELEMETRY) return poll::kReadingV2;
@@ -1795,8 +1828,7 @@ uint8_t RepeaterPoller::readingFormat() const {
 
 bool RepeaterPoller::ensureReadingStore() {
   if (!readings_) readings_ = static_cast<ReadingStore*>(pollAlloc(sizeof(ReadingStore)));
-  if (!json_) json_ = static_cast<char*>(pollAlloc(poll::kReadingJsonMax + 1));
-  if (readings_ && json_) return true;
+  if (readings_ && jsonBuffer()) return true;
   if (!(ctl_note_ & kNoteNoReadingMem)) POLL_LOG("no memory for readings: none are published");
   ctl_note_ |= kNoteNoReadingMem;
   return false;
@@ -1870,7 +1902,7 @@ void RepeaterPoller::takeReading() {
 
 // The oldest held reading goes out on the claim's slot; the JSON is built now so its timestamp is the publish time.
 void RepeaterPoller::maybePublishReading(uint32_t now) {
-  if (reading_pending_ || !readings_ || !json_ || claim_slot_ == 0) return;
+  if (reading_pending_ || !readings_ || !json_ || claim_slot_ == 0) return;   // json_ comes with readings_
   const uint8_t fmt = readingFormat();
   if (fmt == 0) return;
   if (reading_retry_ms_ != 0 && (uint32_t)(millis() - reading_retry_ms_) < kReadingRetryMs) return;
@@ -1880,7 +1912,7 @@ void RepeaterPoller::maybePublishReading(uint32_t now) {
   uint8_t self_pub[poll::kPubKeySize];
   snprintf(tag, sizeof(tag), "meshcore.observer_fw/%s", host_->pollFirmwareVersion());
   host_->pollNodePub(self_pub);
-  const size_t len = poll::buildReadingJson(json_, poll::kReadingJsonMax + 1, fmt, host_->pollNodeName(), self_pub, now,
+  const size_t len = poll::buildReadingJson(json_, kJsonBufSize, fmt, host_->pollNodeName(), self_pub, now,
                                             tag, *g);
   const uint8_t kind = fmt == poll::kReadingV2 ? (uint8_t)MQTT_POLL_READING_TELEMETRY : (uint8_t)MQTT_POLL_READING_BATTERY;
   if (len == 0) {

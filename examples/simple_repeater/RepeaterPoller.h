@@ -235,7 +235,7 @@ private:
     poll::ReadingHold hold;
   };
   ReadingStore* readings_;
-  char*    json_;           // a reading's JSON, built just before it is handed to the bridge
+  char*    json_;           // a claim's or reading's JSON, built just before it is handed to the bridge
   bool     reading_pending_;
   uint32_t reading_filed_ms_;
   uint32_t reading_retry_ms_;     // a failed publish waits a minute; 0 = none
@@ -369,6 +369,8 @@ private:
   void maybeClaim(uint32_t now);
   void updateClaimSlot();
   uint8_t readingFormat() const;
+  char* jsonBuffer();
+  poll::ClaimOptions claimOptions() const;
   bool ensureReadingStore();
   void fillReading(const mesh::Packet* pkt, const poll::Reply& r, const poll::StatusReading* st,
                    const poll::TelemetryReading* tl);
