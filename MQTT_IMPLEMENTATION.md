@@ -426,18 +426,18 @@ is, the node polls every target it is given, at most twice per hour-long window.
 | Command | Purpose | Default |
 |---------|---------|---------|
 | `set poll.url <https://...>` | CoreScope base URL | blank |
-| `set poll.slot <1-6>` | MQTT slot that feeds that CoreScope | unset |
-| `set poll.consent yes\|no` | Agree to register the polling key with CoreScope | no |
-| `set poll on\|off` | Master switch. `on` needs url, slot and consent, and creates the polling key | off |
+| `set poll.slot <1-6>\|0` | MQTT slot that feeds that CoreScope. Unset (0), the slot whose broker host the policy's `mqtt_hosts` names is used; with no match nothing is claimed, published or polled | unset |
+| `set poll.consent yes\|no` | Agree to upload the polling key to CoreScope (registration). Without it the encrypted-reply path neither registers nor polls; a JSON reading mode needs no consent | no |
+| `set poll on\|off` | Master switch. `on` needs the url; with consent it also creates the polling key | off |
 | `set poll.interval <30-1440>` | Minutes between polls of one target (never faster than the window) | 60 |
 | `set poll.status <1\|3\|6\|12\|24>` | Hours between status requests (others ask for telemetry) | 6 |
 | `set poll.community on\|off` | Share polling with other CoreScope observers (used once CoreScope control lands) | on |
 | `poll add <64-hex key \| neighbor prefix>` | Add a target (up to 8). A prefix must match exactly one heard neighbor | |
 | `poll remove <key>`, `poll clear`, `poll list` | Edit or show targets | |
-| `poll pw <key> auto\|blank\|hello` | Guest password to try | auto |
+| `poll pw <key> auto\|blank\|hello\|set <password>` | Guest password to try. `set` stores a password of your own (1-15 printable characters, never echoed or logged); it is dropped from the settings if the target answers it as admin | auto |
 | `poll now <key or prefix>` | One poll outside the schedule. Replies `queued`, `busy`, or an error. Works with polling off; needs the polling key, a synced clock, a direct route, and 60 s since that target's last poll | |
 | `poll enable <key or prefix>` | Clear an admin stop, also of a target no longer listed | |
-| `get poll` | Switch, target count, key source, gate, clock | |
+| `get poll` | Switch, reading mode (`enc`, `json`, `telemetry`, `?` before the first policy answer), target count, key source, slot when none is in use, gate, clock | |
 | `get poll.status` | One short entry per target: number, key prefix, last result | |
 | `get poll.status <n>` | Target n: result, age, battery, temperature, route and SNR, role, next poll, login state, flood count | |
 | `get poll.key` | Polling public key (the private key is never shown) | |
@@ -449,12 +449,18 @@ Safety rules:
 - Only direct neighbors are polled: a target must be in the neighbor table and heard within
   the last day. Every poll packet is sent direct with an empty path, behind forwarded traffic.
   Nothing is ever flooded. A target out of reach shows `not_direct` and gets no packet.
-- The only passwords sent are blank and `hello`. If a repeater answers the polling key as
-  admin, polling of that repeater stops, the node sends `setperm <polling key> 0`, and it checks
-  that the grant is gone. The repeater stays stopped until `poll enable`, even after it's
+- The passwords sent are blank and `hello`, or the password set with `poll pw <key> set`,
+  which is then the only one tried for that target. If a repeater answers the polling key as
+  admin, a password of your own is discarded, polling of that repeater stops, the node sends
+  `setperm <polling key> 0`, and it checks that the grant is gone. The repeater stays stopped until `poll enable`, even after it's
   removed from the list. Up to 16 targets' stops and learned passwords are kept; when removed
   targets' unconfirmed stops would no longer fit, `poll add` is refused until one is cleared
   with `poll enable <key>`.
+- The analyzer's policy picks how readings travel. Without `reading_format` (CoreScope) the
+  polling key is registered and the analyzer decodes the overheard replies. With `json` or
+  `telemetry` the key never leaves the node: it publishes each decoded reading on the claim's
+  slot (`.../battery` or `.../telemetry`) and claims carry `key: "own"`. Before the first
+  policy answer of a boot nothing is registered or polled.
 - No polling until a validated NTP time was applied to the clock this boot. Request timestamps never go backwards,
   across reboots too. They're kept in `/poll_state` with the polling key.
 - One poll runs at a time, and never during neighbor discovery. Periodic discovery waits for
