@@ -78,6 +78,8 @@ public:
   virtual bool pollTakeControlResult(poll::ControlResult& out) = 0;
   virtual bool pollRequestClaim(const char* json, size_t len, uint8_t slot) = 0;
   virtual uint8_t pollTakeClaimResult() = 0;
+  // Lowest enabled MQTT slot (1-based) whose broker host is one of hosts, or 0.
+  virtual uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count) = 0;
 };
 
 // What identifies a queued packet when only its pool slot is known.
@@ -301,7 +303,8 @@ private:
   uint32_t url_hash_;                // a new CoreScope starts its state over
   bool     has_url_;
   bool     community_;
-  uint8_t  claim_slot_;
+  uint8_t  slot_setting_;            // poll.slot as the operator set it, 0 = unset
+  uint8_t  claim_slot_;              // in use: poll.slot, else the slot whose broker the policy names, else 0
   bool     ctl_pending_;
   bool     ctl_deferred_;            // needed and allowed, held back until the claim in flight is answered
   bool     ctl_ever_;
@@ -343,6 +346,7 @@ private:
   void maybeFileControl(uint32_t now);
   void takeClaim(uint32_t now);
   void maybeClaim(uint32_t now);
+  void updateClaimSlot();
   void updateKey(uint32_t now);
   void bindKey();
   bool nowRefused(uint8_t idx, uint32_t now, char* reply, bool local_only);

@@ -564,6 +564,9 @@ public:
     return bridge && bridge->requestPublishPollClaim(json, len, slot);
   }
   uint8_t pollTakeClaimResult() override { return bridge ? bridge->takePollClaimResult() : (uint8_t)poll::CLAIM_NONE; }
+  uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count) override {
+    return bridge ? bridge->findPollSlotForHosts(hosts, count) : 0;
+  }
 #endif
 
   // To check if there is pending work

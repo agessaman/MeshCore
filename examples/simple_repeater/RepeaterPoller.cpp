@@ -68,6 +68,7 @@ const uint8_t kNoteWaitCtl = 1;
 const uint8_t kNoteRefused = 2;
 const uint8_t kNoteClaimRefused = 4;
 const uint8_t kNoteClaimsHeld = 8;
+const uint8_t kNoteNoSlot = 16;
 
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
 
@@ -1133,8 +1134,10 @@ void RepeaterPoller::cmdGetPoll(char* reply) {
                     : "none (not registered, no shared key)";
   // CoreScope details are in `get poll.control`; this line stays under the reply buffer, with the key reason dropped first.
   for (int pass = 0; pass < 2; pass++) {
-    const int n = snprintf(reply, 160, "> %s, mode %s, targets %u (%u ok), key %s, gate %s%s, clock %s%s%s",
+    const int n = snprintf(reply, 160, "> %s, mode %s, targets %u (%u ok), key %s%s, gate %s%s, clock %s%s%s",
                            enabled_ ? "on" : "off", modeName(mode_), (unsigned)total, (unsigned)ok, key,
+                           claim_slot_ != 0 ? "" : policy_.mqtt_host_count ? ", slot none (no broker matches)"
+                                                                           : ", slot none (poll.slot unset)",
                            gate == poll::GATE_OPEN ? "open" : poll::gateName(gate),
                            gate != poll::GATE_OPEN && !policy_.ever_fetched ? " (saved)" : "", clockOk() ? "ok" : "not synced",
                            busy() ? ", polling now" : "", store_state_ == poll::STATE_NEWER ? ", state from newer fw (read-only)" : "");
@@ -1279,6 +1282,8 @@ bool RepeaterPoller::nowRefused(uint8_t idx, uint32_t now, char* reply, bool loc
     snprintf(reply, 160, "Error: polling %s", poll::gateName(c.gate));
   } else if (!local_only && !d.poll) {
     strcpy(reply, "Error: excluded by CoreScope");
+  } else if (!local_only && claim_slot_ == 0) {
+    strcpy(reply, "Error: no MQTT slot (poll.slot unset, no broker matches)");
   } else if (!local_only && key_in_use_ == poll::KEY_NONE) {
     strcpy(reply, "Error: no polling key in use (not registered with CoreScope, no shared key)");
   } else if (busy() || host_->pollDiscoveryBusy()) {
@@ -1444,6 +1449,7 @@ void RepeaterPoller::initControl() {
   url_hash_ = 0;
   has_url_ = false;
   community_ = true;
+  slot_setting_ = 0;
   claim_slot_ = 0;
   ctl_pending_ = false;
   ctl_deferred_ = false;
@@ -1495,12 +1501,26 @@ void RepeaterPoller::resetCorescope() {
 void RepeaterPoller::readControlSettings(const PollSettings& s) {
   has_url_ = s.url[0] != 0;
   community_ = s.community;
-  claim_slot_ = s.slot;
+  slot_setting_ = s.slot;
   const uint32_t h = fnv(s.url);
   if (h != url_hash_) {
     if (url_hash_ != 0) resetCorescope();
     url_hash_ = h;
   }
+  updateClaimSlot();
+}
+
+// Looked up again on every settings read, so a new policy or a reconfigured slot takes effect within a tick.
+void RepeaterPoller::updateClaimSlot() {
+  uint8_t matched = 0;
+  if (slot_setting_ == 0 && policy_.mqtt_host_count != 0) {
+    matched = host_->pollSlotForHosts(policy_.mqtt_hosts, policy_.mqtt_host_count);
+  }
+  const uint8_t slot = poll::effectiveClaimSlot(slot_setting_, matched);
+  if (slot == claim_slot_) return;
+  if (slot == 0) POLL_LOG("claim slot none: poll.slot unset and no broker matches the policy");
+  else POLL_LOG("claim slot %u (%s)", (unsigned)slot, slot_setting_ ? "poll.slot" : "broker match");
+  claim_slot_ = slot;
 }
 
 uint32_t RepeaterPoller::startupHoldS() const {
@@ -1568,6 +1588,7 @@ void RepeaterPoller::serviceControl() {
   ctl_deferred_ = false;
   takeControl(now);
   takeClaim(now);
+  updateClaimSlot();   // the policy just taken may name other brokers
   if (!enabled_ || store_state_ == poll::STATE_NEWER || !clock) return;
   // With consent the key comes first, as before; without it the mode is learned first.
   if (!has_id_ && consent_) return;
@@ -2050,6 +2071,13 @@ void RepeaterPoller::scheduleTick(uint32_t now) {
     const poll::Decision d = poll::decideCycle(states_[pick], cycleInputFor((uint8_t)pick, false, now), now);
     noteSkip((uint8_t)pick, d, now);
     if (!d.poll) continue;
+    if (claim_slot_ == 0) {
+      // Nothing is polled that cannot be claimed.
+      if (!(ctl_note_ & kNoteNoSlot)) POLL_LOG("a target is due but no MQTT slot is in use (poll.slot unset, no broker matches)");
+      ctl_note_ |= kNoteNoSlot;
+      return;
+    }
+    ctl_note_ &= (uint8_t)~kNoteNoSlot;
     if (key_in_use_ == poll::KEY_NONE) {
       // The plugin falls back to its companion path here; this firmware has none, so nothing is sent.
       if (!key_note_) POLL_LOG("a target is due but no polling key is in use (not registered with CoreScope, no shared key)");
