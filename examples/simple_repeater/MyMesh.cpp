@@ -2611,7 +2611,20 @@ void MyMesh::pollReadSettings(PollSettings& out) {
     if (poll::targetIsEmpty(obs->poll_targets[i])) continue;
     memcpy(out.targets[out.count], obs->poll_targets[i], PUB_KEY_SIZE);
     out.pw_mode[out.count] = obs->poll_pw_mode[i];
+    if (obs->poll_pw_mode[i] == MQTT_POLL_PW_CUSTOM) memcpy(out.pw[out.count], obs->poll_pw[i], sizeof(out.pw[0]));
     out.count++;
+  }
+}
+
+static_assert(kPollPwModeCustom == MQTT_POLL_PW_CUSTOM, "poller custom password mode");
+static_assert(sizeof(PollSettings::pw[0]) == sizeof(MQTTPrefs::poll_pw[0]), "poller password size");
+
+void MyMesh::pollDiscardPassword(const uint8_t* pub) {
+  MQTTPrefs* obs = _cli.getObserverPrefs();
+  for (int i = 0; i < MQTT_POLL_MAX_TARGETS; i++) {
+    if (memcmp(obs->poll_targets[i], pub, PUB_KEY_SIZE) != 0) continue;
+    if (poll::discardTargetPassword(obs->poll_pw_mode, obs->poll_pw, i)) _cli.saveObserverPrefs(_fs);
+    return;
   }
 }
 #endif  // WITH_REPEATER_POLL

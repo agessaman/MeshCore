@@ -75,6 +75,23 @@ static inline size_t buildLoginPlain(uint8_t* out, size_t cap, uint32_t timestam
   return 4u + pwlen;
 }
 
+static const uint8_t kCustomPasswordMax = 15;   // poll.pw text, without its NUL
+
+// timestamp (4 LE) plus an operator-chosen password: 1 to 15 printable bytes, no NUL.
+static inline size_t buildLoginPlainCustom(uint8_t* out, size_t cap, uint32_t timestamp, const char* text) {
+  if (!out || !text) return 0;
+  size_t n = 0;
+  while (n <= kCustomPasswordMax && text[n] != 0) {
+    const unsigned char c = (unsigned char)text[n];
+    if (c < 0x21 || c > 0x7E) return 0;
+    n++;
+  }
+  if (n == 0 || n > kCustomPasswordMax || cap < 4u + n) return 0;
+  writeLe32(out, timestamp);
+  memcpy(out + 4, text, n);
+  return 4u + n;
+}
+
 // tag (4 LE), request type, four reserved zeros (the telemetry permission-mask
 // byte is the first of them), then the 4 random bytes. Kind must be a request
 // type, not the ReqKind enum.

@@ -48,6 +48,21 @@ TEST(PollPacketCodec, LoginPlainIsTimestampThenPasswordBytes) {
   EXPECT_EQ(0xEE, buf[9]);  // no trailing NUL in the plaintext length
 }
 
+TEST(PollPacketCodec, LoginPlainCustomCarriesTheOperatorPassword) {
+  uint8_t buf[24];
+  memset(buf, 0xEE, sizeof(buf));
+  EXPECT_EQ(10u, poll::buildLoginPlainCustom(buf, sizeof(buf), 0x11223344, "s3cret"));
+  const uint8_t want[] = {0x44, 0x33, 0x22, 0x11, 's', '3', 'c', 'r', 'e', 't'};
+  ExpectBytes(buf, 10, want, sizeof(want));
+  EXPECT_EQ(0xEE, buf[10]);
+  EXPECT_EQ(19u, poll::buildLoginPlainCustom(buf, sizeof(buf), 1, "abcdefghijklmno"));   // 15 bytes
+  EXPECT_EQ(0u, poll::buildLoginPlainCustom(buf, sizeof(buf), 1, "abcdefghijklmnop"));  // 16 bytes
+  EXPECT_EQ(0u, poll::buildLoginPlainCustom(buf, sizeof(buf), 1, ""));
+  EXPECT_EQ(0u, poll::buildLoginPlainCustom(buf, sizeof(buf), 1, "has space"));
+  EXPECT_EQ(0u, poll::buildLoginPlainCustom(buf, sizeof(buf), 1, nullptr));
+  EXPECT_EQ(0u, poll::buildLoginPlainCustom(buf, 9, 1, "s3cret"));
+}
+
 TEST(PollPacketCodec, LoginRefusesAnyOtherPassword) {
   uint8_t buf[16];
   memset(buf, 0xEE, sizeof(buf));

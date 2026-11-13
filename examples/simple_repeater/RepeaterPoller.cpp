@@ -77,6 +77,11 @@ const uint8_t kNoteClaimsHeld = 8;
 const uint8_t kNoteNoSlot = 16;
 const uint8_t kNoteNoReadingMem = 32;
 
+void wipe(void* p, size_t n) {
+  volatile uint8_t* b = static_cast<volatile uint8_t*>(p);
+  for (size_t i = 0; i < n; i++) b[i] = 0;
+}
+
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
 
 // Kept for the life of the boot, so it never fragments the heap; PSRAM first when the board has it.
@@ -109,7 +114,7 @@ void hex8(char* out, const uint8_t* pub) { mesh::Utils::toHex(out, pub, 4); }
 
 const char* actLabel(uint8_t act, uint8_t pw) {
   switch (act) {
-    case poll::ACT_SEND_LOGIN: return pw == poll::PW_HELLO ? "login hello" : "login blank";
+    case poll::ACT_SEND_LOGIN: return pw == poll::PW_HELLO ? "login hello" : pw == poll::PW_CUSTOM ? "login custom" : "login blank";
     case poll::ACT_SEND_TEACH: return "teach";
     case poll::ACT_SEND_REQUEST: return "request";
     case poll::ACT_SEND_SETPERM: return "setperm";
@@ -446,7 +451,11 @@ bool RepeaterPoller::roomFor(const uint8_t* pub) {
   PollSettings s;
   host_->pollReadSettings(s);
   if (s.count > poll::kMaxTargets) s.count = poll::kMaxTargets;
-  if (poll::storedKeyIn(pub, s.targets, s.count) || s.count >= poll::kMaxTargets) return true;
+  if (poll::storedKeyIn(pub, s.targets, s.count) || s.count >= poll::kMaxTargets) {
+    wipe(s.pw, sizeof(s.pw));
+    return true;
+  }
+  wipe(s.pw, sizeof(s.pw));
   memcpy(s.targets[s.count++], pub, poll::kPubKeySize);
   foldSlots();
   return poll::storedRoomForList(stored_, poll::kStoredTargets, s.targets, s.count);
@@ -454,6 +463,21 @@ bool RepeaterPoller::roomFor(const uint8_t* pub) {
 
 // ---------------------------------------------------------------------------
 // Settings and targets
+
+const char* RepeaterPoller::passwordFor(uint8_t idx) const {
+  return meta_[idx].custom && meta_[idx].custom_pw[0] ? meta_[idx].custom_pw : NULL;
+}
+
+// An admin answer to the operator's password: it must not be sent again, here or after a reboot.
+void RepeaterPoller::discardPassword(uint8_t idx) {
+  if (!meta_[idx].custom) return;
+  wipe(meta_[idx].custom_pw, sizeof(meta_[idx].custom_pw));
+  meta_[idx].custom = false;
+  host_->pollDiscardPassword(meta_[idx].pub);
+  char pfx[9];
+  hex8(pfx, meta_[idx].pub);
+  POLL_LOG("%s custom password discarded: it was answered as admin", pfx);
+}
 
 int8_t RepeaterPoller::slotFor(const uint8_t* pub) const {
   for (uint8_t i = 0; i < kSlots; i++) {
@@ -527,7 +551,17 @@ void RepeaterPoller::readSettings() {
     meta_[idx].orphan = false;
     meta_[idx].list_pos = p;
     meta_[idx].pw_mode = s.pw_mode[p] <= poll::PWMODE_HELLO ? s.pw_mode[p] : (uint8_t)poll::PWMODE_AUTO;
+    const bool custom = s.pw_mode[p] == kPollPwModeCustom && s.pw[p][0] != 0;
+    s.pw[p][poll::kCustomPasswordMax] = '\0';
+    if (custom != meta_[idx].custom || (custom && strcmp(s.pw[p], meta_[idx].custom_pw) != 0)) {
+      // A new password gets a fresh count of unanswered logins.
+      states_[idx].key_login_fails = 0;
+      wipe(meta_[idx].custom_pw, sizeof(meta_[idx].custom_pw));
+      if (custom) memcpy(meta_[idx].custom_pw, s.pw[p], sizeof(meta_[idx].custom_pw));
+      meta_[idx].custom = custom;
+    }
   }
+  wipe(s.pw, sizeof(s.pw));
 
   // Phase spread over the targets sorted by key, among those sharing an interval.
   for (uint8_t i = 0; i < kSlots; i++) {
@@ -699,6 +733,7 @@ void RepeaterPoller::startPoll(uint8_t idx, bool scheduled) {
 
   poll::ExchangeConfig cfg = poll::defaultExchangeConfig();
   cfg.pw_mode = meta_[idx].pw_mode;
+  cfg.custom_pw = passwordFor(idx) != NULL;
   cfg.personal = c.own_key;
   cfg.status_hours = status_hours_;
   uint32_t listen = host_->pollReplyWindowMs();
@@ -793,7 +828,8 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
   switch (s.act) {
     case poll::ACT_SEND_LOGIN: {
       tag = nextTag();
-      n = poll::buildLoginPlain(plain, sizeof(plain), tag, s.pw);
+      if (s.pw == poll::PW_CUSTOM) n = poll::buildLoginPlainCustom(plain, sizeof(plain), tag, passwordFor(idx));
+      else n = poll::buildLoginPlain(plain, sizeof(plain), tag, s.pw);
       if (n) {
         mesh::Identity target(meta_[idx].pub);
         pkt = host_->pollCreateLogin(pollKey(), target, meta_[idx].secret, plain, n);
@@ -1065,6 +1101,7 @@ void RepeaterPoller::finishRun() {
            poll::exchangeReasonName(r.reason), (unsigned)r.logins, (unsigned)r.teaches, (unsigned)r.requests,
            r.reply_flooded ? " reply flooded" : "", reading);
 
+  if (r.discard_password) discardPassword(idx);
   if (r.admin) {
     t.admin_seen = true;
     t.admin_removed = false;
@@ -1450,11 +1487,6 @@ uint32_t fnv(const char* s) {
   return h;
 }
 
-void wipe(void* p, size_t n) {
-  volatile uint8_t* b = static_cast<volatile uint8_t*>(p);
-  for (size_t i = 0; i < n; i++) b[i] = 0;
-}
-
 void fmtStatus(char* out, size_t cap, bool wanted, int16_t status) {
   if (!wanted) snprintf(out, cap, "-");
   else snprintf(out, cap, "%d", (int)status);
@@ -1749,8 +1781,9 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
         c.snr_x4 = direct ? (opts.extended ? poll::clampSnrX4(snr) : snr) : 0;
         if (opts.extended) {
           const poll::TargetState& t = states_[i];
-          c.key = poll::CLAIM_KEY_OWN;   // a JSON mode always polls under the own key
-          c.state = poll::claimStateFor(t, false);
+          // A JSON mode always polls under the own key; an operator password is named as such.
+          c.key = passwordFor(i) ? poll::CLAIM_KEY_PASSWORD : poll::CLAIM_KEY_OWN;
+          c.state = poll::claimStateFor(t, passwordFor(i) != NULL);
           c.misses = t.no_reply_count;
           c.last_attempt = t.last_attempt;
           c.last_ok = t.last_success;
@@ -1976,6 +2009,7 @@ __attribute__((noinline)) void RepeaterPoller::discardUnasked() {
 __attribute__((noinline)) void RepeaterPoller::copyUrl(char* out, size_t cap) {
   PollSettings s;
   host_->pollReadSettings(s);
+  wipe(s.pw, sizeof(s.pw));
   strncpy(out, s.url, cap - 1);
   out[cap - 1] = '\0';
 }

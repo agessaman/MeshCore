@@ -563,6 +563,7 @@ public:
   bool pollRequestClaim(const char* json, size_t len, uint8_t slot) override {
     return bridge && bridge->requestPublishPollClaim(json, len, slot);
   }
+  void pollDiscardPassword(const uint8_t* pub) override;
   uint8_t pollTakeClaimResult() override { return bridge ? bridge->takePollClaimResult() : (uint8_t)poll::CLAIM_NONE; }
   bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind) override {
     return bridge && bridge->requestPublishPollReading(json, len, slot, kind);

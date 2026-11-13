@@ -26,7 +26,10 @@
 #include <helpers/poll/PollReplyParsers.h>
 #include <helpers/poll/PollStateStore.h>
 
-// Operator settings, filled in one place by the host from /mqtt.json.
+// pw_mode beyond poll::PasswordMode: the operator set a password of their own for the target.
+static const uint8_t kPollPwModeCustom = 3;
+
+// Operator settings, filled in one place by the host from /mqtt.json. Holds passwords: wipe a copy after use.
 struct PollSettings {
   bool     enabled;
   bool     consent;
@@ -34,7 +37,8 @@ struct PollSettings {
   uint8_t  status_hours;
   uint8_t  count;                                       // packed: targets[0..count)
   uint8_t  targets[poll::kMaxTargets][poll::kPubKeySize];
-  uint8_t  pw_mode[poll::kMaxTargets];                  // PasswordMode
+  uint8_t  pw_mode[poll::kMaxTargets];                  // PasswordMode, or kPollPwModeCustom
+  char     pw[poll::kMaxTargets][poll::kCustomPasswordMax + 1];   // set only for a custom pw_mode
   char     url[poll::kControlUrlMax];                   // CoreScope base URL, "" = none
   uint8_t  slot;                                        // 1-based MQTT slot for the claim, 0 = unset
   bool     community;                                   // share polling with other observers
@@ -80,6 +84,8 @@ public:
   virtual bool pollTakeControlResult(poll::ControlResult& out) = 0;
   virtual bool pollRequestClaim(const char* json, size_t len, uint8_t slot) = 0;
   virtual uint8_t pollTakeClaimResult() = 0;
+  // Drops the operator's password for this target from the saved settings: it was answered as admin.
+  virtual void pollDiscardPassword(const uint8_t* pub) = 0;
   // One reading at a time, beside the claim; kind is an MQTTPollReadingKind.
   virtual bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind) = 0;
   virtual uint8_t pollTakeReadingResult() = 0;
@@ -162,6 +168,8 @@ private:
     uint32_t admin_answer_print;   // loginAnswerPrint of the last admin login answer taken
     uint8_t  pub[poll::kPubKeySize];
     uint8_t  secret[PUB_KEY_SIZE];
+    bool     custom;       // the operator set a password for this target
+    char     custom_pw[poll::kCustomPasswordMax + 1];
   };
 
   struct Event {
@@ -264,6 +272,9 @@ private:
   void note(uint8_t idx, uint8_t what, uint32_t detail);
   int8_t findTarget(const char* hex, int* matches) const;
   int8_t slotFor(const uint8_t* pub) const;
+  // The password a custom login sends, whatever it came from; NULL when the target has none.
+  const char* passwordFor(uint8_t idx) const;
+  void discardPassword(uint8_t idx);
   void forgetKeyState();
   void foldSlots();
   void restoreStored(uint8_t idx);
