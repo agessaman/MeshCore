@@ -38,12 +38,12 @@ size_t build(char* out, size_t cap, const char* origin, uint32_t ts, const char*
 
 size_t buildExtended(char* out, size_t cap, const char* origin, uint32_t ts, const char* policy,
                      bool community, const poll::ClaimNode* nodes, uint8_t count,
-                     bool accepts_requests, uint8_t request_slots) {
+                     bool accepts_requests, uint8_t request_slots, const char* plugin = kPlugin) {
   poll::ClaimOptions opts{};
   opts.extended = true;
   opts.accepts_requests = accepts_requests;
   opts.request_slots = request_slots;
-  return poll::buildClaimJson(out, cap, origin, g_observer, ts, kPlugin, policy, community,
+  return poll::buildClaimJson(out, cap, origin, g_observer, ts, plugin, policy, community,
                               nodes, count, opts);
 }
 
@@ -617,7 +617,7 @@ TEST(PollClaims, PlainClaimIgnoresEveryExtendedField) {
   EXPECT_EQ(poll::claimSignature(&plain, 1, true), poll::claimSignature(&loaded, 1, true));
 }
 
-TEST(PollClaims, ExtendedSignatureTracksOnlyStoppingStates) {
+TEST(PollClaims, ExtendedSignatureTracksOnlyUrgentStates) {
   poll::ClaimNode base = makeNode(0xab, 0, false, 0, true, 26);
   base.state = poll::CLAIM_STATE_PENDING;
   const uint32_t pending = signatureExtended(&base, 1, true, false);
@@ -634,13 +634,14 @@ TEST(PollClaims, ExtendedSignatureTracksOnlyStoppingStates) {
   const uint32_t failed = signatureExtended(&n, 1, true, false);
   EXPECT_NE(pending, failed);
   n.state = poll::CLAIM_STATE_ADMIN_STOP;
-  EXPECT_EQ(failed, signatureExtended(&n, 1, true, false));  // one bit, not the state value
+  EXPECT_NE(pending, signatureExtended(&n, 1, true, false));
+  EXPECT_NE(failed, signatureExtended(&n, 1, true, false));  // the two urgent states differ
 
-  // Leaves the stopped pair, so the signature goes back.
+  // Leaves the urgent pair, so the signature goes back.
   n.state = poll::CLAIM_STATE_OK;
   EXPECT_EQ(pending, signatureExtended(&n, 1, true, false));
 
-  // A second node gets its own bit.
+  // A second node gets its own value.
   poll::ClaimNode a = makeNode(0xab, 0, false, 0, true, 26);
   poll::ClaimNode b = makeNode(0xcd, 0, false, 0, true, 26);
   poll::ClaimNode pair[2] = {a, b};
@@ -655,6 +656,22 @@ TEST(PollClaims, ExtendedSignatureTracksOnlyStoppingStates) {
   const uint32_t second_stopped = signatureExtended(pair, 2, true, false);
   EXPECT_NE(both_stopped, second_stopped);
   EXPECT_NE(both_ok, second_stopped);
+}
+
+TEST(PollClaims, LoginFailedToAdminStopRepublishesAfterRetryFloor) {
+  initKeys();
+  poll::ClaimNode n = makeNode(0xab, 0, false, 0, true, 26);
+  n.state = poll::CLAIM_STATE_LOGIN_FAILED;
+  const uint32_t failed = signatureExtended(&n, 1, true, false);
+
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  poll::claimSent(t, failed, true, true, kTs);
+
+  n.state = poll::CLAIM_STATE_ADMIN_STOP;
+  const uint32_t stopped = signatureExtended(&n, 1, true, false);
+  ASSERT_NE(failed, stopped);
+  EXPECT_FALSE(poll::claimDue(t, stopped, true, true, kTs + poll::kClaimRetrySec - 1));
+  EXPECT_TRUE(poll::claimDue(t, stopped, true, true, kTs + poll::kClaimRetrySec));
 }
 
 TEST(PollClaims, ExtendedSignatureTracksKeyAndRequested) {
@@ -722,14 +739,15 @@ TEST(PollClaims, AcceptsRequestsPublishesAndRefreshesEmptyClaim) {
 
 TEST(PollClaims, ExtendedWorstCaseFitsClaimBuffer) {
   initKeys();
-  const std::string origin(32, 'A');
+  // 31 origin bytes, each one written as a six-byte \u00XX escape.
+  const std::string origin(31, '\x01');
   const std::string plugin = "meshcore.observer_fw/" + std::string(26, 'p');
   const std::string policy(15, 'v');
   ASSERT_EQ(47u, plugin.size());
 
   poll::ClaimNode nodes[poll::kMaxTargets];
   for (uint8_t i = 0; i < poll::kMaxTargets; i++) {
-    nodes[i] = makeNode((uint8_t)(0xa0 + i), 1, false, 0, true, 26);
+    nodes[i] = makeNode((uint8_t)(0xa0 + i), 0, false, 0, true, -120);
     nodes[i].key = poll::CLAIM_KEY_PASSWORD;
     nodes[i].state = poll::CLAIM_STATE_LOGIN_FAILED;
     nodes[i].misses = 255;
@@ -740,25 +758,26 @@ TEST(PollClaims, ExtendedWorstCaseFitsClaimBuffer) {
 
   std::vector<char> buf(poll::kClaimJsonMax + 1, 'X');
   const size_t len = buildExtended(buf.data(), buf.size(), origin.c_str(), 4294967295u,
-                                   policy.c_str(), true, nodes, poll::kMaxTargets, true, 8);
-  ASSERT_GT(len, 0u);
+                                   policy.c_str(), false, nodes, poll::kMaxTargets, true, 8,
+                                   plugin.c_str());
+  ASSERT_EQ(2725u, len);
   EXPECT_LE(len, (size_t)poll::kClaimJsonMax);
-  EXPECT_EQ((size_t)poll::kClaimJsonMax + 1, buf.size());
+  EXPECT_EQ(0u, poll::kClaimJsonMax % 64);
+  EXPECT_LT((size_t)poll::kClaimJsonMax - len, 64u);
   EXPECT_EQ('\0', buf[len]);
   EXPECT_EQ('}', buf[len - 1]);
 
-  // The exact same claim in a one-byte-short buffer is refused, not truncated.
+  // The exact worst case in a one-byte-short buffer is refused, not truncated.
   std::vector<char> tight(len, 'X');
   EXPECT_EQ(0u, buildExtended(tight.data(), tight.size(), origin.c_str(), 4294967295u,
-                              policy.c_str(), true, nodes, poll::kMaxTargets, true, 8));
-  std::vector<char> tiny(64, 'X');
-  EXPECT_EQ(0u, buildExtended(tiny.data(), tiny.size(), origin.c_str(), 4294967295u,
-                              policy.c_str(), true, nodes, poll::kMaxTargets, true, 8));
+                              policy.c_str(), false, nodes, poll::kMaxTargets, true, 8,
+                              plugin.c_str()));
 
   // One more byte is enough for the terminator.
   std::vector<char> exact(len + 1, 'X');
   EXPECT_EQ(len, buildExtended(exact.data(), exact.size(), origin.c_str(), 4294967295u,
-                               policy.c_str(), true, nodes, poll::kMaxTargets, true, 8));
+                               policy.c_str(), false, nodes, poll::kMaxTargets, true, 8,
+                               plugin.c_str()));
   EXPECT_EQ(0, memcmp(buf.data(), exact.data(), len));
 }
 

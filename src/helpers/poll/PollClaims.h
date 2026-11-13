@@ -447,8 +447,11 @@ static inline uint32_t claimSignature(const ClaimNode* nodes, uint8_t count, boo
       }
     }
     if (opts.extended) {
-      const bool stopped = n.state == CLAIM_STATE_LOGIN_FAILED || n.state == CLAIM_STATE_ADMIN_STOP;
-      h = (h ^ (stopped ? 1u : 0u)) * 16777619u;
+      // Urgent states hash apart; every ordinary state shares one value.
+      uint8_t urgent = 0;
+      if (n.state == CLAIM_STATE_LOGIN_FAILED) urgent = 1;
+      else if (n.state == CLAIM_STATE_ADMIN_STOP) urgent = 2;
+      h = (h ^ urgent) * 16777619u;
       h = (h ^ claimKeyFor(n)) * 16777619u;
       h = (h ^ (n.requested ? 1u : 0u)) * 16777619u;
     }
