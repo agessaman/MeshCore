@@ -294,6 +294,7 @@ private:
   bool     shared_renew_failed_;     // a renewal of the expired shared key failed: it is no longer used
   uint32_t shared_at_;
   uint8_t  key_in_use_;              // poll::KeyChoice
+  uint8_t  mode_;                    // poll::ReadingMode from the latest policy answer of this URL
   uint8_t  acl_pub_[8];              // the key the cached secrets and login state belong to; zero = the stored own key
   uint32_t started_at_;              // first tick with a synced clock
   uint32_t gated_at_;                // last time the gate was seen closed

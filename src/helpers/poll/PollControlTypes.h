@@ -28,6 +28,7 @@ enum ControlWant : uint8_t {
 struct ControlRequest {
   char     url[kControlUrlMax];    // base URL, http or https, no trailing slash
   char     client_version[24];     // firmware release in GET queries; "" = omit
+  uint8_t  mode;                   // ReadingMode known to the loop; used when this session gets no policy
   uint8_t  observer_pub[kPubKeySize];
   uint8_t  want;                   // ControlWant bits
   uint8_t  target_count;
@@ -61,6 +62,7 @@ struct ControlResult {
 
   int16_t  reg_status;
   bool     reg_body_ok;    // the reply said {"ok": true}
+  bool     keys_skipped;   // registration and shared key withheld: JSON or unknown reading mode
 
   int16_t  shared_status;
   bool     shared_ok;      // shared_pub and shared_prv are valid

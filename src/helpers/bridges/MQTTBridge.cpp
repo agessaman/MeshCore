@@ -15,6 +15,7 @@
 #include "../CrashReport.h"
 #if defined(WITH_REPEATER_POLL)
 #include "../poll/PollControlClient.h"
+#include "../poll/PollRegistration.h"
 #endif
 #include <WiFiUdp.h>
 #include <Timezone.h>
@@ -5147,6 +5148,12 @@ void MQTTBridge::finishPollControl(bool started, uint8_t timed_out_want) {
   r.started = started;
   r.finished_at = (uint32_t)time(nullptr);
   poll::policyDefaults(r.policy);
+  // Without an encrypted mode known to the loop the session sent no key request to time out.
+  const uint8_t key_wants = poll::WANT_REGISTER | poll::WANT_SHARED_KEY;
+  if (!poll::keyExchangeAllowed(_poll_ctl_box->req.mode) && (timed_out_want & key_wants)) {
+    r.keys_skipped = true;
+    timed_out_want &= (uint8_t)~key_wants;
+  }
   if (timed_out_want & poll::WANT_OWNERS) r.owners_status = poll::CTL_ERR_TIMEOUT;
   if (timed_out_want & poll::WANT_POLICY) r.policy_status = poll::CTL_ERR_TIMEOUT;
   if (timed_out_want & poll::WANT_REGISTER) r.reg_status = poll::CTL_ERR_TIMEOUT;

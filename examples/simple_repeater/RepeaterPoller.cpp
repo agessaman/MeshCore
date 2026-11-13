@@ -100,6 +100,14 @@ const char* actLabel(uint8_t act, uint8_t pw) {
   }
 }
 
+const char* modeName(uint8_t m) {
+  return m == poll::MODE_ENCRYPTED ? "enc" : m == poll::MODE_JSON ? "json" : m == poll::MODE_TELEMETRY ? "telemetry" : "?";
+}
+
+const char* keyName(uint8_t k) {
+  return k == poll::KEY_OWN ? "own" : k == poll::KEY_SHARED ? "shared" : "none";
+}
+
 void fmtAge(char* out, size_t cap, uint32_t secs) {
   if (secs < 120) snprintf(out, cap, "%lus", (unsigned long)secs);
   else if (secs < 7200) snprintf(out, cap, "%lum", (unsigned long)(secs / 60));
@@ -606,7 +614,7 @@ void RepeaterPoller::loop() {
 
 void RepeaterPoller::tick() {
   readSettings();
-  if (enabled_ && consent_ && !has_id_ && (uint32_t)(millis() - id_retry_ms_) >= 60000UL) {
+  if (enabled_ && poll::identityAllowed(consent_, mode_) && !has_id_ && (uint32_t)(millis() - id_retry_ms_) >= 60000UL) {
     id_retry_ms_ = millis();
     ensureIdentity();
   }
@@ -1123,11 +1131,16 @@ void RepeaterPoller::cmdGetPoll(char* reply) {
                     : key_in_use_ == poll::KEY_SHARED ? "shared"
                     : !has_id_ ? "none (no polling key yet)"
                     : "none (not registered, no shared key)";
-  // CoreScope details are in `get poll.control`; this line stays under the reply buffer.
-  snprintf(reply, 160, "> %s, targets %u (%u ok), key %s, gate %s%s, clock %s%s%s", enabled_ ? "on" : "off",
-           (unsigned)total, (unsigned)ok, key, gate == poll::GATE_OPEN ? "open" : poll::gateName(gate),
-           gate != poll::GATE_OPEN && !policy_.ever_fetched ? " (saved)" : "", clockOk() ? "ok" : "not synced",
-           busy() ? ", polling now" : "", store_state_ == poll::STATE_NEWER ? ", state from newer fw (read-only)" : "");
+  // CoreScope details are in `get poll.control`; this line stays under the reply buffer, with the key reason dropped first.
+  for (int pass = 0; pass < 2; pass++) {
+    const int n = snprintf(reply, 160, "> %s, mode %s, targets %u (%u ok), key %s, gate %s%s, clock %s%s%s",
+                           enabled_ ? "on" : "off", modeName(mode_), (unsigned)total, (unsigned)ok, key,
+                           gate == poll::GATE_OPEN ? "open" : poll::gateName(gate),
+                           gate != poll::GATE_OPEN && !policy_.ever_fetched ? " (saved)" : "", clockOk() ? "ok" : "not synced",
+                           busy() ? ", polling now" : "", store_state_ == poll::STATE_NEWER ? ", state from newer fw (read-only)" : "");
+    if (n < 160) break;
+    key = keyName(key_in_use_);
+  }
 }
 
 void RepeaterPoller::cmdGetKey(char* reply) {
@@ -1398,10 +1411,6 @@ void wipe(void* p, size_t n) {
   for (size_t i = 0; i < n; i++) b[i] = 0;
 }
 
-const char* keyName(uint8_t k) {
-  return k == poll::KEY_OWN ? "own" : k == poll::KEY_SHARED ? "shared" : "none";
-}
-
 void fmtStatus(char* out, size_t cap, bool wanted, int16_t status) {
   if (!wanted) snprintf(out, cap, "-");
   else snprintf(out, cap, "%d", (int)status);
@@ -1428,6 +1437,7 @@ void RepeaterPoller::initControl() {
   shared_renew_failed_ = false;
   shared_at_ = 0;
   key_in_use_ = poll::KEY_NONE;
+  mode_ = poll::MODE_UNKNOWN;
   memset(acl_pub_, 0, sizeof(acl_pub_));   // the flash record's learned passwords are the own key's
   started_at_ = 0;
   gated_at_ = 0;
@@ -1470,6 +1480,7 @@ void RepeaterPoller::resetCorescope() {
   has_shared_ = false;
   shared_renew_failed_ = false;
   shared_at_ = 0;
+  mode_ = poll::MODE_UNKNOWN;
   // The session spacing is the node's, not the server's: ctl_ever_ and ctl_filed_ms_ stay.
   ctl_want_ = 0;   // an answer still on its way came from the old URL
   ctl_last_ = CTL_NEVER;
@@ -1478,7 +1489,7 @@ void RepeaterPoller::resetCorescope() {
     gate_ = open;
     gate_save_due_ = true;
   }
-  POLL_LOG("CoreScope URL changed: policy, owners, registration and shared key start over");
+  POLL_LOG("CoreScope URL changed: policy, mode, owners, registration and shared key start over");
 }
 
 void RepeaterPoller::readControlSettings(const PollSettings& s) {
@@ -1557,7 +1568,9 @@ void RepeaterPoller::serviceControl() {
   ctl_deferred_ = false;
   takeControl(now);
   takeClaim(now);
-  if (!enabled_ || !has_id_ || store_state_ == poll::STATE_NEWER || !clock) return;
+  if (!enabled_ || store_state_ == poll::STATE_NEWER || !clock) return;
+  // With consent the key comes first, as before; without it the mode is learned first.
+  if (!has_id_ && consent_) return;
   if (started_at_ == 0) started_at_ = now;
 
   // Owners that stopped answering are forgotten: this observer then polls every target itself.
@@ -1589,7 +1602,7 @@ void RepeaterPoller::serviceControl() {
 
 void RepeaterPoller::updateKey(uint32_t now) {
   const bool shared = poll::sharedKeyUsable(has_shared_, shared_at_, shared_renew_failed_, now);
-  const uint8_t want = poll::chooseKey(reg_, shared, now);
+  const uint8_t want = poll::chooseKeyForMode(mode_, has_id_, reg_, shared, now);
   if (want == key_in_use_ || busy()) return;   // a run keeps the key it started with
   char pfx[9] = "-";
   if (want == poll::KEY_OWN) hex8(pfx, poll_id_.pub_key);
@@ -1711,7 +1724,8 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
 
 void RepeaterPoller::maybeFileControl(uint32_t now) {
   if (ctl_pending_ || !has_url_) return;
-  const bool registering = poll::registrationDue(reg_, now);
+  // The body may go out before the mode is known; the session sends it only on the encrypted path.
+  const bool registering = poll::registrationWanted(poll::registrationDue(reg_, now), consent_ && has_id_, mode_);
   poll::ControlNeed need;
   need.enabled = enabled_;
   need.has_url = has_url_;
@@ -1733,7 +1747,7 @@ void RepeaterPoller::maybeFileControl(uint32_t now) {
     return;
   }
   if (ctl_retry_ms_ != 0 && (uint32_t)(millis() - ctl_retry_ms_) < kCtlRetryMs) return;
-  const bool want_shared = poll::sharedKeyWanted(has_shared_, shared_at_, reg_, registering, now);
+  const bool want_shared = !poll::modeIsJson(mode_) && poll::sharedKeyWanted(has_shared_, shared_at_, reg_, registering, now);
   discardUnasked();
   fileControl(now, registering, want_shared);
 }
@@ -1776,6 +1790,7 @@ __attribute__((noinline)) void RepeaterPoller::fileControl(uint32_t now, bool re
   poll::ControlRequest req;
   memset(&req, 0, sizeof(req));
   copyUrl(req.url, sizeof(req.url));
+  req.mode = mode_;
   host_->pollNodePub(req.observer_pub);
   ctl_count_ = 0;
   for (uint8_t p = 0; p < count_; p++) {
@@ -1898,6 +1913,13 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
     POLL_LOG("CoreScope policy: status %d; keeping the %s", (int)res.policy_status, had_policy ? "fetched copy" : "saved gate and defaults");
   }
 
+  const uint8_t mode = poll::modeAfterPolicy(mode_, res.policy_ok, res.policy_status, res.policy.reading_format);
+  if (mode != mode_) {
+    if (poll::registrationVoided(mode_, mode)) memset(&reg_, 0, sizeof(reg_));   // registered again before the key is used
+    POLL_LOG("reading mode %s (was %s)", modeName(mode), modeName(mode_));
+    mode_ = mode;
+  }
+
   // Owners, index-aligned with the request's targets; a target that left the list meanwhile is skipped.
   if ((want & poll::WANT_OWNERS) && res.owners_ok) {
     memset(owners_, 0, sizeof(owners_));
@@ -1909,7 +1931,7 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
     owners_ok_at_ = now;
   }
 
-  if (want & poll::WANT_REGISTER) {
+  if ((want & poll::WANT_REGISTER) && !res.keys_skipped) {
     const bool was_ok = reg_.ok, was_unsupported = reg_.unsupported;
     poll::registrationResult(reg_, res.reg_status, res.reg_body_ok, now);
     if (reg_.ok && res.reg_status == 200) {
@@ -1951,14 +1973,15 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
       wipe(keys, sizeof(keys));
     }
   }
-  if ((want & poll::WANT_SHARED_KEY) && !shared_taken) sharedRenewalFailed(now);
+  if ((want & poll::WANT_SHARED_KEY) && !shared_taken && !res.keys_skipped) sharedRenewalFailed(now);
 
   char o[8], p[8], r[8], k[8];
   fmtStatus(o, sizeof(o), want & poll::WANT_OWNERS, res.owners_status);
   fmtStatus(p, sizeof(p), want & poll::WANT_POLICY, res.policy_status);
-  fmtStatus(r, sizeof(r), want & poll::WANT_REGISTER, res.reg_status);
-  fmtStatus(k, sizeof(k), (want & poll::WANT_SHARED_KEY) || res.shared_status != 0, res.shared_status);
-  POLL_LOG("CoreScope answered: owners %s policy %s register %s shared-key %s", o, p, r, k);
+  fmtStatus(r, sizeof(r), (want & poll::WANT_REGISTER) && !res.keys_skipped, res.reg_status);
+  fmtStatus(k, sizeof(k), ((want & poll::WANT_SHARED_KEY) && !res.keys_skipped) || res.shared_status != 0, res.shared_status);
+  POLL_LOG("CoreScope answered: owners %s policy %s register %s shared-key %s%s", o, p, r, k,
+           res.keys_skipped ? " (key requests held: mode not encrypted)" : "");
 }
 
 void RepeaterPoller::noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now) {

@@ -13,6 +13,7 @@
 
 #include "../NetworkLink.h"
 #include "PollControlJson.h"
+#include "PollControlPlan.h"
 #include "PollControlSocket.h"
 #include "PollHttp.h"
 
@@ -545,8 +546,13 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   if (setup != 0) {
     if (req.want & WANT_OWNERS) res.owners_status = setup;
     if (req.want & WANT_POLICY) res.policy_status = setup;
-    if (want_reg) res.reg_status = setup;
-    if (req.want & WANT_SHARED_KEY) res.shared_status = setup;
+    // With no policy step, the loop's mode alone decides whether the key requests count as tried.
+    if (keyExchangeAllowed(req.mode)) {
+      if (want_reg) res.reg_status = setup;
+      if (req.want & WANT_SHARED_KEY) res.shared_status = setup;
+    } else {
+      res.keys_skipped = want_reg || (req.want & WANT_SHARED_KEY);
+    }
     delete k;
     return;
   }
@@ -589,7 +595,12 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   }
   if (!res.policy_ok) policyDefaults(res.policy);
 
-  if (want_reg) {
+  // No key leaves the device, and none is fetched, until a policy answer has chosen the encrypted path.
+  const bool keys_ok = sessionExchangesKeys(req.mode, res.policy_ok, res.policy_status,
+                                            res.policy.reading_format);
+  res.keys_skipped = !keys_ok && (want_reg || (req.want & WANT_SHARED_KEY));
+
+  if (want_reg && keys_ok) {
     const Reply r = request(*k, "POST", "/api/guest-keys", req.reg_body, req.reg_body_len,
                             deadline, env);
     res.reg_status = r.status;
@@ -597,7 +608,7 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
     if (r.status == 200) res.reg_body_ok = parseRegistrationReply(s_body, r.len, &alloc);
   }
 
-  if ((req.want & WANT_SHARED_KEY) || res.reg_status == 404) {
+  if (keys_ok && ((req.want & WANT_SHARED_KEY) || res.reg_status == 404)) {
     const Reply r = request(*k, "GET", "/api/shared-guest/key", nullptr, 0, deadline, env);
     res.shared_status = r.status;
     if (r.status == 200) {
@@ -619,6 +630,7 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   }
 
   delete k;
+  if (res.keys_skipped) POLL_CTL_LOG("registration and shared key skipped: reading mode is not encrypted");
   POLL_CTL_LOG("control session done in %lums: owners=%d policy=%d reg=%d shared=%d "
                "int_heap=%u->%u max_blk=%u->%u int_low=%u->%u",
                (unsigned long)(millis() - t0), (int)res.owners_status, (int)res.policy_status,
