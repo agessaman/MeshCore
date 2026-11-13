@@ -201,9 +201,11 @@ static void refreshMdnsName() {
   const char* nodeName = the_mesh.getNodeName();
   if (!mdns_started || strncmp(nodeName, mdns_node_name, sizeof(mdns_node_name) - 1) == 0) return;
 
-  char mdnsName[64];
+  char mdnsName[64], oldName[64];
   buildMdnsName(nodeName, mdnsName);
-  mdns_hostname_set(mdnsName);
+  buildMdnsName(mdns_node_name, oldName);
+  // setting the hostname re-announces every record, so skip it when only the TXT name changed
+  if (strcmp(mdnsName, oldName) != 0) mdns_hostname_set(mdnsName);
   MDNS.addServiceTxt("meshcore", "tcp", "node-name", nodeName);
   strncpy(mdns_node_name, nodeName, sizeof(mdns_node_name) - 1);
   mdns_node_name[sizeof(mdns_node_name) - 1] = '\0';
