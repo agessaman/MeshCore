@@ -906,10 +906,13 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   _poll_session = nullptr;
   _poll_ctl_seen_ms = 0;
   _poll_session_started_ms = 0;
-  _poll_claim_buf = nullptr;
-  _poll_claim_len = 0;
-  _poll_claim_slot = 0;
-  _poll_claim_state.store(poll::CLAIM_NONE, std::memory_order_relaxed);
+  for (PollPublishBox* box : {&_poll_claim, &_poll_reading}) {
+    box->buf = nullptr;
+    box->len = 0;
+    box->slot = 0;
+    box->type = MSG_POLLING;
+    box->state.store(poll::CLAIM_NONE, std::memory_order_relaxed);
+  }
   _poll_used.store(false, std::memory_order_relaxed);
 #endif
 
@@ -1002,10 +1005,8 @@ void MQTTBridge::releaseRuntimeBuffers() {
       _poll_ctl_box, psram_free));
   _poll_ctl_state.store(poll::CONTROL_IDLE, std::memory_order_release);
   _poll_ctl_seen_ms = 0;
-  _poll_claim_buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
-      _poll_claim_buf, psram_free));
-  _poll_claim_len = 0;
-  _poll_claim_state.store(poll::CLAIM_NONE, std::memory_order_release);
+  releasePollPublish(_poll_claim);
+  releasePollPublish(_poll_reading);
 #endif
 
   // Never pair a newly allocated raw buffer with metadata from a prior bridge
@@ -1749,6 +1750,7 @@ void MQTTBridge::mqttTaskLoop() {
     if (_poll_used.load(std::memory_order_acquire)) {
       servicePollControl();
       servicePollClaim();
+      servicePollReading();
     }
 #endif
 
@@ -3501,7 +3503,9 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
       static_cast<int>(MSG_PACKETS) == MQTT_PUBLICATION_PACKETS &&
       static_cast<int>(MSG_RAW) == MQTT_PUBLICATION_RAW &&
       static_cast<int>(MSG_NEIGHBORS) == MQTT_PUBLICATION_NEIGHBORS &&
-      static_cast<int>(MSG_POLLING) == MQTT_PUBLICATION_POLLING,
+      static_cast<int>(MSG_POLLING) == MQTT_PUBLICATION_POLLING &&
+      static_cast<int>(MSG_BATTERY) == MQTT_PUBLICATION_BATTERY &&
+      static_cast<int>(MSG_TELEMETRY) == MQTT_PUBLICATION_TELEMETRY,
       "topic router enum drift");
 
   if (!mqttTopicSlotIndexValid(index, RUNTIME_MQTT_SLOTS)) return false;
@@ -5032,50 +5036,108 @@ bool MQTTBridge::takePollControlResult(poll::ControlResult& out) {
   return true;
 }
 
-bool MQTTBridge::requestPublishPollClaim(const char* json, size_t len, uint8_t slot) {
-  // A cut claim would be invalid JSON, so an oversized one is refused whole.
-  if (!json || len == 0 || len > poll::kClaimJsonMax) return false;
+bool MQTTBridge::queuePollPublish(PollPublishBox& box, const char* json, size_t len, size_t cap,
+                                  uint8_t slot, uint8_t type) {
+  // A cut publication would be invalid JSON, so an oversized one is refused whole.
+  if (!json || len == 0 || len > cap) return false;
   if (slot < 1 || slot > RUNTIME_MQTT_SLOTS) return false;
-  if (_poll_claim_state.load(std::memory_order_acquire) == poll::CLAIM_PENDING) return false;
+  if (box.state.load(std::memory_order_acquire) == poll::CLAIM_PENDING) return false;
   if (!isRunning()) return false;
-  _poll_claim_buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
-      _poll_claim_buf, poll::kClaimJsonMax + 1, psram_malloc));
-  if (!_poll_claim_buf) return false;
-  memcpy(_poll_claim_buf, json, len);
-  _poll_claim_buf[len] = '\0';
-  _poll_claim_len = len;
-  _poll_claim_slot = slot;
-  _poll_claim_state.store(poll::CLAIM_PENDING, std::memory_order_release);
+  box.buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      box.buf, cap + 1, psram_malloc));
+  if (!box.buf) return false;
+  memcpy(box.buf, json, len);
+  box.buf[len] = '\0';
+  box.len = len;
+  box.slot = slot;
+  box.type = type;
+  box.state.store(poll::CLAIM_PENDING, std::memory_order_release);
   _poll_used.store(true, std::memory_order_release);
   return true;
 }
 
-uint8_t MQTTBridge::takePollClaimResult() {
-  uint8_t s = _poll_claim_state.load(std::memory_order_acquire);
+uint8_t MQTTBridge::takePollPublishResult(PollPublishBox& box) {
+  uint8_t s = box.state.load(std::memory_order_acquire);
   if (s != poll::CLAIM_PUBLISHED && s != poll::CLAIM_FAILED) return s;
   // The MQTT task writes only while PENDING, so this cannot lose a newer answer.
-  _poll_claim_state.store(poll::CLAIM_NONE, std::memory_order_release);
+  box.state.store(poll::CLAIM_NONE, std::memory_order_release);
   return s;
 }
 
+// MQTT task: false when the slot is down or the router refuses the topic there.
+bool MQTTBridge::sendPollPublish(PollPublishBox& box) {
+  const int i = (int)box.slot - 1;
+  if (i < 0 || i >= RUNTIME_MQTT_SLOTS || !_slots[i].enabled || !_slots[i].client ||
+      !_slots[i].connected) {
+    return false;
+  }
+  char topic[128];
+  // The router refuses the polling topics on presets that do not take them.
+  if (!buildTopicForSlot(i, static_cast<MQTTMessageType>(box.type), topic, sizeof(topic))) {
+    return false;
+  }
+  return publishToSlot(i, topic, box.buf, box.len, false, 1);
+}
+
+void MQTTBridge::releasePollPublish(PollPublishBox& box) {
+  box.buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(box.buf, psram_free));
+  box.len = 0;
+  box.state.store(poll::CLAIM_NONE, std::memory_order_release);
+}
+
+bool MQTTBridge::requestPublishPollClaim(const char* json, size_t len, uint8_t slot) {
+  return queuePollPublish(_poll_claim, json, len, poll::kClaimJsonMax, slot, MSG_POLLING);
+}
+
+uint8_t MQTTBridge::takePollClaimResult() {
+  return takePollPublishResult(_poll_claim);
+}
+
 void MQTTBridge::servicePollClaim() {
-  if (_poll_claim_state.load(std::memory_order_acquire) != poll::CLAIM_PENDING) return;
-  const int i = (int)_poll_claim_slot - 1;
-  bool ok = false;
-  if (i >= 0 && i < RUNTIME_MQTT_SLOTS && _slots[i].enabled && _slots[i].client &&
-      _slots[i].connected) {
-    char topic[128];
-    // The router refuses the polling topic on presets that do not take it.
-    if (buildTopicForSlot(i, MSG_POLLING, topic, sizeof(topic))) {
-      ok = publishToSlot(i, topic, _poll_claim_buf, _poll_claim_len, false, 1);
-    }
-  }
+  if (_poll_claim.state.load(std::memory_order_acquire) != poll::CLAIM_PENDING) return;
+  const bool ok = sendPollPublish(_poll_claim);
   if (ok) {
-    POLL_BRIDGE_LOG("claim queued on MQTT%d (%u bytes)", i + 1, (unsigned)_poll_claim_len);
+    POLL_BRIDGE_LOG("claim queued on MQTT%d (%u bytes)", _poll_claim.slot, (unsigned)_poll_claim.len);
   } else {
-    POLL_BRIDGE_LOG("claim not published on MQTT%d", i + 1);
+    POLL_BRIDGE_LOG("claim not published on MQTT%d", _poll_claim.slot);
   }
-  _poll_claim_state.store(ok ? poll::CLAIM_PUBLISHED : poll::CLAIM_FAILED, std::memory_order_release);
+  _poll_claim.state.store(ok ? poll::CLAIM_PUBLISHED : poll::CLAIM_FAILED, std::memory_order_release);
+}
+
+bool MQTTBridge::requestPublishPollReading(const char* json, size_t len, uint8_t slot, uint8_t kind) {
+  const int type = mqttPollReadingPublication(kind);
+  if (type < 0) return false;
+  return queuePollPublish(_poll_reading, json, len, kMQTTPollReadingJsonMax, slot, (uint8_t)type);
+}
+
+uint8_t MQTTBridge::takePollReadingResult() {
+  return takePollPublishResult(_poll_reading);
+}
+
+void MQTTBridge::servicePollReading() {
+  if (_poll_reading.state.load(std::memory_order_acquire) != poll::CLAIM_PENDING) return;
+  const bool ok = sendPollPublish(_poll_reading);
+  if (ok) {
+    POLL_BRIDGE_LOG("reading queued on MQTT%d (%u bytes)", _poll_reading.slot, (unsigned)_poll_reading.len);
+  } else {
+    POLL_BRIDGE_LOG("reading not published on MQTT%d", _poll_reading.slot);
+  }
+  _poll_reading.state.store(ok ? poll::CLAIM_PUBLISHED : poll::CLAIM_FAILED, std::memory_order_release);
+}
+
+// Mesh loop. Reads enabled and preset the way the packet gate does from the radio
+// callback; a custom host comes from the prefs this task edits. During a queued
+// reconfigure the answer may reflect the old setting until the MQTT task applies it.
+uint8_t MQTTBridge::findPollSlotForHosts(const char hosts[][64], uint8_t count) {
+  if (!_obs) return 0;
+  static_assert(RUNTIME_MQTT_SLOTS <= MQTT_PREFS_SLOT_COUNT, "slot prefs must cover every runtime slot");
+  MQTTPollSlotHost slots[RUNTIME_MQTT_SLOTS];
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    const MQTTPresetDef* preset = _slots[i].preset;
+    slots[i].enabled = _slots[i].enabled;
+    slots[i].broker = preset ? preset->server_url : _obs->mqtt_slot_host[i];
+  }
+  return mqttPollSlotForHosts(hosts, count, slots, RUNTIME_MQTT_SLOTS);
 }
 
 void MQTTBridge::finishPollControl(bool started, uint8_t timed_out_want) {

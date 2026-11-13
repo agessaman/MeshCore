@@ -21,6 +21,7 @@
 #include "helpers/poll/PollBuild.h"
 #if defined(WITH_REPEATER_POLL)
 #include "helpers/poll/PollControlTypes.h"
+#include "helpers/MQTTPollRouting.h"
 struct MQTTPollSession;   // the session task's own copy (MQTTBridge.cpp)
 #endif
 #include <atomic>
@@ -485,16 +486,28 @@ private:
   MQTTPollSession* _poll_session;            // MQTT task only; the session in flight
   uint32_t _poll_ctl_seen_ms;              // MQTT task: first pass that saw REQUESTED, 0 = none
   uint32_t _poll_session_started_ms;       // MQTT task
-  // Claim hand-off: same pattern as the neighbors snapshot, one slot, QoS 1.
-  char* _poll_claim_buf;
-  size_t _poll_claim_len;
-  uint8_t _poll_claim_slot;                // 1-based
-  std::atomic<uint8_t> _poll_claim_state;  // poll::ClaimPublish
+  // One poll publication handed to the MQTT task: same pattern as the neighbors
+  // snapshot, one slot, QoS 1. The mesh loop writes the fields only while not PENDING.
+  struct PollPublishBox {
+    char* buf;                    // allocated on first use, cap + 1 bytes
+    size_t len;
+    uint8_t slot;                 // 1-based
+    uint8_t type;                 // MQTTMessageType
+    std::atomic<uint8_t> state;   // poll::ClaimPublish
+  };
+  PollPublishBox _poll_claim;
+  PollPublishBox _poll_reading;   // separate box so a claim and a reading never wait on each other
   // Set once the mesh first uses either hand-off, so a node with polling off
   // pays one atomic load per bridge pass and nothing else.
   std::atomic<bool> _poll_used;
   void servicePollControl();
   void servicePollClaim();
+  void servicePollReading();
+  bool queuePollPublish(PollPublishBox& box, const char* json, size_t len, size_t cap,
+                        uint8_t slot, uint8_t type);
+  bool sendPollPublish(PollPublishBox& box);
+  static uint8_t takePollPublishResult(PollPublishBox& box);
+  static void releasePollPublish(PollPublishBox& box);
   void finishPollControl(bool started, uint8_t timed_out_want = 0);
   void stopPollControl();
 #endif
@@ -580,7 +593,7 @@ private:
   mesh::MillisecondClock* _ms;    // For uptime
 
   // Topic building
-  enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW, MSG_NEIGHBORS, MSG_POLLING };
+  enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW, MSG_NEIGHBORS, MSG_POLLING, MSG_BATTERY, MSG_TELEMETRY };
   bool buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size);
   bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
   uint8_t eligiblePacketSlots(uint8_t packet_type, MQTTMessageType type);
@@ -852,6 +865,12 @@ public:
   // slot is 1-based. Refused while the previous claim is still pending.
   bool requestPublishPollClaim(const char* json, size_t len, uint8_t slot);
   uint8_t takePollClaimResult();   // poll::ClaimPublish; a final answer is returned once
+  // One reading at a time, beside the claim; kind is an MQTTPollReadingKind.
+  // Refused while the previous reading is still pending.
+  bool requestPublishPollReading(const char* json, size_t len, uint8_t slot, uint8_t kind);
+  uint8_t takePollReadingResult(); // poll::ClaimPublish; a final answer is returned once
+  // 1-based lowest enabled slot whose broker host equals an entry, 0 when none does.
+  uint8_t findPollSlotForHosts(const char hosts[][64], uint8_t count);
 #if defined(POLL_TEST_CONTROL_CLI)
   // Bench only: the running bridge, for `get poll.ctl`.
   static MQTTBridge* pollBenchInstance();
