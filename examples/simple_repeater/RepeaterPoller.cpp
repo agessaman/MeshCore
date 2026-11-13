@@ -1790,6 +1790,7 @@ __attribute__((noinline)) void RepeaterPoller::fileControl(uint32_t now, bool re
   poll::ControlRequest req;
   memset(&req, 0, sizeof(req));
   copyUrl(req.url, sizeof(req.url));
+  strncpy(req.client_version, host_->pollFirmwareVersion(), sizeof(req.client_version) - 1);   // as in the claim's plugin tag
   req.mode = mode_;
   host_->pollNodePub(req.observer_pub);
   ctl_count_ = 0;
