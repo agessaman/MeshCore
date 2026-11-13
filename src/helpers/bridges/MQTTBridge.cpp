@@ -15,7 +15,9 @@
 #include "../CrashReport.h"
 #if defined(WITH_REPEATER_POLL)
 #include "../poll/PollControlClient.h"
+#include "../poll/PollReadings.h"
 #include "../poll/PollRegistration.h"
+static_assert(kMQTTPollReadingJsonMax >= poll::kReadingJsonMax, "the reading box must take the builder's worst case");
 #endif
 #include <WiFiUdp.h>
 #include <Timezone.h>

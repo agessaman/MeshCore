@@ -16,7 +16,7 @@ enum MQTTPollReadingKind : uint8_t {
   MQTT_POLL_READING_TELEMETRY = 1,   // telemetry topic, reading envelope v2
 };
 
-static const size_t kMQTTPollReadingJsonMax = 1536;   // one reading with LPP hex and full stats
+static const size_t kMQTTPollReadingJsonMax = 1664;   // one reading with LPP hex and full stats (poll::kReadingJsonMax)
 
 // Publication type for a reading kind, or -1 for an unknown kind.
 static inline int mqttPollReadingPublication(uint8_t kind) {

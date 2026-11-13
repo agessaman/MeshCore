@@ -564,6 +564,10 @@ public:
     return bridge && bridge->requestPublishPollClaim(json, len, slot);
   }
   uint8_t pollTakeClaimResult() override { return bridge ? bridge->takePollClaimResult() : (uint8_t)poll::CLAIM_NONE; }
+  bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind) override {
+    return bridge && bridge->requestPublishPollReading(json, len, slot, kind);
+  }
+  uint8_t pollTakeReadingResult() override { return bridge ? bridge->takePollReadingResult() : (uint8_t)poll::CLAIM_NONE; }
   uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count) override {
     return bridge ? bridge->findPollSlotForHosts(hosts, count) : 0;
   }

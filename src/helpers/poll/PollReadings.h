@@ -64,6 +64,26 @@ static inline bool replyEmptyForPacing(const Reading& r) {
   return !r.other_records;
 }
 
+// The code for a run whose data reply parsed. Battery delivery keeps the voltage
+// rule (0 mV is paced daily, no voltage is a miss); v2 takes any reply as a
+// success and paces only one replyEmptyForPacing would call empty.
+static inline uint8_t dataReplyCode(uint8_t format, bool has_battery, uint16_t battery_mv,
+                                    bool other_records) {
+  if (format == kReadingV2) {
+    const bool empty = !(has_battery && battery_mv != 0) && !other_records;
+    return empty ? CODE_NO_BATTERY : CODE_OK;
+  }
+  if (!has_battery) return CODE_NO_REPLY;
+  return battery_mv != 0 ? CODE_OK : CODE_NO_BATTERY;
+}
+
+// The SNR a reading or claim prints, held to +-30 dB so the JSON stays within its worst case.
+static inline int16_t clampSnrX4(int32_t snr_x4) {
+  if (snr_x4 < -120) return -120;
+  if (snr_x4 > 120) return 120;
+  return (int16_t)snr_x4;
+}
+
 // Tenths of a degree as a decimal with one fraction digit.
 static inline void readingTenths(detail::Out& o, int32_t tenths) {
   if (tenths < 0) {

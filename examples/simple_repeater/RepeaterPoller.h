@@ -19,7 +19,9 @@
 #include <helpers/poll/PollControlTypes.h>
 #include <helpers/poll/PollCycle.h>
 #include <helpers/poll/PollExchange.h>
+#include <helpers/poll/PollPacketCodec.h>
 #include <helpers/poll/PollPolicy.h>
+#include <helpers/poll/PollReadings.h>
 #include <helpers/poll/PollRegistration.h>
 #include <helpers/poll/PollReplyParsers.h>
 #include <helpers/poll/PollStateStore.h>
@@ -78,6 +80,9 @@ public:
   virtual bool pollTakeControlResult(poll::ControlResult& out) = 0;
   virtual bool pollRequestClaim(const char* json, size_t len, uint8_t slot) = 0;
   virtual uint8_t pollTakeClaimResult() = 0;
+  // One reading at a time, beside the claim; kind is an MQTTPollReadingKind.
+  virtual bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind) = 0;
+  virtual uint8_t pollTakeReadingResult() = 0;
   // Lowest enabled MQTT slot (1-based) whose broker host is one of hosts, or 0.
   virtual uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count) = 0;
 };
@@ -220,6 +225,22 @@ private:
   int16_t  rd_temp_c10_;
   uint32_t rd_uptime_;
   int16_t  rd_noise_;
+  bool     rd_parsed_;     // the data reply parsed
+  bool     rd_other_;      // it carried an LPP record besides channel-1 voltage and temperature
+  bool     rd_full_;       // readings_->run holds this run's reply
+
+  // Readings for a JSON mode; allocated on first use, from PSRAM when there is some
+  struct ReadingStore {
+    poll::Reading run;
+    poll::ReadingHold hold;
+  };
+  ReadingStore* readings_;
+  char*    json_;           // a reading's JSON, built just before it is handed to the bridge
+  bool     reading_pending_;
+  uint32_t reading_filed_ms_;
+  uint32_t reading_retry_ms_;     // a failed publish waits a minute; 0 = none
+  uint8_t  reading_node_[8];      // the held reading in flight: node prefix and sample time
+  uint32_t reading_sampled_;
 
   // Schedule
   uint32_t last_tick_ms_;
@@ -347,6 +368,13 @@ private:
   void takeClaim(uint32_t now);
   void maybeClaim(uint32_t now);
   void updateClaimSlot();
+  uint8_t readingFormat() const;
+  bool ensureReadingStore();
+  void fillReading(const mesh::Packet* pkt, const poll::Reply& r, const poll::StatusReading* st,
+                   const poll::TelemetryReading* tl);
+  void dropReadings(const char* why);
+  void takeReading();
+  void maybePublishReading(uint32_t now);
   void updateKey(uint32_t now);
   void bindKey();
   bool nowRefused(uint8_t idx, uint32_t now, char* reply, bool local_only);

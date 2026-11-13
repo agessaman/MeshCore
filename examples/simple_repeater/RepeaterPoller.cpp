@@ -6,6 +6,9 @@
 #include <Packet.h>
 #include <Utils.h>
 #include <helpers/MQTTConnectionPolicy.h>
+#include <helpers/MQTTPollRouting.h>
+#include <esp_heap_caps.h>
+#include <math.h>
 #include <helpers/poll/PollControlPlan.h>
 #include <helpers/poll/PollPacketCodec.h>
 #include <helpers/poll/PollSchedule.h>
@@ -19,6 +22,7 @@
 static_assert(PATH_HASH_SIZE == 1, "poll packets carry one-byte hashes");
 static_assert(PUB_KEY_SIZE == poll::kPubKeySize, "key size");
 static_assert(PRV_KEY_SIZE == poll::kPrvKeySize, "private key size");
+static_assert(MAX_HASH_SIZE == poll::kReadingHashSize, "a reading prints the packet hash the envelope does");
 static_assert(sizeof(RepeaterPoller) <= 5204, "repeater poller RAM budget");
 
 namespace {
@@ -62,6 +66,7 @@ const bool kFastPolicy = false;
 #endif
 const uint32_t kCtlRetryMs = 30000;          // a session the bridge refused is filed again after this
 const uint32_t kClaimTimeoutMs = 60000;      // a claim the bridge never answered counts as failed
+const uint32_t kReadingRetryMs = 60000;      // a reading the bridge could not publish waits this long
 
 // Log-once bits in ctl_note_.
 const uint8_t kNoteWaitCtl = 1;
@@ -69,8 +74,18 @@ const uint8_t kNoteRefused = 2;
 const uint8_t kNoteClaimRefused = 4;
 const uint8_t kNoteClaimsHeld = 8;
 const uint8_t kNoteNoSlot = 16;
+const uint8_t kNoteNoReadingMem = 32;
 
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
+
+// Kept for the life of the boot, so it never fragments the heap; PSRAM first when the board has it.
+void* pollAlloc(size_t n) {
+#if defined(BOARD_HAS_PSRAM)
+  void* p = heap_caps_calloc(1, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (p) return p;
+#endif
+  return heap_caps_calloc(1, n, MALLOC_CAP_8BIT);
+}
 
 // The whole packet as queued: a shed packet's pool slot reused by forwarded traffic must not read as ours.
 PollPacketSig sigOf(const mesh::Packet* pkt) {
@@ -152,7 +167,9 @@ RepeaterPoller::RepeaterPoller()
       run_quick_(false), run_learned_before_(0), poll_tag_count_(0), inflight_(NULL), inflight_ms_(0),
       inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
-      rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), last_tick_ms_(0),
+      rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), rd_parsed_(false), rd_other_(false),
+      rd_full_(false), readings_(NULL), json_(NULL), reading_pending_(false), reading_filed_ms_(0),
+      reading_retry_ms_(0), reading_sampled_(0), last_tick_ms_(0),
       last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), save_safety_(false),
       save_retry_ms_(0), ahead_save_ms_(0), ahead_saved_(false), hold_note_(0), fold_full_logged_(false) {
   memset(&gate_, 0, sizeof(gate_));
@@ -162,6 +179,7 @@ RepeaterPoller::RepeaterPoller()
   memset(poll_tags_, 0, sizeof(poll_tags_));
   memset(events_, 0, sizeof(events_));
   memset(&inflight_sig_, 0, sizeof(inflight_sig_));
+  memset(reading_node_, 0, sizeof(reading_node_));
   initControl();
 }
 
@@ -459,6 +477,7 @@ void RepeaterPoller::readSettings() {
   memset(&s, 0, sizeof(s));
   host_->pollReadSettings(s);
   if (s.count > poll::kMaxTargets) s.count = poll::kMaxTargets;
+  if (enabled_ && !s.enabled) dropReadings("polling off");
   enabled_ = s.enabled;
   consent_ = s.consent;
   interval_min_ = s.interval_min ? s.interval_min : 60;
@@ -479,6 +498,7 @@ void RepeaterPoller::readSettings() {
       continue;
     }
     if (run_idx_ == (int8_t)i && run_kind_ == RUN_EXCHANGE) abortRun("target removed");
+    if (readings_) poll::readingHoldDrop(readings_->hold, meta_[i].pub);
     foldSlots();   // its stop must outlive the slot even if no save has succeeded yet
     memset(&meta_[i], 0, sizeof(meta_[i]));
     memset(&states_[i], 0, sizeof(states_[i]));
@@ -694,6 +714,8 @@ void RepeaterPoller::startPoll(uint8_t idx, bool scheduled) {
   rd_temp_c10_ = INT16_MIN;
   rd_uptime_ = 0;
   rd_noise_ = 0;
+  rd_parsed_ = rd_other_ = rd_full_ = false;
+  if (readingFormat() != 0) ensureReadingStore();
 
   poll::Step s = exchange_.start(t, cfg, now);
   const poll::ExchangeResult& r = exchange_.result();
@@ -925,6 +947,9 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
           rd_mv_ = st.battery_mv;
           rd_uptime_ = st.has_uptime ? st.uptime_secs : 0;
           rd_noise_ = st.noise_floor;
+          rd_parsed_ = true;
+          rd_other_ = false;
+          fillReading(pkt, r, &st, NULL);
         }
       } else {
         poll::TelemetryReading tl;
@@ -933,6 +958,9 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
           rd_mv_ = tl.battery_mv;
           rd_temp_ = tl.has_temperature;
           rd_temp_c10_ = tl.temperature_c10;
+          rd_parsed_ = true;
+          rd_other_ = tl.other_records;
+          fillReading(pkt, r, NULL, &tl);
         }
       }
       POLL_LOG("rx data tag=%lu %s snr=%.2f len=%u", (unsigned long)r.tag, flooded ? "flooded" : "direct", snr,
@@ -997,11 +1025,13 @@ void RepeaterPoller::finishRun() {
   }
 
   const poll::ExchangeResult& r = exchange_.result();
+  const uint8_t data_code =
+      r.got_reply && rd_parsed_ ? poll::dataReplyCode(readingFormat(), rd_voltage_, rd_mv_, rd_other_) : poll::CODE_NO_REPLY;
   uint8_t code;
   if (r.admin) {
     code = poll::CODE_ADMIN_STOP;
-  } else if (r.got_reply && rd_voltage_) {
-    code = rd_mv_ > 0 ? poll::CODE_OK : poll::CODE_NO_BATTERY;
+  } else if (data_code != poll::CODE_NO_REPLY) {
+    code = data_code;
   } else if (r.reason == poll::XR_NOTHING_SENT) {
     code = poll::CODE_ERROR;
   } else {
@@ -1015,6 +1045,12 @@ void RepeaterPoller::finishRun() {
     if (r.kind == poll::REQ_STATUS) t.noise_floor = rd_noise_;
   }
   if (run_scheduled_) last_scheduled_at_ = now;
+  const uint8_t fmt = readingFormat();
+  if ((code == poll::CODE_OK || code == poll::CODE_NO_BATTERY) && rd_full_ && readings_ && fmt != 0 &&
+      poll::readingPublishable(fmt, readings_->run)) {
+    poll::readingHoldPut(readings_->hold, readings_->run);
+    POLL_LOG("reading held for publication (%u waiting)", (unsigned)readings_->hold.count);
+  }
 
   char reading[40] = "";
   if (code == poll::CODE_OK || code == poll::CODE_NO_BATTERY) {
@@ -1489,6 +1525,7 @@ void RepeaterPoller::resetCorescope() {
   shared_renew_failed_ = false;
   shared_at_ = 0;
   mode_ = poll::MODE_UNKNOWN;
+  dropReadings("URL changed");
   // The session spacing is the node's, not the server's: ctl_ever_ and ctl_filed_ms_ stay.
   ctl_want_ = 0;   // an answer still on its way came from the old URL
   ctl_last_ = CTL_NEVER;
@@ -1590,6 +1627,7 @@ void RepeaterPoller::serviceControl() {
   ctl_deferred_ = false;
   takeControl(now);
   takeClaim(now);
+  takeReading();
   updateClaimSlot();   // the policy just taken may name other brokers
   if (!enabled_ || store_state_ == poll::STATE_NEWER || !clock) return;
   // With consent the key comes first, as before; without it the mode is learned first.
@@ -1620,6 +1658,7 @@ void RepeaterPoller::serviceControl() {
 
   updateKey(now);
   maybeClaim(now);
+  maybePublishReading(now);
   maybeFileControl(now);
 }
 
@@ -1743,6 +1782,122 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
     POLL_LOG("claim filed: %u node%s, community %s, %u bytes", (unsigned)n, n == 1 ? "" : "s", community_ ? "on" : "off",
              (unsigned)len);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Readings in a JSON mode
+
+uint8_t RepeaterPoller::readingFormat() const {
+  if (mode_ == poll::MODE_JSON) return poll::kReadingV1;
+  if (mode_ == poll::MODE_TELEMETRY) return poll::kReadingV2;
+  return 0;
+}
+
+bool RepeaterPoller::ensureReadingStore() {
+  if (!readings_) readings_ = static_cast<ReadingStore*>(pollAlloc(sizeof(ReadingStore)));
+  if (!json_) json_ = static_cast<char*>(pollAlloc(poll::kReadingJsonMax + 1));
+  if (readings_ && json_) return true;
+  if (!(ctl_note_ & kNoteNoReadingMem)) POLL_LOG("no memory for readings: none are published");
+  ctl_note_ |= kNoteNoReadingMem;
+  return false;
+}
+
+// What the reply said, kept for the run's finish; the bytes come from the decrypted copy.
+void RepeaterPoller::fillReading(const mesh::Packet* pkt, const poll::Reply& r, const poll::StatusReading* st,
+                                 const poll::TelemetryReading* tl) {
+  if (!readings_ || readingFormat() == 0) return;
+  poll::Reading& g = readings_->run;
+  memset(&g, 0, sizeof(g));
+  memcpy(g.node, meta_[run_idx_].pub, poll::kPubKeySize);
+  g.sampled_at = host_->pollNow();
+  g.has_snr = true;
+  g.snr_x4 = poll::clampSnrX4((int32_t)lroundf(pkt->getSNR() * 4.0f));
+  g.has_tag = true;
+  g.tag = r.tag;
+  g.has_hash = true;
+  pkt->calculatePacketHash(g.hash);
+  if (st) {
+    g.method = poll::REQ_STATUS;
+    g.has_battery = true;
+    g.battery_mv = st->battery_mv;
+    g.status = *st;
+    g.status_len = st->data_len;
+  } else {
+    g.method = poll::REQ_TELEMETRY;
+    g.has_battery = tl->has_voltage;
+    g.battery_mv = tl->battery_mv;
+    g.has_temperature = tl->has_temperature;
+    g.temperature_c10 = tl->temperature_c10;
+    g.other_records = tl->other_records;
+    const uint8_t n = tl->lpp_len < poll::kReadingLppMax ? tl->lpp_len : poll::kReadingLppMax;
+    const uint8_t take = n <= r.len ? n : (uint8_t)r.len;
+    memcpy(g.lpp, r.data, take);
+    g.lpp_len = take;
+  }
+  rd_full_ = true;
+}
+
+void RepeaterPoller::dropReadings(const char* why) {
+  if (!readings_ || readings_->hold.count == 0) return;
+  POLL_LOG("dropped %u held reading%s: %s", (unsigned)readings_->hold.count, readings_->hold.count == 1 ? "" : "s", why);
+  poll::readingHoldClear(readings_->hold);
+  (void)why;
+}
+
+void RepeaterPoller::takeReading() {
+  if (!reading_pending_) return;
+  uint8_t r = host_->pollTakeReadingResult();
+  if (r == poll::CLAIM_PENDING) {
+    if ((uint32_t)(millis() - reading_filed_ms_) < kClaimTimeoutMs) return;
+    r = poll::CLAIM_FAILED;
+  }
+  reading_pending_ = false;
+  if (r != poll::CLAIM_PUBLISHED) {
+    reading_retry_ms_ = millis() | 1UL;
+    POLL_LOG("reading to slot %u failed; kept, retry in %lus", (unsigned)claim_slot_, (unsigned long)(kReadingRetryMs / 1000));
+    return;
+  }
+  reading_retry_ms_ = 0;
+  // Only the entry that went out leaves; a newer one for the same node, or a dropped one, is left alone.
+  for (uint8_t i = 0; readings_ && i < readings_->hold.count; i++) {
+    const poll::Reading& e = readings_->hold.entries[i];
+    if (e.sampled_at != reading_sampled_ || memcmp(e.node, reading_node_, sizeof(reading_node_)) != 0) continue;
+    poll::readingHoldRemoveAt(readings_->hold, i);
+    break;
+  }
+  POLL_LOG("reading published to slot %u", (unsigned)claim_slot_);
+}
+
+// The oldest held reading goes out on the claim's slot; the JSON is built now so its timestamp is the publish time.
+void RepeaterPoller::maybePublishReading(uint32_t now) {
+  if (reading_pending_ || !readings_ || !json_ || claim_slot_ == 0) return;
+  const uint8_t fmt = readingFormat();
+  if (fmt == 0) return;
+  if (reading_retry_ms_ != 0 && (uint32_t)(millis() - reading_retry_ms_) < kReadingRetryMs) return;
+  const poll::Reading* g = poll::readingHoldPeek(readings_->hold);
+  if (!g) return;
+  char tag[48];
+  uint8_t self_pub[poll::kPubKeySize];
+  snprintf(tag, sizeof(tag), "meshcore.observer_fw/%s", host_->pollFirmwareVersion());
+  host_->pollNodePub(self_pub);
+  const size_t len = poll::buildReadingJson(json_, poll::kReadingJsonMax + 1, fmt, host_->pollNodeName(), self_pub, now,
+                                            tag, *g);
+  const uint8_t kind = fmt == poll::kReadingV2 ? (uint8_t)MQTT_POLL_READING_TELEMETRY : (uint8_t)MQTT_POLL_READING_BATTERY;
+  if (len == 0) {
+    POLL_LOG("reading not built (too long): dropped");
+    poll::readingHoldRemoveAt(readings_->hold, 0);
+    return;
+  }
+  if (!host_->pollRequestReading(json_, len, claim_slot_, kind)) {
+    reading_retry_ms_ = millis() | 1UL;
+    POLL_LOG("reading not handed to the bridge (stopped or busy); retry in %lus", (unsigned long)(kReadingRetryMs / 1000));
+    return;
+  }
+  memcpy(reading_node_, g->node, sizeof(reading_node_));
+  reading_sampled_ = g->sampled_at;
+  reading_pending_ = true;
+  reading_filed_ms_ = millis();
+  POLL_LOG("reading filed: %s, %u bytes", fmt == poll::kReadingV2 ? "telemetry" : "battery", (unsigned)len);
 }
 
 void RepeaterPoller::maybeFileControl(uint32_t now) {
@@ -1943,6 +2098,7 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
     if (poll::registrationVoided(mode_, mode)) memset(&reg_, 0, sizeof(reg_));   // registered again before the key is used
     POLL_LOG("reading mode %s (was %s)", modeName(mode), modeName(mode_));
     mode_ = mode;
+    dropReadings("reading mode changed");   // held ones were read for the old envelope
   }
 
   // Owners, index-aligned with the request's targets; a target that left the list meanwhile is skipped.

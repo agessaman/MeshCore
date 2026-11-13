@@ -356,6 +356,36 @@ TEST(PollReadings, HoldKeepsTheNewestPerTargetOldestFirst) {
 
 }  // namespace
 
+TEST(PollReadings, DataReplyCodeKeepsTodaysRuleOutsideTelemetry) {
+  for (uint8_t f : {(uint8_t)0, poll::kReadingV1}) {
+    EXPECT_EQ(poll::CODE_OK, poll::dataReplyCode(f, true, 3900, false));
+    EXPECT_EQ(poll::CODE_NO_BATTERY, poll::dataReplyCode(f, true, 0, false));
+    EXPECT_EQ(poll::CODE_NO_REPLY, poll::dataReplyCode(f, false, 0, true));
+    EXPECT_EQ(poll::CODE_NO_REPLY, poll::dataReplyCode(f, false, 0, false));
+  }
+}
+
+TEST(PollReadings, DataReplyCodeInTelemetryPacesOnlyEmptyReplies) {
+  EXPECT_EQ(poll::CODE_OK, poll::dataReplyCode(poll::kReadingV2, true, 3900, false));
+  EXPECT_EQ(poll::CODE_OK, poll::dataReplyCode(poll::kReadingV2, false, 0, true));   // no voltage, other records
+  EXPECT_EQ(poll::CODE_OK, poll::dataReplyCode(poll::kReadingV2, true, 0, true));
+  EXPECT_EQ(poll::CODE_NO_BATTERY, poll::dataReplyCode(poll::kReadingV2, true, 0, false));
+  EXPECT_EQ(poll::CODE_NO_BATTERY, poll::dataReplyCode(poll::kReadingV2, false, 0, false));
+  // Same verdict as replyEmptyForPacing on the reading.
+  poll::Reading r;
+  memset(&r, 0, sizeof(r));
+  r.other_records = true;
+  EXPECT_EQ(poll::replyEmptyForPacing(r), poll::dataReplyCode(poll::kReadingV2, r.has_battery, r.battery_mv, r.other_records) == poll::CODE_NO_BATTERY);
+  r.other_records = false;
+  EXPECT_EQ(poll::replyEmptyForPacing(r), poll::dataReplyCode(poll::kReadingV2, r.has_battery, r.battery_mv, r.other_records) == poll::CODE_NO_BATTERY);
+}
+
+TEST(PollReadings, SnrIsClampedToThirtyDb) {
+  EXPECT_EQ(-120, poll::clampSnrX4(-500));
+  EXPECT_EQ(120, poll::clampSnrX4(127));
+  EXPECT_EQ(-41, poll::clampSnrX4(-41));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
