@@ -207,6 +207,20 @@ TEST(PollControlJson, OwnersUppercaseKeysMatch) {
   EXPECT_EQ(poll::OWNER_ROLE_INDEPENDENT, o.out[0].role);
 }
 
+TEST(PollControlJson, OwnersKeysWithEmbeddedNulAreIgnored) {
+  ReqParse o;
+  keyFromId(o.targets[0], 0x11);
+  const std::string body = "{\"nodes\":{\"" + pubHexId(0x11) + "\\u000000\":{\"requested\":true},"
+                           "\"" + pubHexId(0x22) + "\\u000000\":{\"requested\":true}},"
+                           "\"policy\":{\"node_windows\":{\"" + std::string(64, 'c') + "\\u000000\":4000}}}";
+  ASSERT_TRUE(o.parse(body, 1, 8));
+  EXPECT_TRUE(o.nodes_ok);
+  EXPECT_FALSE(o.out[0].present);
+  EXPECT_EQ(0, o.requested_count);
+  ASSERT_TRUE(o.has_policy);
+  EXPECT_EQ(0, o.policy.node_window_count);
+}
+
 TEST(PollControlJson, OwnersWithoutNodesIsNotOk) {
   Owners o;
   fill(o.targets[0], 0xaa);
@@ -345,7 +359,9 @@ TEST(PollControlJson, PolicyReadingFormat) {
   const char* telemetry = "{\"reading_format\":\"telemetry\"}";
   const char* unknown[] = {"{\"reading_format\":\"JSON\"}", "{\"reading_format\":\"js\"}",
                            "{\"reading_format\":\"\"}", "{\"reading_format\":null}",
-                           "{\"reading_format\":1}", "{\"reading_format\":[\"json\"]}"};
+                           "{\"reading_format\":1}", "{\"reading_format\":[\"json\"]}",
+                           "{\"reading_format\":\"json\\u0000x\"}",
+                           "{\"reading_format\":\"telemetry\\u0000\"}"};
   for (const char* body : unknown) {
     ASSERT_TRUE(poll::parsePolicyReply(body, strlen(body), p)) << body;
     EXPECT_EQ(poll::READING_ENCRYPTED, p.reading_format) << body;
@@ -373,6 +389,15 @@ TEST(PollControlJson, PolicyMqttHostsAreLowercaseAndValidated) {
   EXPECT_STREQ("ok-1.example", p.mqtt_hosts[1]);
   EXPECT_EQ(max_len, std::string(p.mqtt_hosts[2]));
   EXPECT_STREQ("third.example", p.mqtt_hosts[3]);
+}
+
+TEST(PollControlJson, PolicyMqttHostWithEmbeddedNulIsSkipped) {
+  const std::string body =
+      "{\"mqtt_hosts\":[\"bad.example\\u0000x\",\"ok.example\\u0000\",\"good.example\"]}";
+  poll::Policy p;
+  ASSERT_TRUE(poll::parsePolicyReply(body.data(), body.size(), p));
+  ASSERT_EQ(1, p.mqtt_host_count);
+  EXPECT_STREQ("good.example", p.mqtt_hosts[0]);
 }
 
 TEST(PollControlJson, PolicyMqttHostsThatIsNotAnArrayMeansNone) {
@@ -569,6 +594,8 @@ TEST(PollControlJson, SharedKeyExpandedAndBad) {
       "{\"public_key\":\"" + std::string(62, 'a') + "\",\"private_key\":\"" + std::string(64, 'f') + "\"}",
       "{\"public_key\":\"" + hexKey('a') + "\",\"private_key\":\"" + std::string(63, 'f') + "z\"}",
       "{\"public_key\":\"" + hexKey('a') + "\",\"private_key\":12}",
+      "{\"public_key\":\"" + hexKey('a') + "\\u000000\",\"private_key\":\"" + std::string(64, 'f') + "\"}",
+      "{\"public_key\":\"" + hexKey('a') + "\",\"private_key\":\"" + std::string(64, 'f') + "\\u000000\"}",
       "{\"error\":\"no shared guest key\"}",
   };
   for (const std::string& b : bad) {
@@ -630,7 +657,7 @@ TEST(PollControlJson, LocalTargetKeepsRequestedFlagAndEnvelope) {
   const std::string ct = hexRun("cD", 16);
   const std::string tag = hexRun("Ef", 32);
   const std::string body =
-      "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"role\":\"polling\",\"mine\":true,\"requested\":1,\"pw\":{"
+      "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"role\":\"polling\",\"mine\":true,\"requested\":true,\"pw\":{"
       "\"epk\":\"" + epk + "\",\"ct\":\"" + ct + "\",\"tag\":\"" + tag + "\"}},\"" + pubHexId(0x22) +
       "\":{\"role\":\"standby\",\"mine\":false}}}";
   ASSERT_TRUE(o.parse(body, 2, 4));
@@ -756,6 +783,31 @@ TEST(PollControlJson, MalformedPasswordEnvelopeIsBad) {
   EXPECT_EQ(0x44, extra.requested[0].pub[0]);
 }
 
+TEST(PollControlJson, PasswordEnvelopeRejectsEmbeddedNul) {
+  const std::string epk = hexRun("ab", 32);
+  const std::string ct = hexRun("cd", 16);
+  const std::string tag = hexRun("ef", 32);
+  const std::string nul = "\\u0000";
+  const std::string cases[] = {
+      "{\"epk\":\"" + epk + nul + "00\",\"ct\":\"" + ct + "\",\"tag\":\"" + tag + "\"}",
+      "{\"epk\":\"" + epk + "\",\"ct\":\"" + ct + nul + "00\",\"tag\":\"" + tag + "\"}",
+      "{\"epk\":\"" + epk + "\",\"ct\":\"" + ct + "\",\"tag\":\"" + tag + nul + "00\"}",
+  };
+  for (const std::string& pw : cases) {
+    ReqParse o;
+    keyFromId(o.targets[0], 0x11);
+    const std::string body = "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"requested\":true,\"pw\":" + pw + "}}}";
+    ASSERT_TRUE(o.parse(body, 1, 0)) << pw;
+    EXPECT_TRUE(o.out[0].present) << pw;
+    EXPECT_TRUE(o.out[0].requested) << pw;
+    EXPECT_FALSE(o.out[0].pw.present) << pw;
+    EXPECT_TRUE(o.out[0].pw.bad) << pw;
+    EXPECT_EQ(0, o.out[0].pw.epk[0]) << pw;
+    EXPECT_EQ(0, o.out[0].pw.ct[0]) << pw;
+    EXPECT_EQ(0, o.out[0].pw.tag[0]) << pw;
+  }
+}
+
 TEST(PollControlJson, RequestedFalseIsIgnored) {
   ReqParse o;
   keyFromId(o.targets[0], 0x11);
@@ -768,6 +820,27 @@ TEST(PollControlJson, RequestedFalseIsIgnored) {
   EXPECT_EQ(0, o.requested_count);
   EXPECT_TRUE(o.out[0].present);
   EXPECT_FALSE(o.out[0].requested);
+}
+
+TEST(PollControlJson, RequestedNeedsBooleanTrue) {
+  const char* values[] = {"false", "\"false\"", "\"true\"", "1", "[1]", "{\"a\":1}"};
+  for (const char* v : values) {
+    const std::string body =
+        "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"requested\":" + v + ",\"role\":\"polling\"}}}";
+
+    ReqParse local;
+    keyFromId(local.targets[0], 0x11);
+    ASSERT_TRUE(local.parse(body, 1, 8)) << v;
+    EXPECT_TRUE(local.out[0].present) << v;
+    EXPECT_FALSE(local.out[0].requested) << v;
+    EXPECT_EQ(0, local.requested_count) << v;
+
+    ReqParse remote;
+    keyFromId(remote.targets[0], 0xAB);
+    ASSERT_TRUE(remote.parse(body, 1, 8)) << v;
+    EXPECT_FALSE(remote.out[0].present) << v;
+    EXPECT_EQ(0, remote.requested_count) << v;
+  }
 }
 
 TEST(PollControlJson, InvalidOwnersAnswerYieldsNoRequested) {

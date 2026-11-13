@@ -28,9 +28,9 @@ static inline int hexDigit(char c) {
   return -1;
 }
 
-// Exactly 2 * n hex digits, either case, nothing else.
-static inline bool decodeHex(const char* s, uint8_t* out, size_t n) {
-  if (!s) return false;
+// Exactly 2 * n hex digits over len bytes, either case, nothing else.
+static inline bool decodeHex(const char* s, size_t len, uint8_t* out, size_t n) {
+  if (!s || len != 2 * n) return false;
   for (size_t i = 0; i < n; i++) {
     const int hi = hexDigit(s[2 * i]);
     if (hi < 0) return false;
@@ -38,11 +38,15 @@ static inline bool decodeHex(const char* s, uint8_t* out, size_t n) {
     if (lo < 0) return false;
     out[i] = (uint8_t)((hi << 4) | lo);
   }
-  return s[2 * n] == '\0';
+  return true;
 }
 
-static inline bool decodeKey(const char* s, uint8_t out[kPubKeySize]) {
-  return decodeHex(s, out, kPubKeySize);
+static inline bool decodeHex(JsonString s, uint8_t* out, size_t n) {
+  return decodeHex(s.c_str(), s.size(), out, n);
+}
+
+static inline bool decodeKey(JsonString s, uint8_t out[kPubKeySize]) {
+  return decodeHex(s.c_str(), s.size(), out, kPubKeySize);
 }
 
 // Python's int(): bools are 0/1, floats truncate, strings must be a whole
@@ -140,16 +144,21 @@ static inline void copyText(JsonVariantConst v, char* out, size_t cap) {
 }
 
 // A broker host entry: 1..63 bytes of letters, digits, dot and hyphen.
-static inline bool validHost(const char* s) {
-  if (!s) return false;
-  size_t n = 0;
-  for (; s[n]; n++) {
-    const char c = s[n];
+static inline bool validHost(JsonString s) {
+  if (s.isNull() || s.size() == 0 || s.size() > kPolicyHostLen - 1) return false;
+  for (size_t i = 0; i < s.size(); i++) {
+    const char c = s.c_str()[i];
     const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                     (c >= '0' && c <= '9') || c == '.' || c == '-';
-    if (!ok || n >= kPolicyHostLen - 1) return false;
+    if (!ok) return false;
   }
-  return n > 0;
+  return true;
+}
+
+// Length-aware compare, so an embedded NUL cannot shorten the value.
+static inline bool textIs(JsonString s, const char* lit) {
+  const size_t n = strlen(lit);
+  return s.c_str() && s.size() == n && memcmp(s.c_str(), lit, n) == 0;
 }
 
 // Hosts are stored lowercase because they compare case-insensitively.
@@ -236,7 +245,7 @@ static inline void parsePolicyObject(JsonObjectConst o, Policy& p,
   for (uint8_t pass = 0; pass < 2; pass++) {
     for (JsonVariantConst item : ex) {
       uint8_t key[kPubKeySize];
-      if (!item.is<const char*>() || !cjson::decodeKey(item.as<const char*>(), key)) continue;
+      if (!item.is<const char*>() || !cjson::decodeKey(item.as<JsonString>(), key)) continue;
       if (cjson::keyIn(key, targets, target_count) != (pass == 0)) continue;
       if (policyExcluded(p, key)) continue;  // the plugin keeps a set
       if (p.excluded_count >= kMaxExcluded) {
@@ -251,7 +260,7 @@ static inline void parsePolicyObject(JsonObjectConst o, Policy& p,
   for (uint8_t pass = 0; pass < 2; pass++) {
     for (JsonPairConst kv : nw) {
       uint8_t key[kPubKeySize];
-      if (!cjson::decodeKey(kv.key().c_str(), key)) continue;
+      if (!cjson::decodeKey(kv.key(), key)) continue;
       if (cjson::keyIn(key, targets, target_count) != (pass == 0)) continue;
       int64_t w = 0;
       if (!cjson::readInt(kv.value(), &w) || w <= 0) continue;
@@ -283,21 +292,20 @@ static inline void parsePolicyObject(JsonObjectConst o, Policy& p,
 
   JsonVariantConst format = o["reading_format"];
   if (format.is<const char*>()) {
-    const char* name = format.as<const char*>();
-    if (name && strcmp(name, "json") == 0) p.reading_format = READING_JSON;
-    else if (name && strcmp(name, "telemetry") == 0) p.reading_format = READING_TELEMETRY;
+    const JsonString name = format.as<JsonString>();
+    if (cjson::textIs(name, "json")) p.reading_format = READING_JSON;
+    else if (cjson::textIs(name, "telemetry")) p.reading_format = READING_TELEMETRY;
   }
 
   JsonArrayConst hosts = o["mqtt_hosts"].as<JsonArrayConst>();
   for (JsonVariantConst item : hosts) {
     if (p.mqtt_host_count >= kPolicyHostMax) break;
     if (!item.is<const char*>()) continue;
-    const char* host = item.as<const char*>();
+    const JsonString host = item.as<JsonString>();
     if (!cjson::validHost(host)) continue;
     char* dst = p.mqtt_hosts[p.mqtt_host_count];
-    size_t i = 0;
-    for (; host[i]; i++) dst[i] = cjson::lowerAscii(host[i]);
-    dst[i] = '\0';
+    for (size_t i = 0; i < host.size(); i++) dst[i] = cjson::lowerAscii(host.c_str()[i]);
+    dst[host.size()] = '\0';
     p.mqtt_host_count++;
   }
 }
@@ -344,13 +352,15 @@ static inline void pwEnvelopeFrom(JsonObjectConst e, PwEnvelope& out) {
     return;
   }
   JsonObjectConst pw = raw.as<JsonObjectConst>();
-  const char* epk = pw["epk"].is<const char*>() ? pw["epk"].as<const char*>() : nullptr;
-  const char* ct = pw["ct"].is<const char*>() ? pw["ct"].as<const char*>() : nullptr;
-  const char* tag = pw["tag"].is<const char*>() ? pw["tag"].as<const char*>() : nullptr;
+  if (!pw["epk"].is<const char*>() || !pw["ct"].is<const char*>() || !pw["tag"].is<const char*>()) {
+    out.bad = true;
+    return;
+  }
   uint8_t epk_b[32], ct_b[16], tag_b[32];
   uint32_t ver = 0;
-  if (!epk || !ct || !tag || !cjson::decodeHex(epk, epk_b, 32) || !cjson::decodeHex(ct, ct_b, 16) ||
-      !cjson::decodeHex(tag, tag_b, 32) || !pwVer(pw, &ver)) {
+  if (!cjson::decodeHex(pw["epk"].as<JsonString>(), epk_b, 32) ||
+      !cjson::decodeHex(pw["ct"].as<JsonString>(), ct_b, 16) ||
+      !cjson::decodeHex(pw["tag"].as<JsonString>(), tag_b, 32) || !pwVer(pw, &ver)) {
     out.bad = true;
     return;
   }
@@ -375,7 +385,7 @@ static inline void ownerEntryFrom(JsonObjectConst e, OwnerEntry& out) {
     out.role = OWNER_ROLE_UNKNOWN;
   }
   out.mine = cjson::truthy(e["mine"]);
-  out.requested = cjson::truthy(e["requested"]);
+  out.requested = e["requested"].is<bool>() && e["requested"].as<bool>();
   out.excluded = cjson::truthy(e["excluded"]);
   int64_t v = 0;
   if (cjson::truthy(e["standby_rank"]) && cjson::readInt(e["standby_rank"], &v)) {
@@ -459,7 +469,7 @@ static inline bool parseOwnersReply(const char* body, size_t len,
     if (nodes_ok) *nodes_ok = true;
     for (JsonPairConst kv : nodes) {
       uint8_t key[kPubKeySize];
-      if (!cjson::decodeKey(kv.key().c_str(), key)) continue;
+      if (!cjson::decodeKey(kv.key(), key)) continue;
       JsonObjectConst e = kv.value().as<JsonObjectConst>();
       if (e.isNull()) continue;  // a non-dict entry counts as no entry
       bool configured = false;
@@ -511,11 +521,11 @@ static inline bool parseSharedKeyReply(const char* body, size_t len, uint8_t pub
   filter["private_key"] = true;
   JsonDocument doc(cjson::pickAllocator(alloc));
   if (!cjson::deserializeObject(doc, body, len, filter)) return false;
-  const char* pub_hex = doc["public_key"].is<const char*>() ? doc["public_key"].as<const char*>() : nullptr;
-  const char* prv_hex = doc["private_key"].is<const char*>() ? doc["private_key"].as<const char*>() : nullptr;
-  if (!pub_hex || !prv_hex) return false;
+  const JsonString pub_hex = doc["public_key"].as<JsonString>();
+  const JsonString prv_hex = doc["private_key"].as<JsonString>();
+  if (pub_hex.isNull() || prv_hex.isNull()) return false;
   if (!cjson::decodeKey(pub_hex, pub)) return false;
-  const size_t n = strlen(prv_hex);
+  const size_t n = prv_hex.size();
   bool ok = false;
   if (n == 64) ok = cjson::decodeHex(prv_hex, prv, 32);
   else if (n == 128) ok = cjson::decodeHex(prv_hex, prv, 64);
