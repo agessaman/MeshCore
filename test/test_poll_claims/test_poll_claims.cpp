@@ -571,6 +571,25 @@ TEST(PollClaims, ExtendedStateAndHistoryFields) {
   EXPECT_EQ("\"2023-11-14T22:13:20Z\"", claimField(json, "last_ok"));
 }
 
+TEST(PollClaims, StopsAndRequestFlagsChangeTheExtendedSignature) {
+  initKeys();
+  poll::ClaimNode n = makeNode(0xab, 0, false, 0, true, 26);
+  n.requested = true;
+  n.key = poll::CLAIM_KEY_PASSWORD;
+  n.state = poll::CLAIM_STATE_OK;
+  const uint32_t ok = signatureExtended(&n, 1, true, true);
+  poll::ClaimNode failed = n;
+  failed.state = poll::CLAIM_STATE_LOGIN_FAILED;
+  EXPECT_NE(ok, signatureExtended(&failed, 1, true, true));
+  poll::ClaimNode stopped = n;
+  stopped.state = poll::CLAIM_STATE_ADMIN_STOP;
+  EXPECT_NE(ok, signatureExtended(&stopped, 1, true, true));
+  poll::ClaimNode local = n;
+  local.requested = false;
+  EXPECT_NE(ok, signatureExtended(&local, 1, true, true));
+  EXPECT_NE(signatureExtended(nullptr, 0, true, true), signatureExtended(nullptr, 0, true, false));
+}
+
 TEST(PollClaims, ExtendedRequestSlotsStayInRange) {
   initKeys();
   char buf[1024];

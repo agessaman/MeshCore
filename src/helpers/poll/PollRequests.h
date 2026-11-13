@@ -64,6 +64,18 @@ static inline bool requestsMustDrop(bool opt_in, bool url_is_https, bool url_cha
   return ownersLapsed(owners_ok_at, now);
 }
 
+// Requests run only in a JSON mode with community on, polling on, and requestsAllowed.
+static inline bool requestsActive(bool opt_in, bool url_is_https, bool json_mode, bool community,
+                                  bool enabled) {
+  return enabled && json_mode && community && requestsAllowed(opt_in, url_is_https);
+}
+
+// A requested target is polled only while its entry says requested: no entry is never a poller.
+static inline uint8_t requestedRole(const OwnerBrief& b) {
+  if (!b.present || !b.requested) return ROLE_DISABLED;
+  return mapRole(true, b);
+}
+
 // Skip a bad envelope, one not decrypted yet, or a refusal at the current ver.
 static inline bool requestMayPoll(const RequestedTarget& target) {
   if (!target.held) return false;
@@ -142,6 +154,67 @@ static inline void dropAll(RequestTable& table, RequestDelta& delta) {
   for (uint8_t i = 0; i < n; i++) noteKey(&delta.dropped_count, delta.dropped, table.targets[i].pub);
   for (uint8_t i = 0; i < kMaxTargets; i++) wipeRequested(table.targets[i]);
   table.count = 0;
+}
+
+// An envelope still to decrypt: present, well formed, and neither opened nor refused.
+static inline bool envelopeNeedsOpen(const RequestedTarget& target) {
+  return target.held && target.envelope.present && !target.envelope.bad && !target.pw_ready &&
+         !target.pw_bad;
+}
+
+// The decrypt outcome; a failure marks the target bad so it is never polled with a blank password.
+static inline void envelopeOpened(RequestedTarget& target, bool ok, const char pw[16]) {
+  volatile char* p = target.pw;
+  for (uint8_t i = 0; i < (uint8_t)sizeof(target.pw); i++) p[i] = 0;
+  target.pw_ready = ok;
+  target.pw_bad = !ok;
+  target.pw_ver = ok ? target.envelope.ver : 0;
+  if (ok) memcpy(target.pw, pw, sizeof(target.pw));
+  target.pw[sizeof(target.pw) - 1] = 0;
+}
+
+// The envelope password a login sends, or null when the target has none ready.
+static inline const char* requestedPassword(const RequestedTarget& target) {
+  if (!target.envelope.present || !target.pw_ready || !requestMayPoll(target)) return nullptr;
+  return target.pw[0] ? target.pw : nullptr;
+}
+
+// Two polls in a row whose logins went unanswered refuse the envelope password until a new ver.
+static inline bool noteEnvelopeLoginFails(RequestedTarget& target, uint8_t key_login_fails) {
+  if (!target.envelope.present || !target.pw_ready || key_login_fails < 2) return false;
+  if (target.login_failed && target.failed_ver == target.envelope.ver) return false;
+  target.login_failed = true;
+  target.failed_ver = target.envelope.ver;
+  return true;
+}
+
+// An admin answer to the envelope password: it goes, and the same envelope is not opened again.
+static inline void discardRequestedPassword(RequestedTarget& target) {
+  volatile char* p = target.pw;
+  for (uint8_t i = 0; i < (uint8_t)sizeof(target.pw); i++) p[i] = 0;
+  target.pw_ready = false;
+  target.pw_ver = 0;
+  if (target.envelope.present) target.pw_bad = true;
+}
+
+// A local target with the same key takes over; false when it was not held.
+static inline bool removeRequestedKey(RequestTable& table, const uint8_t* pub, RequestDelta& delta) {
+  memset(&delta, 0, sizeof(delta));
+  const int i = findRequested(table, pub);
+  if (i < 0) return false;
+  removeRequested(table, (uint8_t)i, delta);
+  return true;
+}
+
+// The held target a new local target displaces: the last on standby, else the last held.
+// roles is indexed like the table (poll::Role).
+static inline int requestToEvict(const RequestTable& table, const uint8_t* roles) {
+  const uint8_t n = table.count > kMaxTargets ? kMaxTargets : table.count;
+  if (n == 0) return -1;
+  for (int i = (int)n - 1; i >= 0; i--) {
+    if (roles && roles[i] != ROLE_POLLER) return i;
+  }
+  return (int)n - 1;
 }
 
 // Apply one owners snapshot. now is unused here; requestsMustDrop reads the clock.

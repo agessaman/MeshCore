@@ -106,6 +106,49 @@ static inline uint8_t mapRole(bool community, const OwnerEntry& e) {
   return ROLE_POLLER;
 }
 
+// What a poller keeps of an owners entry between sessions; an envelope goes to the request table.
+struct OwnerBrief {
+  bool     present;
+  uint8_t  role;           // OwnerRole
+  bool     mine;
+  bool     excluded;
+  bool     requested;
+  uint8_t  standby_rank;
+  uint8_t  owner_hops;
+  uint32_t latest_ts;
+};
+
+static inline OwnerBrief ownerBrief(const OwnerEntry& e) {
+  OwnerBrief b;
+  b.present = e.present;
+  b.role = e.role;
+  b.mine = e.mine;
+  b.excluded = e.excluded;
+  b.requested = e.requested;
+  b.standby_rank = e.standby_rank;
+  b.owner_hops = e.owner_hops;
+  b.latest_ts = e.latest_ts;
+  return b;
+}
+
+static inline OwnerEntry ownerFromBrief(const OwnerBrief& b) {
+  OwnerEntry e;
+  memset(&e, 0, sizeof(e));
+  e.present = b.present;
+  e.role = b.role;
+  e.mine = b.mine;
+  e.excluded = b.excluded;
+  e.requested = b.requested;
+  e.standby_rank = b.standby_rank;
+  e.owner_hops = b.owner_hops;
+  e.latest_ts = b.latest_ts;
+  return e;
+}
+
+static inline uint8_t mapRole(bool community, const OwnerBrief& b) {
+  return mapRole(community, ownerFromBrief(b));
+}
+
 static inline const char* skipReasonName(uint8_t reason) {
   switch (reason) {
     case SKIP_GATE: return "gate";

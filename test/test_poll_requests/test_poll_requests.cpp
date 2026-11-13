@@ -374,6 +374,142 @@ TEST(PollRequests, MayPollRequiresAUsablePassword) {
   EXPECT_FALSE(poll::requestMayPoll(t));
 }
 
+TEST(PollRequests, ActiveNeedsJsonModeCommunityAndPolling) {
+  EXPECT_TRUE(poll::requestsActive(true, true, true, true, true));
+  EXPECT_FALSE(poll::requestsActive(false, true, true, true, true));
+  EXPECT_FALSE(poll::requestsActive(true, false, true, true, true));
+  EXPECT_FALSE(poll::requestsActive(true, true, false, true, true));
+  EXPECT_FALSE(poll::requestsActive(true, true, true, false, true));
+  EXPECT_FALSE(poll::requestsActive(true, true, true, true, false));
+}
+
+TEST(PollRequests, AnAbsentOrUnrequestedEntryNeverPolls) {
+  poll::OwnerBrief b;
+  memset(&b, 0, sizeof(b));
+  EXPECT_EQ(poll::ROLE_POLLER, poll::mapRole(true, b));   // a local target fails open
+  EXPECT_EQ(poll::ROLE_DISABLED, poll::requestedRole(b));
+  b.present = true;
+  b.role = poll::OWNER_ROLE_POLLING;
+  EXPECT_EQ(poll::ROLE_DISABLED, poll::requestedRole(b));
+  b.requested = true;
+  EXPECT_EQ(poll::ROLE_POLLER, poll::requestedRole(b));
+  b.role = poll::OWNER_ROLE_STANDBY;
+  EXPECT_EQ(poll::ROLE_STANDBY, poll::requestedRole(b));
+  b.role = poll::OWNER_ROLE_DISABLED;
+  EXPECT_EQ(poll::ROLE_DISABLED, poll::requestedRole(b));
+}
+
+TEST(PollRequests, OwnerBriefKeepsWhatTheRolesNeed) {
+  poll::OwnerEntry e;
+  memset(&e, 0, sizeof(e));
+  e.present = true;
+  e.role = poll::OWNER_ROLE_STANDBY;
+  e.standby_rank = 2;
+  e.latest_ts = 1234;
+  e.requested = true;
+  e.pw = envGood(3, 9);
+  const poll::OwnerBrief b = poll::ownerBrief(e);
+  EXPECT_EQ(poll::mapRole(true, e), poll::mapRole(true, b));
+  const poll::OwnerEntry back = poll::ownerFromBrief(b);
+  EXPECT_EQ(2, back.standby_rank);
+  EXPECT_EQ(1234u, back.latest_ts);
+  EXPECT_TRUE(back.requested);
+  EXPECT_FALSE(back.pw.present);
+}
+
+TEST(PollRequests, OpeningAnEnvelopeNeverFallsBackToBlank) {
+  poll::RequestedTarget t;
+  memset(&t, 0, sizeof(t));
+  t.held = true;
+  t.envelope = envGood(5, 1);
+  EXPECT_TRUE(poll::envelopeNeedsOpen(t));
+  EXPECT_EQ(nullptr, poll::requestedPassword(t));
+  char pw[16];
+  memset(pw, 0, sizeof(pw));
+  poll::envelopeOpened(t, false, pw);
+  EXPECT_FALSE(poll::envelopeNeedsOpen(t));
+  EXPECT_FALSE(poll::requestMayPoll(t));
+  EXPECT_EQ(nullptr, poll::requestedPassword(t));
+
+  poll::replaceEnvelope(t, envGood(6, 2));
+  EXPECT_TRUE(poll::envelopeNeedsOpen(t));
+  strcpy(pw, "guestpw");
+  poll::envelopeOpened(t, true, pw);
+  EXPECT_TRUE(poll::requestMayPoll(t));
+  ASSERT_NE(nullptr, poll::requestedPassword(t));
+  EXPECT_STREQ("guestpw", poll::requestedPassword(t));
+  EXPECT_EQ(6u, t.pw_ver);
+
+  // No envelope: blank then hello, as a local auto target.
+  poll::RequestedTarget plain;
+  memset(&plain, 0, sizeof(plain));
+  plain.held = true;
+  EXPECT_FALSE(poll::envelopeNeedsOpen(plain));
+  EXPECT_TRUE(poll::requestMayPoll(plain));
+  EXPECT_EQ(nullptr, poll::requestedPassword(plain));
+}
+
+TEST(PollRequests, TwoUnansweredLoginsRefuseTheVerUntilItChanges) {
+  poll::RequestedTarget t;
+  memset(&t, 0, sizeof(t));
+  t.held = true;
+  t.envelope = envGood(5, 1);
+  char pw[16] = "guestpw";
+  poll::envelopeOpened(t, true, pw);
+  EXPECT_FALSE(poll::noteEnvelopeLoginFails(t, 1));
+  EXPECT_TRUE(poll::noteEnvelopeLoginFails(t, 2));
+  EXPECT_FALSE(poll::noteEnvelopeLoginFails(t, 3));   // already refused at this ver
+  EXPECT_FALSE(poll::requestMayPoll(t));
+  poll::replaceEnvelope(t, envGood(6, 2));
+  EXPECT_FALSE(t.login_failed);
+  poll::envelopeOpened(t, true, pw);
+  EXPECT_TRUE(poll::requestMayPoll(t));
+
+  poll::RequestedTarget plain;
+  memset(&plain, 0, sizeof(plain));
+  plain.held = true;
+  EXPECT_FALSE(poll::noteEnvelopeLoginFails(plain, 5));   // blank/hello targets are not refused this way
+}
+
+TEST(PollRequests, AdminAnswerDiscardsThePasswordForGood) {
+  poll::RequestedTarget t;
+  memset(&t, 0, sizeof(t));
+  t.held = true;
+  t.envelope = envGood(5, 1);
+  char pw[16] = "guestpw";
+  poll::envelopeOpened(t, true, pw);
+  poll::discardRequestedPassword(t);
+  EXPECT_TRUE(pwIs(t.pw, 0));
+  EXPECT_FALSE(poll::envelopeNeedsOpen(t));   // the same envelope is not opened again
+  EXPECT_FALSE(poll::requestMayPoll(t));
+  EXPECT_EQ(nullptr, poll::requestedPassword(t));
+}
+
+TEST(PollRequests, LocalKeyRemovesAndEvictionPrefersStandby) {
+  poll::RequestTable table;
+  memset(&table, 0, sizeof(table));
+  hold(table, 0x81, envGood(1, 1), 'A');
+  hold(table, 0x82, envClear(), 0);
+  hold(table, 0x83, envClear(), 0);
+  const uint8_t roles[3] = {poll::ROLE_POLLER, poll::ROLE_STANDBY, poll::ROLE_POLLER};
+  EXPECT_EQ(1, poll::requestToEvict(table, roles));
+  const uint8_t pollers[3] = {poll::ROLE_POLLER, poll::ROLE_POLLER, poll::ROLE_POLLER};
+  EXPECT_EQ(2, poll::requestToEvict(table, pollers));
+
+  uint8_t key[poll::kPubKeySize];
+  setKey(key, 0x81);
+  poll::RequestDelta delta;
+  EXPECT_TRUE(poll::removeRequestedKey(table, key, delta));
+  EXPECT_EQ(2, table.count);
+  EXPECT_EQ(1, delta.dropped_count);
+  EXPECT_TRUE(tablePwClear(table));
+  EXPECT_FALSE(poll::removeRequestedKey(table, key, delta));
+
+  poll::RequestTable empty;
+  memset(&empty, 0, sizeof(empty));
+  EXPECT_EQ(-1, poll::requestToEvict(empty, roles));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
