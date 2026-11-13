@@ -928,7 +928,7 @@ TEST(MQTTPrefsSerializer, PollObjectMissingKeepsDefaultsWithoutRepair) {
 TEST(MQTTPrefsSerializer, PollRepairsEachOutOfRangeRule) {
   bool repaired = false;
   MQTTPrefs prefs = loadPoll(
-      "{version:1,poll:{interval_min:29,status_hours:2,slot:7,pw1:3,community:4,consent:5,enabled:2}}",
+      "{version:1,poll:{interval_min:29,status_hours:2,slot:7,pw1:4,community:4,consent:5,enabled:2}}",
       &repaired);
   EXPECT_TRUE(repaired);
   EXPECT_EQ(MQTT_POLL_INTERVAL_DEFAULT, prefs.poll_interval_min);
@@ -1019,11 +1019,138 @@ TEST(MQTTPrefsSerializer, PollKeysFitTheSerializerLimit) {
   const char* keys[] = {
       "poll", "enabled", "consent", "url", "slot", "interval_min", "status_hours",
       "community", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8",
-      "pw1", "pw2", "pw3", "pw4", "pw5", "pw6", "pw7", "pw8",
+      "pw1", "pw2", "pw3", "pw4", "pw5", "pw6", "pw7", "pw8", "requests",
+      "pass1", "pass2", "pass3", "pass4", "pass5", "pass6", "pass7", "pass8",
   };
   for (const char* key : keys) {
     EXPECT_LE(strlen(key), 15u) << key;
   }
+}
+
+TEST(MQTTPrefsSerializer, PollRequestsAndCustomPasswordRoundTrip) {
+  MQTTPrefs source = defaults();
+  source.poll_requests = 1;
+  ASSERT_EQ(poll::TargetHex::Ok,
+            poll::parseTargetHex(kPollKey, source.poll_targets[0], nullptr));
+  source.poll_pw_mode[0] = MQTT_POLL_PW_CUSTOM;
+  strcpy(source.poll_pw[0], "a\"b\\c/~!");
+  ASSERT_EQ(poll::TargetHex::Ok,
+            poll::parseTargetHex(kPollKey2, source.poll_targets[1], nullptr));
+  source.poll_pw_mode[1] = MQTT_POLL_PW_CUSTOM;
+  strcpy(source.poll_pw[1], "fifteen-chars-x");
+
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+  EXPECT_NE(std::string::npos, output.text().find("requests:1")) << output.text();
+  EXPECT_NE(std::string::npos, output.text().find("pw1:3")) << output.text();
+
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input)) << output.text();
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(1, loaded.poll_requests);
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, loaded.poll_pw_mode[0]);
+  EXPECT_STREQ("a\"b\\c/~!", loaded.poll_pw[0]);
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, loaded.poll_pw_mode[1]);
+  EXPECT_STREQ("fifteen-chars-x", loaded.poll_pw[1]);
+  EXPECT_EQ(0, memcmp(source.poll_pw, loaded.poll_pw, sizeof(source.poll_pw)));
+}
+
+TEST(MQTTPrefsSerializer, PollFileWithoutNewKeysLoadsUnchanged) {
+  // Written by firmware that predates poll.requests and custom passwords.
+  const std::string old_file =
+      std::string("{version:1,wifi:{ssid:\"mesh\"},poll:{enabled:1,consent:1,"
+                  "url:\"https://corescope.example\",slot:1,interval_min:90,status_hours:12,"
+                  "community:0,t1:\"") + kPollKey + "\",pw1:2,t2:\"" + kPollKey2 +
+      "\",pw2:1,t3:\"\",pw3:0,t4:\"\",pw4:0,t5:\"\",pw5:0,t6:\"\",pw6:0,t7:\"\",pw7:0,"
+      "t8:\"\",pw8:0}}";
+  bool repaired = true;
+  MQTTPrefs prefs = loadPoll(old_file.c_str(), &repaired);
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(1, prefs.poll_enabled);
+  EXPECT_EQ(90, prefs.poll_interval_min);
+  EXPECT_EQ(MQTT_POLL_PW_HELLO, prefs.poll_pw_mode[0]);
+  EXPECT_EQ(MQTT_POLL_PW_BLANK, prefs.poll_pw_mode[1]);
+  EXPECT_EQ(MQTT_POLL_REQUESTS_DEFAULT, prefs.poll_requests);
+  const char zero[MQTT_POLL_MAX_TARGETS][MQTT_POLL_PW_MAX_LEN + 1] = {};
+  EXPECT_EQ(0, memcmp(zero, prefs.poll_pw, sizeof(zero)));
+
+  // Re-saving keeps every old key and value, then adds the new keys after them.
+  OutputStream output;
+  MQTTPrefsSerializer writer(&prefs);
+  ASSERT_TRUE(writer.saveSerial(output));
+  const std::string& text = output.text();
+  const size_t pw8 = text.find("pw8:0");
+  ASSERT_NE(std::string::npos, pw8) << text;
+  EXPECT_LT(pw8, text.find("requests:0")) << text;
+  EXPECT_LT(pw8, text.find("pass1:\"\"")) << text;
+}
+
+TEST(MQTTPrefsSerializer, PollRepairsRequestsAndPasswords) {
+  bool repaired = false;
+  MQTTPrefs prefs = loadPoll("{version:1,poll:{requests:2}}", &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(0, prefs.poll_requests);
+
+  const std::string target = std::string("t1:\"") + kPollKey + "\"";
+
+  // Custom mode with no password falls back to auto.
+  repaired = false;
+  prefs = loadPoll(("{version:1,poll:{" + target + ",pw1:3}}").c_str(), &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, prefs.poll_pw_mode[0]);
+
+  // A password without custom mode is dropped.
+  repaired = false;
+  prefs = loadPoll(("{version:1,poll:{" + target + ",pw1:2,pass1:\"stray\"}}").c_str(),
+                   &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(MQTT_POLL_PW_HELLO, prefs.poll_pw_mode[0]);
+  EXPECT_STREQ("", prefs.poll_pw[0]);
+
+  // A password that breaks the character rules is dropped with its mode.
+  repaired = false;
+  prefs = loadPoll(("{version:1,poll:{" + target + ",pw1:3,pass1:\"a b\"}}").c_str(),
+                   &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, prefs.poll_pw_mode[0]);
+  EXPECT_STREQ("", prefs.poll_pw[0]);
+
+  // An empty entry keeps no password.
+  repaired = false;
+  prefs = loadPoll("{version:1,poll:{t2:\"\",pw2:3,pass2:\"orphan\"}}", &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, prefs.poll_pw_mode[1]);
+  EXPECT_STREQ("", prefs.poll_pw[1]);
+
+  // A malformed target drops its password too.
+  repaired = false;
+  prefs = loadPoll("{version:1,poll:{t1:\"abcd\",pw1:3,pass1:\"secret\"}}", &repaired);
+  EXPECT_TRUE(repaired);
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, prefs.poll_pw_mode[0]);
+  EXPECT_STREQ("", prefs.poll_pw[0]);
+
+  // A valid custom entry is not a repair.
+  repaired = true;
+  prefs = loadPoll(("{version:1,poll:{" + target + ",pw1:3,pass1:\"guest\",requests:1}}").c_str(),
+                   &repaired);
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, prefs.poll_pw_mode[0]);
+  EXPECT_STREQ("guest", prefs.poll_pw[0]);
+  EXPECT_EQ(1, prefs.poll_requests);
+}
+
+TEST(MQTTPrefsSerializer, PollPasswordLongerThanStorageFailsTheLoad) {
+  // Same strict-length rule as every other string field.
+  const std::string json = std::string("{version:1,poll:{pass1:\"") + std::string(16, 'x') + "\"}}";
+  MQTTPrefs prefs = defaults();
+  InputStream input(json);
+  MQTTPrefsSerializer reader(&prefs);
+  EXPECT_FALSE(reader.loadSerial(input));
 }
 
 int main(int argc, char** argv) {

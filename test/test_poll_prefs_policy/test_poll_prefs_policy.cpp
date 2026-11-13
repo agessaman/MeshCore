@@ -105,19 +105,20 @@ TEST(PollPrefsPolicy, NormalizesUrlsAndGatesEnable) {
 TEST(PollPrefsPolicy, AddRemoveAndPwKeepTargetsPacked) {
   uint8_t targets[MQTT_POLL_MAX_TARGETS][MQTT_POLL_PUBKEY_SIZE] = {};
   uint8_t pw[MQTT_POLL_MAX_TARGETS] = {};
+  char pass[MQTT_POLL_MAX_TARGETS][poll::kPwBufSize] = {};
 
-  EXPECT_EQ(poll::TargetEdit::BadKey, poll::addTarget(targets, pw, "abcd"));
-  EXPECT_EQ(poll::TargetEdit::BadKey, poll::addTarget(targets, pw, std::string(64, '0').c_str()));
-  EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, kKeyA));
+  EXPECT_EQ(poll::TargetEdit::BadKey, poll::addTarget(targets, pw, pass, "abcd"));
+  EXPECT_EQ(poll::TargetEdit::BadKey, poll::addTarget(targets, pw, pass, std::string(64, '0').c_str()));
+  EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, pass, kKeyA));
   EXPECT_EQ(MQTT_POLL_PW_AUTO, pw[0]);
-  EXPECT_EQ(poll::TargetEdit::Duplicate, poll::addTarget(targets, pw, kKeyA));
+  EXPECT_EQ(poll::TargetEdit::Duplicate, poll::addTarget(targets, pw, pass, kKeyA));
   std::string upper = kKeyA;
   for (char& c : upper) {
     if (c >= 'a' && c <= 'f') c = static_cast<char>(c - 'a' + 'A');
   }
-  EXPECT_EQ(poll::TargetEdit::Duplicate, poll::addTarget(targets, pw, upper.c_str()));
-  EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, kKeyB));
-  EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, kKeyC));
+  EXPECT_EQ(poll::TargetEdit::Duplicate, poll::addTarget(targets, pw, pass, upper.c_str()));
+  EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, pass, kKeyB));
+  EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, pass, kKeyC));
 
   int index = -1;
   EXPECT_EQ(poll::TargetEdit::Ok, poll::findTargetPrefix(targets, "C8C8C858", &index));
@@ -129,7 +130,7 @@ TEST(PollPrefsPolicy, AddRemoveAndPwKeepTargetsPacked) {
 
   pw[0] = MQTT_POLL_PW_HELLO;
   pw[1] = MQTT_POLL_PW_BLANK;
-  EXPECT_EQ(poll::TargetEdit::Ok, poll::removeTarget(targets, pw, "010101c0"));
+  EXPECT_EQ(poll::TargetEdit::Ok, poll::removeTarget(targets, pw, pass, "010101c0"));
   EXPECT_TRUE(poll::targetIsEmpty(targets[2]));
   EXPECT_EQ(MQTT_POLL_PW_AUTO, pw[2]);
   char left[65];
@@ -140,10 +141,10 @@ TEST(PollPrefsPolicy, AddRemoveAndPwKeepTargetsPacked) {
   EXPECT_EQ(MQTT_POLL_PW_HELLO, pw[0]);
   EXPECT_EQ(MQTT_POLL_PW_AUTO, pw[1]);
 
-  EXPECT_EQ(poll::TargetEdit::Ok, poll::setTargetPwMode(targets, pw, "aaaa", MQTT_POLL_PW_BLANK));
+  EXPECT_EQ(poll::TargetEdit::Ok, poll::setTargetPwMode(targets, pw, pass, "aaaa", MQTT_POLL_PW_BLANK));
   EXPECT_EQ(MQTT_POLL_PW_BLANK, pw[1]);
   EXPECT_EQ(poll::TargetEdit::BadMode,
-            poll::setTargetPwMode(targets, pw, "aaaa", 9));
+            poll::setTargetPwMode(targets, pw, pass, "aaaa", 9));
   EXPECT_EQ(MQTT_POLL_PW_BLANK, pw[1]);
 
   uint8_t ambiguous[MQTT_POLL_MAX_TARGETS][MQTT_POLL_PUBKEY_SIZE] = {};
@@ -156,14 +157,15 @@ TEST(PollPrefsPolicy, AddRemoveAndPwKeepTargetsPacked) {
 
   uint8_t full[MQTT_POLL_MAX_TARGETS][MQTT_POLL_PUBKEY_SIZE] = {};
   uint8_t full_pw[MQTT_POLL_MAX_TARGETS] = {};
+  char full_pass[MQTT_POLL_MAX_TARGETS][poll::kPwBufSize] = {};
   for (int i = 0; i < MQTT_POLL_MAX_TARGETS; i++) {
     std::string hex(64, 'b');
     hex[63] = static_cast<char>('0' + i);
-    EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(full, full_pw, hex.c_str()));
+    EXPECT_EQ(poll::TargetEdit::Ok, poll::addTarget(full, full_pw, full_pass, hex.c_str()));
   }
-  EXPECT_EQ(poll::TargetEdit::Full, poll::addTarget(full, full_pw, kKeyA));
+  EXPECT_EQ(poll::TargetEdit::Full, poll::addTarget(full, full_pw, full_pass, kKeyA));
 
-  poll::clearTargets(full, full_pw);
+  poll::clearTargets(full, full_pw, full_pass);
   EXPECT_TRUE(poll::targetIsEmpty(full[0]));
   EXPECT_EQ(0, full_pw[0]);
 
@@ -177,6 +179,132 @@ TEST(PollPrefsPolicy, AddRemoveAndPwKeepTargetsPacked) {
   EXPECT_STREQ("auto", poll::pwModeName(MQTT_POLL_PW_AUTO));
   EXPECT_STREQ("blank", poll::pwModeName(MQTT_POLL_PW_BLANK));
   EXPECT_STREQ("hello", poll::pwModeName(MQTT_POLL_PW_HELLO));
+  EXPECT_STREQ("custom", poll::pwModeName(MQTT_POLL_PW_CUSTOM));
+  EXPECT_FALSE(poll::parsePwMode("custom", &full_pw[0]));
+}
+
+TEST(PollPrefsPolicy, PasswordValidation) {
+  EXPECT_TRUE(poll::pollPasswordValid("a"));
+  EXPECT_TRUE(poll::pollPasswordValid("guest!pw#42"));
+  EXPECT_TRUE(poll::pollPasswordValid("\"quoted\\"));
+  EXPECT_TRUE(poll::pollPasswordValid("!~"));
+  EXPECT_TRUE(poll::pollPasswordValid(std::string(15, 'x').c_str()));
+  EXPECT_FALSE(poll::pollPasswordValid(std::string(16, 'x').c_str()));
+  EXPECT_FALSE(poll::pollPasswordValid(""));
+  EXPECT_FALSE(poll::pollPasswordValid(nullptr));
+  EXPECT_FALSE(poll::pollPasswordValid("two words"));
+  EXPECT_FALSE(poll::pollPasswordValid("tab\there"));
+  EXPECT_FALSE(poll::pollPasswordValid("del\x7f"));
+  EXPECT_FALSE(poll::pollPasswordValid("caf\xc3\xa9"));
+}
+
+TEST(PollPrefsPolicy, HttpsSchemeIgnoresCase) {
+  EXPECT_TRUE(poll::pollUrlIsHttps("https://corescope.example"));
+  EXPECT_TRUE(poll::pollUrlIsHttps("HTTPS://corescope.example"));
+  EXPECT_TRUE(poll::pollUrlIsHttps("HtTpS://x"));
+  EXPECT_TRUE(poll::pollUrlIsHttps("https://"));
+  EXPECT_FALSE(poll::pollUrlIsHttps("http://corescope.example"));
+  EXPECT_FALSE(poll::pollUrlIsHttps("https:/corescope.example"));
+  EXPECT_FALSE(poll::pollUrlIsHttps("https"));
+  EXPECT_FALSE(poll::pollUrlIsHttps(" https://x"));
+  EXPECT_FALSE(poll::pollUrlIsHttps(""));
+  EXPECT_FALSE(poll::pollUrlIsHttps(nullptr));
+}
+
+TEST(PollPrefsPolicy, CustomPasswordFollowsItsTarget) {
+  uint8_t targets[MQTT_POLL_MAX_TARGETS][MQTT_POLL_PUBKEY_SIZE] = {};
+  uint8_t pw[MQTT_POLL_MAX_TARGETS] = {};
+  char pass[MQTT_POLL_MAX_TARGETS][poll::kPwBufSize] = {};
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, pass, kKeyA));
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, pass, kKeyB));
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::addTarget(targets, pw, pass, kKeyC));
+
+  EXPECT_EQ(poll::TargetEdit::BadPassword,
+            poll::setTargetPassword(targets, pw, pass, "aaaa", "has space"));
+  EXPECT_EQ(poll::TargetEdit::BadPassword,
+            poll::setTargetPassword(targets, pw, pass, "aaaa", std::string(16, 'p').c_str()));
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, pw[2]);
+  EXPECT_EQ(poll::TargetEdit::NotFound,
+            poll::setTargetPassword(targets, pw, pass, "ff", "secret"));
+
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::setTargetPassword(targets, pw, pass, "aaaa", "longer-secret"));
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::setTargetPassword(targets, pw, pass, "aaaa", "short"));
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, pw[2]);
+  EXPECT_STREQ("short", pass[2]);
+  for (size_t i = strlen("short"); i < poll::kPwBufSize; i++) EXPECT_EQ(0, pass[2][i]);
+
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::setTargetPassword(targets, pw, pass, "c8c8", "first"));
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::setTargetPwMode(targets, pw, pass, "c8c8", MQTT_POLL_PW_HELLO));
+  EXPECT_EQ(MQTT_POLL_PW_HELLO, pw[0]);
+  for (size_t i = 0; i < poll::kPwBufSize; i++) EXPECT_EQ(0, pass[0][i]);
+  EXPECT_EQ(poll::TargetEdit::BadMode,
+            poll::setTargetPwMode(targets, pw, pass, "c8c8", MQTT_POLL_PW_CUSTOM));
+
+  // Removing the middle target shifts the custom password down with its key.
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::removeTarget(targets, pw, pass, "010101c0"));
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, pw[1]);
+  EXPECT_STREQ("short", pass[1]);
+  for (size_t i = 0; i < poll::kPwBufSize; i++) EXPECT_EQ(0, pass[2][i]);
+
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::removeTarget(targets, pw, pass, "aaaa"));
+  for (size_t i = 0; i < poll::kPwBufSize; i++) EXPECT_EQ(0, pass[1][i]);
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, pw[1]);
+
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::setTargetPassword(targets, pw, pass, "c8c8", "again"));
+  EXPECT_TRUE(poll::discardTargetPassword(pw, pass, 0));
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, pw[0]);
+  EXPECT_STREQ("", pass[0]);
+  EXPECT_FALSE(poll::discardTargetPassword(pw, pass, 0));
+  EXPECT_FALSE(poll::discardTargetPassword(pw, pass, MQTT_POLL_MAX_TARGETS));
+
+  ASSERT_EQ(poll::TargetEdit::Ok, poll::setTargetPassword(targets, pw, pass, "c8c8", "gone"));
+  poll::clearTargets(targets, pw, pass);
+  const char zero[MQTT_POLL_MAX_TARGETS][poll::kPwBufSize] = {};
+  EXPECT_EQ(0, memcmp(zero, pass, sizeof(zero)));
+}
+
+TEST(PollPrefsPolicy, NormalizeTargetPassword) {
+  uint8_t mode = MQTT_POLL_PW_HELLO;
+  char pass[poll::kPwBufSize] = {};
+  EXPECT_FALSE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_HELLO, mode);
+
+  strcpy(pass, "stray");
+  EXPECT_TRUE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_HELLO, mode);
+  EXPECT_STREQ("", pass);
+
+  mode = MQTT_POLL_PW_CUSTOM;
+  strcpy(pass, "ok-pass");
+  EXPECT_FALSE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, mode);
+  EXPECT_STREQ("ok-pass", pass);
+
+  pass[10] = 'x';  // junk after the terminator is cleared, the password kept
+  EXPECT_TRUE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, mode);
+  EXPECT_EQ(0, pass[10]);
+
+  memset(pass, 0, sizeof(pass));
+  EXPECT_TRUE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, mode);
+
+  mode = MQTT_POLL_PW_CUSTOM;
+  strcpy(pass, "a b");
+  EXPECT_TRUE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, mode);
+  EXPECT_STREQ("", pass);
+
+  mode = MQTT_POLL_PW_CUSTOM;
+  memset(pass, 'z', sizeof(pass));  // no terminator at all
+  EXPECT_TRUE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, mode);
+  EXPECT_EQ(0, pass[0]);
+
+  mode = 9;
+  memset(pass, 0, sizeof(pass));
+  EXPECT_TRUE(poll::normalizeTargetPassword(&mode, pass));
+  EXPECT_EQ(MQTT_POLL_PW_AUTO, mode);
 }
 
 TEST(PollPrefsPolicy, ListUsesPrefixesAndFitsTheCliReply) {
@@ -203,6 +331,17 @@ TEST(PollPrefsPolicy, ListUsesPrefixesAndFitsTheCliReply) {
   EXPECT_EQ(8, static_cast<int>(std::count(line, line + strlen(line), '(')));
   ASSERT_TRUE(poll::formatTargetList(many, many_pw, line, sizeof(line)));
   EXPECT_NE(std::string::npos, std::string(line).find(", "));
+
+  // Eight custom entries still fit, and only the word custom is shown.
+  for (int i = 0; i < MQTT_POLL_MAX_TARGETS; i++) many_pw[i] = MQTT_POLL_PW_CUSTOM;
+  ASSERT_TRUE(poll::formatTargetList(many, many_pw, line, 160));
+  EXPECT_LT(strlen(line), 160u);
+  EXPECT_EQ(8, static_cast<int>(std::count(line, line + strlen(line), '(')));
+  EXPECT_NE(std::string::npos, std::string(line).find("8:CCCCCCCC(custom)")) << line;
+
+  put(targets, pw, 1, kKeyB, MQTT_POLL_PW_CUSTOM);
+  ASSERT_TRUE(poll::formatTargetList(targets, pw, line, 160));
+  EXPECT_STREQ("> 1: C8C8C858 (auto), 2: 010101C0 (custom)", line);
 }
 
 int main(int argc, char** argv) {

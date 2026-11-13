@@ -18,6 +18,10 @@ static_assert(kPubKeySize == MQTT_POLL_PUBKEY_SIZE, "poll key size drift");
 static_assert(static_cast<int>(PWMODE_AUTO) == MQTT_POLL_PW_AUTO, "poll pw mode drift");
 static_assert(static_cast<int>(PWMODE_BLANK) == MQTT_POLL_PW_BLANK, "poll pw mode drift");
 static_assert(static_cast<int>(PWMODE_HELLO) == MQTT_POLL_PW_HELLO, "poll pw mode drift");
+// Custom passwords are prefs-only: PasswordMode has no value for mode 3 yet.
+static_assert(MQTT_POLL_PW_CUSTOM > MQTT_POLL_PW_HELLO, "poll custom pw mode drift");
+
+static const size_t kPwBufSize = MQTT_POLL_PW_MAX_LEN + 1;
 
 enum class TargetHex : uint8_t { Bad, Empty, Ok };
 
@@ -29,6 +33,7 @@ enum class TargetEdit : uint8_t {
   NotFound,
   Ambiguous,
   BadMode,
+  BadPassword,
 };
 
 static inline int hexValue(char c) {
@@ -105,6 +110,60 @@ static inline bool pollUrlHasScheme(const char* url) {
   return strncmp(url, "https://", 8) == 0 || strncmp(url, "http://", 7) == 0;
 }
 
+// True only for an https:// URL, scheme compared without regard to case.
+static inline bool pollUrlIsHttps(const char* url) {
+  if (!url) return false;
+  static const char kScheme[] = "https://";
+  for (size_t i = 0; i < sizeof(kScheme) - 1; i++) {
+    char c = url[i];
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    if (c != kScheme[i]) return false;
+  }
+  return true;
+}
+
+// 1 to 15 bytes of printable ASCII without spaces (0x21..0x7E).
+static inline bool pollPasswordValid(const char* password) {
+  if (!password || password[0] == '\0') return false;
+  size_t len = 0;
+  for (; password[len] != '\0'; len++) {
+    if (len >= MQTT_POLL_PW_MAX_LEN) return false;
+    const unsigned char c = static_cast<unsigned char>(password[len]);
+    if (c < 0x21 || c > 0x7E) return false;
+  }
+  return true;
+}
+
+// Mode in range and a password stored exactly when the mode is custom. Repairs
+// either side to auto with a zeroed password; returns true when it changed.
+static inline bool normalizeTargetPassword(uint8_t* mode, char password[kPwBufSize]) {
+  if (!mode || !password) return false;
+  bool changed = false;
+  if (*mode > MQTT_POLL_PW_CUSTOM) {
+    *mode = MQTT_POLL_PW_AUTO;
+    changed = true;
+  }
+  if (*mode == MQTT_POLL_PW_CUSTOM) {
+    if (memchr(password, '\0', kPwBufSize) != nullptr && pollPasswordValid(password)) {
+      const size_t len = strlen(password);
+      for (size_t i = len + 1; i < kPwBufSize; i++) {
+        if (password[i] != '\0') {
+          password[i] = '\0';
+          changed = true;
+        }
+      }
+      return changed;
+    }
+    *mode = MQTT_POLL_PW_AUTO;
+    changed = true;
+  }
+  for (size_t i = 0; i < kPwBufSize; i++) {
+    if (password[i] != '\0') changed = true;
+  }
+  memset(password, 0, kPwBufSize);
+  return changed;
+}
+
 // Empty is fine. A trailing slash is removed. Anything else that does not
 // start with http:// or https:// is cleared. *changed reports either edit.
 static inline bool normalizePollUrl(char* url, bool* changed) {
@@ -137,6 +196,7 @@ static inline const char* pwModeName(uint8_t mode) {
   switch (mode) {
     case MQTT_POLL_PW_BLANK: return "blank";
     case MQTT_POLL_PW_HELLO: return "hello";
+    case MQTT_POLL_PW_CUSTOM: return "custom";
     default: return "auto";
   }
 }
@@ -153,30 +213,38 @@ static inline bool parsePwMode(const char* text, uint8_t* mode) {
   return false;
 }
 
-static inline bool packTargets(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw) {
-  if (!targets || !pw) return false;
+// Passwords move with their targets; an empty entry keeps none.
+static inline bool packTargets(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw,
+                               char pass[][kPwBufSize]) {
+  if (!targets || !pw || !pass) return false;
   uint8_t packed[MQTT_POLL_MAX_TARGETS][MQTT_POLL_PUBKEY_SIZE];
   uint8_t packed_pw[MQTT_POLL_MAX_TARGETS];
+  char packed_pass[MQTT_POLL_MAX_TARGETS][kPwBufSize];
   memset(packed, 0, sizeof(packed));
   memset(packed_pw, 0, sizeof(packed_pw));
+  memset(packed_pass, 0, sizeof(packed_pass));
   int w = 0;
   for (int r = 0; r < MQTT_POLL_MAX_TARGETS; r++) {
     if (targetIsEmpty(targets[r])) continue;
     memcpy(packed[w], targets[r], MQTT_POLL_PUBKEY_SIZE);
     packed_pw[w] = pw[r];
+    memcpy(packed_pass[w], pass[r], kPwBufSize);
     w++;
   }
   const bool moved = memcmp(targets, packed, sizeof(packed)) != 0 ||
-                     memcmp(pw, packed_pw, sizeof(packed_pw)) != 0;
+                     memcmp(pw, packed_pw, sizeof(packed_pw)) != 0 ||
+                     memcmp(pass, packed_pass, sizeof(packed_pass)) != 0;
   memcpy(targets, packed, sizeof(packed));
   memcpy(pw, packed_pw, sizeof(packed_pw));
+  memcpy(pass, packed_pass, sizeof(packed_pass));
+  memset(packed_pass, 0, sizeof(packed_pass));
   return moved;
 }
 
 // Full 64-hex key only. Fills the first hole and resets that entry's pw mode.
 static inline TargetEdit addTarget(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw,
-                                   const char* hex) {
-  if (!targets || !pw) return TargetEdit::BadKey;
+                                   char pass[][kPwBufSize], const char* hex) {
+  if (!targets || !pw || !pass) return TargetEdit::BadKey;
   uint8_t key[MQTT_POLL_PUBKEY_SIZE];
   if (parseTargetHex(hex, key, nullptr) != TargetHex::Ok) return TargetEdit::BadKey;
   int slot = -1;
@@ -190,6 +258,7 @@ static inline TargetEdit addTarget(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uin
   if (slot < 0) return TargetEdit::Full;
   memcpy(targets[slot], key, MQTT_POLL_PUBKEY_SIZE);
   pw[slot] = MQTT_POLL_PW_AUTO;
+  memset(pass[slot], 0, kPwBufSize);
   return TargetEdit::Ok;
 }
 
@@ -224,35 +293,65 @@ static inline TargetEdit findTargetPrefix(const uint8_t targets[][MQTT_POLL_PUBK
 }
 
 static inline TargetEdit removeTarget(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw,
-                                      const char* hex_or_prefix) {
-  if (!targets || !pw) return TargetEdit::BadKey;
+                                      char pass[][kPwBufSize], const char* hex_or_prefix) {
+  if (!targets || !pw || !pass) return TargetEdit::BadKey;
   int index = -1;
   const TargetEdit found = findTargetPrefix(targets, hex_or_prefix, &index);
   if (found != TargetEdit::Ok) return found;
   memset(targets[index], 0, MQTT_POLL_PUBKEY_SIZE);
   pw[index] = MQTT_POLL_PW_AUTO;
-  packTargets(targets, pw);
+  memset(pass[index], 0, kPwBufSize);
+  packTargets(targets, pw, pass);
   return TargetEdit::Ok;
 }
 
-static inline void clearTargets(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw) {
+static inline void clearTargets(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw,
+                                char pass[][kPwBufSize]) {
   if (targets) memset(targets, 0, MQTT_POLL_MAX_TARGETS * MQTT_POLL_PUBKEY_SIZE);
   if (pw) memset(pw, 0, MQTT_POLL_MAX_TARGETS);
+  if (pass) memset(pass, 0, MQTT_POLL_MAX_TARGETS * kPwBufSize);
 }
 
+// auto, blank, or hello only; any stored custom password is zeroed.
 static inline TargetEdit setTargetPwMode(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw,
-                                         const char* hex_or_prefix, uint8_t mode) {
-  if (!targets || !pw) return TargetEdit::BadKey;
+                                         char pass[][kPwBufSize], const char* hex_or_prefix,
+                                         uint8_t mode) {
+  if (!targets || !pw || !pass) return TargetEdit::BadKey;
   if (mode > MQTT_POLL_PW_HELLO) return TargetEdit::BadMode;
   int index = -1;
   const TargetEdit found = findTargetPrefix(targets, hex_or_prefix, &index);
   if (found != TargetEdit::Ok) return found;
   pw[index] = mode;
+  memset(pass[index], 0, kPwBufSize);
   return TargetEdit::Ok;
 }
 
+// Stores a custom password and switches the target to custom mode.
+static inline TargetEdit setTargetPassword(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t* pw,
+                                           char pass[][kPwBufSize], const char* hex_or_prefix,
+                                           const char* password) {
+  if (!targets || !pw || !pass) return TargetEdit::BadKey;
+  if (!pollPasswordValid(password)) return TargetEdit::BadPassword;
+  int index = -1;
+  const TargetEdit found = findTargetPrefix(targets, hex_or_prefix, &index);
+  if (found != TargetEdit::Ok) return found;
+  memset(pass[index], 0, kPwBufSize);
+  memcpy(pass[index], password, strlen(password));
+  pw[index] = MQTT_POLL_PW_CUSTOM;
+  return TargetEdit::Ok;
+}
+
+// Drops a target's custom password (back to auto); false if it had none.
+static inline bool discardTargetPassword(uint8_t* pw, char pass[][kPwBufSize], int index) {
+  if (!pw || !pass || index < 0 || index >= MQTT_POLL_MAX_TARGETS) return false;
+  const bool had = pw[index] == MQTT_POLL_PW_CUSTOM;
+  if (had) pw[index] = MQTT_POLL_PW_AUTO;
+  memset(pass[index], 0, kPwBufSize);
+  return had;
+}
+
 // Spaced form matches `1: C8C8C858 (auto), 2: ...`. Eight fully spaced entries
-// do not fit a 160-byte CLI reply, so a tighter join is used when needed.
+// do not fit a 160-byte CLI reply, so tighter joins are used when needed.
 static inline bool formatTargetList(const uint8_t targets[][MQTT_POLL_PUBKEY_SIZE],
                                     const uint8_t* pw, char* buf, size_t buflen) {
   if (!buf || buflen == 0) return false;
@@ -271,7 +370,7 @@ static inline bool formatTargetList(const uint8_t targets[][MQTT_POLL_PUBKEY_SIZ
   }
 
   char body[192];
-  for (int tight = 0; tight < 2; tight++) {
+  for (int tight = 0; tight < 3; tight++) {
     size_t used = 0;
     body[0] = '\0';
     auto append = [&](const char* s) -> bool {
@@ -296,7 +395,9 @@ static inline bool formatTargetList(const uint8_t targets[][MQTT_POLL_PUBKEY_SIZ
       }
       prefix[8] = '\0';
       char piece[32];
-      if (tight) {
+      if (tight == 2) {
+        snprintf(piece, sizeof(piece), "%d:%s(%s)", n + 1, prefix, pwModeName(pw[slot]));
+      } else if (tight) {
         snprintf(piece, sizeof(piece), "%d:%s (%s)", n + 1, prefix, pwModeName(pw[slot]));
       } else {
         snprintf(piece, sizeof(piece), "%d: %s (%s)", n + 1, prefix, pwModeName(pw[slot]));

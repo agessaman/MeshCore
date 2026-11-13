@@ -127,6 +127,7 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->poll_interval_min = MQTT_POLL_INTERVAL_DEFAULT;
   prefs->poll_status_hours = MQTT_POLL_STATUS_HOURS_DEFAULT;
   prefs->poll_community = MQTT_POLL_COMMUNITY_DEFAULT;
+  prefs->poll_requests = MQTT_POLL_REQUESTS_DEFAULT;
 }
 
 #endif // WITH_MQTT_BRIDGE

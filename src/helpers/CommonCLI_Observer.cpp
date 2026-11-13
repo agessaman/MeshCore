@@ -296,7 +296,8 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
   const bool mine = pollToken(config, "poll on") || pollToken(config, "poll off") ||
                     pollToken(config, "poll.url") || pollToken(config, "poll.slot") ||
                     pollToken(config, "poll.interval") || pollToken(config, "poll.status") ||
-                    pollToken(config, "poll.community") || pollToken(config, "poll.consent");
+                    pollToken(config, "poll.community") || pollToken(config, "poll.consent") ||
+                    pollToken(config, "poll.requests");
   if (!mine) return PollSetResult::NotMine;
   if (!cb->supportsRepeaterPoll()) {
     strcpy(reply, "Error: not supported on this build");
@@ -420,6 +421,18 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
     strcpy(reply, "OK");
     return PollSetResult::Changed;
   }
+  if (pollToken(config, "poll.requests")) {
+    char word[8];
+    bool extra = false;
+    if (!pollCopyWord(pollValue(config, "poll.requests"), word, sizeof(word), &extra) || extra ||
+        (strcmp(word, "on") != 0 && strcmp(word, "off") != 0)) {
+      strcpy(reply, "Error: use on or off");
+      return PollSetResult::Done;
+    }
+    prefs->poll_requests = word[1] == 'n' ? 1 : 0;
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
   char word[8];
   bool extra = false;
   if (!pollCopyWord(pollValue(config, "poll.consent"), word, sizeof(word), &extra) || extra ||
@@ -444,7 +457,7 @@ static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
   const bool mine = strcmp(config, "poll.status.hours") == 0 ||
                     strcmp(config, "poll.url") == 0 || strcmp(config, "poll.slot") == 0 ||
                     strcmp(config, "poll.interval") == 0 || strcmp(config, "poll.community") == 0 ||
-                    strcmp(config, "poll.consent") == 0;
+                    strcmp(config, "poll.consent") == 0 || strcmp(config, "poll.requests") == 0;
   if (!mine) return false;
   if (!cb->supportsRepeaterPoll()) {
     strcpy(reply, "Error: not supported on this build");
@@ -460,6 +473,8 @@ static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
     sprintf(reply, "> %u", (unsigned)prefs->poll_interval_min);
   } else if (strcmp(config, "poll.community") == 0) {
     strcpy(reply, prefs->poll_community ? "> on" : "> off");
+  } else if (strcmp(config, "poll.requests") == 0) {
+    strcpy(reply, prefs->poll_requests ? "> on" : "> off");
   } else {
     strcpy(reply, prefs->poll_consent ? "> yes" : "> no");
   }
@@ -487,7 +502,10 @@ static void pollKeyError(poll::TargetEdit edit, char* reply, bool full_key) {
       strcpy(reply, "Error: ambiguous prefix");
       break;
     case poll::TargetEdit::BadMode:
-      strcpy(reply, "Error: use auto, blank, or hello");
+      strcpy(reply, "Error: use auto, blank, hello, or set <password>");
+      break;
+    case poll::TargetEdit::BadPassword:
+      strcpy(reply, "Error: password must be 1-15 printable chars, no spaces");
       break;
     default:
       strcpy(reply, full_key ? "Error: key must be 64 hex chars" : "Error: key must be hex");
@@ -1940,7 +1958,7 @@ bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
       strcpy(reply, "Error: usage poll clear");
       return true;
     }
-    poll::clearTargets(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode);
+    poll::clearTargets(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, _mqtt_prefs.poll_pw);
     strcpy(reply, "OK");
     changed = true;
   } else if (strcmp(verb, "add") == 0) {
@@ -1962,7 +1980,7 @@ bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
       strcpy(reply, "Error: no room left to keep removed targets' admin stops; clear one with poll enable <key>");
     } else {
       const poll::TargetEdit edit =
-          poll::addTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key);
+          poll::addTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, _mqtt_prefs.poll_pw, key);
       if (edit == poll::TargetEdit::Ok) {
         strcpy(reply, "OK");
         changed = true;
@@ -1975,7 +1993,7 @@ bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
       strcpy(reply, "Error: key must be hex");
     } else {
       const poll::TargetEdit edit =
-          poll::removeTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key);
+          poll::removeTarget(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, _mqtt_prefs.poll_pw, key);
       if (edit == poll::TargetEdit::Ok) {
         strcpy(reply, "OK");
         changed = true;
@@ -1985,17 +2003,34 @@ bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
     }
   } else {
     if (!pollCopyWord(arg, key, sizeof(key), &extra) || !extra) {
-      strcpy(reply, "Error: usage poll pw <key> auto|blank|hello");
+      strcpy(reply, "Error: usage poll pw <key> auto|blank|hello|set <password>");
     } else {
       const char* mode_text = arg;
       while (*mode_text && *mode_text != ' ') mode_text++;
       while (*mode_text == ' ') mode_text++;
       uint8_t mode = 0;
-      if (!poll::parsePwMode(mode_text, &mode)) {
-        strcpy(reply, "Error: use auto, blank, or hello");
+      if (pollToken(mode_text, "set")) {
+        // The password is never echoed back, not even in an error.
+        char password[MQTT_POLL_PW_MAX_LEN + 2];
+        bool more = false;
+        const bool word_ok =
+            pollCopyWord(pollValue(mode_text, "set"), password, sizeof(password), &more) && !more;
+        const poll::TargetEdit edit =
+            word_ok ? poll::setTargetPassword(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode,
+                                              _mqtt_prefs.poll_pw, key, password)
+                    : poll::TargetEdit::BadPassword;
+        memset(password, 0, sizeof(password));
+        if (edit == poll::TargetEdit::Ok) {
+          strcpy(reply, "OK");
+          changed = true;
+        } else {
+          pollKeyError(edit, reply, false);
+        }
+      } else if (!poll::parsePwMode(mode_text, &mode)) {
+        strcpy(reply, "Error: use auto, blank, hello, or set <password>");
       } else {
         const poll::TargetEdit edit = poll::setTargetPwMode(
-            _mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, key, mode);
+            _mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode, _mqtt_prefs.poll_pw, key, mode);
         if (edit == poll::TargetEdit::Ok) {
           strcpy(reply, "OK");
           changed = true;

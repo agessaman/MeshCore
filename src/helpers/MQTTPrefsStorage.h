@@ -168,7 +168,9 @@ struct MQTTPrefs {
   uint8_t  poll_status_hours;     // default 6, valid values 1, 3, 6, 12, 24
   uint8_t  poll_community;        // share polling with other observers, default 1
   uint8_t  poll_targets[8][32];   // target public keys; an all-zero entry is empty
-  uint8_t  poll_pw_mode[8];       // per target: 0 auto, 1 blank, 2 hello
+  uint8_t  poll_pw_mode[8];       // per target: 0 auto, 1 blank, 2 hello, 3 custom
+  uint8_t  poll_requests;         // also poll targets the analyzer asks for, default 0
+  char     poll_pw[8][16];        // per target custom password; all zero unless pw mode is custom
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {
@@ -192,11 +194,17 @@ static const uint8_t MQTT_POLL_COMMUNITY_DEFAULT = 1;
 static const uint8_t MQTT_POLL_PW_AUTO = 0;
 static const uint8_t MQTT_POLL_PW_BLANK = 1;
 static const uint8_t MQTT_POLL_PW_HELLO = 2;
+static const uint8_t MQTT_POLL_PW_CUSTOM = 3;
+static const size_t MQTT_POLL_PW_MAX_LEN = 15;
+static const uint8_t MQTT_POLL_REQUESTS_DEFAULT = 0;
 static_assert(sizeof(MQTTPrefs::poll_url) == MQTT_POLL_URL_LEN, "poll url capacity");
 static_assert(sizeof(MQTTPrefs::poll_targets) / sizeof(MQTTPrefs::poll_targets[0]) == MQTT_POLL_MAX_TARGETS,
               "poll target capacity");
 static_assert(sizeof(MQTTPrefs::poll_targets[0]) == MQTT_POLL_PUBKEY_SIZE, "poll key size");
 static_assert(sizeof(MQTTPrefs::poll_pw_mode) == MQTT_POLL_MAX_TARGETS, "poll pw mode capacity");
+static_assert(sizeof(MQTTPrefs::poll_pw) / sizeof(MQTTPrefs::poll_pw[0]) == MQTT_POLL_MAX_TARGETS,
+              "poll password capacity");
+static_assert(sizeof(MQTTPrefs::poll_pw[0]) == MQTT_POLL_PW_MAX_LEN + 1, "poll password size");
 
 // Frozen payload written by the version-1 binary format. Keep this distinct
 // from the runtime MQTTPrefs type: JSON persistence must not make the runtime

@@ -488,15 +488,17 @@ class MQTTPrefsSerializer : public ConfigSerializer {
   // upgrading does not rewrite every node's file. Out-of-range values are.
   class PollPrefs : public ConfigSerializer {
     MQTTPrefs* _prefs;
-    int32_t _enabled, _consent, _slot, _interval, _status_hours, _community;
+    int32_t _enabled, _consent, _slot, _interval, _status_hours, _community, _requests;
     int32_t _pw[MQTT_POLL_MAX_TARGETS];
     char _url[MQTT_POLL_URL_LEN];
     char _t[MQTT_POLL_MAX_TARGETS][65];
+    char _pass[MQTT_POLL_MAX_TARGETS][poll::kPwBufSize];
     bool _seen_enabled = false, _seen_consent = false, _seen_url = false;
     bool _seen_slot = false, _seen_interval = false, _seen_status = false;
-    bool _seen_community = false;
+    bool _seen_community = false, _seen_requests = false;
     bool _seen_t[MQTT_POLL_MAX_TARGETS] = {};
     bool _seen_pw[MQTT_POLL_MAX_TARGETS] = {};
+    bool _seen_pass[MQTT_POLL_MAX_TARGETS] = {};
   protected:
     void structure() override {
       defStrict("enabled", _enabled, _seen_enabled);
@@ -522,15 +524,28 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       defStrict("pw7", _pw[6], _seen_pw[6]);
       defStrict("t8", _t[7], sizeof(_t[7]), _seen_t[7]);
       defStrict("pw8", _pw[7], _seen_pw[7]);
+      // Later additions; older firmware skips these keys.
+      defStrict("requests", _requests, _seen_requests);
+      defStrict("pass1", _pass[0], sizeof(_pass[0]), _seen_pass[0]);
+      defStrict("pass2", _pass[1], sizeof(_pass[1]), _seen_pass[1]);
+      defStrict("pass3", _pass[2], sizeof(_pass[2]), _seen_pass[2]);
+      defStrict("pass4", _pass[3], sizeof(_pass[3]), _seen_pass[3]);
+      defStrict("pass5", _pass[4], sizeof(_pass[4]), _seen_pass[4]);
+      defStrict("pass6", _pass[5], sizeof(_pass[5]), _seen_pass[5]);
+      defStrict("pass7", _pass[6], sizeof(_pass[6]), _seen_pass[6]);
+      defStrict("pass8", _pass[7], sizeof(_pass[7]), _seen_pass[7]);
     }
   public:
     explicit PollPrefs(MQTTPrefs* prefs)
         : _prefs(prefs), _enabled(prefs->poll_enabled), _consent(prefs->poll_consent),
           _slot(prefs->poll_slot), _interval(prefs->poll_interval_min),
-          _status_hours(prefs->poll_status_hours), _community(prefs->poll_community) {
+          _status_hours(prefs->poll_status_hours), _community(prefs->poll_community),
+          _requests(prefs->poll_requests) {
       memcpy(_url, prefs->poll_url, sizeof(_url));
       for (int i = 0; i < MQTT_POLL_MAX_TARGETS; i++) {
         _pw[i] = prefs->poll_pw_mode[i];
+        memcpy(_pass[i], prefs->poll_pw[i], sizeof(_pass[i]));
+        _pass[i][sizeof(_pass[i]) - 1] = '\0';
         if (poll::targetIsEmpty(prefs->poll_targets[i])) {
           _t[i][0] = '\0';
         } else {
@@ -538,6 +553,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
         }
       }
     }
+    ~PollPrefs() { memset(_pass, 0, sizeof(_pass)); }
     void apply(bool* repaired) {
       if (_interval < static_cast<int32_t>(MQTT_POLL_INTERVAL_MIN) ||
           _interval > static_cast<int32_t>(MQTT_POLL_INTERVAL_MAX)) {
@@ -564,6 +580,10 @@ class MQTTPrefsSerializer : public ConfigSerializer {
         _enabled = 0;
         *repaired = true;
       }
+      if (_requests != 0 && _requests != 1) {
+        _requests = MQTT_POLL_REQUESTS_DEFAULT;
+        *repaired = true;
+      }
       bool url_changed = false;
       if (!poll::normalizePollUrl(_url, &url_changed)) {
         *repaired = true;
@@ -580,6 +600,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
           memset(_prefs->poll_targets[i], 0, MQTT_POLL_PUBKEY_SIZE);
           _t[i][0] = '\0';
           _pw[i] = MQTT_POLL_PW_AUTO;
+          memset(_pass[i], 0, sizeof(_pass[i]));
           *repaired = true;
         } else {
           memcpy(_prefs->poll_targets[i], key, MQTT_POLL_PUBKEY_SIZE);
@@ -588,11 +609,21 @@ class MQTTPrefsSerializer : public ConfigSerializer {
             *repaired = true;
           }
         }
-        if (_pw[i] < 0 || _pw[i] > MQTT_POLL_PW_HELLO) {
+        if (_pw[i] < 0 || _pw[i] > MQTT_POLL_PW_CUSTOM) {
           _pw[i] = MQTT_POLL_PW_AUTO;
           *repaired = true;
         }
-        _prefs->poll_pw_mode[i] = static_cast<uint8_t>(_pw[i]);
+        // An empty entry keeps no password; a password needs custom mode and vice versa.
+        uint8_t mode = static_cast<uint8_t>(_pw[i]);
+        if (_t[i][0] == '\0' && (mode == MQTT_POLL_PW_CUSTOM || _pass[i][0] != '\0')) {
+          mode = MQTT_POLL_PW_AUTO;
+          memset(_pass[i], 0, sizeof(_pass[i]));
+          *repaired = true;
+        }
+        if (poll::normalizeTargetPassword(&mode, _pass[i])) *repaired = true;
+        _pw[i] = mode;
+        _prefs->poll_pw_mode[i] = mode;
+        memcpy(_prefs->poll_pw[i], _pass[i], sizeof(_prefs->poll_pw[i]));
       }
       if (_enabled == 1 &&
           !poll::pollCanEnable(_url, _slot, _consent, MQTT_PREFS_SLOT_COUNT)) {
@@ -606,6 +637,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
       _prefs->poll_interval_min = static_cast<uint16_t>(_interval);
       _prefs->poll_status_hours = static_cast<uint8_t>(_status_hours);
       _prefs->poll_community = static_cast<uint8_t>(_community);
+      _prefs->poll_requests = static_cast<uint8_t>(_requests);
     }
   };
 
