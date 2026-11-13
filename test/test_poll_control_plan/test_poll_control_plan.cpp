@@ -238,6 +238,28 @@ TEST(PollControlPlan, AnExpiredSharedKeyGoesOnlyWhenItsRenewalFails) {
   EXPECT_EQ(poll::KEY_NONE, poll::chooseKey(reg(), poll::sharedKeyUsable(true, kNow - poll::kDay, true, kNow), kNow));
 }
 
+TEST(PollControlPlan, TheSessionExchangesKeysOnlyAfterAnEncryptedAnswer) {
+  using namespace poll;
+  // This session's own answer decides.
+  EXPECT_TRUE(sessionExchangesKeys(MODE_UNKNOWN, true, 200, READING_ENCRYPTED));
+  EXPECT_TRUE(sessionExchangesKeys(MODE_JSON, true, 200, READING_ENCRYPTED));
+  EXPECT_TRUE(sessionExchangesKeys(MODE_UNKNOWN, false, 404, READING_ENCRYPTED));
+  EXPECT_FALSE(sessionExchangesKeys(MODE_ENCRYPTED, true, 200, READING_JSON));
+  EXPECT_FALSE(sessionExchangesKeys(MODE_UNKNOWN, true, 200, READING_TELEMETRY));
+  // Without one, the mode the loop sent.
+  EXPECT_FALSE(sessionExchangesKeys(MODE_UNKNOWN, false, 503, READING_ENCRYPTED));
+  EXPECT_FALSE(sessionExchangesKeys(MODE_UNKNOWN, false, 0, READING_ENCRYPTED));
+  EXPECT_FALSE(sessionExchangesKeys(MODE_JSON, false, -2, READING_ENCRYPTED));
+  EXPECT_TRUE(sessionExchangesKeys(MODE_ENCRYPTED, false, -2, READING_ENCRYPTED));
+}
+
+TEST(PollControlPlan, TheOperatorSlotWinsOverABrokerMatch) {
+  EXPECT_EQ(2, poll::effectiveClaimSlot(2, 1));
+  EXPECT_EQ(2, poll::effectiveClaimSlot(2, 0));
+  EXPECT_EQ(3, poll::effectiveClaimSlot(0, 3));
+  EXPECT_EQ(0, poll::effectiveClaimSlot(0, 0));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

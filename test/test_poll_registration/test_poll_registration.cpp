@@ -246,6 +246,66 @@ TEST(PollRegistration, FutureStampIsNotDue) {
   EXPECT_EQ(poll::KEY_OWN, poll::chooseKey(s, true, base));
 }
 
+TEST(PollRegistration, ModeFollowsTheLatestPolicyAnswer) {
+  using namespace poll;
+  EXPECT_EQ(MODE_JSON, modeAfterPolicy(MODE_UNKNOWN, true, 200, READING_JSON));
+  EXPECT_EQ(MODE_TELEMETRY, modeAfterPolicy(MODE_ENCRYPTED, true, 200, READING_TELEMETRY));
+  EXPECT_EQ(MODE_ENCRYPTED, modeAfterPolicy(MODE_JSON, true, 200, READING_ENCRYPTED));  // field dropped
+  EXPECT_EQ(MODE_ENCRYPTED, modeAfterPolicy(MODE_UNKNOWN, false, 404, READING_ENCRYPTED));
+  EXPECT_EQ(MODE_ENCRYPTED, modeAfterPolicy(MODE_JSON, false, 404, READING_JSON));
+  // A failed fetch keeps whatever was selected, unknown included.
+  EXPECT_EQ(MODE_UNKNOWN, modeAfterPolicy(MODE_UNKNOWN, false, 503, READING_ENCRYPTED));
+  EXPECT_EQ(MODE_JSON, modeAfterPolicy(MODE_JSON, false, -2, READING_ENCRYPTED));
+  EXPECT_EQ(MODE_ENCRYPTED, modeAfterPolicy(MODE_ENCRYPTED, false, 0, READING_JSON));
+}
+
+TEST(PollRegistration, KeysAreExchangedOnlyOnTheEncryptedPath) {
+  using namespace poll;
+  EXPECT_FALSE(keyExchangeAllowed(MODE_UNKNOWN));
+  EXPECT_TRUE(keyExchangeAllowed(MODE_ENCRYPTED));
+  EXPECT_FALSE(keyExchangeAllowed(MODE_JSON));
+  EXPECT_FALSE(keyExchangeAllowed(MODE_TELEMETRY));
+  EXPECT_TRUE(registrationWanted(true, true, MODE_UNKNOWN));     // the session decides
+  EXPECT_TRUE(registrationWanted(true, true, MODE_ENCRYPTED));
+  EXPECT_FALSE(registrationWanted(true, true, MODE_JSON));
+  EXPECT_FALSE(registrationWanted(true, false, MODE_ENCRYPTED));  // no upload without consent
+  EXPECT_FALSE(registrationWanted(false, true, MODE_ENCRYPTED));
+}
+
+TEST(PollRegistration, OwnKeyInJsonModeNeedsNoRegistrationOrConsent) {
+  using namespace poll;
+  const RegistrationState none{false, false, 0, 0, 0};
+  EXPECT_EQ(KEY_OWN, chooseKeyForMode(MODE_JSON, true, none, false, kTs));
+  EXPECT_EQ(KEY_OWN, chooseKeyForMode(MODE_TELEMETRY, true, none, true, kTs));
+  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_JSON, false, none, true, kTs));
+  EXPECT_TRUE(identityAllowed(false, MODE_JSON));
+  EXPECT_TRUE(identityAllowed(false, MODE_TELEMETRY));
+  EXPECT_FALSE(identityAllowed(false, MODE_UNKNOWN));
+  EXPECT_FALSE(identityAllowed(false, MODE_ENCRYPTED));
+  EXPECT_TRUE(identityAllowed(true, MODE_UNKNOWN));
+}
+
+TEST(PollRegistration, NoKeyBeforeTheModeIsKnown) {
+  using namespace poll;
+  const RegistrationState ok{true, false, kTs, kTs, 200};
+  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_UNKNOWN, true, ok, true, kTs));
+  // The encrypted path is exactly chooseKey.
+  EXPECT_EQ(chooseKey(ok, true, kTs), chooseKeyForMode(MODE_ENCRYPTED, true, ok, true, kTs));
+  const RegistrationState none{false, false, 0, 0, 0};
+  EXPECT_EQ(KEY_SHARED, chooseKeyForMode(MODE_ENCRYPTED, true, none, true, kTs));
+  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_ENCRYPTED, true, none, false, kTs));
+}
+
+TEST(PollRegistration, LeavingJsonModeVoidsTheRegistration) {
+  using namespace poll;
+  EXPECT_TRUE(registrationVoided(MODE_JSON, MODE_ENCRYPTED));
+  EXPECT_TRUE(registrationVoided(MODE_TELEMETRY, MODE_ENCRYPTED));
+  EXPECT_FALSE(registrationVoided(MODE_JSON, MODE_TELEMETRY));
+  EXPECT_FALSE(registrationVoided(MODE_ENCRYPTED, MODE_JSON));
+  EXPECT_FALSE(registrationVoided(MODE_ENCRYPTED, MODE_ENCRYPTED));
+  EXPECT_FALSE(registrationVoided(MODE_UNKNOWN, MODE_ENCRYPTED));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

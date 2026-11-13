@@ -63,6 +63,17 @@ static inline bool sharedKeyUsable(bool have_shared, uint32_t shared_at, bool re
   return elapsedSec(now, shared_at) < kSharedKeyMaxAgeS || !renewal_failed;
 }
 
+// The session decides after its own policy step: on its answer, else on the mode the loop sent.
+static inline bool sessionExchangesKeys(uint8_t loop_mode, bool policy_ok, int16_t policy_status,
+                                        uint8_t format) {
+  return keyExchangeAllowed(modeAfterPolicy(loop_mode, policy_ok, policy_status, format));
+}
+
+// The operator's slot wins; otherwise the slot whose broker the policy named, or none (0).
+static inline uint8_t effectiveClaimSlot(uint8_t configured, uint8_t matched) {
+  return configured != 0 ? configured : matched;
+}
+
 static inline uint8_t controlWants(bool community, bool registering, bool want_shared) {
   // The client skips the policy GET when the owners reply carried one.
   uint8_t w = WANT_POLICY;
