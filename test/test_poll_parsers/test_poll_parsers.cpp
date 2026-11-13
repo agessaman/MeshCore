@@ -245,6 +245,109 @@ TEST(PollReplyParsers, ChannelZeroPaddingAndTruncationStopTheWalk) {
   EXPECT_FALSE(poll::parseTelemetry(digital, 4, nullptr));
 }
 
+TEST(PollReplyParsers, StatusExposesHowManyDataBytesWerePresent) {
+  uint8_t short_reply[8] = {0x3C, 0x0F, 0x00, 0x00, 0x92, 0xFF, 0xA6, 0xFF};
+  poll::StatusReading s;
+  ASSERT_TRUE(poll::parseStatus(short_reply, sizeof(short_reply), &s));
+  EXPECT_EQ(8, s.data_len);
+
+  const char* hex =
+      "c60f00008cff8eff523d0100344f00007d47000079060c000b4b000029040000"
+      "a629010094130000020005002400eadb6b200100aa6d000000000000";
+  uint8_t data[80];
+  const size_t n = FromHex(hex, data, sizeof(data));
+  ASSERT_EQ(60u, n);
+  ASSERT_TRUE(poll::parseStatus(data, n, &s));
+  EXPECT_EQ(60, s.data_len);
+
+  // The count is a byte, so a larger buffer reports the largest count it can.
+  uint8_t big[300];
+  memset(big, 0, sizeof(big));
+  ASSERT_TRUE(poll::parseStatus(big, sizeof(big), &s));
+  EXPECT_EQ(255, s.data_len);
+}
+
+TEST(PollReplyParsers, TelemetryLppLengthStopsAtPaddingOrABadRecord) {
+  poll::TelemetryReading t;
+
+  const uint8_t volts[] = {1, 116, 0x01, 0x97};
+  ASSERT_TRUE(poll::parseTelemetry(volts, sizeof(volts), &t));
+  EXPECT_EQ(4, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+
+  const uint8_t both[] = {1, 116, 0x01, 0x97, 1, 103, 0x00, 0xA7};
+  ASSERT_TRUE(poll::parseTelemetry(both, sizeof(both), &t));
+  EXPECT_EQ(8, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+
+  // Channel 0 is padding: the offset of that byte ends the records.
+  uint8_t block[16];
+  memset(block, 0, sizeof(block));
+  memcpy(block, (const uint8_t[]){1, 116, 0x01, 0x97}, 4);
+  ASSERT_TRUE(poll::parseTelemetry(block, sizeof(block), &t));
+  EXPECT_EQ(4, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+
+  const uint8_t channel_zero[] = {0, 116, 0x01, 0x97};
+  ASSERT_TRUE(poll::parseTelemetry(channel_zero, sizeof(channel_zero), &t));
+  EXPECT_EQ(0, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+
+  // A zero-voltage value keeps all four bytes: it is a record, not padding.
+  const uint8_t zero_volts[] = {1, 116, 0x00, 0x00};
+  ASSERT_TRUE(poll::parseTelemetry(zero_volts, sizeof(zero_volts), &t));
+  EXPECT_TRUE(t.has_voltage);
+  EXPECT_EQ(0, t.battery_mv);
+  EXPECT_EQ(4, t.lpp_len);
+
+  // An incomplete value keeps the bytes before it, less trailing padding.
+  const uint8_t trunc_v[] = {1, 116, 0x01};
+  ASSERT_TRUE(poll::parseTelemetry(trunc_v, sizeof(trunc_v), &t));
+  EXPECT_EQ(3, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+
+  const uint8_t trunc_zero[] = {1, 116, 0x00};
+  ASSERT_TRUE(poll::parseTelemetry(trunc_zero, sizeof(trunc_zero), &t));
+  EXPECT_EQ(2, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+
+  // An unknown type counts as another record and its bytes are not copied.
+  const uint8_t unknown[] = {1, 250, 0, 1, 103, 0, 1};
+  ASSERT_TRUE(poll::parseTelemetry(unknown, sizeof(unknown), &t));
+  EXPECT_EQ(7, t.lpp_len);
+  EXPECT_TRUE(t.other_records);
+
+  const uint8_t unknown_padded[] = {1, 250, 0, 0, 0, 0};
+  ASSERT_TRUE(poll::parseTelemetry(unknown_padded, sizeof(unknown_padded), &t));
+  EXPECT_EQ(2, t.lpp_len);
+  EXPECT_TRUE(t.other_records);
+
+  // Records on other channels, and other types on channel 1, are extra data.
+  const uint8_t mixed[] = {1, 116, 0x01, 0x8A, 2, 103, 0x00, 0x64, 1, 103, 0x00, 0xA5};
+  ASSERT_TRUE(poll::parseTelemetry(mixed, sizeof(mixed), &t));
+  EXPECT_EQ(12, t.lpp_len);
+  EXPECT_TRUE(t.other_records);
+
+  const uint8_t digital[] = {1, 0, 0x7F, 1, 116, 0x01, 0x97};
+  ASSERT_TRUE(poll::parseTelemetry(digital, sizeof(digital), &t));
+  EXPECT_EQ(7, t.lpp_len);
+  EXPECT_TRUE(t.other_records);
+
+  // A lone non-zero byte left after whole records is an incomplete header.
+  const uint8_t stray[] = {1, 116, 0x01, 0x97, 0x05};
+  ASSERT_TRUE(poll::parseTelemetry(stray, sizeof(stray), &t));
+  EXPECT_EQ(5, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+
+  const uint8_t stray_zero[] = {1, 116, 0x01, 0x97, 0x00};
+  ASSERT_TRUE(poll::parseTelemetry(stray_zero, sizeof(stray_zero), &t));
+  EXPECT_EQ(4, t.lpp_len);
+
+  ASSERT_TRUE(poll::parseTelemetry(nullptr, 0, &t));
+  EXPECT_EQ(0, t.lpp_len);
+  EXPECT_FALSE(t.other_records);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

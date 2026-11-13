@@ -11,7 +11,9 @@ namespace poll {
 
 // Prefix of RepeaterStats (examples/simple_repeater/MyMesh.h), in struct order.
 // Bytes that are not present stay zero. has_uptime is set only when that
-// field's four bytes were in the buffer, even if the value is 0.
+// field's four bytes were in the buffer, even if the value is 0. data_len is
+// how many data bytes the reply carried, so a caller can tell which trailing
+// fields exist rather than reading an absent one as a measured zero.
 struct StatusReading {
   uint16_t battery_mv;
   uint16_t tx_queue;
@@ -33,6 +35,7 @@ struct StatusReading {
   uint16_t flood_dups;
   uint32_t rx_air_secs;
   uint32_t recv_errors;
+  uint8_t data_len;  // bytes present, capped at 255
 };
 
 struct TelemetryReading {
@@ -40,6 +43,8 @@ struct TelemetryReading {
   uint16_t battery_mv;
   bool has_temperature;
   int16_t temperature_c10;  // tenths of a degree C
+  uint8_t lpp_len;          // leading bytes that are whole LPP records
+  bool other_records;       // a record other than channel-1 voltage or temperature
 };
 
 static inline uint16_t leU16(const uint8_t* p) {
@@ -75,6 +80,7 @@ static inline bool nextField(const uint8_t* data, size_t len, size_t* off, size_
 static inline bool parseStatus(const uint8_t* data, size_t len, StatusReading* out) {
   if (!out || !data || len < 2) return false;
   memset(out, 0, sizeof(*out));
+  out->data_len = len > 255 ? 255 : (uint8_t)len;
   size_t off = 0;
   const uint8_t* f;
   if (!nextField(data, len, &off, 2, &f)) return true;
@@ -168,6 +174,11 @@ static const int16_t kTempMaxC10 = 1250;  // 125.0 C
 // Channel 1 only. Voltage is u16 big-endian times 10 mV. Temperature is i16
 // big-endian in tenths of a degree; outside [-60, 125] C is "no sensor".
 // The first of each wins, including an out-of-range temperature.
+//
+// lpp_len covers the leading whole records: it stops at the first channel-0
+// byte, or at the first record that cannot be walked, whose own bytes and the
+// zero padding after them are left out. An unknown type counts as another
+// record, since it may be a sensor the poller does not decode.
 static inline bool parseTelemetry(const uint8_t* data, size_t len, TelemetryReading* out) {
   if (!out || (!data && len > 0)) return false;
   memset(out, 0, sizeof(*out));
@@ -176,21 +187,32 @@ static inline bool parseTelemetry(const uint8_t* data, size_t len, TelemetryRead
   bool saw_voltage = false;
   bool saw_temperature = false;
   size_t i = 0;
+  uint8_t stop = 0;  // 0 ran out cleanly, 1 channel 0, 2 a record that cannot be walked
   while (i + 2 <= len) {
     uint8_t channel = data[i];
     uint8_t type = data[i + 1];
-    if (channel == 0) break;
+    if (channel == 0) {
+      stop = 1;
+      break;
+    }
     int sz = lppValueSize(type);
-    if (sz < 0 || i + 2u + (size_t)sz > len) break;
+    const bool self_voltage = channel == kLppChannelSelf && type == kLppVoltage;
+    const bool self_temperature = channel == kLppChannelSelf && type == kLppTemperature;
+    if (sz < 0 || i + 2u + (size_t)sz > len) {
+      stop = 2;
+      if (!self_voltage && !self_temperature) out->other_records = true;
+      break;
+    }
+    if (!self_voltage && !self_temperature) out->other_records = true;
     const uint8_t* raw = data + i + 2;
-    if (channel == kLppChannelSelf && type == kLppVoltage && !saw_voltage) {
+    if (self_voltage && !saw_voltage) {
       saw_voltage = true;
       uint32_t mv = (uint32_t)beU16(raw) * 10u;
       if (mv <= 65535u) {
         out->has_voltage = true;
         out->battery_mv = (uint16_t)mv;
       }
-    } else if (channel == kLppChannelSelf && type == kLppTemperature && !saw_temperature) {
+    } else if (self_temperature && !saw_temperature) {
       saw_temperature = true;
       int16_t c10 = beI16(raw);
       if (c10 >= kTempMinC10 && c10 <= kTempMaxC10) {
@@ -199,6 +221,16 @@ static inline bool parseTelemetry(const uint8_t* data, size_t len, TelemetryRead
       }
     }
     i += 2u + (size_t)sz;
+  }
+  if (stop == 0 && i < len) stop = data[i] == 0 ? 1 : 2;
+  if (stop == 1) {
+    out->lpp_len = (uint8_t)i;
+  } else if (stop == 2) {
+    size_t n = len;
+    while (n > 0 && data[n - 1] == 0) n--;
+    out->lpp_len = n > 255 ? 255 : (uint8_t)n;
+  } else {
+    out->lpp_len = len > 255 ? 255 : (uint8_t)len;
   }
   return true;
 }
