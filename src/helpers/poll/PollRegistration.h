@@ -137,11 +137,14 @@ static inline bool registrationVoided(uint8_t from, uint8_t to) {
 // A JSON mode needs no consent for the polling key, which then never leaves the device.
 static inline bool identityAllowed(bool consent, uint8_t mode) { return consent || modeIsJson(mode); }
 
-// In a JSON mode the own key is usable at once; before any policy answer no key is.
-static inline uint8_t chooseKeyForMode(uint8_t mode, bool has_own, const RegistrationState& s,
-                                       bool have_shared_key, uint32_t now) {
+// In a JSON mode the own key is usable at once; before any policy answer no key is, and the
+// encrypted path without consent uses none.
+static inline uint8_t chooseKeyForMode(uint8_t mode, bool has_own, bool consent,
+                                       const RegistrationState& s, bool have_shared_key,
+                                       uint32_t now) {
   if (mode == MODE_UNKNOWN) return KEY_NONE;
   if (modeIsJson(mode)) return has_own ? KEY_OWN : KEY_NONE;
+  if (!consent) return KEY_NONE;
   return chooseKey(s, have_shared_key, now);
 }
 

@@ -93,14 +93,13 @@ TEST(PollPrefsPolicy, NormalizesUrlsAndGatesEnable) {
   EXPECT_FALSE(poll::normalizePollUrl(url, &changed));
   EXPECT_STREQ("", url);
 
-  EXPECT_FALSE(poll::pollCanEnable("", 1, 1, MQTT_PREFS_SLOT_COUNT));
-  EXPECT_TRUE(poll::pollCanEnable("https://corescope.example", 0, 1, MQTT_PREFS_SLOT_COUNT));
-  EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", -1, 1, MQTT_PREFS_SLOT_COUNT));
-  EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", 1, 0, MQTT_PREFS_SLOT_COUNT));
-  EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", 7, 1, MQTT_PREFS_SLOT_COUNT));
-  EXPECT_TRUE(poll::pollCanEnable("https://corescope.example", 1, 1, MQTT_PREFS_SLOT_COUNT));
-  EXPECT_TRUE(poll::pollCanEnable("http://corescope.example", 6, 1, 6));
-  EXPECT_FALSE(poll::pollCanEnable("http://corescope.example", 4, 1, 3));
+  EXPECT_FALSE(poll::pollCanEnable("", 1, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_TRUE(poll::pollCanEnable("https://corescope.example", 0, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", -1, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", 7, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_TRUE(poll::pollCanEnable("https://corescope.example", 1, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_TRUE(poll::pollCanEnable("http://corescope.example", 6, 6));
+  EXPECT_FALSE(poll::pollCanEnable("http://corescope.example", 4, 3));
 }
 
 TEST(PollPrefsPolicy, AddRemoveAndPwKeepTargetsPacked) {

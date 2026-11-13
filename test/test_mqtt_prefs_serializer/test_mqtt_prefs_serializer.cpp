@@ -984,8 +984,8 @@ TEST(MQTTPrefsSerializer, PollRepairsEachOutOfRangeRule) {
   prefs = loadPoll(
       "{version:1,poll:{enabled:1,url:\"https://corescope.example\",slot:1,consent:0}}",
       &repaired);
-  EXPECT_TRUE(repaired);
-  EXPECT_EQ(0, prefs.poll_enabled);
+  EXPECT_FALSE(repaired);   // consent gates only the key upload
+  EXPECT_EQ(1, prefs.poll_enabled);
   EXPECT_EQ(1, prefs.poll_slot);
   EXPECT_STREQ("https://corescope.example", prefs.poll_url);
 

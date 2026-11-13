@@ -275,9 +275,9 @@ TEST(PollRegistration, KeysAreExchangedOnlyOnTheEncryptedPath) {
 TEST(PollRegistration, OwnKeyInJsonModeNeedsNoRegistrationOrConsent) {
   using namespace poll;
   const RegistrationState none{false, false, 0, 0, 0};
-  EXPECT_EQ(KEY_OWN, chooseKeyForMode(MODE_JSON, true, none, false, kTs));
-  EXPECT_EQ(KEY_OWN, chooseKeyForMode(MODE_TELEMETRY, true, none, true, kTs));
-  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_JSON, false, none, true, kTs));
+  EXPECT_EQ(KEY_OWN, chooseKeyForMode(MODE_JSON, true, true, none, false, kTs));
+  EXPECT_EQ(KEY_OWN, chooseKeyForMode(MODE_TELEMETRY, true, true, none, true, kTs));
+  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_JSON, false, true, none, true, kTs));
   EXPECT_TRUE(identityAllowed(false, MODE_JSON));
   EXPECT_TRUE(identityAllowed(false, MODE_TELEMETRY));
   EXPECT_FALSE(identityAllowed(false, MODE_UNKNOWN));
@@ -288,12 +288,15 @@ TEST(PollRegistration, OwnKeyInJsonModeNeedsNoRegistrationOrConsent) {
 TEST(PollRegistration, NoKeyBeforeTheModeIsKnown) {
   using namespace poll;
   const RegistrationState ok{true, false, kTs, kTs, 200};
-  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_UNKNOWN, true, ok, true, kTs));
+  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_UNKNOWN, true, true, ok, true, kTs));
   // The encrypted path is exactly chooseKey.
-  EXPECT_EQ(chooseKey(ok, true, kTs), chooseKeyForMode(MODE_ENCRYPTED, true, ok, true, kTs));
+  EXPECT_EQ(chooseKey(ok, true, kTs), chooseKeyForMode(MODE_ENCRYPTED, true, true, ok, true, kTs));
   const RegistrationState none{false, false, 0, 0, 0};
-  EXPECT_EQ(KEY_SHARED, chooseKeyForMode(MODE_ENCRYPTED, true, none, true, kTs));
-  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_ENCRYPTED, true, none, false, kTs));
+  EXPECT_EQ(KEY_SHARED, chooseKeyForMode(MODE_ENCRYPTED, true, true, none, true, kTs));
+  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_ENCRYPTED, true, true, none, false, kTs));
+  // Without consent the encrypted path polls under no key; a JSON mode does not need it.
+  EXPECT_EQ(KEY_NONE, chooseKeyForMode(MODE_ENCRYPTED, true, false, ok, true, kTs));
+  EXPECT_EQ(KEY_OWN, chooseKeyForMode(MODE_JSON, true, false, none, false, kTs));
 }
 
 TEST(PollRegistration, LeavingJsonModeVoidsTheRegistration) {

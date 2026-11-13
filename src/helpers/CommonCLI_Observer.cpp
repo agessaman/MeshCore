@@ -322,9 +322,8 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
       strcpy(reply, "Error: poll.url is not set");
     } else if (prefs->poll_slot > RUNTIME_MQTT_SLOTS) {
       snprintf(reply, 160, "Error: poll.slot must be 1-%d", RUNTIME_MQTT_SLOTS);
-    } else if (prefs->poll_consent == 0) {
-      strcpy(reply, "Error: poll.consent is not set");
-    } else if (!cb->ensureRepeaterPollKey()) {
+    // Without consent the key waits for a JSON mode, where it never leaves the device.
+    } else if (prefs->poll_consent != 0 && !cb->ensureRepeaterPollKey()) {
       strcpy(reply, "Error: could not create the polling key");
     } else {
       prefs->poll_enabled = 1;
@@ -438,13 +437,9 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
     strcpy(reply, "Error: use yes or no");
     return PollSetResult::Done;
   }
-  if (strcmp(word, "no") == 0) {
-    prefs->poll_consent = 0;
-    pollNoteCleared(prefs, "poll.consent", reply);
-  } else {
-    prefs->poll_consent = 1;
-    strcpy(reply, "OK");
-  }
+  // Polling stays on either way; consent gates only the key upload.
+  prefs->poll_consent = strcmp(word, "no") == 0 ? 0 : 1;
+  strcpy(reply, "OK");
   return PollSetResult::Changed;
 }
 

@@ -1130,6 +1130,7 @@ void RepeaterPoller::cmdGetPoll(char* reply) {
   const uint8_t gate = gateAt(now);
   const char* key = key_in_use_ == poll::KEY_OWN ? "own"
                     : key_in_use_ == poll::KEY_SHARED ? "shared"
+                    : !consent_ && !poll::modeIsJson(mode_) ? "none (consent needed)"
                     : !has_id_ ? "none (no polling key yet)"
                     : "none (not registered, no shared key)";
   // CoreScope details are in `get poll.control`; this line stays under the reply buffer, with the key reason dropped first.
@@ -1285,7 +1286,8 @@ bool RepeaterPoller::nowRefused(uint8_t idx, uint32_t now, char* reply, bool loc
   } else if (!local_only && claim_slot_ == 0) {
     strcpy(reply, "Error: no MQTT slot (poll.slot unset, no broker matches)");
   } else if (!local_only && key_in_use_ == poll::KEY_NONE) {
-    strcpy(reply, "Error: no polling key in use (not registered with CoreScope, no shared key)");
+    strcpy(reply, !consent_ && !poll::modeIsJson(mode_) ? "Error: no polling key in use (consent needed)"
+                                                        : "Error: no polling key in use (not registered with CoreScope, no shared key)");
   } else if (busy() || host_->pollDiscoveryBusy()) {
     strcpy(reply, "busy");
   } else if (t.last_attempt && t.last_attempt <= now && now - t.last_attempt < kNowSpacingS) {
@@ -1623,7 +1625,7 @@ void RepeaterPoller::serviceControl() {
 
 void RepeaterPoller::updateKey(uint32_t now) {
   const bool shared = poll::sharedKeyUsable(has_shared_, shared_at_, shared_renew_failed_, now);
-  const uint8_t want = poll::chooseKeyForMode(mode_, has_id_, reg_, shared, now);
+  const uint8_t want = poll::chooseKeyForMode(mode_, has_id_, consent_, reg_, shared, now);
   if (want == key_in_use_ || busy()) return;   // a run keeps the key it started with
   char pfx[9] = "-";
   if (want == poll::KEY_OWN) hex8(pfx, poll_id_.pub_key);
@@ -1768,7 +1770,8 @@ void RepeaterPoller::maybeFileControl(uint32_t now) {
     return;
   }
   if (ctl_retry_ms_ != 0 && (uint32_t)(millis() - ctl_retry_ms_) < kCtlRetryMs) return;
-  const bool want_shared = !poll::modeIsJson(mode_) && poll::sharedKeyWanted(has_shared_, shared_at_, reg_, registering, now);
+  // Without consent the encrypted path polls nothing, so no shared key is fetched either.
+  const bool want_shared = !poll::modeIsJson(mode_) && consent_ && poll::sharedKeyWanted(has_shared_, shared_at_, reg_, registering, now);
   discardUnasked();
   fileControl(now, registering, want_shared);
 }

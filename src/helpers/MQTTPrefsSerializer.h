@@ -626,7 +626,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
         memcpy(_prefs->poll_pw[i], _pass[i], sizeof(_prefs->poll_pw[i]));
       }
       if (_enabled == 1 &&
-          !poll::pollCanEnable(_url, _slot, _consent, MQTT_PREFS_SLOT_COUNT)) {
+          !poll::pollCanEnable(_url, _slot, MQTT_PREFS_SLOT_COUNT)) {
         _enabled = 0;
         *repaired = true;
       }
