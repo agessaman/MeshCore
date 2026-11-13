@@ -50,9 +50,10 @@ static inline const char* codeName(uint8_t code) {
 
 enum ReqKind : uint8_t { REQ_TELEMETRY = 0, REQ_STATUS = 1 };
 
-// The only two passwords the polling key may ever present.
-enum Password : uint8_t { PW_BLANK = 0, PW_HELLO = 1 };
+// Passwords a polling key may present; a custom one is supplied by the caller.
+enum Password : uint8_t { PW_BLANK = 0, PW_HELLO = 1, PW_CUSTOM = 2 };
 
+// Fixed password text; a custom password is empty here because the caller supplies it.
 static inline const char* passwordText(uint8_t pw) { return pw == PW_HELLO ? "hello" : ""; }
 
 // Operator override per target.

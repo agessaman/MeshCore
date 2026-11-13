@@ -58,6 +58,7 @@ static inline const char* exchangeReasonName(uint8_t r) {
 struct ExchangeConfig {
   uint8_t  pw_mode;        // PasswordMode operator override
   bool     personal;       // true: per-observer polling key; false: public shared key
+  bool     custom_pw;      // true: this target takes a caller-supplied password
   uint16_t status_hours;   // status request at most this often; 0 = default (6)
   Timing   timing;
 };
@@ -66,6 +67,7 @@ static inline ExchangeConfig defaultExchangeConfig() {
   ExchangeConfig c;
   c.pw_mode = PWMODE_AUTO;
   c.personal = false;
+  c.custom_pw = false;
   c.status_hours = kDefaultStatusHours;
   c.timing = defaultTiming();
   return c;
@@ -75,6 +77,7 @@ struct ExchangeResult {
   bool    got_reply;       // a data reply arrived
   bool    reply_flooded;   // ...and it was flooded
   bool    admin;           // a login was answered as admin: owner must run PollAdminDrill
+  bool    discard_password;   // the custom password got an admin answer and must go
   uint8_t kind;            // ReqKind chosen for this poll
   bool    login_tried;     // the login path ran
   bool    login_answered;
@@ -112,7 +115,12 @@ static inline bool routeMayBeLost(const TargetState& t, uint32_t now) {
 
 // Passwords for one poll, one login each; returns the count (1 or 2).
 static inline uint8_t passwordOrder(const TargetState& t, uint32_t now, uint8_t pw_mode, bool personal,
-                                    uint8_t out[2]) {
+                                    uint8_t out[2], bool custom_pw = false) {
+  // A custom password goes alone: no blank or hello attempt may stand in for it.
+  if (custom_pw) {
+    out[0] = PW_CUSTOM;
+    return 1;
+  }
   if (pw_mode == PWMODE_BLANK || pw_mode == PWMODE_HELLO) {
     out[0] = pw_mode == PWMODE_HELLO ? PW_HELLO : PW_BLANK;
     return 1;
@@ -267,7 +275,7 @@ class PollExchange {
   Step beginLogin(TargetState& t, bool in_acl) {
     res_.login_tried = true;
     in_acl_ = in_acl;
-    pw_count_ = passwordOrder(t, now_, cfg_.pw_mode, cfg_.personal, pws_);
+    pw_count_ = passwordOrder(t, now_, cfg_.pw_mode, cfg_.personal, pws_, cfg_.custom_pw);
     pw_next_ = 0;
     if (in_acl) return sendTeach(PH_PRE_TEACH_TX);
     return nextLogin(t);
@@ -386,9 +394,11 @@ class PollExchange {
     t.key_login_fails = 0;
     if (admin) {
       res_.admin = true;
+      // A password login would simply grant admin again, so the password must go.
+      res_.discard_password = cfg_.custom_pw;
       return finish(t, XR_ADMIN);
     }
-    if (answer_pw_ == PW_HELLO || cfg_.personal) {
+    if (answer_pw_ != PW_CUSTOM && (answer_pw_ == PW_HELLO || cfg_.personal)) {
       t.learned_pw = answer_pw_ == PW_HELLO ? LEARNED_HELLO : LEARNED_BLANK;
     }
     if (!in_acl_ || flooded) {

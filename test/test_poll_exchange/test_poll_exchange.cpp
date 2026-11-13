@@ -19,6 +19,7 @@ const uint32_t kNow = 2000000;  // an even UTC day boundary is kNow - kNow % kDa
 struct FakeRepeater {
   bool accepts_blank = true;
   bool accepts_hello = true;
+  bool accepts_custom = true;
   bool admin = false;
   bool stubborn = false;        // setperm never takes
   bool answer_requests = true;
@@ -74,7 +75,9 @@ struct Sim {
           rep.ignore_logins--;
           return;
         }
-        bool ok = s.pw == PW_HELLO ? rep.accepts_hello : rep.accepts_blank;
+        bool ok = rep.accepts_blank;
+        if (s.pw == PW_HELLO) ok = rep.accepts_hello;
+        if (s.pw == PW_CUSTOM) ok = rep.accepts_custom;
         if (!ok) return;
         rep.in_acl = true;
         schedule(rep.login_delay_ms, rep.admin ? EV_LOGIN_ADMIN : EV_LOGIN_GUEST, !rep.route_known);
@@ -523,6 +526,111 @@ TEST(PollExchange, FailingKeyAlternatesOneLoginPerPollByDay) {
   ASSERT_EQ(1u, n.rep.login_pws.size());
   EXPECT_EQ(day == 0 ? PW_HELLO : PW_BLANK, n.rep.login_pws[0]);
   EXPECT_EQ(0, n.t.key_login_fails);   // answered
+}
+
+// ---- custom passwords ----------------------------------------------------------
+
+TEST(PollExchange, FirstContactWithACustomPasswordIsLoginFloodClearTeachRequest) {
+  Sim s;
+  s.cfg.custom_pw = true;
+  s.t.status_checked_at = kNow;  // telemetry
+  const ExchangeResult& r = s.poll();
+  EXPECT_EQ(acts({ACT_SEND_LOGIN, ACT_SEND_TEACH, ACT_SEND_REQUEST}), s.tx);
+  EXPECT_EQ((std::vector<uint8_t>{PW_CUSTOM}), s.rep.login_pws);
+  EXPECT_TRUE(std::find(s.waits.begin(), s.waits.end(), 15000u) != s.waits.end());
+  EXPECT_TRUE(r.login_answered && r.login_flooded);
+  EXPECT_TRUE(r.got_reply);
+  EXPECT_FALSE(r.reply_flooded);
+  EXPECT_FALSE(r.admin);
+  EXPECT_FALSE(r.discard_password);
+  EXPECT_EQ(1, r.logins);
+  EXPECT_EQ(LEARNED_NONE, s.t.learned_pw);   // the custom text is the caller's to keep
+  EXPECT_EQ(0, s.t.key_login_fails);
+  EXPECT_NE(0u, s.t.logged_in_at);
+}
+
+TEST(PollExchange, CustomPasswordUsesTheFastPathAfterTheFirstPoll) {
+  Sim s;
+  s.cfg.custom_pw = true;
+  s.poll();
+  s.t.code = CODE_OK;   // the owner stores the reading
+  const ExchangeResult& r = s.poll();
+  EXPECT_EQ(acts({ACT_SEND_REQUEST}), s.tx);
+  EXPECT_FALSE(r.login_tried);
+  EXPECT_EQ(1, s.rep.logins);   // total, from the first contact
+}
+
+TEST(PollExchange, SilentTargetWithACustomPasswordGetsNoFallbackLogin) {
+  Sim s;
+  s.cfg.custom_pw = true;
+  s.cfg.pw_mode = PWMODE_HELLO;    // ignored
+  s.t.learned_pw = LEARNED_BLANK;  // ignored
+  s.rep.accepts_custom = false;
+  s.rep.accepts_blank = s.rep.accepts_hello = true;
+  const ExchangeResult& r = s.poll();
+  EXPECT_EQ(acts({ACT_SEND_LOGIN}), s.tx);
+  EXPECT_EQ((std::vector<uint8_t>{PW_CUSTOM}), s.rep.login_pws);
+  EXPECT_FALSE(r.login_answered);
+  EXPECT_EQ(XR_LOGIN_UNANSWERED, r.reason);
+  EXPECT_EQ(LEARNED_BLANK, s.t.learned_pw);
+  EXPECT_EQ(1, s.t.key_login_fails);
+}
+
+TEST(PollExchange, CustomPasswordIsTheWholeOrder) {
+  const uint8_t modes[] = {PWMODE_AUTO, PWMODE_BLANK, PWMODE_HELLO};
+  for (uint8_t mode : modes) {
+    uint8_t pw[2];
+    TargetState t;
+    memset(&t, 0, sizeof(t));
+    t.learned_pw = LEARNED_HELLO;
+    t.key_login_fails = 9;
+    ASSERT_EQ(1, passwordOrder(t, 0, mode, true, pw, true)) << (int)mode;
+    EXPECT_EQ(PW_CUSTOM, pw[0]);
+    ASSERT_EQ(1, passwordOrder(t, 86400, mode, false, pw, true)) << (int)mode;
+    EXPECT_EQ(PW_CUSTOM, pw[0]);
+  }
+}
+
+TEST(PollExchange, AdminAnswerToACustomPasswordAsksToDiscardIt) {
+  Sim s;
+  s.cfg.custom_pw = true;
+  s.rep.admin = true;
+  const ExchangeResult& r = s.poll();
+  EXPECT_EQ(acts({ACT_SEND_LOGIN}), s.tx);
+  EXPECT_TRUE(r.admin);
+  EXPECT_TRUE(r.discard_password);
+  EXPECT_EQ(XR_ADMIN, r.reason);
+  EXPECT_EQ(0, s.rep.requests);
+  EXPECT_EQ(LEARNED_NONE, s.t.learned_pw);
+}
+
+TEST(PollExchange, AdminAnswerToABlankOrHelloKeepsThePassword) {
+  Sim s;
+  s.rep.admin = true;
+  const ExchangeResult& r = s.poll();
+  EXPECT_TRUE(r.admin);
+  EXPECT_FALSE(r.discard_password);
+}
+
+TEST(PollExchange, CustomPasswordLoginsCountInKeyLoginFails) {
+  Sim s;
+  s.cfg.custom_pw = true;
+  s.rep.accepts_custom = false;
+  s.poll();
+  EXPECT_EQ(1, s.t.key_login_fails);
+  s.poll();
+  EXPECT_EQ(2, s.t.key_login_fails);
+  s.rep.accepts_custom = true;
+  const ExchangeResult& r = s.poll();
+  EXPECT_TRUE(r.login_answered);
+  EXPECT_EQ(0, s.t.key_login_fails);       // an answered login clears it
+  EXPECT_EQ(3u, s.rep.login_pws.size());   // one per poll, never two
+}
+
+TEST(PollExchange, PasswordTextLeavesACustomPasswordToTheCaller) {
+  EXPECT_STREQ("hello", passwordText(PW_HELLO));
+  EXPECT_STREQ("", passwordText(PW_BLANK));
+  EXPECT_STREQ("", passwordText(PW_CUSTOM));
 }
 
 // ---- flood accounting ----------------------------------------------------------
