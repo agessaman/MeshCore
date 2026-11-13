@@ -27,6 +27,16 @@ enum OwnerRole : uint8_t {
   OWNER_ROLE_UNKNOWN
 };
 
+// Copied pw object. present is well formed; bad means it was sent but unusable.
+struct PwEnvelope {
+  bool     present;
+  bool     bad;
+  uint8_t  epk[32];
+  uint8_t  ct[16];
+  uint8_t  tag[32];
+  uint32_t ver;
+};
+
 // One node's entry in the owners reply, already extracted from JSON.
 struct OwnerEntry {
   bool     present;        // the owners reply has an entry for this node
@@ -36,6 +46,8 @@ struct OwnerEntry {
   uint8_t  standby_rank;   // >= 1; default 1
   uint8_t  owner_hops;
   uint32_t latest_ts;      // newest reading CoreScope has for the node, 0 = none
+  bool     requested;      // same truthiness as mine
+  PwEnvelope pw;
 };
 
 enum SkipReason : uint8_t {

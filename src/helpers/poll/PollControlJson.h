@@ -316,6 +316,51 @@ static inline bool parsePolicyReply(const char* body, size_t len, Policy& p,
   return true;
 }
 
+// Missing ver is 0. A negative, fractional, or non-numeric ver is rejected.
+static inline bool pwVer(JsonObjectConst pw, uint32_t* ver) {
+  if (!cjson::hasKey(pw, "ver")) {
+    *ver = 0;
+    return true;
+  }
+  JsonVariantConst v = pw["ver"];
+  if (v.is<bool>() || v.is<const char*>()) return false;
+  int64_t n = 0;
+  if (!cjson::readInt(v, &n) || n < 0 || n > (int64_t)UINT32_MAX) return false;
+  if (v.is<double>()) {
+    const double d = v.as<double>();
+    if (d != (double)n) return false;
+  }
+  *ver = (uint32_t)n;
+  return true;
+}
+
+// Absent pw leaves both flags clear. Any pw value that is not a full envelope sets bad.
+static inline void pwEnvelopeFrom(JsonObjectConst e, PwEnvelope& out) {
+  memset(&out, 0, sizeof(out));
+  if (!cjson::hasKey(e, "pw")) return;
+  JsonVariantConst raw = e["pw"];
+  if (!raw.is<JsonObjectConst>()) {
+    out.bad = true;
+    return;
+  }
+  JsonObjectConst pw = raw.as<JsonObjectConst>();
+  const char* epk = pw["epk"].is<const char*>() ? pw["epk"].as<const char*>() : nullptr;
+  const char* ct = pw["ct"].is<const char*>() ? pw["ct"].as<const char*>() : nullptr;
+  const char* tag = pw["tag"].is<const char*>() ? pw["tag"].as<const char*>() : nullptr;
+  uint8_t epk_b[32], ct_b[16], tag_b[32];
+  uint32_t ver = 0;
+  if (!epk || !ct || !tag || !cjson::decodeHex(epk, epk_b, 32) || !cjson::decodeHex(ct, ct_b, 16) ||
+      !cjson::decodeHex(tag, tag_b, 32) || !pwVer(pw, &ver)) {
+    out.bad = true;
+    return;
+  }
+  memcpy(out.epk, epk_b, 32);
+  memcpy(out.ct, ct_b, 16);
+  memcpy(out.tag, tag_b, 32);
+  out.ver = ver;
+  out.present = true;
+}
+
 static inline void ownerEntryFrom(JsonObjectConst e, OwnerEntry& out) {
   memset(&out, 0, sizeof(out));
   out.present = true;
@@ -330,6 +375,7 @@ static inline void ownerEntryFrom(JsonObjectConst e, OwnerEntry& out) {
     out.role = OWNER_ROLE_UNKNOWN;
   }
   out.mine = cjson::truthy(e["mine"]);
+  out.requested = cjson::truthy(e["requested"]);
   out.excluded = cjson::truthy(e["excluded"]);
   int64_t v = 0;
   if (cjson::truthy(e["standby_rank"]) && cjson::readInt(e["standby_rank"], &v)) {
@@ -341,6 +387,34 @@ static inline void ownerEntryFrom(JsonObjectConst e, OwnerEntry& out) {
     uint32_t t = 0;
     if (parseIsoUtc(ts.as<const char*>(), &t)) out.latest_ts = t;
   }
+  pwEnvelopeFrom(e, out.pw);
+}
+
+// Poller, then standby, then parked roles; lower rank, then key bytes.
+static inline int requestedOrder(const uint8_t* key_a, const OwnerEntry& a,
+                                 const uint8_t* key_b, const OwnerEntry& b) {
+  const uint8_t role_a = mapRole(true, a);
+  const uint8_t role_b = mapRole(true, b);
+  const int tier_a = role_a == ROLE_POLLER ? 0 : (role_a == ROLE_STANDBY ? 1 : 2);
+  const int tier_b = role_b == ROLE_POLLER ? 0 : (role_b == ROLE_STANDBY ? 1 : 2);
+  if (tier_a != tier_b) return tier_a - tier_b;
+  if (a.standby_rank != b.standby_rank) return (int)a.standby_rank - (int)b.standby_rank;
+  return memcmp(key_a, key_b, kPubKeySize);
+}
+
+// Insert by rank, dropping the worst entry once cap is full.
+static inline void keepRequested(RequestedEntry* list, uint8_t* n, uint8_t cap,
+                                 const uint8_t key[kPubKeySize], const OwnerEntry& entry) {
+  uint8_t i = *n < cap ? *n : cap;
+  if (i == cap && requestedOrder(key, entry, list[cap - 1].pub, list[cap - 1].entry) >= 0) return;
+  if (i == cap) i = (uint8_t)(cap - 1);
+  while (i > 0 && requestedOrder(key, entry, list[i - 1].pub, list[i - 1].entry) < 0) {
+    list[i] = list[i - 1];
+    i--;
+  }
+  memcpy(list[i].pub, key, kPubKeySize);
+  list[i].entry = entry;
+  if (*n < cap) (*n)++;
 }
 
 // An /owners reply. Returns false when the body is not a JSON object. owners[]
@@ -350,12 +424,19 @@ static inline bool parseOwnersReply(const char* body, size_t len,
                                     const uint8_t (*targets)[kPubKeySize], uint8_t target_count,
                                     OwnerEntry owners[kMaxTargets], bool* nodes_ok,
                                     Policy* policy, bool* has_policy,
-                                    ArduinoJson::Allocator* alloc = nullptr) {
+                                    ArduinoJson::Allocator* alloc = nullptr,
+                                    uint8_t request_capacity = 0,
+                                    RequestedEntry* requested = nullptr,
+                                    uint8_t* requested_count = nullptr) {
   if (target_count > kMaxTargets) target_count = kMaxTargets;
   memset(owners, 0, sizeof(OwnerEntry) * kMaxTargets);
   if (nodes_ok) *nodes_ok = false;
   if (has_policy) *has_policy = false;
   if (policy) policyDefaults(*policy);
+  if (requested_count) *requested_count = 0;
+  if (requested) memset(requested, 0, sizeof(RequestedEntry) * kMaxTargets);
+  uint8_t cap = request_capacity > kMaxTargets ? kMaxTargets : request_capacity;
+  uint8_t kept = 0;
 
   JsonDocument filter(cjson::pickAllocator(alloc));
   JsonObject entry = filter["nodes"]["*"].to<JsonObject>();
@@ -365,6 +446,8 @@ static inline bool parseOwnersReply(const char* body, size_t len,
   entry["standby_rank"] = true;
   entry["owner_hops"] = true;
   entry["latest_ts"] = true;
+  entry["requested"] = true;
+  entry["pw"] = true;
   if (policy) cjson::policyFilter(filter["policy"].to<JsonObject>());
 
   JsonDocument doc(cjson::pickAllocator(alloc));
@@ -379,11 +462,20 @@ static inline bool parseOwnersReply(const char* body, size_t len,
       if (!cjson::decodeKey(kv.key().c_str(), key)) continue;
       JsonObjectConst e = kv.value().as<JsonObjectConst>();
       if (e.isNull()) continue;  // a non-dict entry counts as no entry
+      bool configured = false;
       for (uint8_t i = 0; i < target_count; i++) {
         if (owners[i].present || memcmp(targets[i], key, kPubKeySize) != 0) continue;
         ownerEntryFrom(e, owners[i]);
+        configured = true;
       }
+      if (configured || !requested || cap == 0) continue;
+      if (cjson::keyIn(key, targets, target_count)) continue;
+      OwnerEntry extra;
+      ownerEntryFrom(e, extra);
+      if (!extra.requested) continue;
+      keepRequested(requested, &kept, cap, key, extra);
     }
+    if (requested_count) *requested_count = kept;
   }
 
   if (policy && !nodes.isNull()) {

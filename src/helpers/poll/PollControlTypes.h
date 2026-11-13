@@ -31,9 +31,16 @@ struct ControlRequest {
   uint8_t  observer_pub[kPubKeySize];
   uint8_t  want;                   // ControlWant bits
   uint8_t  target_count;
+  uint8_t  request_capacity;   // 0 accepts no analyzer targets beyond targets[]
   uint8_t  targets[kMaxTargets][kPubKeySize];   // owners entries are read for these only
   uint16_t reg_body_len;           // 0 = nothing to register
   char     reg_body[kRegBodyMax];  // built and signed on the loop side
+};
+
+// An analyzer target that is not in the configured list.
+struct RequestedEntry {
+  uint8_t    pub[kPubKeySize];
+  OwnerEntry entry;
 };
 
 // HTTP status fields: > 0 is the status, 0 means the request was not made, and
@@ -45,6 +52,8 @@ struct ControlResult {
   int16_t  owners_status;
   bool     owners_ok;      // 200 with a "nodes" object
   OwnerEntry owners[kMaxTargets];   // index-aligned with ControlRequest::targets
+  uint8_t    requested_count;        // 0 unless the owners answer had a nodes object
+  RequestedEntry requested[kMaxTargets];
 
   int16_t  policy_status;  // of the reply that carried the policy, or of the policy endpoint
   bool     policy_ok;      // policy holds the server's fields, not yet clamped

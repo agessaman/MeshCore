@@ -565,7 +565,8 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
     if (r.status == 200) {
       bool has_policy = false;
       if (parseOwnersReply(s_body, r.len, req.targets, count, res.owners, &res.owners_ok,
-                           &res.policy, &has_policy, &alloc)) {
+                           &res.policy, &has_policy, &alloc, req.request_capacity,
+                           res.requested, &res.requested_count)) {
         if (has_policy) {
           res.policy_ok = true;
           res.policy_status = r.status;

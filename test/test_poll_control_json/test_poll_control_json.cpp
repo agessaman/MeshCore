@@ -44,6 +44,73 @@ void fill(uint8_t key[poll::kPubKeySize], uint8_t b) { memset(key, b, poll::kPub
 
 std::string hexKey(char c) { return std::string(64, c); }
 
+std::string pubHexId(uint8_t id) {
+  static const char* h = "0123456789abcdef";
+  std::string s(64, '0');
+  s[0] = h[id >> 4];
+  s[1] = h[id & 0xf];
+  return s;
+}
+
+void keyFromId(uint8_t key[poll::kPubKeySize], uint8_t id) {
+  memset(key, 0, poll::kPubKeySize);
+  key[0] = id;
+}
+
+struct RankSpec {
+  uint8_t id;
+  const char* role;
+  int rank;
+  bool mine;
+  bool requested;
+};
+
+std::string rankBody(const RankSpec* specs, int n) {
+  std::string b = "{\"nodes\":{";
+  for (int i = 0; i < n; i++) {
+    if (i) b += ",";
+    b += "\"" + pubHexId(specs[i].id) + "\":{\"role\":\"" + specs[i].role + "\",\"mine\":";
+    b += specs[i].mine ? "true" : "false";
+    b += ",\"standby_rank\":" + std::to_string(specs[i].rank);
+    b += ",\"requested\":";
+    b += specs[i].requested ? "true" : "false";
+    b += "}";
+  }
+  b += "}}";
+  return b;
+}
+
+std::string hexRun(const char* pair, int nbytes) {
+  std::string s;
+  for (int i = 0; i < nbytes; i++) s += pair;
+  return s;
+}
+
+struct ReqParse {
+  uint8_t targets[poll::kMaxTargets][poll::kPubKeySize];
+  poll::OwnerEntry out[poll::kMaxTargets];
+  poll::RequestedEntry requested[poll::kMaxTargets];
+  poll::Policy policy;
+  uint8_t requested_count = 0;
+  bool nodes_ok = false;
+  bool has_policy = false;
+  ReqParse() {
+    memset(targets, 0, sizeof(targets));
+    memset(requested, 0x5a, sizeof(requested));
+  }
+  bool parse(const std::string& body, uint8_t ntargets, uint8_t cap) {
+    requested_count = 0xff;
+    return poll::parseOwnersReply(body.data(), body.size(), targets, ntargets, out, &nodes_ok,
+                                  &policy, &has_policy, nullptr, cap, requested, &requested_count);
+  }
+};
+
+bool envelopeBytes(const poll::PwEnvelope& pw, uint8_t epk, uint8_t ct, uint8_t tag) {
+  for (int i = 0; i < 32; i++) if (pw.epk[i] != epk || pw.tag[i] != tag) return false;
+  for (int i = 0; i < 16; i++) if (pw.ct[i] != ct) return false;
+  return true;
+}
+
 struct Owners {
   uint8_t targets[poll::kMaxTargets][poll::kPubKeySize];
   poll::OwnerEntry out[poll::kMaxTargets];
@@ -553,6 +620,177 @@ TEST(PollControlJson, SixKilobyteValidBodyParses) {
                      "\":{\"role\":\"polling\",\"mine\":true}}}";
   ASSERT_TRUE(o.parse(body, 1));
   EXPECT_TRUE(o.out[0].present);
+}
+
+TEST(PollControlJson, LocalTargetKeepsRequestedFlagAndEnvelope) {
+  ReqParse o;
+  keyFromId(o.targets[0], 0x11);
+  keyFromId(o.targets[1], 0x22);
+  const std::string epk = hexRun("AB", 32);
+  const std::string ct = hexRun("cD", 16);
+  const std::string tag = hexRun("Ef", 32);
+  const std::string body =
+      "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"role\":\"polling\",\"mine\":true,\"requested\":1,\"pw\":{"
+      "\"epk\":\"" + epk + "\",\"ct\":\"" + ct + "\",\"tag\":\"" + tag + "\"}},\"" + pubHexId(0x22) +
+      "\":{\"role\":\"standby\",\"mine\":false}}}";
+  ASSERT_TRUE(o.parse(body, 2, 4));
+  EXPECT_TRUE(o.nodes_ok);
+  EXPECT_TRUE(o.out[0].present);
+  EXPECT_TRUE(o.out[0].requested);
+  EXPECT_TRUE(o.out[0].pw.present);
+  EXPECT_FALSE(o.out[0].pw.bad);
+  EXPECT_EQ(0u, o.out[0].pw.ver);
+  EXPECT_TRUE(envelopeBytes(o.out[0].pw, 0xab, 0xcd, 0xef));
+  EXPECT_TRUE(o.out[1].present);
+  EXPECT_FALSE(o.out[1].requested);
+  EXPECT_FALSE(o.out[1].pw.present);
+  EXPECT_FALSE(o.out[1].pw.bad);
+  EXPECT_EQ(0, o.requested_count);
+  EXPECT_EQ(0, o.requested[0].pub[0]);
+}
+
+TEST(PollControlJson, RequestedTargetsFollowRankNotJsonOrder) {
+  const RankSpec specs[] = {
+      {0x30, "excluded", 2, true, true},
+      {0x20, "paused", 1, false, true},
+      {0x01, "disabled", 1, false, true},
+      {0x11, "standby", 1, false, true},
+      {0x10, "standby", 1, false, true},
+      {0x05, "polling", 9, false, true},
+      {0x50, "standby", 3, true, true},
+      {0x40, "independent", 2, false, true},
+      {0xF0, "polling", 1, false, true},
+      {0x02, "polling", 1, true, false},
+  };
+  const int n = (int)(sizeof(specs) / sizeof(specs[0]));
+  RankSpec reversed[10];
+  for (int i = 0; i < n; i++) reversed[i] = specs[n - 1 - i];
+  const std::string forward = rankBody(specs, n);
+  const std::string backward = rankBody(reversed, n);
+  const uint8_t top4[] = {0xF0, 0x40, 0x50, 0x05};
+  const uint8_t top8[] = {0xF0, 0x40, 0x50, 0x05, 0x10, 0x11, 0x01, 0x20};
+
+  for (const std::string& body : {forward, backward}) {
+    ReqParse o;
+    keyFromId(o.targets[0], 0xAB);
+    const std::string local =
+        "\"" + pubHexId(0xAB) + "\":{\"role\":\"polling\",\"mine\":true,\"requested\":true,\"standby_rank\":1},";
+    std::string mixed = body;
+    mixed.insert(strlen("{\"nodes\":{"), local);
+    ASSERT_TRUE(o.parse(mixed, 1, 4)) << mixed;
+    ASSERT_EQ(4, o.requested_count);
+    for (int i = 0; i < 4; i++) EXPECT_EQ(top4[i], o.requested[i].pub[0]) << i;
+    EXPECT_TRUE(o.out[0].present);
+    EXPECT_TRUE(o.out[0].requested);
+    EXPECT_EQ(poll::OWNER_ROLE_POLLING, o.requested[0].entry.role);
+    EXPECT_EQ(1, o.requested[0].entry.standby_rank);
+    EXPECT_EQ(poll::ROLE_POLLER, poll::mapRole(true, o.requested[2].entry));
+
+    ASSERT_TRUE(o.parse(mixed, 1, 8));
+    ASSERT_EQ(8, o.requested_count);
+    for (int i = 0; i < 8; i++) EXPECT_EQ(top8[i], o.requested[i].pub[0]) << i;
+    EXPECT_EQ(poll::OWNER_ROLE_DISABLED, o.requested[6].entry.role);
+    EXPECT_EQ(poll::OWNER_ROLE_PAUSED, o.requested[7].entry.role);
+
+    ASSERT_TRUE(o.parse(mixed, 1, 255));
+    ASSERT_EQ(8, o.requested_count);
+    EXPECT_EQ(0x20, o.requested[7].pub[0]);
+  }
+}
+
+TEST(PollControlJson, RequestCapacityZeroKeepsConfiguredEnvelopeOnly) {
+  ReqParse o;
+  keyFromId(o.targets[0], 0x11);
+  const std::string pw = "{\"epk\":\"" + hexRun("aa", 32) + "\",\"ct\":\"" + hexRun("bb", 16) +
+                         "\",\"tag\":\"" + hexRun("cc", 32) + "\",\"ver\":4}";
+  const std::string body = "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"requested\":true,\"pw\":" + pw +
+                           "},\"" + pubHexId(0x44) + "\":{\"requested\":true,\"role\":\"polling\"}}}";
+  ASSERT_TRUE(o.parse(body, 1, 0));
+  EXPECT_EQ(0, o.requested_count);
+  EXPECT_EQ(0, o.requested[0].pub[0]);
+  EXPECT_TRUE(o.out[0].requested);
+  EXPECT_TRUE(o.out[0].pw.present);
+  EXPECT_FALSE(o.out[0].pw.bad);
+  EXPECT_EQ(4u, o.out[0].pw.ver);
+  EXPECT_TRUE(envelopeBytes(o.out[0].pw, 0xaa, 0xbb, 0xcc));
+}
+
+TEST(PollControlJson, MalformedPasswordEnvelopeIsBad) {
+  const std::string epk = hexRun("ab", 32);
+  const std::string ct = hexRun("cd", 16);
+  const std::string tag = hexRun("ef", 32);
+  const std::string good_tail = "\",\"ct\":\"" + ct + "\",\"tag\":\"" + tag + "\",\"ver\":2}";
+  const std::string cases[] = {
+      "{\"epk\":\"" + epk.substr(0, 63) + good_tail,
+      "{\"epk\":\"" + epk + "\",\"ct\":\"" + std::string(31, 'c') + "g\",\"tag\":\"" + tag + "\",\"ver\":2}",
+      "{\"epk\":\"" + epk + "\",\"ct\":\"" + ct + "\",\"ver\":2}",
+      "{\"epk\":\"" + epk + "\",\"ct\":\"" + ct + "\",\"tag\":\"" + tag + "\",\"ver\":-1}",
+      "{\"epk\":\"" + epk + "\",\"ct\":\"" + ct + "\",\"tag\":\"" + tag + "\",\"ver\":1.5}",
+      "\"nope\"",
+      "[]",
+      "7",
+      "null",
+      "true",
+  };
+  for (const std::string& pw : cases) {
+    ReqParse o;
+    keyFromId(o.targets[0], 0x11);
+    const std::string body = "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"requested\":true,\"pw\":" + pw + "}}}";
+    ASSERT_TRUE(o.parse(body, 1, 0)) << pw;
+    EXPECT_TRUE(o.out[0].present) << pw;
+    EXPECT_TRUE(o.out[0].requested) << pw;
+    EXPECT_FALSE(o.out[0].pw.present) << pw;
+    EXPECT_TRUE(o.out[0].pw.bad) << pw;
+    EXPECT_EQ(0, o.out[0].pw.epk[0]) << pw;
+    EXPECT_EQ(0, o.out[0].pw.ct[0]) << pw;
+    EXPECT_EQ(0, o.out[0].pw.tag[0]) << pw;
+    EXPECT_EQ(0u, o.out[0].pw.ver) << pw;
+  }
+
+  ReqParse extra;
+  const std::string body = "{\"nodes\":{\"" + pubHexId(0x44) + "\":{\"requested\":true,\"pw\":[]}}}";
+  ASSERT_TRUE(extra.parse(body, 0, 1));
+  ASSERT_EQ(1, extra.requested_count);
+  EXPECT_FALSE(extra.requested[0].entry.pw.present);
+  EXPECT_TRUE(extra.requested[0].entry.pw.bad);
+  EXPECT_EQ(0x44, extra.requested[0].pub[0]);
+}
+
+TEST(PollControlJson, RequestedFalseIsIgnored) {
+  ReqParse o;
+  keyFromId(o.targets[0], 0x11);
+  const std::string body =
+      "{\"nodes\":{\"" + pubHexId(0x11) + "\":{\"requested\":false,\"role\":\"polling\",\"mine\":true},\"" +
+      pubHexId(0x21) + "\":{\"requested\":false,\"role\":\"polling\"},\"" + pubHexId(0x22) +
+      "\":{\"requested\":0,\"role\":\"polling\"},\"" + pubHexId(0x23) +
+      "\":{\"requested\":\"\",\"role\":\"polling\"}}}";
+  ASSERT_TRUE(o.parse(body, 1, 8));
+  EXPECT_EQ(0, o.requested_count);
+  EXPECT_TRUE(o.out[0].present);
+  EXPECT_FALSE(o.out[0].requested);
+}
+
+TEST(PollControlJson, InvalidOwnersAnswerYieldsNoRequested) {
+  ReqParse o;
+  keyFromId(o.targets[0], 0x11);
+  EXPECT_FALSE(o.parse("not json", 1, 8));
+  EXPECT_EQ(0, o.requested_count);
+  EXPECT_EQ(0, o.requested[0].pub[0]);
+  EXPECT_EQ(0, o.requested[0].entry.pw.epk[0]);
+
+  ASSERT_TRUE(o.parse("{\"nodes\":[{\"requested\":true}]}", 1, 8));
+  EXPECT_FALSE(o.nodes_ok);
+  EXPECT_EQ(0, o.requested_count);
+  EXPECT_EQ(0, o.requested[0].pub[0]);
+
+  ASSERT_TRUE(o.parse("{\"observer\":\"x\"}", 1, 8));
+  EXPECT_FALSE(o.nodes_ok);
+  EXPECT_EQ(0, o.requested_count);
+
+  ASSERT_TRUE(o.parse("{\"nodes\":{}}", 1, 8));
+  EXPECT_TRUE(o.nodes_ok);
+  EXPECT_EQ(0, o.requested_count);
+  EXPECT_FALSE(o.out[0].present);
 }
 
 int main(int argc, char** argv) {
