@@ -15,6 +15,8 @@ namespace poll {
 
 static const uint8_t  kMaxExcluded = 16;
 static const uint8_t  kMaxNodeWindows = 8;
+static const uint8_t  kPolicyHostMax = 4;
+static const uint8_t  kPolicyHostLen = 64;   // 63 bytes + NUL
 
 static const uint32_t kDirectMinS = 30UL * 60UL;
 static const uint32_t kDirectMaxS = kDay;
@@ -29,6 +31,9 @@ static const uint8_t  kMaxRequestsMin = 1;
 static const uint8_t  kMaxRequestsMax = 3;
 static const uint8_t  kMaxRequestsDefault = 2;
 static const uint32_t kStalePolicyS = 6UL * 3600UL;
+
+// How a poller delivers what it decoded.
+enum ReadingFormat : uint8_t { READING_ENCRYPTED = 0, READING_JSON = 1, READING_TELEMETRY = 2 };
 
 struct Policy {
   uint32_t direct_s;        // 3600, clamp [1800, 86400]
@@ -52,6 +57,9 @@ struct Policy {
   // More entries than fit: those for the targets named when it was read are kept first.
   bool     excluded_truncated;
   bool     windows_truncated;
+  uint8_t  reading_format;  // a ReadingFormat
+  uint8_t  mqtt_host_count;
+  char     mqtt_hosts[kPolicyHostMax][kPolicyHostLen];  // lowercase, NUL-terminated
   // Fetch bookkeeping. The switches above stay as they are across a failed fetch.
   bool     ever_fetched;
   uint32_t fetched_at;      // last successful fetch; 0 = none
@@ -81,6 +89,8 @@ static inline void policyDefaults(Policy& p) {
   p.one_hop_s = kOneHopDefaultS;
   p.grace_s = kGraceDefaultS;
   p.max_requests = kMaxRequestsDefault;
+  p.reading_format = READING_ENCRYPTED;
+  p.mqtt_host_count = 0;
 }
 
 // Bench fast mode: the plugin's time floors drop to a minute so a stub can set short windows.

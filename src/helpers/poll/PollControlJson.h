@@ -139,6 +139,24 @@ static inline void copyText(JsonVariantConst v, char* out, size_t cap) {
   }
 }
 
+// A broker host entry: 1..63 bytes of letters, digits, dot and hyphen.
+static inline bool validHost(const char* s) {
+  if (!s) return false;
+  size_t n = 0;
+  for (; s[n]; n++) {
+    const char c = s[n];
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '.' || c == '-';
+    if (!ok || n >= kPolicyHostLen - 1) return false;
+  }
+  return n > 0;
+}
+
+// Hosts are stored lowercase because they compare case-insensitively.
+static inline char lowerAscii(char c) {
+  return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
 // Present with any value, null included: containsKey is deprecated in v7.
 static inline bool hasKey(JsonObjectConst o, const char* name) {
   for (JsonPairConst kv : o) {
@@ -156,10 +174,12 @@ static inline void policyFilter(JsonObject f) {
   static const char* const kFields[] = {
     "direct_s", "one_hop_s", "grace_s", "max_requests", "version", "paused",
     "paused_until", "min_plugin_version", "version_ok", "observer_blocked",
+    "reading_format",
   };
   for (size_t i = 0; i < sizeof(kFields) / sizeof(kFields[0]); i++) f[kFields[i]] = true;
   f["excluded_nodes"] = true;
   f["node_windows"] = true;
+  f["mqtt_hosts"] = true;
 }
 
 static inline bool deserializeObject(JsonDocument& doc, const char* body, size_t len,
@@ -259,6 +279,26 @@ static inline void parsePolicyObject(JsonObjectConst o, Policy& p,
   if (cjson::hasKey(o, "observer_blocked")) {
     JsonVariantConst b = o["observer_blocked"];
     p.observer_blocked = b.is<bool>() && b.as<bool>();
+  }
+
+  JsonVariantConst format = o["reading_format"];
+  if (format.is<const char*>()) {
+    const char* name = format.as<const char*>();
+    if (name && strcmp(name, "json") == 0) p.reading_format = READING_JSON;
+    else if (name && strcmp(name, "telemetry") == 0) p.reading_format = READING_TELEMETRY;
+  }
+
+  JsonArrayConst hosts = o["mqtt_hosts"].as<JsonArrayConst>();
+  for (JsonVariantConst item : hosts) {
+    if (p.mqtt_host_count >= kPolicyHostMax) break;
+    if (!item.is<const char*>()) continue;
+    const char* host = item.as<const char*>();
+    if (!cjson::validHost(host)) continue;
+    char* dst = p.mqtt_hosts[p.mqtt_host_count];
+    size_t i = 0;
+    for (; host[i]; i++) dst[i] = cjson::lowerAscii(host[i]);
+    dst[i] = '\0';
+    p.mqtt_host_count++;
   }
 }
 

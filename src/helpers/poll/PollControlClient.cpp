@@ -559,8 +559,7 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   const uint8_t count = req.target_count > kMaxTargets ? kMaxTargets : req.target_count;
 
   if (req.want & WANT_OWNERS) {
-    snprintf(path, sizeof(path), "/api/guest-polling/owners?observer=%s&plugin_version=%s", obs,
-             kPluginVersion);
+    buildOwnersPath(obs, kPluginVersion, req.client_version, path, sizeof(path));
     const Reply r = request(*k, "GET", path, nullptr, 0, deadline, env);
     res.owners_status = r.status;
     if (r.status == 200) {
@@ -579,8 +578,7 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   }
 
   if ((req.want & WANT_POLICY) && !res.policy_ok) {
-    snprintf(path, sizeof(path), "/api/guest-polling/policy?plugin_version=%s&observer=%s",
-             kPluginVersion, obs);
+    buildPolicyPath(obs, kPluginVersion, req.client_version, path, sizeof(path));
     const Reply r = request(*k, "GET", path, nullptr, 0, deadline, env);
     res.policy_status = r.status;
     if (r.status == 200) {

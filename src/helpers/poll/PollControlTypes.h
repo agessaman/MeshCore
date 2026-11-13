@@ -27,6 +27,7 @@ enum ControlWant : uint8_t {
 
 struct ControlRequest {
   char     url[kControlUrlMax];    // base URL, http or https, no trailing slash
+  char     client_version[24];     // firmware release in GET queries; "" = omit
   uint8_t  observer_pub[kPubKeySize];
   uint8_t  want;                   // ControlWant bits
   uint8_t  target_count;

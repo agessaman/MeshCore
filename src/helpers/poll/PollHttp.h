@@ -225,4 +225,89 @@ static inline int32_t parseHttpChunkSize(const char* line) {
   return digits ? (int32_t)n : -1;
 }
 
+// The label the analyzer sees on the owners and policy GETs.
+static const char kClientName[] = "meshcore.observer_fw";
+static const uint8_t kClientVersionMax = 24;   // the size of ControlRequest::client_version
+
+// A URL-safe version label: [A-Za-z0-9._-] kept, every other byte '_'.
+static inline void sanitizeClientVersion(const char* in, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  size_t n = 0;
+  if (in) {
+    for (const char* s = in; *s && n + 1 < cap; s++) {
+      const char c = *s;
+      const bool keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+      out[n++] = keep ? c : '_';
+    }
+  }
+  out[n] = '\0';
+}
+
+// A path under construction; ok turns false once the next byte would not fit.
+struct HttpPath {
+  char*  out;
+  size_t cap;
+  size_t len;
+  bool   ok;
+};
+
+static inline HttpPath httpPath(char* out, size_t cap) {
+  HttpPath p = {out, cap, 0, out && cap > 0};
+  if (p.ok) out[0] = '\0';
+  return p;
+}
+
+static inline void httpPathAdd(HttpPath& p, const char* text) {
+  if (!p.ok) return;
+  for (; *text; text++) {
+    if (p.len + 1 >= p.cap) {
+      p.ok = false;
+      p.len = 0;
+      p.out[0] = '\0';
+      return;
+    }
+    p.out[p.len++] = *text;
+  }
+  p.out[p.len] = '\0';
+}
+
+// client= always; client_version= only when the caller supplied one.
+static inline void appendClientQuery(HttpPath& p, const char* client_version) {
+  httpPathAdd(p, "&client=");
+  httpPathAdd(p, kClientName);
+  if (client_version && *client_version) {
+    httpPathAdd(p, "&client_version=");
+    httpPathAdd(p, client_version);
+  }
+}
+
+// The owners GET path in CoreScope's parameter order, with the client identity last.
+static inline size_t buildOwnersPath(const char* observer_hex, const char* plugin_version,
+                                     const char* client_version, char* out, size_t cap) {
+  char clean[kClientVersionMax];
+  sanitizeClientVersion(client_version, clean, sizeof(clean));
+  HttpPath p = httpPath(out, cap);
+  httpPathAdd(p, "/api/guest-polling/owners?observer=");
+  if (observer_hex) httpPathAdd(p, observer_hex);
+  httpPathAdd(p, "&plugin_version=");
+  if (plugin_version) httpPathAdd(p, plugin_version);
+  appendClientQuery(p, clean);
+  return p.ok ? p.len : 0;
+}
+
+// The policy GET path in CoreScope's parameter order, with the client identity last.
+static inline size_t buildPolicyPath(const char* observer_hex, const char* plugin_version,
+                                     const char* client_version, char* out, size_t cap) {
+  char clean[kClientVersionMax];
+  sanitizeClientVersion(client_version, clean, sizeof(clean));
+  HttpPath p = httpPath(out, cap);
+  httpPathAdd(p, "/api/guest-polling/policy?plugin_version=");
+  if (plugin_version) httpPathAdd(p, plugin_version);
+  httpPathAdd(p, "&observer=");
+  if (observer_hex) httpPathAdd(p, observer_hex);
+  appendClientQuery(p, clean);
+  return p.ok ? p.len : 0;
+}
+
 }  // namespace poll

@@ -272,6 +272,81 @@ TEST(PollControlJson, PolicyMissingFieldsKeepDefaults) {
   EXPECT_EQ(0, memcmp(&d, &p, sizeof(p)));
 }
 
+TEST(PollControlJson, PolicyReadingFormat) {
+  poll::Policy p;
+  const char* json = "{\"reading_format\":\"json\"}";
+  const char* telemetry = "{\"reading_format\":\"telemetry\"}";
+  const char* unknown[] = {"{\"reading_format\":\"JSON\"}", "{\"reading_format\":\"js\"}",
+                           "{\"reading_format\":\"\"}", "{\"reading_format\":null}",
+                           "{\"reading_format\":1}", "{\"reading_format\":[\"json\"]}"};
+  for (const char* body : unknown) {
+    ASSERT_TRUE(poll::parsePolicyReply(body, strlen(body), p)) << body;
+    EXPECT_EQ(poll::READING_ENCRYPTED, p.reading_format) << body;
+  }
+
+  ASSERT_TRUE(poll::parsePolicyReply(json, strlen(json), p));
+  EXPECT_EQ(poll::READING_JSON, p.reading_format);
+  ASSERT_TRUE(poll::parsePolicyReply(telemetry, strlen(telemetry), p));
+  EXPECT_EQ(poll::READING_TELEMETRY, p.reading_format);
+  // Every answer starts from the defaults: a dropped field clears the mode.
+  ASSERT_TRUE(poll::parsePolicyReply("{}", 2, p));
+  EXPECT_EQ(poll::READING_ENCRYPTED, p.reading_format);
+}
+
+TEST(PollControlJson, PolicyMqttHostsAreLowercaseAndValidated) {
+  const std::string max_len(63, 'b');
+  const std::string body =
+      "{\"mqtt_hosts\":[\"Broker.Example.ORG\",7,null,\"bad host\",\"bad_host\",\"" +
+      std::string(64, 'a') + "\",\"ok-1.example\",\"" + max_len +
+      "\",\"third.example\",\"fourth.example\",\"fifth.example\"]}";
+  poll::Policy p;
+  ASSERT_TRUE(poll::parsePolicyReply(body.data(), body.size(), p));
+  ASSERT_EQ(poll::kPolicyHostMax, p.mqtt_host_count);
+  EXPECT_STREQ("broker.example.org", p.mqtt_hosts[0]);
+  EXPECT_STREQ("ok-1.example", p.mqtt_hosts[1]);
+  EXPECT_EQ(max_len, std::string(p.mqtt_hosts[2]));
+  EXPECT_STREQ("third.example", p.mqtt_hosts[3]);
+}
+
+TEST(PollControlJson, PolicyMqttHostsThatIsNotAnArrayMeansNone) {
+  const char* bodies[] = {"{\"mqtt_hosts\":\"broker.example.org\"}",
+                          "{\"mqtt_hosts\":{\"a\":1}}", "{\"mqtt_hosts\":null}",
+                          "{\"mqtt_hosts\":[[]]}"};
+  poll::Policy p;
+  for (const char* body : bodies) {
+    ASSERT_TRUE(poll::parsePolicyReply(body, strlen(body), p)) << body;
+    EXPECT_EQ(0, p.mqtt_host_count) << body;
+  }
+  ASSERT_TRUE(poll::parsePolicyReply("{}", 2, p));
+  EXPECT_EQ(0, p.mqtt_host_count);
+  // A previous answer's hosts do not survive a new one.
+  const char* one = "{\"mqtt_hosts\":[\"a.example\"]}";
+  ASSERT_TRUE(poll::parsePolicyReply(one, strlen(one), p));
+  ASSERT_EQ(1, p.mqtt_host_count);
+  ASSERT_TRUE(poll::parsePolicyReply("{}", 2, p));
+  EXPECT_EQ(0, p.mqtt_host_count);
+  EXPECT_STREQ("", p.mqtt_hosts[0]);
+}
+
+TEST(PollControlJson, PolicyReadingFieldsSurviveTheOwnersFilter) {
+  const std::string owners =
+      "{\"nodes\":{},\"policy\":{\"reading_format\":\"telemetry\","
+      "\"mqtt_hosts\":[\"MQTT.Example.NET\",\"second.example\"]}}";
+  Owners o;
+  ASSERT_TRUE(o.parse(owners, 0));
+  ASSERT_TRUE(o.has_policy);
+  EXPECT_EQ(poll::READING_TELEMETRY, o.policy.reading_format);
+  ASSERT_EQ(2, o.policy.mqtt_host_count);
+  EXPECT_STREQ("mqtt.example.net", o.policy.mqtt_hosts[0]);
+  EXPECT_STREQ("second.example", o.policy.mqtt_hosts[1]);
+
+  // The next owners answer without them returns to the defaults.
+  ASSERT_TRUE(o.parse("{\"nodes\":{},\"policy\":{}}", 0));
+  ASSERT_TRUE(o.has_policy);
+  EXPECT_EQ(poll::READING_ENCRYPTED, o.policy.reading_format);
+  EXPECT_EQ(0, o.policy.mqtt_host_count);
+}
+
 TEST(PollControlJson, PolicyWrongTypesIgnoredAndUnclamped) {
   const std::string body =
       "{\"direct_s\":\"60\",\"one_hop_s\":null,\"grace_s\":[1],\"max_requests\":99,"

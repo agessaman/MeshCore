@@ -39,6 +39,24 @@ TEST(PollPolicy, DefaultsMatchTheUnclampedPolicy) {
   EXPECT_FALSE(p.ever_fetched);
   EXPECT_EQ(0U, p.fetched_at);
   EXPECT_EQ(0, p.last_status);
+  EXPECT_EQ(poll::READING_ENCRYPTED, p.reading_format);
+  EXPECT_EQ(0, p.mqtt_host_count);
+  EXPECT_STREQ("", p.mqtt_hosts[0]);
+}
+
+TEST(PollPolicy, ClampLeavesTheReadingFormatAndHostsAlone) {
+  poll::Policy p = defaults();
+  p.reading_format = poll::READING_TELEMETRY;
+  p.mqtt_host_count = 2;
+  strcpy(p.mqtt_hosts[0], "broker.example.org");
+  strcpy(p.mqtt_hosts[1], "mqtt.example.net");
+
+  poll::policyClamp(p);
+
+  EXPECT_EQ(poll::READING_TELEMETRY, p.reading_format);
+  EXPECT_EQ(2, p.mqtt_host_count);
+  EXPECT_STREQ("broker.example.org", p.mqtt_hosts[0]);
+  EXPECT_STREQ("mqtt.example.net", p.mqtt_hosts[1]);
 }
 
 TEST(PollPolicy, ClampPullsEveryLimitOntoItsEdge) {

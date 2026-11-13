@@ -152,6 +152,51 @@ TEST(PollHttp, CompleteWriteAndTransportFailure) {
                                     [](const uint8_t*, size_t) { return -1; }, []() {}));
 }
 
+TEST(PollHttp, ControlPathsAppendTheClientIdentity) {
+  char path[256];
+  poll::buildOwnersPath("abc123", "0.11.1", "", path, sizeof(path));
+  EXPECT_STREQ("/api/guest-polling/owners?observer=abc123&plugin_version=0.11.1"
+               "&client=meshcore.observer_fw", path);
+
+  poll::buildPolicyPath("abc123", "0.11.1", "", path, sizeof(path));
+  EXPECT_STREQ("/api/guest-polling/policy?plugin_version=0.11.1&observer=abc123"
+               "&client=meshcore.observer_fw", path);
+
+  poll::buildOwnersPath("abc123", "0.11.1", "1.2.3", path, sizeof(path));
+  EXPECT_STREQ("/api/guest-polling/owners?observer=abc123&plugin_version=0.11.1"
+               "&client=meshcore.observer_fw&client_version=1.2.3", path);
+
+  poll::buildPolicyPath("abc123", "0.11.1", "1.2.3", path, sizeof(path));
+  EXPECT_STREQ("/api/guest-polling/policy?plugin_version=0.11.1&observer=abc123"
+               "&client=meshcore.observer_fw&client_version=1.2.3", path);
+}
+
+TEST(PollHttp, ClientVersionKeepsOnlyUrlSafeBytes) {
+  char version[24];
+  poll::sanitizeClientVersion("v1.2.3 beta+x/y", version, sizeof(version));
+  EXPECT_STREQ("v1.2.3_beta_x_y", version);
+  poll::sanitizeClientVersion("firmware_A-1.0", version, sizeof(version));
+  EXPECT_STREQ("firmware_A-1.0", version);
+  poll::sanitizeClientVersion(nullptr, version, sizeof(version));
+  EXPECT_STREQ("", version);
+  poll::sanitizeClientVersion("abcdefghijklmnopqrstuvwxyz", version, sizeof(version));
+  EXPECT_EQ(poll::kClientVersionMax - 1, strlen(version));
+
+  char path[256];
+  poll::buildPolicyPath("abc", "0.11.1", "1.2 (rc 1)+x", path, sizeof(path));
+  EXPECT_STREQ("/api/guest-polling/policy?plugin_version=0.11.1&observer=abc"
+               "&client=meshcore.observer_fw&client_version=1.2__rc_1__x", path);
+}
+
+TEST(PollHttp, ControlPathRefusesAShortBuffer) {
+  char tiny[8];
+  EXPECT_EQ(0u, poll::buildOwnersPath("abc", "0.11.1", "", tiny, sizeof(tiny)));
+  EXPECT_STREQ("", tiny);
+  EXPECT_EQ(0u, poll::buildPolicyPath("abc", "0.11.1", "1.2", tiny, sizeof(tiny)));
+  EXPECT_STREQ("", tiny);
+  EXPECT_EQ(0u, poll::buildOwnersPath("abc", "0.11.1", "", nullptr, 0));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
