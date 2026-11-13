@@ -123,6 +123,22 @@ TEST(MQTTPayloadBuilder, StatusReportsConnectionHealthWhenSupplied) {
   EXPECT_EQ(16116, stats["heap_largest"].as<int>());
 }
 
+TEST(MQTTPayloadBuilder, StatusRoleFollowsRepeatAndIsOmittedWhenNull) {
+  JsonDocument scratch;
+  char buffer[768];
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, "off", MQTTConnHealth(), -1, nullptr, nullptr, nullptr,
+      nullptr, 0, "companion");
+  ASSERT_GT(len, 0);
+  EXPECT_NE(nullptr, strstr(buffer, "\"repeat\":\"off\",\"role\":\"companion\""));
+
+  len = buildMinimalStatus(scratch, buffer, sizeof(buffer));
+  ASSERT_GT(len, 0);
+  EXPECT_EQ(nullptr, strstr(buffer, "\"role\""));
+}
+
 TEST(MQTTPayloadBuilder, StatusReportsConnectFailuresAndBreakerOnlyWhenNonZero) {
   JsonDocument scratch;
   char buffer[1024];
@@ -428,7 +444,7 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusKeepsWidestCrashInProductionBuffer) {
       4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
       8388608, 2147483647, 2147483647,
       "off", health, 8388608, "deepsleep", crash.c_str(), &included,
-      "client_quarantined", 255);
+      "client_quarantined", 255, "room_server");
 
   ASSERT_GT(len, 0) << "worst-case status plus crash overflowed the "
                     << kStatusJsonBufferSize << "-byte production buffer";
@@ -440,6 +456,10 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusKeepsWidestCrashInProductionBuffer) {
   EXPECT_TRUE(parsed["crash"].is<JsonObject>());
   EXPECT_STREQ("TTTTTTTTTTTTTTT", parsed["crash"]["task"].as<const char*>());
   EXPECT_EQ(8388608, parsed["stats"]["heap_min"].as<int>());
+  // The longest role must fit beside the widest crash and self-heal fields.
+  EXPECT_STREQ("room_server", parsed["role"].as<const char*>());
+  EXPECT_STREQ("client_quarantined", parsed["stats"]["selfheal"].as<const char*>());
+  EXPECT_EQ(255, parsed["stats"]["selfheal_n"].as<int>());
 }
 
 // A realistic node (ordinary name and versions, full health block) keeps the widest crash object.

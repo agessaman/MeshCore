@@ -1824,7 +1824,7 @@ void MyMesh::resetNeighborDiscoverJsonBudget() {
     self_default_scope_buf[sizeof(self_default_scope_buf) - 1] = 0;
   }
   MQTTBridge::getEffectiveMqttOrigin(
-    &_prefs, _cli.getObserverPrefs(),
+    _prefs.node_name, _cli.getObserverPrefs(),
     neighbor_discover_origin, sizeof(neighbor_discover_origin));
 
   char self_pubkey_hex[65];

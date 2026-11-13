@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/StatsFormatHelper.h>
 
 #include <Arduino.h> // needed for PlatformIO
 #ifdef ENABLE_WIFI_INTERFACE
@@ -288,7 +289,20 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
   return _prefs.multi_acks;
 }
 
+#ifdef WITH_MQTT_BRIDGE
+void MyMesh::logRx(mesh::Packet* pkt, int len, float score) {
+  _observer.onPacketRx(pkt);
+}
+
+void MyMesh::logTx(mesh::Packet* pkt, int len) {
+  _observer.onPacketTx(pkt);
+}
+#endif
+
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#ifdef WITH_MQTT_BRIDGE
+  _observer.onRawRx(raw, len, snr, rssi);
+#endif
   if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {
     int i = 0;
     out_frame[i++] = PUSH_CODE_LOG_RX_DATA;
@@ -485,7 +499,12 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
-  return _prefs.isRepeatEn();
+  return isClientRepeatActive();
+}
+
+// prefs.json is shared with repeater firmware; check the applied freq since CLI "set radio" waits for reboot
+bool MyMesh::isClientRepeatActive() const {
+  return _prefs.isRepeatEn() && isValidClientRepeatFreq(_active_freq_khz);
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis) {
@@ -899,7 +918,11 @@ void MyMesh::onSendTimeout() {}
 
 MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store)
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
-      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _listener(NULL), _iter(0) {
+      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _listener(NULL), _iter(0)
+#ifdef WITH_MQTT_BRIDGE
+      , _observer(board, *this, FIRMWARE_VERSION, FIRMWARE_BUILD_DATE)
+#endif
+{
   _iter_started = false;
   _cli_rescue = false;
   cli_command[0] = 0;
@@ -1005,6 +1028,7 @@ void MyMesh::begin() {
   _store->loadChannels(this);
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  _active_freq_khz = (uint32_t)lroundf(_prefs.freq * 1000);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
 
@@ -1014,6 +1038,14 @@ void MyMesh::begin() {
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
   // NOTE: no FEM LNA wiring here — companion has its own NodePrefs without
   // radio_fem_rxgain, matching upstream (which also doesn't wire companion).
+
+#ifdef WITH_MQTT_BRIDGE
+  // /mqtt.json is shared with the repeater observer, so a node reflashed between
+  // roles keeps its MQTT/WiFi setup. Only the stored companion SSID is adopted,
+  // never the compile-time WIFI_SSID placeholder.
+  _observer.loadPrefs(_store->getPrimaryFS(), _prefs.wifi_ssid, _prefs.wifi_pwd);
+  _observer.begin(this, _radio, _ms, _mgr, getRTCClock(), &self_id);
+#endif
 }
 
 const char *MyMesh::getNodeName() {
@@ -1074,7 +1106,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     i += 40;
     StrHelper::strzcpy((char *)&out_frame[i], FIRMWARE_VERSION, 20);
     i += 20;
-    out_frame[i++] = _prefs.isRepeatEn() ? 1 : 0;   // v9+
+    out_frame[i++] = isClientRepeatActive() ? 1 : 0;   // v9+
     out_frame[i++] = _prefs.path_hash_mode;  // v10+
     _serial->writeFrame(out_frame, i);
   } else if (cmd_frame[0] == CMD_APP_START &&
@@ -1454,6 +1486,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       savePrefs();
 
       radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+      _active_freq_khz = freq;
       MESH_DEBUG_PRINTLN("OK: CMD_SET_RADIO_PARAMS: f=%d, bw=%d, sf=%d, cr=%d", freq, bw, (uint32_t)sf,
                          (uint32_t)cr);
 
@@ -1553,6 +1586,9 @@ void MyMesh::handleCmdFrame(size_t len) {
           // re-load contacts, to invalidate ecdh shared_secrets
           resetContacts();
           _store->loadContacts(this);
+#ifdef WITH_MQTT_BRIDGE
+          _observer.restartBridge();   // device ID and JWT username come from the key
+#endif
         } else {
           writeErrFrame(ERR_CODE_FILE_IO_ERROR);
         }
@@ -2082,10 +2118,24 @@ void MyMesh::enterCLIRescue() {
   Serial.println("========= CLI Rescue =========");
 }
 
+int MyMesh::getDiagQueueSize() {
+#ifdef WITH_MQTT_BRIDGE
+  return _observer.queueSize();
+#else
+  return 0;
+#endif
+}
+
+void MyMesh::formatDiagRadio(char* reply) {
+  StatsFormatHelper::formatRadioDiag(reply, _radio, radio_driver, *_ms, _err_flags, hasOutbound());
+}
+
 bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
   while (*command == ' ') command++; // skip leading spaces
 
+  bool prefixed = false;
   if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
+    prefixed = true;
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
     *reply = 0;
@@ -2106,6 +2156,23 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
   if (board.handleCommand(command, sender_timestamp, reply)) {
     if (_prefs.isDirty()) { savePrefs(); }
     return true;
+  }
+
+  // Shared fork diagnostics and, on observer builds, observer settings (mqtt*,
+  // wifi.ssid/pwd, timezone, ...) in /mqtt.json. Reached from the USB console,
+  // the app's CLI and remote admin alike. Callers' reply buffers hold 161 bytes,
+  // 3 fewer after a reflected prefix.
+  {
+    char sub_reply[161];
+    sub_reply[0] = 0;
+    bool handled = NodeDiagCLI::handleCommand(sender_timestamp, command, sub_reply, *this);
+#ifdef WITH_MQTT_BRIDGE
+    if (!handled) handled = _observer.handleCommand(sender_timestamp, command, sub_reply);
+#endif
+    if (handled) {
+      StrHelper::strncpy(reply, sub_reply, prefixed ? sizeof(sub_reply) - 3 : sizeof(sub_reply));
+      return true;
+    }
   }
 
   if (strcmp(command, "reboot") == 0) {
@@ -2174,6 +2241,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     sprintf(reply, "> %s", _prefs.wifi_pwd);
     return true;
   }
+#ifndef WITH_MQTT_BRIDGE   // observer builds keep WiFi in /mqtt.json; these edit unused prefs
   if (strcmp(command, "set wifi.clear") == 0) {
     _prefs.wifi_ssid[0] = 0;
     _prefs.wifi_pwd[0] = 0;
@@ -2195,6 +2263,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     sprintf(reply, "> %d", _prefs.wifi_enabled);
     return true;
   }
+#endif
   if (strcmp(command, "get wifi.status") == 0) {
     strcpy(reply, WiFi.status() == WL_CONNECTED ? "> connected" : "> disconnected");
     return true;
@@ -2584,14 +2653,18 @@ void MyMesh::checkSerialInterface() {
 
 void MyMesh::loop() {
   BaseChatMesh::loop();
+#ifdef WITH_MQTT_BRIDGE
+  _observer.loop();
+#endif
 
   if (_cli_rescue) {
     checkCLIRescueCmd();
   } else {
     checkSerialInterface();
-#if defined(ENABLE_WIFI_INTERFACE) && defined(RP2040_PLATFORM) && !defined(ENABLE_USB_INTERFACE)
+#if defined(ENABLE_WIFI_INTERFACE) && (defined(RP2040_PLATFORM) || defined(WITH_MQTT_BRIDGE)) && !defined(ENABLE_USB_INTERFACE)
     // RP2040 WiFi builds are headless and have no way into the rescue CLI (that needs a
-    // display + long-press), so serve config commands on the otherwise unused USB serial
+    // display + long-press), so serve config commands on the otherwise unused USB serial.
+    // Observer WiFi builds do the same so the observer can be configured over USB.
     checkCLIRescueCmd();
 #endif
   }
