@@ -51,7 +51,8 @@ int MQTTPayloadBuilder::buildStatusMessage(
   const char* reset_reason,
   const char* crash_json,
   bool* crash_included,
-  const char* selfheal, int selfheal_n
+  const char* selfheal, int selfheal_n,
+  const char* boot_id
 ) {
   if (crash_included != nullptr) *crash_included = false;
   doc.clear();
@@ -74,10 +75,11 @@ int MQTTPayloadBuilder::buildStatusMessage(
       conn_health.connect_failures > 0 || conn_health.slots_breaker > 0;
 
   const bool has_reset_reason = reset_reason != nullptr && reset_reason[0] != '\0';
+  const bool has_boot_id = boot_id != nullptr && boot_id[0] != '\0';
   const bool has_selfheal = selfheal_n > 0 && selfheal != nullptr && selfheal[0] != '\0';
   if (battery_mv >= 0 || uptime_secs >= 0 || errors >= 0 || queue_len >= 0 ||
       noise_floor > -999 || tx_air_secs >= 0 || rx_air_secs >= 0 || recv_errors >= 0 ||
-      internal_heap >= 0 || heap_min >= 0 || has_reset_reason || has_selfheal ||
+      internal_heap >= 0 || heap_min >= 0 || has_reset_reason || has_boot_id || has_selfheal ||
       packets_sent >= 0 || packets_received >= 0 || has_conn_health) {
     JsonObject stats = root["stats"].to<JsonObject>();
 
@@ -95,6 +97,7 @@ int MQTTPayloadBuilder::buildStatusMessage(
     if (conn_health.heap_largest >= 0) stats["heap_largest"] = conn_health.heap_largest;
     if (heap_min >= 0) stats["heap_min"] = heap_min;
     if (has_reset_reason) stats["reset_reason"] = reset_reason;
+    if (has_boot_id) stats["boot_id"] = boot_id;
     if (has_selfheal) {
       stats["selfheal"] = selfheal;
       stats["selfheal_n"] = selfheal_n;

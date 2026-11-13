@@ -63,7 +63,8 @@ int MQTTMessageBuilder::buildStatusMessage(
   const char* reset_reason,
   const char* crash_json,
   bool* crash_included,
-  const char* selfheal, int selfheal_n
+  const char* selfheal, int selfheal_n,
+  const char* boot_id
 ) {
   return MQTTPayloadBuilder::buildStatusMessage(
       doc, origin, origin_id, model, firmware_version, radio, client_version,
@@ -71,7 +72,7 @@ int MQTTMessageBuilder::buildStatusMessage(
       queue_len, noise_floor, tx_air_secs, rx_air_secs, recv_errors, internal_heap,
       packets_sent, packets_received, repeat, conn_health, heap_min, reset_reason,
       crash_json, crash_included,
-      selfheal, selfheal_n);
+      selfheal, selfheal_n, boot_id);
 }
 
 int MQTTMessageBuilder::buildPacketMessage(
