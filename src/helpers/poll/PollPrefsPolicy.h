@@ -184,10 +184,10 @@ static inline bool normalizePollUrl(char* url, bool* changed) {
 }
 
 // slot_max is the highest 1-based slot this check accepts (prefs capacity or
-// the build's runtime slot count).
+// the build's runtime slot count). Slot 0 is allowed: the policy's broker hosts may pick one.
 static inline bool pollCanEnable(const char* url, int slot, int consent, int slot_max) {
   if (!pollUrlHasScheme(url) || url[0] == '\0') return false;
-  if (slot < 1 || slot > slot_max) return false;
+  if (slot < 0 || slot > slot_max) return false;
   if (consent == 0) return false;
   return true;
 }

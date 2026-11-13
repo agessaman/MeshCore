@@ -1000,8 +1000,8 @@ TEST(MQTTPrefsSerializer, PollRepairsEachOutOfRangeRule) {
   prefs = loadPoll(
       "{version:1,poll:{enabled:1,url:\"https://corescope.example\",slot:0,consent:1}}",
       &repaired);
-  EXPECT_TRUE(repaired);
-  EXPECT_EQ(0, prefs.poll_enabled);
+  EXPECT_FALSE(repaired);   // no slot: the policy's broker hosts may pick one
+  EXPECT_EQ(1, prefs.poll_enabled);
 
   repaired = false;
   prefs = loadPoll(

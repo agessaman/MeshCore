@@ -320,8 +320,6 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
     }
     if (!poll::pollUrlHasScheme(prefs->poll_url)) {
       strcpy(reply, "Error: poll.url is not set");
-    } else if (prefs->poll_slot == 0) {
-      strcpy(reply, "Error: poll.slot is not set");
     } else if (prefs->poll_slot > RUNTIME_MQTT_SLOTS) {
       snprintf(reply, 160, "Error: poll.slot must be 1-%d", RUNTIME_MQTT_SLOTS);
     } else if (prefs->poll_consent == 0) {
@@ -369,8 +367,8 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
       return PollSetResult::Done;
     }
     if (strcmp(word, "none") == 0 || strcmp(word, "0") == 0) {
-      prefs->poll_slot = 0;
-      pollNoteCleared(prefs, "poll.slot", reply);
+      prefs->poll_slot = 0;   // polling stays on; the policy's broker hosts may pick a slot
+      strcpy(reply, "OK");
       return PollSetResult::Changed;
     }
     int slot = 0;

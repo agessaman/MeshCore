@@ -94,7 +94,8 @@ TEST(PollPrefsPolicy, NormalizesUrlsAndGatesEnable) {
   EXPECT_STREQ("", url);
 
   EXPECT_FALSE(poll::pollCanEnable("", 1, 1, MQTT_PREFS_SLOT_COUNT));
-  EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", 0, 1, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_TRUE(poll::pollCanEnable("https://corescope.example", 0, 1, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", -1, 1, MQTT_PREFS_SLOT_COUNT));
   EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", 1, 0, MQTT_PREFS_SLOT_COUNT));
   EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", 7, 1, MQTT_PREFS_SLOT_COUNT));
   EXPECT_TRUE(poll::pollCanEnable("https://corescope.example", 1, 1, MQTT_PREFS_SLOT_COUNT));
