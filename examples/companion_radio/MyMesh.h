@@ -146,7 +146,7 @@ public:
   void getObserverRadioParams(float& freq, float& bw, uint8_t& sf, uint8_t& cr) const override {
     freq = _prefs.freq; bw = _prefs.bw; sf = _prefs.sf; cr = _prefs.cr;
   }
-  bool isObserverForwarding() const override { return _prefs.isRepeatEn(); }
+  bool isObserverForwarding() const override { return isClientRepeatActive(); }
   const char* getObserverRole() const override { return "companion"; }
 #endif
 
