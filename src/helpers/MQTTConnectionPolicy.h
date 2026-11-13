@@ -71,12 +71,27 @@ static inline bool firstSetupHandshakeDone(bool armer_enabled, bool armer_has_cl
 
 // A first setup may start before the 15 s guard expires when the guard was armed
 // by another first setup whose handshake is done, but not within kFirstSetupMinGapMs.
-// Anything else (retries, reconnects, reconfigures) keeps the full guard.
+// A first setup never follows a reconnect, renewal, probe or reconfigure early.
 static inline bool firstSetupGuardReleased(uint32_t now, uint32_t last_cross_slot_ms,
                                            bool first_attempt, bool armed_by_first_setup,
                                            bool armer_handshake_done) {
   if (!first_attempt || !armed_by_first_setup || !armer_handshake_done) return false;
   return elapsedMs(now, last_cross_slot_ms) >= kFirstSetupMinGapMs;
+}
+
+// A reconnect may start before the 15 s guard expires when the handshake that armed it
+// (a first setup or another reconnect) is over, but not within kFirstSetupMinGapMs.
+// Renewals, reconfigures and breaker probes keep the full guard.
+static inline bool reconnectGuardReleased(uint32_t now, uint32_t last_cross_slot_ms,
+                                          bool armed_by_handshake, bool armer_handshake_done) {
+  if (!armed_by_handshake || !armer_handshake_done) return false;
+  return elapsedMs(now, last_cross_slot_ms) >= kFirstSetupMinGapMs;
+}
+
+// A reconnect may arm that early release only when the next outcome event is its own:
+// no older attempt in flight and no DISCONNECTED still owed by a session closed before it.
+static inline bool reconnectArmsEarlyRelease(bool attempt_pending, bool disconnect_owed) {
+  return !attempt_pending && !disconnect_owed;
 }
 
 // One reconfigure per pass. A request that does not open a connection is not
@@ -172,11 +187,51 @@ static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt,
   return elapsedMs(now, last_attempt) >= probe_ms;
 }
 
-// The first reconnect after the link returns always makes a real attempt. The
-// failures it would count may have been the link's, so it advances the ladder
-// but cannot trip the breaker; the next ordinary due attempt can.
+// A session lost this close to a link-down edge, on either side, is blamed on the link.
+// It covers the 10 s Wi-Fi status poll that delays the edge after the socket has failed.
+static const uint32_t kLinkDropAttributionMs = 20000UL;
+// A link that stayed up for less than this is flapping, and its drops climb the ladder.
+static const uint32_t kLinkFlapFloorMs = 30000UL;
+// The link-down edge is polled, so it can trail the real drop by this much.
+static const uint32_t kLinkPollSlackMs = 10000UL;
+
+// Decided at the link-down edge, before the bridge closes live clients. A slot whose
+// session was up, or ended within kLinkDropAttributionMs of the edge, lost it to the
+// link. A slot already down before that (broker trouble) is not excused, and neither
+// is any slot when the link itself held for under kLinkFlapFloorMs. The floor is
+// measured to the session's end when the slot stamps one; without a usable stamp it
+// is measured to the polled edge, which trails the real drop, so slack is added.
+// link_up_ms = 0 means the bridge never saw the up edge (link was up at start) and
+// counts as held.
+static inline bool outageCausedByLink(uint32_t now, uint32_t link_up_ms, bool slot_connected,
+                                      uint32_t outage_started_ms) {
+  // Trust the outage stamp only inside the current link-up period, at or before now.
+  uint32_t link_end = now;
+  bool stamped_end = false;
+  if (!slot_connected && outage_started_ms != 0 && link_up_ms != 0 &&
+      elapsedMs(outage_started_ms, link_up_ms) <= elapsedMs(now, link_up_ms)) {
+    link_end = outage_started_ms;
+    stamped_end = true;
+  }
+  const uint32_t required = kLinkFlapFloorMs + (stamped_end ? 0U : kLinkPollSlackMs);
+  if (link_up_ms != 0 && elapsedMs(link_end, link_up_ms) < required) return false;
+  if (slot_connected) return true;
+  if (outage_started_ms == 0) return false;
+  // The event task may stamp the disconnect a moment after the bridge read its clock.
+  return elapsedMs(now, outage_started_ms) <= kLinkDropAttributionMs ||
+         elapsedMs(outage_started_ms, now) <= kLinkDropAttributionMs;
+}
+
+// The first reconnect after the link returns always makes a real attempt. An outage
+// the link caused holds the ladder where it was; any other outage advances it, but
+// the attempt cannot trip the breaker (the next ordinary due attempt can).
 static inline BackoffAdvance advanceBackoffForLinkRecovery(uint8_t reconnect_backoff,
-                                                           uint8_t max_backoff_failures) {
+                                                           uint8_t max_backoff_failures,
+                                                           bool outage_caused_by_link = false) {
+  if (outage_caused_by_link) {
+    BackoffAdvance held = {reconnect_backoff, max_backoff_failures, false, true};
+    return held;
+  }
   BackoffAdvance result = advanceBackoff(reconnect_backoff, max_backoff_failures);
   result.circuit_breaker_tripped = false;
   result.should_reconnect = true;
@@ -367,6 +422,66 @@ static inline StaleTokenAction classifyStaleToken(bool minted, bool connected,
   if (!minted) return StaleTokenAction::Defer;
   if (!connected) return StaleTokenAction::Reconnect;
   return broker_enforces_exp ? StaleTokenAction::Bounce : StaleTokenAction::KeepAlive;
+}
+
+// A renewal or corrected-clock bounce keeps the full guard and the one-handshake-per-pass budget.
+static inline bool bounceHandshakeAllowed(bool handshake_this_pass, uint32_t now,
+                                          uint32_t last_cross_slot_ms) {
+  return !handshake_this_pass && !reconnectGuardActive(now, last_cross_slot_ms);
+}
+
+// A renewal opens a handshake when the broker will act on the old token's exp, or no session is live.
+static inline bool renewalBounceNeeded(bool old_token_imminent, bool broker_enforces_exp,
+                                       bool connected) {
+  return (old_token_imminent && broker_enforces_exp) || !connected;
+}
+
+enum class RenewalStep : uint8_t {
+  None,      // not due, or throttled
+  Wait,      // bounce needed but the guard is busy: touch nothing, retry next pass
+  Renew,     // mint and stage; the live session keeps running
+  Bounce,    // mint, close the session, reconnect, arm the guard
+};
+
+// Wait is decided before minting or disconnecting, so a waiting slot keeps its live session.
+static inline RenewalStep renewalStep(bool due, bool attempt_allowed, bool bounce_needed,
+                                      bool handshake_allowed) {
+  if (!due || !attempt_allowed) return RenewalStep::None;
+  if (!bounce_needed) return RenewalStep::Renew;
+  return handshake_allowed ? RenewalStep::Bounce : RenewalStep::Wait;
+}
+
+// While another slot's renewal or owed bounce waits, ordinary reconnects and probes stand
+// aside, so it takes the next idle guard window instead of losing it to a retry loop.
+static inline bool yieldsToWaitingBounce(uint8_t waiting_mask, int slot_index) {
+  return (waiting_mask & ~(1U << slot_index)) != 0;
+}
+
+// The staged corrected-clock token must outlast the handshake and stay clear of the renewal
+// buffer, or the dispatch would present expired credentials or be followed by a second bounce.
+static inline bool owedDispatchNeedsMint(bool time_synced, bool has_token, uint32_t current_time,
+                                         uint32_t staged_expires_at,
+                                         uint32_t renewal_buffer_secs) {
+  return !canReuseJwtForReconnect(time_synced, has_token, false, current_time,
+                                  staged_expires_at, renewal_buffer_secs);
+}
+
+enum class OwedBounceStep : uint8_t {
+  Settled,    // nothing to open: the fresh token is in use, or the broker tolerates the old one
+  Wait,       // guard busy: leave the session alone
+  Reconnect,  // client is down: start it, or wake one that is waiting
+  Bounce,     // live session the broker will reject: close it, then reconnect
+};
+
+// A slot owed a corrected-clock bounce takes its turn through the guard like a renewal.
+static inline OwedBounceStep owedBounceStep(bool fresh_token_applied, bool connected,
+                                            bool broker_enforces_exp, bool handshake_allowed) {
+  if (fresh_token_applied) return OwedBounceStep::Settled;
+  const StaleTokenAction action = classifyStaleToken(true, connected, broker_enforces_exp);
+  if (action == StaleTokenAction::KeepAlive) return OwedBounceStep::Settled;
+  if (!handshake_allowed) return OwedBounceStep::Wait;
+  return action == StaleTokenAction::Reconnect ? OwedBounceStep::Reconnect
+                                               : OwedBounceStep::Bounce;
 }
 
 // Which clock to fall back on when no NTP server answered.

@@ -172,6 +172,9 @@ private:
     uint8_t max_backoff_failures;   // consecutive failures at max backoff level
     bool circuit_breaker_tripped;   // true = stop reconnecting until reconfigured
     bool link_retry_pending;        // next reconnect follows link recovery; it cannot trip the breaker
+    bool link_caused_outage;        // bridge task: last link-down edge blamed this slot's outage on the link
+    bool clock_bounce_owed;         // bridge task: corrected-clock token staged, reconnect waits for the guard
+    bool bounce_waiting;            // bridge task: its renewal or owed bounce waited for the guard last pass
     uint32_t connect_count;         // onConnect callbacks since boot (release/acquire with connected)
     uint32_t link_retry_connects;   // connect_count when link_retry_pending was armed
     unsigned long connected_at_ms;  // millis() of last successful connect (0 = not connected);
@@ -301,6 +304,10 @@ private:
   // delivers before that call returns is still seen; cleared by the attempt's outcome
   // (including an ignored late CONNECTED) or a deliberate stop.
   volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
+
+  // Set by the bridge task while a soft-disconnected session's DISCONNECTED is still to
+  // come; cleared at the end of that event's handler or by a deliberate stop.
+  volatile bool _slot_disconnect_owed[RUNTIME_MQTT_SLOTS];
 
   // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
   // All NTP I/O must run on Core 0; the CLI thread
@@ -523,8 +530,11 @@ private:
   unsigned long _last_config_warning; // Throttle configuration mismatch warnings
   static const unsigned long CONFIG_WARNING_INTERVAL = 300000; // Log every 5 minutes max
 
-  unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
-  int8_t _guard_armed_by_slot;             // slot whose first setup armed that guard; -1 = anything else
+  unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s, less once the armer is done)
+  int8_t _guard_armed_by_slot;             // slot whose first setup or reconnect armed that guard; -1 = anything else
+  bool _guard_armer_first_setup;           // that handshake was a first setup
+  unsigned long _link_up_ms;               // bridge task: millis() of the last link up edge, 0 = none seen
+  uint8_t _bounce_waiting_mask;            // bridge task: slots whose bounce waited last pass; others yield to them
   // Breaker probe minutes in effect; seeded from prefs at begin(), updated by the CLI after a save.
   std::atomic<uint8_t> _breaker_probe_min{MQTTConnectionPolicy::kBreakerProbeDefaultMinutes};
   // Free-stack bytes each task last measured for itself; 0 = no sample yet.
@@ -597,6 +607,7 @@ private:
   // Close a live client because the route changed under it: bounded where that
   // is enough, a real stop where an in-flight attempt has to be cancelled.
   void closeLiveClientForLinkTransition(int index);
+  esp_err_t softDisconnectSlot(int index, unsigned long timeout_ms = 5000);
   // Stop a live client, recording Stopped (proven) or Quarantined (not joined).
   void stopSlotClient(int index);
   // Reconnect a slot, starting it instead when the client is stopped (reconnect() is a

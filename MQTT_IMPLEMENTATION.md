@@ -626,7 +626,10 @@ published (or on `clear crash`), so it survives boots where MQTT never connects.
 **Connections.** Each slot reconnects with exponential backoff, then drops to a slow
 periodic retry (`mqtt.breaker.interval`, default 30 min). Packets queue while a slot is down. When the network route changes
 (Ethernet to WiFi or back), every slot disconnects cleanly and retries at once on the new
-route. Each medium keeps its own DHCP DNS servers.
+route. Each medium keeps its own DHCP DNS servers. When Wi-Fi or Ethernet drops and
+comes back, every slot retries at once; a session the outage cut does not count against
+the broker, unless the link keeps dropping within 30 s of coming up (40 s when the slot is
+still marked connected at the polled edge).
 
 **Self-heal.** With `mqtt.selfheal on`, the node alerts and reboots 1 min later when a
 bridge stop never completes (10 min), an MQTT client cannot be stopped (30 min), or every
@@ -753,6 +756,16 @@ get mqtt1.filter           # none sends no packets
 ```
 
 **JWT brokers reject the login:** check the clock with `get mqtt.ntp.diag`.
+
+**Slots connect, then drop a few seconds later and the queue stays full:** usually a weak WiFi
+uplink. The small handshake frames get through, but full-size publishes do not.
+
+```bash
+get link.status            # signal below about -70 dBm is marginal
+set wifi.txpower 20        # raise the TX power cap; `default` reverts
+```
+
+Most builds, the Station G3 included, start at the 11 dBm build default (`MQTT_WIFI_TX_POWER`).
 
 ## Fault Alerts
 

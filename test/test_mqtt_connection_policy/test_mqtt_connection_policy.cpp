@@ -109,6 +109,45 @@ TEST(MQTTConnectionPolicy, NonFirstAttemptsKeepTheFullGuard) {
   EXPECT_FALSE(Policy::deferredSlotSetupDue(armed + 14999U, 1000U, 1000U, armed, false, false));
 }
 
+TEST(MQTTConnectionPolicy, ReconnectFollowsAFinishedHandshakeAfterTheMinimumGap) {
+  const uint32_t armed = 5000U;
+  EXPECT_FALSE(Policy::reconnectGuardReleased(armed, armed, true, true));
+  EXPECT_FALSE(Policy::reconnectGuardReleased(armed + Policy::kFirstSetupMinGapMs - 1U, armed, true, true));
+  EXPECT_TRUE(Policy::reconnectGuardReleased(armed + Policy::kFirstSetupMinGapMs, armed, true, true));
+  // Five slots after a link outage: about 3 s per handshake instead of 15 s per slot.
+  EXPECT_TRUE(Policy::reconnectGuardReleased(armed + 3000U, armed, true, true));
+}
+
+TEST(MQTTConnectionPolicy, ReconnectKeepsTheFullGuardWhileTheArmerIsStillConnecting) {
+  const uint32_t armed = 5000U;
+  const bool connecting = Policy::firstSetupHandshakeDone(true, true, true, false);
+  const bool publishing = Policy::firstSetupHandshakeDone(true, true, false, true);
+  EXPECT_FALSE(Policy::reconnectGuardReleased(armed + 14999U, armed, true, connecting));
+  EXPECT_FALSE(Policy::reconnectGuardReleased(armed + 14999U, armed, true, publishing));
+  // The guard itself still expires at 15 s for a handshake that hangs.
+  EXPECT_FALSE(Policy::reconnectGuardActive(armed + Policy::kReconnectGuardMs, armed));
+}
+
+TEST(MQTTConnectionPolicy, ReconnectKeepsTheFullGuardAfterARenewalProbeOrReconfigure) {
+  const uint32_t armed = 5000U;
+  EXPECT_FALSE(Policy::reconnectGuardReleased(armed + 14999U, armed, false, true));
+}
+
+TEST(MQTTConnectionPolicy, ReconnectArmsTheEarlyReleaseOnlyWhenNoOlderEventIsOutstanding) {
+  EXPECT_TRUE(Policy::reconnectArmsEarlyRelease(false, false));
+  // An older attempt's outcome would clear the pending flag for this one.
+  EXPECT_FALSE(Policy::reconnectArmsEarlyRelease(true, false));
+  // So would the late DISCONNECTED of a session whose soft disconnect timed out.
+  EXPECT_FALSE(Policy::reconnectArmsEarlyRelease(false, true));
+  EXPECT_FALSE(Policy::reconnectArmsEarlyRelease(true, true));
+}
+
+TEST(MQTTConnectionPolicy, ReconnectGuardReleaseSurvivesClockRollover) {
+  const uint32_t armed = 0xFFFFFF00U;
+  EXPECT_FALSE(Policy::reconnectGuardReleased(armed + 1999U, armed, true, true));
+  EXPECT_TRUE(Policy::reconnectGuardReleased(armed + 2000U, armed, true, true));
+}
+
 TEST(MQTTConnectionPolicy, ConnectingReconfigureWaitsForTheReconnectGuard) {
   EXPECT_FALSE(Policy::slotReconfigureDue(false, true, 20000U, 0U, false));
   EXPECT_FALSE(Policy::slotReconfigureDue(true, true, 20000U, 0U, true));
@@ -306,6 +345,213 @@ TEST(MQTTConnectionPolicy, LinkRecoveryRetryBelowThresholdMatchesOrdinaryAdvance
       EXPECT_EQ(ordinary.should_reconnect, recovery.should_reconnect);
     }
   }
+}
+
+namespace {
+struct LadderSlot {
+  uint8_t backoff = 0;
+  uint8_t failures = 0;
+  bool tripped = false;
+};
+
+// One drop: link up at link_up, slot connected at connected_at, the socket fails
+// at disconnect_at, the edge arrives at edge, and the link-recovery retry follows.
+uint8_t runLinkDrop(LadderSlot& s, uint32_t link_up, uint32_t disconnect_at, uint32_t edge,
+                    bool connected_at_edge) {
+  const uint32_t outage_start = connected_at_edge ? 0U : disconnect_at;
+  const bool link_caused =
+      Policy::outageCausedByLink(edge, link_up, connected_at_edge, outage_start);
+  Policy::BackoffAdvance a =
+      Policy::advanceBackoffForLinkRecovery(s.backoff, s.failures, link_caused);
+  s.backoff = a.reconnect_backoff;
+  s.failures = a.max_backoff_failures;
+  s.tripped = a.circuit_breaker_tripped;
+  EXPECT_TRUE(a.should_reconnect);
+  return s.backoff;
+}
+}  // namespace
+
+// The V4 bench pattern: drops every 105-150 s, sessions just under the 120 s stable
+// clear, the socket failing up to 9 s before the polled edge. Ten drops stay at 0.
+TEST(MQTTConnectionPolicy, LinkOutagesOfShortSessionsDoNotClimbTheLadder) {
+  LadderSlot s;
+  uint32_t t = 100000U;
+  for (int drop = 0; drop < 10; ++drop) {
+    const uint32_t link_up = t;
+    const uint32_t disconnect_at = t + 110000U;
+    const uint32_t edge = disconnect_at + 9000U;
+    EXPECT_EQ(0, runLinkDrop(s, link_up, disconnect_at, edge, drop % 2 == 0)) << drop;
+    EXPECT_EQ(0, s.failures);
+    EXPECT_FALSE(s.tripped);
+    t = edge + 20000U;
+  }
+}
+
+// The edge may land before or after the event task stamps the disconnect.
+TEST(MQTTConnectionPolicy, LinkAttributionDoesNotRelyOnEdgeOrder) {
+  const uint32_t link_up = 1000U;
+  const uint32_t edge = 200000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, false, edge - 1000U));
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, false, edge - Policy::kLinkDropAttributionMs));
+  EXPECT_TRUE(Policy::outageCausedByLink(edge, link_up, false, edge + 5U));
+  EXPECT_FALSE(Policy::outageCausedByLink(edge, link_up, false, edge - Policy::kLinkDropAttributionMs - 1U));
+  // Never disconnected and not connected: nothing ties it to the link.
+  EXPECT_FALSE(Policy::outageCausedByLink(edge, link_up, false, 0U));
+  // Wraps: link up just before the counter rolled over.
+  const uint32_t wrapped_up = std::numeric_limits<uint32_t>::max() - 59999U;
+  EXPECT_TRUE(Policy::outageCausedByLink(40000U, wrapped_up, false, 39000U));
+}
+
+// A slot already failing against its broker when the link drops keeps the old rule:
+// the recovery attempt advances but cannot trip, and the next ordinary failure trips.
+TEST(MQTTConnectionPolicy, BrokerOutageBeforeLinkDropStillClimbsAndTrips) {
+  const uint32_t edge = 900000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(edge, 1000U, false, edge - 300000U));
+  Policy::BackoffAdvance r = Policy::advanceBackoffForLinkRecovery(5, 2, false);
+  EXPECT_EQ(3, r.max_backoff_failures);
+  EXPECT_FALSE(r.circuit_breaker_tripped);
+  EXPECT_TRUE(Policy::advanceBackoff(r.reconnect_backoff, r.max_backoff_failures).circuit_breaker_tripped);
+}
+
+// Refusals, handshake failures and quick drops with the link up never pass through
+// the link-recovery path, so they climb and trip exactly as before.
+TEST(MQTTConnectionPolicy, BrokerFailuresWithLinkUpStillClimbAndTrip) {
+  LadderSlot s;
+  int attempts = 0;
+  while (!s.tripped && attempts < 20) {
+    Policy::BackoffAdvance a = Policy::advanceBackoff(s.backoff, s.failures);
+    s.backoff = a.reconnect_backoff;
+    s.failures = a.max_backoff_failures;
+    s.tripped = a.circuit_breaker_tripped;
+    ++attempts;
+  }
+  EXPECT_TRUE(s.tripped);
+  EXPECT_EQ(8, attempts);  // five rungs, then three failures at the top
+}
+
+// A held ladder keeps what the broker earned: link drops neither add nor forgive.
+TEST(MQTTConnectionPolicy, LinkCausedOutageHoldsAnEarnedLevel) {
+  for (uint8_t backoff = 0; backoff <= 5; ++backoff) {
+    for (uint8_t failures = 0; failures < 3; ++failures) {
+      Policy::BackoffAdvance r = Policy::advanceBackoffForLinkRecovery(backoff, failures, true);
+      EXPECT_EQ(backoff, r.reconnect_backoff);
+      EXPECT_EQ(failures, r.max_backoff_failures);
+      EXPECT_FALSE(r.circuit_breaker_tripped);
+      EXPECT_TRUE(r.should_reconnect);
+    }
+  }
+}
+
+// A link that drops again within kLinkFlapFloorMs of coming up is not excused, so a
+// Wi-Fi flapping every few seconds still climbs to the long rungs.
+TEST(MQTTConnectionPolicy, RapidLinkFlappingStillClimbs) {
+  LadderSlot s;
+  uint32_t t = 500000U;
+  for (int drop = 0; drop < 5; ++drop) {
+    const uint32_t link_up = t;
+    const uint32_t edge = t + 12000U;  // up 12 s, the session dies with it
+    runLinkDrop(s, link_up, edge - 1000U, edge, false);
+    t = edge + 3000U;
+  }
+  EXPECT_EQ(5, s.backoff);
+  EXPECT_FALSE(s.tripped);
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      t + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs - 1U, t, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(
+      t + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs, t, true, 0U));
+  // Link up since the bridge started (no edge seen) counts as held.
+  EXPECT_TRUE(Policy::outageCausedByLink(5000U, 0U, true, 0U));
+}
+
+// The 10 s status poll can report the edge well after the socket died, so the floor
+// runs to the stamped session end rather than to the polled edge.
+TEST(MQTTConnectionPolicy, LinkFlapFloorUsesTheSessionEndNotThePolledEdge) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(130000U, link_up, false, 125000U));
+  EXPECT_TRUE(Policy::outageCausedByLink(130000U, link_up, false, 130000U));
+  // A slot still up at the edge has no stamp, so its floor runs to the edge plus the
+  // poll slack; the slack is added because the edge trails the physical drop.
+  EXPECT_TRUE(Policy::outageCausedByLink(
+      link_up + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs, link_up, true, 0U));
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      link_up + Policy::kLinkFlapFloorMs + Policy::kLinkPollSlackMs - 1U, link_up, true, 0U));
+}
+
+// A slot still marked connected at the polled edge has no stamp, so it gets the slack:
+// up at 100 s, dropped at 125 s, edge at 130 s reads as 30 s but the link lasted 25 s.
+TEST(MQTTConnectionPolicy, UnstampedSlotGetsThePollSlackOnTheFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(130000U, link_up, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(140000U, link_up, true, 0U));
+  // Link up since the bridge started (no edge seen) skips the floor entirely.
+  EXPECT_TRUE(Policy::outageCausedByLink(5000U, 0U, true, 0U));
+  EXPECT_TRUE(Policy::outageCausedByLink(900000U, 0U, true, 0U));
+}
+
+// A stamp after the edge is unusable, so the slot falls back to the polled edge and
+// takes the slack with it.
+TEST(MQTTConnectionPolicy, FutureStampUsesThePolledEdgeFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(135000U, link_up, false, 135005U));
+  EXPECT_TRUE(Policy::outageCausedByLink(140000U, link_up, false, 140005U));
+}
+
+// A stamped session end keeps the 30 s floor; the slack applies only to the polled edge.
+TEST(MQTTConnectionPolicy, StampedSlotIgnoresThePollSlack) {
+  EXPECT_TRUE(Policy::outageCausedByLink(131000U, 100000U, false, 130000U));
+}
+
+// An outage stamped before the link came up is outside this link-up period, so it
+// cannot move the floor and the edge stands.
+TEST(MQTTConnectionPolicy, OutageBeforeTheLinkCameUpStaysUnattributed) {
+  const uint32_t link_up = 100000U;
+  EXPECT_FALSE(Policy::outageCausedByLink(140000U, link_up, false, 95000U));
+  EXPECT_FALSE(Policy::outageCausedByLink(110000U, link_up, false, 95000U));
+}
+
+// The event task may stamp the disconnect a moment after the bridge read its clock.
+TEST(MQTTConnectionPolicy, OutageAfterTheEdgeKeepsTheEdgeFloor) {
+  const uint32_t link_up = 100000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(200000U, link_up, false, 200005U));
+  EXPECT_FALSE(Policy::outageCausedByLink(120000U, link_up, false, 120005U));
+}
+
+// The attribution window reaches kLinkDropAttributionMs past the edge as well.
+TEST(MQTTConnectionPolicy, AttributionWindowEndsTwentySecondsPastTheEdge) {
+  const uint32_t now = 300000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, 0U, false, now + Policy::kLinkDropAttributionMs));
+  EXPECT_FALSE(Policy::outageCausedByLink(
+      now, 0U, false, now + Policy::kLinkDropAttributionMs + 1U));
+}
+
+// An outage stamped just before the rollover ties to an edge just after it.
+TEST(MQTTConnectionPolicy, AttributionWrapsFromOutageToEdge) {
+  const uint32_t outage = std::numeric_limits<uint32_t>::max() - 5000U;
+  const uint32_t now = 10000U;
+  const uint32_t link_up = outage - 60000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, link_up, false, outage));
+}
+
+// An outage stamped just after the rollover ties to an edge just before it.
+TEST(MQTTConnectionPolicy, AttributionWrapsFromEdgeToOutage) {
+  const uint32_t now = std::numeric_limits<uint32_t>::max() - 5000U;
+  const uint32_t outage = 10000U;
+  const uint32_t link_up = outage - 60000U;
+  EXPECT_TRUE(Policy::outageCausedByLink(now, link_up, false, outage));
+}
+
+// The recovery retry runs at the held level; if its handshake then fails with the
+// link up, that is broker evidence like any other and the next attempt climbs one
+// rung (10 s, then 30 s), not the minutes an accumulated level used to cost.
+TEST(MQTTConnectionPolicy, FailedHandshakeRightAfterLinkUpClimbsOneRung) {
+  LadderSlot s;
+  runLinkDrop(s, 1000U, 150000U, 152000U, false);
+  EXPECT_EQ(0, s.backoff);
+  EXPECT_EQ(10000U, Policy::reconnectBackoffMs(s.backoff));
+  Policy::BackoffAdvance next = Policy::advanceBackoff(s.backoff, s.failures);
+  EXPECT_EQ(1, next.reconnect_backoff);
+  EXPECT_EQ(30000U, Policy::reconnectBackoffMs(next.reconnect_backoff));
 }
 
 TEST(MQTTConnectionPolicy, JwtLifetimeUsesCappedPerSlotStagger) {
@@ -543,6 +789,309 @@ TEST(StaleToken, FailedMintNeverReconnects) {
   EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, false, false));
   EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, true));
   EXPECT_EQ(StaleTokenAction::Defer, Policy::classifyStaleToken(false, true, false));
+}
+
+using Policy::RenewalStep;
+using Policy::OwedBounceStep;
+
+TEST(RenewalGuard, BounceNeededOnlyForEnforcedExpOrNoSession) {
+  EXPECT_TRUE(Policy::renewalBounceNeeded(/*imminent=*/true, /*enforces=*/true, /*connected=*/true));
+  EXPECT_FALSE(Policy::renewalBounceNeeded(true, false, true));
+  EXPECT_FALSE(Policy::renewalBounceNeeded(false, true, true));
+  EXPECT_TRUE(Policy::renewalBounceNeeded(false, false, false));
+}
+
+TEST(RenewalGuard, BounceKeepsTheFullGuardAndPassBudget) {
+  const uint32_t armed = 100000U;
+  EXPECT_FALSE(Policy::bounceHandshakeAllowed(false, armed + 2000U, armed));
+  EXPECT_FALSE(Policy::bounceHandshakeAllowed(false, armed + 14999U, armed));
+  EXPECT_TRUE(Policy::bounceHandshakeAllowed(false, armed + 15000U, armed));
+  // Another slot launched a handshake earlier in this pass.
+  EXPECT_FALSE(Policy::bounceHandshakeAllowed(true, armed + 60000U, armed));
+}
+
+TEST(RenewalGuard, DueRenewalWithIdleGuardBouncesInTheSamePass) {
+  const uint32_t last = 100000U;
+  const uint32_t now = last + 60000U;
+  EXPECT_EQ(RenewalStep::Bounce,
+            Policy::renewalStep(true, true, true, Policy::bounceHandshakeAllowed(false, now, last)));
+}
+
+TEST(RenewalGuard, DueRenewalWaitsWhileTheGuardIsBusy) {
+  const uint32_t last = 100000U;
+  EXPECT_EQ(RenewalStep::Wait,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(false, last + 5000U, last)));
+  EXPECT_EQ(RenewalStep::Wait,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(true, last + 60000U, last)));
+}
+
+TEST(RenewalGuard, RenewalWithoutABounceNeverWaits) {
+  EXPECT_EQ(RenewalStep::Renew, Policy::renewalStep(true, true, false, false));
+  EXPECT_EQ(RenewalStep::None, Policy::renewalStep(false, true, true, true));
+  EXPECT_EQ(RenewalStep::None, Policy::renewalStep(true, false, true, true));
+}
+
+namespace {
+// Mirrors maintainSlotConnection()'s order: decide, and only on Bounce touch the session.
+struct FakeSlot {
+  bool connected = true;
+  bool owed = false;
+  bool fresh_applied = false;
+  int soft_disconnects = 0;
+  int handshakes = 0;
+  uint32_t started_at = 0;
+};
+
+struct FakeGuard {
+  uint32_t last = 0;
+  bool this_pass = false;
+  void startPass(uint32_t now) { this_pass = Policy::reconnectGuardActive(now, last); }
+  void arm(uint32_t now) { last = now; this_pass = true; }
+};
+
+void renewalPass(FakeSlot& s, FakeGuard& g, uint32_t now) {
+  const RenewalStep step = Policy::renewalStep(
+      true, true, Policy::renewalBounceNeeded(true, true, s.connected),
+      Policy::bounceHandshakeAllowed(g.this_pass, now, g.last));
+  if (step != RenewalStep::Bounce) return;
+  s.soft_disconnects++;
+  s.handshakes++;
+  s.started_at = now;
+  g.arm(now);
+}
+
+void owedPass(FakeSlot& s, FakeGuard& g, uint32_t now) {
+  if (!s.owed) return;
+  const OwedBounceStep step = Policy::owedBounceStep(
+      s.fresh_applied, s.connected, true, Policy::bounceHandshakeAllowed(g.this_pass, now, g.last));
+  if (step == OwedBounceStep::Wait) return;
+  s.owed = false;
+  if (step == OwedBounceStep::Settled) return;
+  if (step == OwedBounceStep::Bounce) s.soft_disconnects++;
+  s.handshakes++;
+  s.started_at = now;
+  g.arm(now);
+}
+}  // namespace
+
+TEST(RenewalGuard, DeferredRenewalLeavesTheSessionAloneThenStartsWhenTheGuardClears) {
+  FakeGuard g;
+  FakeSlot s;
+  const uint32_t armed = 200000U;
+  // An earlier slot launched a handshake in this same pass.
+  g.startPass(armed);
+  g.arm(armed);
+  renewalPass(s, g, armed);
+  EXPECT_EQ(0, s.soft_disconnects);
+  EXPECT_EQ(0, s.handshakes);
+  for (uint32_t now = armed + 500U; now < armed + 15000U; now += 500U) {
+    g.startPass(now);
+    renewalPass(s, g, now);
+    ASSERT_EQ(0, s.soft_disconnects) << "touched at " << now;
+  }
+  g.startPass(armed + 15000U);
+  renewalPass(s, g, armed + 15000U);
+  EXPECT_EQ(1, s.soft_disconnects);
+  EXPECT_EQ(1, s.handshakes);
+  EXPECT_EQ(armed + 15000U, s.started_at);
+}
+
+TEST(RenewalGuard, OwedCorrectedClockBouncesRunOnePerGuardWindowWithNoneSkipped) {
+  FakeGuard g;
+  g.last = 1000U;
+  FakeSlot slots[5];
+  for (auto& s : slots) s.owed = true;
+  slots[3].connected = false;  // a down client reconnects without a bounce
+  const uint32_t t0 = 50000U;
+  for (uint32_t now = t0; now < t0 + 120000U; now += 250U) {
+    g.startPass(now);
+    for (auto& s : slots) owedPass(s, g, now);
+  }
+  for (int i = 0; i < 5; i++) {
+    EXPECT_FALSE(slots[i].owed) << "slot " << i;
+    EXPECT_EQ(1, slots[i].handshakes) << "slot " << i;
+    if (i > 0) {
+      EXPECT_GE(slots[i].started_at - slots[i - 1].started_at, Policy::kReconnectGuardMs);
+    }
+  }
+  EXPECT_EQ(0, slots[3].soft_disconnects);
+  EXPECT_EQ(1, slots[4].soft_disconnects);
+  // The fifth handshake starts four guard windows after the first.
+  EXPECT_EQ(slots[0].started_at + 4U * Policy::kReconnectGuardMs, slots[4].started_at);
+}
+
+TEST(RenewalGuard, OwedSlotAlreadyOnTheFreshTokenSettlesWithoutAHandshake) {
+  EXPECT_EQ(OwedBounceStep::Settled, Policy::owedBounceStep(true, true, true, false));
+  EXPECT_EQ(OwedBounceStep::Settled, Policy::owedBounceStep(false, true, false, false));
+  EXPECT_EQ(OwedBounceStep::Wait, Policy::owedBounceStep(false, false, true, false));
+  EXPECT_EQ(OwedBounceStep::Reconnect, Policy::owedBounceStep(false, false, false, true));
+  EXPECT_EQ(OwedBounceStep::Bounce, Policy::owedBounceStep(false, true, true, true));
+
+  FakeGuard g;
+  FakeSlot slots[2];
+  slots[0].owed = slots[1].owed = true;
+  slots[0].fresh_applied = true;
+  g.startPass(100000U);
+  for (auto& s : slots) owedPass(s, g, 100000U);
+  EXPECT_EQ(0, slots[0].handshakes);
+  EXPECT_EQ(1, slots[1].handshakes);
+}
+
+namespace {
+// Mirrors one maintenance pass over slot 0, whose ordinary reconnect is always rejected
+// locally (arm, call fails, roll back), and slot 1, whose renewal bounce is due.
+struct StarveSim {
+  bool restore_on_reject = true;
+  bool yield_to_waiting = true;
+  uint32_t last = 0;
+  int8_t armer = -1;
+  uint8_t waiting_mask = 0;
+  uint32_t retry_last_attempt = 0;
+  int retry_attempts = 0;
+  uint32_t first_retry_at = 0;
+  bool renewal_due = true;
+  int renewal_handshakes = 0;
+  uint32_t renewal_started_at = 0;
+
+  void pass(uint32_t now) {
+    bool this_pass = Policy::reconnectGuardActive(now, last);
+    uint8_t seen = 0;
+    // Slot 0: ordinary backoff reconnect, rolled back to rung 0 on every local rejection.
+    const bool yield = yield_to_waiting && Policy::yieldsToWaitingBounce(waiting_mask, 0);
+    const bool released = this_pass && armer >= 0 &&
+        Policy::reconnectGuardReleased(now, last, true, /*armer_handshake_done=*/true);
+    if (!yield && (!this_pass || released) && Policy::reconnectDue(now, retry_last_attempt, 0, 0)) {
+      retry_last_attempt = now;
+      const uint32_t last_before = last;
+      const int8_t armer_before = armer;
+      this_pass = true;
+      last = now;
+      armer = Policy::reconnectArmsEarlyRelease(false, false) ? 0 : -1;
+      if (retry_attempts++ == 0) first_retry_at = now;
+      if (restore_on_reject) {
+        last = last_before;
+        armer = armer_before;
+      }
+    }
+    // Slot 1: renewal bounce through the guard.
+    const RenewalStep step = Policy::renewalStep(
+        renewal_due, true, true, Policy::bounceHandshakeAllowed(this_pass, now, last));
+    if (step == RenewalStep::Wait) {
+      seen |= 2U;
+    } else if (step == RenewalStep::Bounce) {
+      renewal_handshakes++;
+      renewal_started_at = now;
+      renewal_due = false;
+      last = now;
+      armer = -1;
+      this_pass = true;
+    }
+    waiting_mask = seen;
+  }
+
+  void run(uint32_t from, uint32_t to) {
+    for (uint32_t now = from; now <= to; now += 100U) pass(now);
+  }
+};
+}  // namespace
+
+TEST(RenewalGuard, WithoutRestoreRepeatedLocalRejectionsStarveARenewal) {
+  // The failure being fixed: each rejected retry re-stamps the guard every 10 s.
+  StarveSim sim;
+  sim.restore_on_reject = false;
+  sim.yield_to_waiting = false;
+  sim.last = 1000U;  // the last real handshake, by slot 0 itself
+  sim.armer = 0;
+  sim.retry_last_attempt = 1000U;
+  sim.run(2000U, 600000U);
+  EXPECT_EQ(0, sim.renewal_handshakes);
+  EXPECT_GT(sim.retry_attempts, 50);
+}
+
+TEST(RenewalGuard, RejectedAttemptRestoresTheGuardSoTheWaitingBounceGoesOneWindowAfterTheRealHandshake) {
+  StarveSim sim;
+  sim.yield_to_waiting = false;  // the restore alone is enough
+  sim.last = 1000U;
+  sim.armer = 0;
+  sim.retry_last_attempt = 1000U;
+  sim.run(2000U, 600000U);
+  EXPECT_EQ(1, sim.renewal_handshakes);
+  EXPECT_EQ(1000U + Policy::kReconnectGuardMs, sim.renewal_started_at);
+  EXPECT_EQ(11000U, sim.first_retry_at);  // a rejected retry ran inside the window and did not extend it
+}
+
+TEST(RenewalGuard, RepeatedLocalRejectionsDoNotStarveAnotherSlotsRenewal) {
+  StarveSim sim;
+  sim.last = 1000U;
+  sim.armer = 0;
+  sim.retry_last_attempt = 1000U;
+  sim.run(2000U, 600000U);
+  EXPECT_EQ(1, sim.renewal_handshakes);
+  EXPECT_EQ(1000U + Policy::kReconnectGuardMs, sim.renewal_started_at);
+  // The retrying slot stood aside while the renewal waited, then resumed after its real guard.
+  EXPECT_EQ(sim.renewal_started_at + Policy::kReconnectGuardMs, sim.first_retry_at);
+  EXPECT_GT(sim.retry_attempts, 50);
+}
+
+TEST(RenewalGuard, YieldIsOnlyToOtherWaitingSlots) {
+  EXPECT_FALSE(Policy::yieldsToWaitingBounce(0, 0));
+  EXPECT_FALSE(Policy::yieldsToWaitingBounce(1U << 2, 2));
+  EXPECT_TRUE(Policy::yieldsToWaitingBounce(1U << 2, 0));
+  EXPECT_TRUE(Policy::yieldsToWaitingBounce((1U << 2) | (1U << 0), 0));
+}
+
+TEST(RenewalGuard, OwedDispatchMintsWhenTheStagedTokenAgedIntoTheBuffer) {
+  const uint32_t now = 1800000000U;
+  const uint32_t buffer = 300U;
+  // Clear of buffer plus the handshake margin: dispatch as staged.
+  EXPECT_FALSE(Policy::owedDispatchNeedsMint(true, true, now, now + buffer + 61U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, true, now, now + buffer + 60U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, true, now, now + 10U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, true, now, now - 1U, buffer));
+  EXPECT_TRUE(Policy::owedDispatchNeedsMint(true, false, now, now + 86400U, buffer));
+}
+
+TEST(RenewalGuard, OwedDispatchWithAnAgedTokenMintsFirstAndHandshakesOnce) {
+  const uint32_t buffer = 300U;
+  const uint32_t lifetime = 86400U;
+  const uint32_t now = 1800000000U;
+  const uint32_t staged_cases[] = {now + 120U, now - 30U, now + lifetime};
+  for (uint32_t staged : staged_cases) {
+    uint32_t token_exp = staged;
+    uint32_t applied = now - 5000U;  // pre-correction credential
+    int mints = 0;
+    int handshakes = 0;
+    // Dispatch: refresh if needed, then the single reconnect records the token as applied.
+    if (Policy::owedDispatchNeedsMint(true, true, now, token_exp, buffer)) {
+      mints++;
+      token_exp = now + lifetime;
+    }
+    handshakes++;
+    applied = token_exp;
+    // Later passes: the renewal path must not find this credential due again.
+    for (uint32_t t = now + 1U; t < now + 3600U; t += 60U) {
+      if (Policy::tokenNeedsRenewal(true, t, applied, buffer)) handshakes++;
+    }
+    EXPECT_EQ(staged == now + lifetime ? 0 : 1, mints) << staged;
+    EXPECT_EQ(1, handshakes) << staged;
+    EXPECT_GT(applied, now + buffer);
+  }
+}
+
+TEST(RenewalGuard, FailedOwedReconnectIsRetriedByTheRenewalPathUnderTheGuard) {
+  // The owed flag is cleared at dispatch; a failed reconnect leaves the applied expiry stale.
+  const uint32_t now_s = 1800000000U;
+  const uint32_t stale_applied = now_s - 5000U;
+  ASSERT_TRUE(Policy::tokenNeedsRenewal(true, now_s, stale_applied, 300U));
+  const uint32_t armed = 400000U;
+  EXPECT_EQ(RenewalStep::Wait,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(false, armed + 1000U, armed)));
+  EXPECT_EQ(RenewalStep::Bounce,
+            Policy::renewalStep(true, true, true,
+                                Policy::bounceHandshakeAllowed(false, armed + 15000U, armed)));
 }
 
 using Policy::ClockSource;
