@@ -12,15 +12,85 @@
 
 namespace poll {
 
+// The key a target is polled with, as the claim names it.
+enum ClaimKey : uint8_t {
+  CLAIM_KEY_SHARED = 0,
+  CLAIM_KEY_OWN,
+  CLAIM_KEY_PASSWORD,
+};
+
+static inline const char* claimKeyName(uint8_t key) {
+  switch (key) {
+    case CLAIM_KEY_OWN: return "own";
+    case CLAIM_KEY_PASSWORD: return "password";
+    default: return "shared";
+  }
+}
+
+// Last result for a target, in the claim's own vocabulary.
+enum ClaimState : uint8_t {
+  CLAIM_STATE_PENDING = 0,
+  CLAIM_STATE_OK,
+  CLAIM_STATE_NO_REPLY,
+  CLAIM_STATE_LOGIN_FAILED,
+  CLAIM_STATE_ADMIN_STOP,
+  CLAIM_STATE_NOT_DIRECT,
+};
+
+static inline const char* claimStateName(uint8_t state) {
+  switch (state) {
+    case CLAIM_STATE_OK: return "ok";
+    case CLAIM_STATE_NO_REPLY: return "no_reply";
+    case CLAIM_STATE_LOGIN_FAILED: return "login_failed";
+    case CLAIM_STATE_ADMIN_STOP: return "admin_stop";
+    case CLAIM_STATE_NOT_DIRECT: return "not_direct";
+    default: return "pending";
+  }
+}
+
+// A stopped target wins; a custom password is only called failed after two
+// unanswered logins in a row.
+static inline uint8_t claimStateFor(const TargetState& t, bool custom_password) {
+  if (t.admin_seen) return CLAIM_STATE_ADMIN_STOP;
+  if (t.code == CODE_NONE) return CLAIM_STATE_PENDING;
+  if (t.code == CODE_NOT_DIRECT) return CLAIM_STATE_NOT_DIRECT;
+  if (t.code == CODE_OK || t.code == CODE_NO_BATTERY) return CLAIM_STATE_OK;
+  if (custom_password && t.key_login_fails >= 2) return CLAIM_STATE_LOGIN_FAILED;
+  return CLAIM_STATE_NO_REPLY;
+}
+
 struct ClaimNode {
   uint8_t node[kPubKeySize];
   uint8_t reply_hops;     // 0 direct, 1 one hop
   bool    has_via;        // false -> JSON null
   uint8_t via[kPubKeySize];
-  bool    personal_key;   // informational; the claim always says "shared"
+  bool    personal_key;   // the observer's own registered polling key
   bool    has_snr;
   int16_t snr_x4;         // neighbor SNR in quarter dB, printed to 0.1
+
+  // Optional extended fields; zero means shared, pending, and no history.
+  uint8_t  key;           // ClaimKey
+  uint8_t  state;         // ClaimState
+  uint8_t  misses;        // consecutive polls without a reading
+  bool     requested;     // supplied by the analyzer, not configured locally
+  uint32_t last_attempt;  // 0 -> JSON null
+  uint32_t last_ok;       // 0 -> JSON null
 };
+
+// The optional fields of the extended claim schema. The zero value writes the
+// plain v2 object, byte for byte.
+struct ClaimOptions {
+  bool    extended = false;          // write the optional per-node and envelope fields
+  bool    accepts_requests = false;  // the operator opted in to requested targets
+  uint8_t request_slots = 0;         // target entries still free, clamped to 0..8
+};
+
+// The key kind a claim names; a target password wins over the own polling key.
+static inline uint8_t claimKeyFor(const ClaimNode& n) {
+  if (n.key == CLAIM_KEY_PASSWORD) return CLAIM_KEY_PASSWORD;
+  if (n.key == CLAIM_KEY_OWN || n.personal_key) return CLAIM_KEY_OWN;
+  return CLAIM_KEY_SHARED;
+}
 
 static const uint32_t kClaimEverySec = 30UL * 60UL;
 static const uint32_t kClaimRetrySec = 60;
@@ -253,7 +323,8 @@ static inline size_t buildClaimJson(char* out, size_t cap, const char* origin,
                                     const uint8_t observer_pub[kPubKeySize],
                                     uint32_t now_epoch, const char* plugin_tag,
                                     const char* policy_version, bool community,
-                                    const ClaimNode* nodes, uint8_t count) {
+                                    const ClaimNode* nodes, uint8_t count,
+                                    const ClaimOptions& opts) {
   if (!out || cap == 0 || !observer_pub) return 0;
   if (count > kMaxTargets || (count > 0 && !nodes)) return 0;
 
@@ -268,7 +339,13 @@ static inline size_t buildClaimJson(char* out, size_t cap, const char* origin,
   detail::jsonString(o, plugin_tag);
   o.lit(", \"policy_version\": ");
   detail::jsonString(o, policy_version);
-  o.lit(community ? ", \"community\": true, \"nodes\": [" : ", \"community\": false, \"nodes\": [");
+  o.lit(community ? ", \"community\": true" : ", \"community\": false");
+  if (opts.extended) {
+    o.lit(opts.accepts_requests ? ", \"accepts_requests\": true" : ", \"accepts_requests\": false");
+    o.lit(", \"request_slots\": ");
+    detail::writeUint(o, opts.request_slots > kMaxTargets ? kMaxTargets : opts.request_slots);
+  }
+  o.lit(", \"nodes\": [");
   for (uint8_t i = 0; i < count; i++) {
     const ClaimNode& n = nodes[i];
     if (i) o.lit(", ");
@@ -284,11 +361,36 @@ static inline size_t buildClaimJson(char* out, size_t cap, const char* origin,
     } else {
       o.lit("null");
     }
-    o.lit(", \"key\": \"shared\", \"snr\": ");
+    o.lit(", \"key\": \"");
+    o.lit(claimKeyName(opts.extended ? claimKeyFor(n) : CLAIM_KEY_SHARED));
+    o.lit("\", \"snr\": ");
     if (n.has_snr) {
       detail::jsonSnr(o, n.snr_x4);
     } else {
       o.lit("null");
+    }
+    if (opts.extended) {
+      if (n.requested) o.lit(", \"requested\": true");
+      o.lit(", \"state\": ");
+      detail::jsonString(o, claimStateName(n.state));
+      o.lit(", \"misses\": ");
+      detail::writeUint(o, n.misses);
+      o.lit(", \"last_attempt\": ");
+      if (n.last_attempt) {
+        o.ch('"');
+        detail::jsonTimestamp(o, n.last_attempt);
+        o.ch('"');
+      } else {
+        o.lit("null");
+      }
+      o.lit(", \"last_ok\": ");
+      if (n.last_ok) {
+        o.ch('"');
+        detail::jsonTimestamp(o, n.last_ok);
+        o.ch('"');
+      } else {
+        o.lit("null");
+      }
     }
     o.ch('}');
   }
@@ -296,8 +398,17 @@ static inline size_t buildClaimJson(char* out, size_t cap, const char* origin,
   return o.ok ? o.len : 0;
 }
 
-// Sort key for the signature: the fields CoreScope compares, not the key name
-// or SNR, so a route or hop change is what triggers a fresh claim.
+static inline size_t buildClaimJson(char* out, size_t cap, const char* origin,
+                                    const uint8_t observer_pub[kPubKeySize],
+                                    uint32_t now_epoch, const char* plugin_tag,
+                                    const char* policy_version, bool community,
+                                    const ClaimNode* nodes, uint8_t count) {
+  return buildClaimJson(out, cap, origin, observer_pub, now_epoch, plugin_tag, policy_version,
+                        community, nodes, count, ClaimOptions{});
+}
+
+// Sort key for the signature: the route fields, never SNR, so a route or hop
+// change is what reorders the hash.
 static inline int claimNodeCmp(const ClaimNode& a, const ClaimNode& b) {
   const int c = memcmp(a.node, b.node, kPubKeySize);
   if (c != 0) return c;
@@ -307,7 +418,8 @@ static inline int claimNodeCmp(const ClaimNode& a, const ClaimNode& b) {
   return memcmp(a.via, b.via, kPubKeySize);
 }
 
-static inline uint32_t claimSignature(const ClaimNode* nodes, uint8_t count, bool community) {
+static inline uint32_t claimSignature(const ClaimNode* nodes, uint8_t count, bool community,
+                                      const ClaimOptions& opts) {
   if (count > kMaxTargets || (count > 0 && !nodes)) return 0;
   uint8_t order[kMaxTargets];
   for (uint8_t i = 0; i < count; i++) order[i] = i;
@@ -334,10 +446,21 @@ static inline uint32_t claimSignature(const ClaimNode* nodes, uint8_t count, boo
         h = (h ^ n.via[k]) * 16777619u;
       }
     }
+    if (opts.extended) {
+      const bool stopped = n.state == CLAIM_STATE_LOGIN_FAILED || n.state == CLAIM_STATE_ADMIN_STOP;
+      h = (h ^ (stopped ? 1u : 0u)) * 16777619u;
+      h = (h ^ claimKeyFor(n)) * 16777619u;
+      h = (h ^ (n.requested ? 1u : 0u)) * 16777619u;
+    }
     h = (h ^ 0xffu) * 16777619u;
   }
   h = (h ^ (community ? 1u : 0u)) * 16777619u;
+  if (opts.extended) h = (h ^ (opts.accepts_requests ? 1u : 0u)) * 16777619u;
   return h;
+}
+
+static inline uint32_t claimSignature(const ClaimNode* nodes, uint8_t count, bool community) {
+  return claimSignature(nodes, count, community, ClaimOptions{});
 }
 
 struct ClaimTiming {
@@ -346,13 +469,16 @@ struct ClaimTiming {
   uint32_t signature;
   bool     sent_once;
   bool     last_community;
-  bool     last_listed;    // the last claim named nodes
+  bool     last_listed;    // the last claim was a list, not a withdrawal
 };
 
 static_assert(sizeof(ClaimTiming) == 16, "last_listed fits the existing word");
 
-// key is poll::KeyChoice. Zero is KEY_NONE: no polling key, so no node is named.
-static inline bool claimMayList(uint8_t key) { return key != 0; }
+// key is poll::KeyChoice. Zero is KEY_NONE: no polling key, so no node is
+// named. An observer that accepts requested targets may publish an empty list.
+static inline bool claimMayList(uint8_t key, bool accepts_requests = false) {
+  return key != 0 || accepts_requests;
+}
 
 // A list already published is taken back by one empty claim, then nothing
 // until a polling key is in use again.
@@ -361,9 +487,9 @@ static inline bool emptyClaimOwed(const ClaimTiming& t, bool may_list) {
 }
 
 // Every attempt starts the 60 s retry clock, as claims.py does, so a route
-// change right after a publish waits for it too. may_list is claimMayList(key):
-// without a key the claim names no nodes, and one empty claim retracts a list
-// already sent this boot.
+// change right after a publish waits for it too. may_list is claimMayList():
+// without the right to list, one empty claim retracts a list already sent this
+// boot.
 static inline bool claimDue(const ClaimTiming& t, uint32_t signature, bool community,
                             bool may_list, uint32_t now) {
   const bool owe_empty = emptyClaimOwed(t, may_list);
@@ -376,6 +502,8 @@ static inline bool claimDue(const ClaimTiming& t, uint32_t signature, bool commu
   return true;
 }
 
+// listed is true for a snapshot, including an accepted empty one, false only
+// for a withdrawal.
 static inline void claimSent(ClaimTiming& t, uint32_t signature, bool community, bool listed,
                             uint32_t now) {
   t.sent_at = now;

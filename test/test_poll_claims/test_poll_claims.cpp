@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "helpers/poll/PollClaims.h"
+#include "helpers/poll/PollControlTypes.h"
 
 namespace {
 
@@ -33,6 +34,25 @@ size_t build(char* out, size_t cap, const char* origin, uint32_t ts, const char*
              bool community, const poll::ClaimNode* nodes, uint8_t count) {
   return poll::buildClaimJson(out, cap, origin, g_observer, ts, kPlugin, policy, community,
                               nodes, count);
+}
+
+size_t buildExtended(char* out, size_t cap, const char* origin, uint32_t ts, const char* policy,
+                     bool community, const poll::ClaimNode* nodes, uint8_t count,
+                     bool accepts_requests, uint8_t request_slots) {
+  poll::ClaimOptions opts{};
+  opts.extended = true;
+  opts.accepts_requests = accepts_requests;
+  opts.request_slots = request_slots;
+  return poll::buildClaimJson(out, cap, origin, g_observer, ts, kPlugin, policy, community,
+                              nodes, count, opts);
+}
+
+uint32_t signatureExtended(const poll::ClaimNode* nodes, uint8_t count, bool community,
+                           bool accepts_requests) {
+  poll::ClaimOptions opts{};
+  opts.extended = true;
+  opts.accepts_requests = accepts_requests;
+  return poll::claimSignature(nodes, count, community, opts);
 }
 
 // The plugin's own json.dumps output, then the same payload through the exact
@@ -410,6 +430,336 @@ TEST(PollClaims, ClockJumpsNeverLookDue) {
   t.sent_at = base;
   t.tried_at = base + 100;
   EXPECT_FALSE(poll::claimDue(t, 0x12345678u, true, true, base));
+}
+
+TEST(PollClaims, ExtendedClaimWritesEveryOptionalField) {
+  initKeys();
+  poll::ClaimNode n = makeNode(0xab, 0, false, 0, true, 26);
+  n.key = poll::CLAIM_KEY_OWN;
+  n.state = poll::CLAIM_STATE_OK;
+  n.misses = 2;
+  n.requested = true;
+  n.last_attempt = kTs - 100;
+  n.last_ok = kTs - 50;
+  const std::string expected =
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "a1b2c3d4", "community": true, "accepts_requests": true, "request_slots": 3, "nodes": [{"node_id": "abababababababababababababababababababababababababababababababab", "reply_hops": 0, "via": null, "key": "own", "snr": 6.5, "requested": true, "state": "ok", "misses": 2, "last_attempt": "2023-11-14T22:11:40Z", "last_ok": "2023-11-14T22:12:30Z"}]})json";
+  char buf[1024];
+  const size_t len =
+      buildExtended(buf, sizeof(buf), "Cadham Village", kTs, "a1b2c3d4", true, &n, 1, true, 3);
+  ASSERT_EQ(expected.size(), len);
+  EXPECT_EQ(expected, std::string(buf, len));
+}
+
+TEST(PollClaims, ExtendedEmptyClaimStillCarriesTheEnvelope) {
+  initKeys();
+  const std::string expected =
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": false, "accepts_requests": true, "request_slots": 8, "nodes": []})json";
+  char buf[1024];
+  const size_t len = buildExtended(buf, sizeof(buf), "Cadham Village", kTs, "", false, nullptr, 0,
+                                   true, 8);
+  ASSERT_EQ(expected.size(), len);
+  EXPECT_EQ(expected, std::string(buf, len));
+}
+
+TEST(PollClaims, ExtendedRequestedIsWrittenOnlyWhenTrue) {
+  initKeys();
+  poll::ClaimNode off = makeNode(0xab, 0, false, 0, true, 26);
+  char buf[1024];
+  size_t len = buildExtended(buf, sizeof(buf), "x", kTs, "", true, &off, 1, false, 0);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ(std::string::npos, std::string(buf, len).find("\"requested\""));
+
+  poll::ClaimNode on = off;
+  on.requested = true;
+  len = buildExtended(buf, sizeof(buf), "x", kTs, "", true, &on, 1, false, 0);
+  ASSERT_GT(len, 0u);
+  EXPECT_NE(std::string::npos, std::string(buf, len).find("\"requested\": true"));
+}
+
+TEST(PollClaims, ClaimKeyNamesAndKinds) {
+  EXPECT_STREQ("shared", poll::claimKeyName(poll::CLAIM_KEY_SHARED));
+  EXPECT_STREQ("own", poll::claimKeyName(poll::CLAIM_KEY_OWN));
+  EXPECT_STREQ("password", poll::claimKeyName(poll::CLAIM_KEY_PASSWORD));
+
+  char buf[1024];
+  const uint8_t fills[] = {0xab, 0xcd, 0xef};
+  const uint8_t kinds[] = {poll::CLAIM_KEY_SHARED, poll::CLAIM_KEY_OWN, poll::CLAIM_KEY_PASSWORD};
+  const char* names[] = {"shared", "own", "password"};
+  for (uint8_t i = 0; i < 3; i++) {
+    poll::ClaimNode n = makeNode(fills[i], 0, false, 0, true, 26);
+    n.key = kinds[i];
+    const size_t len = buildExtended(buf, sizeof(buf), "x", kTs, "", true, &n, 1, false, 0);
+    ASSERT_GT(len, 0u);
+    EXPECT_EQ(std::string("\"") + names[i] + "\"",
+              claimField(std::string(buf, len), "key"));
+  }
+
+  // The own registered polling key still names itself through personal_key.
+  poll::ClaimNode own = makeNode(0xab, 0, false, 0, true, 26);
+  own.personal_key = true;
+  size_t len = buildExtended(buf, sizeof(buf), "x", kTs, "", true, &own, 1, false, 0);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ("\"own\"", claimField(std::string(buf, len), "key"));
+
+  // A target password wins over the own key.
+  own.key = poll::CLAIM_KEY_PASSWORD;
+  len = buildExtended(buf, sizeof(buf), "x", kTs, "", true, &own, 1, false, 0);
+  ASSERT_GT(len, 0u);
+  EXPECT_EQ("\"password\"", claimField(std::string(buf, len), "key"));
+}
+
+TEST(PollClaims, ClaimStateNames) {
+  EXPECT_STREQ("pending", poll::claimStateName(poll::CLAIM_STATE_PENDING));
+  EXPECT_STREQ("ok", poll::claimStateName(poll::CLAIM_STATE_OK));
+  EXPECT_STREQ("no_reply", poll::claimStateName(poll::CLAIM_STATE_NO_REPLY));
+  EXPECT_STREQ("login_failed", poll::claimStateName(poll::CLAIM_STATE_LOGIN_FAILED));
+  EXPECT_STREQ("admin_stop", poll::claimStateName(poll::CLAIM_STATE_ADMIN_STOP));
+  EXPECT_STREQ("not_direct", poll::claimStateName(poll::CLAIM_STATE_NOT_DIRECT));
+  EXPECT_STREQ("pending", poll::claimStateName(200));
+}
+
+TEST(PollClaims, ClaimStateForTarget) {
+  poll::TargetState t{};
+  EXPECT_EQ(poll::CLAIM_STATE_PENDING, poll::claimStateFor(t, false));
+
+  t.code = poll::CODE_OK;
+  EXPECT_EQ(poll::CLAIM_STATE_OK, poll::claimStateFor(t, false));
+  t.code = poll::CODE_NO_BATTERY;
+  EXPECT_EQ(poll::CLAIM_STATE_OK, poll::claimStateFor(t, false));
+  t.code = poll::CODE_NOT_DIRECT;
+  EXPECT_EQ(poll::CLAIM_STATE_NOT_DIRECT, poll::claimStateFor(t, false));
+  t.code = poll::CODE_NO_REPLY;
+  EXPECT_EQ(poll::CLAIM_STATE_NO_REPLY, poll::claimStateFor(t, false));
+  t.code = poll::CODE_ERROR;
+  EXPECT_EQ(poll::CLAIM_STATE_NO_REPLY, poll::claimStateFor(t, false));
+
+  t.code = poll::CODE_NO_REPLY;
+  t.key_login_fails = 1;
+  EXPECT_EQ(poll::CLAIM_STATE_NO_REPLY, poll::claimStateFor(t, true));
+  t.key_login_fails = 2;
+  EXPECT_EQ(poll::CLAIM_STATE_NO_REPLY, poll::claimStateFor(t, false));
+  EXPECT_EQ(poll::CLAIM_STATE_LOGIN_FAILED, poll::claimStateFor(t, true));
+
+  // A stop wins over whatever the last poll did.
+  t.code = poll::CODE_OK;
+  t.admin_seen = true;
+  EXPECT_EQ(poll::CLAIM_STATE_ADMIN_STOP, poll::claimStateFor(t, false));
+}
+
+TEST(PollClaims, ExtendedStateAndHistoryFields) {
+  initKeys();
+  poll::ClaimNode n = makeNode(0xab, 0, false, 0, true, 26);
+  n.state = poll::CLAIM_STATE_LOGIN_FAILED;
+  n.misses = 255;
+  n.last_attempt = kTs;
+  n.last_ok = 0;
+  char buf[1024];
+  size_t len = buildExtended(buf, sizeof(buf), "x", kTs, "", true, &n, 1, false, 0);
+  ASSERT_GT(len, 0u);
+  std::string json(buf, len);
+  EXPECT_EQ("\"login_failed\"", claimField(json, "state"));
+  EXPECT_EQ("255", claimField(json, "misses"));
+  EXPECT_EQ("\"2023-11-14T22:13:20Z\"", claimField(json, "last_attempt"));
+  EXPECT_EQ("null", claimField(json, "last_ok"));
+
+  n.last_attempt = 0;
+  n.last_ok = kTs;
+  len = buildExtended(buf, sizeof(buf), "x", kTs, "", true, &n, 1, false, 0);
+  ASSERT_GT(len, 0u);
+  json.assign(buf, len);
+  EXPECT_EQ("null", claimField(json, "last_attempt"));
+  EXPECT_EQ("\"2023-11-14T22:13:20Z\"", claimField(json, "last_ok"));
+}
+
+TEST(PollClaims, ExtendedRequestSlotsStayInRange) {
+  initKeys();
+  char buf[1024];
+  struct Case {
+    bool accepts;
+    uint8_t slots;
+    const char* accepts_text;
+    const char* slots_text;
+  };
+  const Case cases[] = {
+      {false, 0, "false", "0"},
+      {true, 3, "true", "3"},
+      {true, 8, "true", "8"},
+      {true, 9, "true", "8"},
+      {true, 255, "true", "8"},
+  };
+  for (const Case& c : cases) {
+    const size_t len =
+        buildExtended(buf, sizeof(buf), "x", kTs, "", true, nullptr, 0, c.accepts, c.slots);
+    ASSERT_GT(len, 0u);
+    const std::string json(buf, len);
+    EXPECT_EQ(c.accepts_text, claimField(json, "accepts_requests")) << (int)c.slots;
+    EXPECT_EQ(c.slots_text, claimField(json, "request_slots")) << (int)c.slots;
+  }
+}
+
+TEST(PollClaims, PlainClaimIgnoresEveryExtendedField) {
+  initKeys();
+  poll::ClaimNode plain = makeNode(0xab, 0, false, 0, true, 26);
+  poll::ClaimNode loaded = plain;
+  loaded.key = poll::CLAIM_KEY_PASSWORD;
+  loaded.state = poll::CLAIM_STATE_ADMIN_STOP;
+  loaded.misses = 9;
+  loaded.requested = true;
+  loaded.last_attempt = kTs;
+  loaded.last_ok = kTs;
+  char a[1024];
+  char b[1024];
+  const size_t la = build(a, sizeof(a), "x", kTs, "", true, &plain, 1);
+  const size_t lb = build(b, sizeof(b), "x", kTs, "", true, &loaded, 1);
+  ASSERT_GT(la, 0u);
+  ASSERT_EQ(la, lb);
+  EXPECT_EQ(0, memcmp(a, b, la));
+  EXPECT_EQ(poll::claimSignature(&plain, 1, true), poll::claimSignature(&loaded, 1, true));
+}
+
+TEST(PollClaims, ExtendedSignatureTracksOnlyStoppingStates) {
+  poll::ClaimNode base = makeNode(0xab, 0, false, 0, true, 26);
+  base.state = poll::CLAIM_STATE_PENDING;
+  const uint32_t pending = signatureExtended(&base, 1, true, false);
+
+  poll::ClaimNode n = base;
+  n.state = poll::CLAIM_STATE_OK;
+  EXPECT_EQ(pending, signatureExtended(&n, 1, true, false));
+  n.state = poll::CLAIM_STATE_NO_REPLY;
+  EXPECT_EQ(pending, signatureExtended(&n, 1, true, false));
+  n.state = poll::CLAIM_STATE_NOT_DIRECT;
+  EXPECT_EQ(pending, signatureExtended(&n, 1, true, false));
+
+  n.state = poll::CLAIM_STATE_LOGIN_FAILED;
+  const uint32_t failed = signatureExtended(&n, 1, true, false);
+  EXPECT_NE(pending, failed);
+  n.state = poll::CLAIM_STATE_ADMIN_STOP;
+  EXPECT_EQ(failed, signatureExtended(&n, 1, true, false));  // one bit, not the state value
+
+  // Leaves the stopped pair, so the signature goes back.
+  n.state = poll::CLAIM_STATE_OK;
+  EXPECT_EQ(pending, signatureExtended(&n, 1, true, false));
+
+  // A second node gets its own bit.
+  poll::ClaimNode a = makeNode(0xab, 0, false, 0, true, 26);
+  poll::ClaimNode b = makeNode(0xcd, 0, false, 0, true, 26);
+  poll::ClaimNode pair[2] = {a, b};
+  const uint32_t both_ok = signatureExtended(pair, 2, true, false);
+  pair[0].state = poll::CLAIM_STATE_ADMIN_STOP;
+  const uint32_t first_stopped = signatureExtended(pair, 2, true, false);
+  EXPECT_NE(both_ok, first_stopped);
+  pair[1].state = poll::CLAIM_STATE_ADMIN_STOP;
+  const uint32_t both_stopped = signatureExtended(pair, 2, true, false);
+  EXPECT_NE(first_stopped, both_stopped);
+  pair[0].state = poll::CLAIM_STATE_PENDING;
+  const uint32_t second_stopped = signatureExtended(pair, 2, true, false);
+  EXPECT_NE(both_stopped, second_stopped);
+  EXPECT_NE(both_ok, second_stopped);
+}
+
+TEST(PollClaims, ExtendedSignatureTracksKeyAndRequested) {
+  poll::ClaimNode base = makeNode(0xab, 0, false, 0, true, 26);
+  const uint32_t shared = signatureExtended(&base, 1, true, false);
+
+  poll::ClaimNode n = base;
+  n.key = poll::CLAIM_KEY_OWN;
+  const uint32_t own = signatureExtended(&n, 1, true, false);
+  EXPECT_NE(shared, own);
+  n.key = poll::CLAIM_KEY_PASSWORD;
+  EXPECT_NE(shared, signatureExtended(&n, 1, true, false));
+  EXPECT_NE(own, signatureExtended(&n, 1, true, false));
+
+  n = base;
+  n.personal_key = true;  // the own registered key names itself
+  EXPECT_NE(shared, signatureExtended(&n, 1, true, false));
+
+  n = base;
+  n.requested = true;
+  const uint32_t requested = signatureExtended(&n, 1, true, false);
+  EXPECT_NE(shared, requested);
+
+  // Accepts requests is part of the envelope signature...
+  EXPECT_NE(shared, signatureExtended(&base, 1, true, true));
+  // ...but the free slot count, misses, and timestamps ride on the refresh.
+  poll::ClaimOptions slots{};
+  slots.extended = true;
+  slots.request_slots = 7;
+  EXPECT_EQ(shared, poll::claimSignature(&base, 1, true, slots));
+  n = base;
+  n.misses = 255;
+  n.last_attempt = kTs;
+  n.last_ok = kTs;
+  EXPECT_EQ(shared, signatureExtended(&n, 1, true, false));
+}
+
+TEST(PollClaims, AcceptsRequestsPublishesAndRefreshesEmptyClaim) {
+  const uint32_t base = kTs;
+  EXPECT_FALSE(poll::claimMayList(0));
+  EXPECT_FALSE(poll::claimMayList(0, false));
+  EXPECT_TRUE(poll::claimMayList(0, true));
+  EXPECT_TRUE(poll::claimMayList(2, false));
+  EXPECT_TRUE(poll::claimMayList(2, true));
+
+  poll::ClaimTiming t{0, 0, 0, false, false, false};
+  const bool may = poll::claimMayList(0, true);
+  EXPECT_FALSE(poll::emptyClaimOwed(t, may));
+  EXPECT_TRUE(poll::claimDue(t, 0xabcdu, true, may, base));
+  poll::claimSent(t, 0xabcdu, true, true, base);  // an empty snapshot, not a withdrawal
+  EXPECT_TRUE(t.last_listed);
+  EXPECT_FALSE(poll::claimDue(t, 0xabcdu, true, may, base + 1799));
+  EXPECT_TRUE(poll::claimDue(t, 0xabcdu, true, may, base + 1800));
+  poll::claimSent(t, 0xabcdu, true, true, base + 1800);
+
+  // Switching the opt-in off retracts the list with one empty claim, then silence.
+  const bool off = poll::claimMayList(0);
+  EXPECT_TRUE(poll::emptyClaimOwed(t, off));
+  EXPECT_FALSE(poll::claimDue(t, 0xabcdu, true, off, base + 1859));
+  EXPECT_TRUE(poll::claimDue(t, 0xabcdu, true, off, base + 1860));
+  poll::claimSent(t, 0xabcdu, true, false, base + 1860);
+  EXPECT_FALSE(t.last_listed);
+  EXPECT_FALSE(poll::claimDue(t, 0xabcdu, true, off, base + 999999));
+}
+
+TEST(PollClaims, ExtendedWorstCaseFitsClaimBuffer) {
+  initKeys();
+  const std::string origin(32, 'A');
+  const std::string plugin = "meshcore.observer_fw/" + std::string(26, 'p');
+  const std::string policy(15, 'v');
+  ASSERT_EQ(47u, plugin.size());
+
+  poll::ClaimNode nodes[poll::kMaxTargets];
+  for (uint8_t i = 0; i < poll::kMaxTargets; i++) {
+    nodes[i] = makeNode((uint8_t)(0xa0 + i), 1, false, 0, true, 26);
+    nodes[i].key = poll::CLAIM_KEY_PASSWORD;
+    nodes[i].state = poll::CLAIM_STATE_LOGIN_FAILED;
+    nodes[i].misses = 255;
+    nodes[i].requested = true;
+    nodes[i].last_attempt = 4294967295u;
+    nodes[i].last_ok = 4294967295u;
+  }
+
+  std::vector<char> buf(poll::kClaimJsonMax + 1, 'X');
+  const size_t len = buildExtended(buf.data(), buf.size(), origin.c_str(), 4294967295u,
+                                   policy.c_str(), true, nodes, poll::kMaxTargets, true, 8);
+  ASSERT_GT(len, 0u);
+  EXPECT_LE(len, (size_t)poll::kClaimJsonMax);
+  EXPECT_EQ((size_t)poll::kClaimJsonMax + 1, buf.size());
+  EXPECT_EQ('\0', buf[len]);
+  EXPECT_EQ('}', buf[len - 1]);
+
+  // The exact same claim in a one-byte-short buffer is refused, not truncated.
+  std::vector<char> tight(len, 'X');
+  EXPECT_EQ(0u, buildExtended(tight.data(), tight.size(), origin.c_str(), 4294967295u,
+                              policy.c_str(), true, nodes, poll::kMaxTargets, true, 8));
+  std::vector<char> tiny(64, 'X');
+  EXPECT_EQ(0u, buildExtended(tiny.data(), tiny.size(), origin.c_str(), 4294967295u,
+                              policy.c_str(), true, nodes, poll::kMaxTargets, true, 8));
+
+  // One more byte is enough for the terminator.
+  std::vector<char> exact(len + 1, 'X');
+  EXPECT_EQ(len, buildExtended(exact.data(), exact.size(), origin.c_str(), 4294967295u,
+                               policy.c_str(), true, nodes, poll::kMaxTargets, true, 8));
+  EXPECT_EQ(0, memcmp(buf.data(), exact.data(), len));
 }
 
 }  // namespace

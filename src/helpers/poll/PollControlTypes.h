@@ -12,7 +12,7 @@ namespace poll {
 
 static const uint8_t  kControlUrlMax = 96;     // the size of the poll.url setting
 static const uint16_t kRegBodyMax = 560;       // registration JSON with a 64-byte private key
-static const uint16_t kClaimJsonMax = 1536;    // claim v2 with eight nodes and a long origin
+static const uint16_t kClaimJsonMax = 2560;    // extended claim v2 with eight nodes and a long origin
 
 // The plugin release this firmware mirrors; CoreScope gates on it.
 static const char kPluginVersion[] = "0.11.1";
