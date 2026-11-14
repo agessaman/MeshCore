@@ -2204,6 +2204,8 @@ void RepeaterPoller::maybeFileControl(uint32_t now) {
   need.policy_answered = policy_answered_;
   need.target_due = anyTargetDue(now);
   need.manual_due = now_idx_ >= 0;
+  need.slot_unresolved = poll::modeIsJson(mode_) && slot_setting_ == 0 && claim_slot_ == 0;
+  need.requests_active = requestsActive();
   if (!poll::controlNeeded(need)) return;
   const uint32_t since = (uint32_t)(millis() - ctl_filed_ms_) / 1000UL;
   if (!poll::controlAllowed(ctl_pending_, ctl_ever_, since, kCtlEveryS)) return;
