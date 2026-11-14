@@ -431,15 +431,16 @@ is, the node polls every target it is given, at most twice per hour-long window.
 | `set poll on\|off` | Master switch. `on` needs the url; with consent it also creates the polling key | off |
 | `set poll.interval <30-1440>` | Minutes between polls of one target (never faster than the window) | 60 |
 | `set poll.status <1\|3\|6\|12\|24>` | Hours between status requests (others ask for telemetry) | 6 |
+| `set poll.requests on\|off` | Accept analyzer targets in a JSON reading mode over HTTPS, while polling and community are on | off |
 | `set poll.community on\|off` | Share polling with other CoreScope observers (used once CoreScope control lands) | on |
 | `poll add <64-hex key \| neighbor prefix>` | Add a target (up to 8). A prefix must match exactly one heard neighbor | |
 | `poll remove <key>`, `poll clear`, `poll list` | Edit or show targets | |
 | `poll pw <key> auto\|blank\|hello\|set <password>` | Guest password to try. `set` stores a password of your own (1-15 printable characters, never echoed or logged); it is dropped from the settings if the target answers it as admin | auto |
 | `poll now <key or prefix>` | One poll outside the schedule. Replies `queued`, `busy`, or an error. Works with polling off; needs the polling key, a synced clock, a direct route, and 60 s since that target's last poll | |
 | `poll enable <key or prefix>` | Clear an admin stop, also of a target no longer listed | |
-| `get poll` | Switch, reading mode (`enc`, `json`, `telemetry`, `?` before the first policy answer), target count, key source, slot when none is in use, gate, clock | |
-| `get poll.status` | One short entry per target: number, key prefix, last result | |
-| `get poll.status <n>` | Target n: result, age, battery, temperature, route and SNR, role, next poll, login state, flood count | |
+| `get poll` | Switch, reading mode (`encrypted`, `json`, `telemetry`, `unknown`), slot and source (`set`, `host match`, `none`), active requests with held/free counts, target count, key source, gate, clock | |
+| `get poll.status` | One short entry per target: number, key prefix, requested marker, last result | |
+| `get poll.status <n>` | Target n: local/requested, result, age, battery, temperature, route and SNR, role, next poll, login state, flood count | |
 | `get poll.key` | Polling public key (the private key is never shown) | |
 
 `get mqtt.status` ends with `, poll: <ok>/<targets>` while polling is on.
@@ -461,6 +462,14 @@ Safety rules:
   `telemetry` the key never leaves the node: it publishes each decoded reading on the claim's
   slot (`.../battery` or `.../telemetry`) and claims carry `key: "own"`. Before the first
   policy answer of a boot nothing is registered or polled.
+- Requested targets share the eight slots with local targets, which always take priority.
+  Requests and envelope passwords stay in RAM; only an admin stop is kept in the state file.
+  An absent password uses blank then `hello`; an invalid envelope never falls back to blank.
+  Two failed envelope logins report `login_failed` until its version changes. An admin answer
+  discards the password and reports `admin_stop`, including after a request is dropped and adopted again.
+  Requests are dropped and queued radio work is canceled when the opt-in, polling, or community
+  goes off, the URL changes or stops being HTTPS, the mode leaves JSON/telemetry, a valid owners
+  snapshot omits them, or owners roles lapse after more than 1,800 seconds without a valid answer.
 - No polling until a validated NTP time was applied to the clock this boot. Request timestamps never go backwards,
   across reboots too. They're kept in `/poll_state` with the polling key.
 - One poll runs at a time, and never during neighbor discovery. Periodic discovery waits for
