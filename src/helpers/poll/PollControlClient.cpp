@@ -422,25 +422,12 @@ Reply request(Conn& k, const char* method, const char* path, const char* body, s
     return out;
   }
 
-  char head[352];
+  char head[kHttpRequestHeaderMax + 1];
   const bool default_port = (k.base.tls && k.base.port == 443) || (!k.base.tls && k.base.port == 80);
-  char host[kHttpHostMax + 8];
-  if (default_port) snprintf(host, sizeof(host), "%s", k.base.host);
-  else snprintf(host, sizeof(host), "%s:%u", k.base.host, (unsigned)k.base.port);
-  int n;
-  if (body) {
-    n = snprintf(head, sizeof(head),
-                 "%s %s%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: meshcore-observer/%s\r\n"
-                 "Accept: application/json\r\nConnection: keep-alive\r\n"
-                 "Content-Type: application/json\r\nContent-Length: %u\r\n\r\n",
-                 method, k.base.prefix, path, host, kPluginVersion, (unsigned)body_len);
-  } else {
-    n = snprintf(head, sizeof(head),
-                 "%s %s%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: meshcore-observer/%s\r\n"
-                 "Accept: application/json\r\nConnection: keep-alive\r\n\r\n",
-                 method, k.base.prefix, path, host, kPluginVersion);
-  }
-  if (n <= 0 || (size_t)n >= sizeof(head)) {
+  const size_t n = formatHttpRequestHeader(head, sizeof(head), method, k.base.prefix, path,
+                                           k.base.host, k.base.port, default_port, kPluginVersion,
+                                           body, body_len);
+  if (n == 0) {
     out.status = CTL_ERR_PROTOCOL;
     return out;
   }
@@ -462,7 +449,7 @@ Reply request(Conn& k, const char* method, const char* path, const char* body, s
     }
     k.reusable = false;
     k.rpos = k.rlen = 0;
-    int sent = writeBytes(k, head, (size_t)n, session_deadline, env);
+    int sent = writeBytes(k, head, n, session_deadline, env);
     if (sent == 1 && body) {
       sent = writeBytes(k, body, body_len, session_deadline, env);
     }
@@ -561,7 +548,7 @@ void runControlSession(const ControlRequest& req, ControlResult& res, const Cont
   WipingAllocator alloc;
   char obs[2 * kPubKeySize + 1];
   hexLower(obs, req.observer_pub, kPubKeySize);
-  char path[200];
+  char path[kHttpPathCap];
   const uint8_t count = req.target_count > kMaxTargets ? kMaxTargets : req.target_count;
 
   if (req.want & WANT_OWNERS) {

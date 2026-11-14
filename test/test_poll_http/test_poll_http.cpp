@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <string>
+#include <vector>
 
 #include "helpers/poll/PollHttp.h"
 
@@ -186,6 +187,73 @@ TEST(PollHttp, ClientVersionKeepsOnlyUrlSafeBytes) {
   poll::buildPolicyPath("abc", "0.11.1", "1.2 (rc 1)+x", path, sizeof(path));
   EXPECT_STREQ("/api/guest-polling/policy?plugin_version=0.11.1&observer=abc"
                "&client=meshcore.observer_fw&client_version=1.2__rc_1__x", path);
+}
+
+TEST(PollHttp, LongPrefixReleaseLabelFitsInTheRequestHeader) {
+  poll::HttpBase b;
+  ASSERT_TRUE(poll::parseHttpBase(
+      "https://beacon.example.org/services/meshcore/guest-polling/observer-control-plane", b));
+  EXPECT_TRUE(b.tls);
+  EXPECT_EQ(443, b.port);
+  const char* key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const char* release = "v1.18.0-rc.123456789012";
+  ASSERT_EQ(64u, strlen(key));
+  ASSERT_EQ(23u, strlen(release));
+
+  char path[poll::kHttpPathCap];
+  char head[poll::kHttpRequestHeaderMax + 1];
+  for (auto build : {poll::buildOwnersPath, poll::buildPolicyPath}) {
+    ASSERT_NE(0u, build(key, poll::kPluginVersion, release, path, sizeof(path)));
+    const size_t n = poll::formatHttpRequestHeader(head, sizeof(head), "GET", b.prefix, path, b.host,
+                                                   b.port, true, poll::kPluginVersion, nullptr, 0);
+    EXPECT_GT(n, 352u);
+    EXPECT_LT(n, sizeof(head));
+    EXPECT_NE('\0', head[0]);
+  }
+}
+
+TEST(PollHttp, MaximumBaseUrlAndPathFitInTheRequestHeader) {
+  const std::string host(poll::kHttpHostTextMax, 'a');
+  const std::string prefix_body(poll::kHttpPrefixTextMax - 1, 'b');
+  const std::string url = "https://" + host + ":65535/" + prefix_body;
+  poll::HttpBase b;
+  ASSERT_TRUE(poll::parseHttpBase(url.c_str(), b));
+  EXPECT_EQ(poll::kHttpHostTextMax, strlen(b.host));
+  EXPECT_EQ(poll::kHttpPrefixTextMax, strlen(b.prefix));
+  EXPECT_EQ(65535, b.port);
+  EXPECT_FALSE((b.tls && b.port == 443) || (!b.tls && b.port == 80));
+
+  const std::string path(poll::kHttpPathTextMax, 'c');
+  ASSERT_EQ(poll::kHttpPathCap - 1, path.size());
+  char head[poll::kHttpRequestHeaderMax + 1];
+  const char* body = "{}";
+  const size_t n = poll::formatHttpRequestHeader(head, sizeof(head), "POST", b.prefix, path.c_str(),
+                                                 b.host, b.port, false, poll::kPluginVersion, body,
+                                                 4294967295u);
+  EXPECT_EQ(poll::kHttpRequestHeaderMax, n);
+  EXPECT_EQ(n, strlen(head));
+}
+
+TEST(PollHttp, RequestHeaderRefusesAShortBuffer) {
+  char tiny[8];
+  memset(tiny, 'x', sizeof(tiny));
+  EXPECT_EQ(0u, poll::formatHttpRequestHeader(tiny, sizeof(tiny), "GET", "/cs", "/api/guest-keys",
+                                             "host.example", 443, true, poll::kPluginVersion, nullptr,
+                                             0));
+  EXPECT_STREQ("", tiny);
+  EXPECT_EQ(0u, poll::formatHttpRequestHeader(nullptr, 0, "GET", "", "/", "h", 80, true, "0.11.1",
+                                             nullptr, 0));
+
+  char path[poll::kHttpPathCap];
+  ASSERT_NE(0u, poll::buildOwnersPath("abc", poll::kPluginVersion, "1.2.3", path, sizeof(path)));
+  char full[poll::kHttpRequestHeaderMax + 1];
+  const size_t n = poll::formatHttpRequestHeader(full, sizeof(full), "GET", "", path, "h", 80, true,
+                                                 poll::kPluginVersion, nullptr, 0);
+  ASSERT_GT(n, 0u);
+  std::vector<char> short_buf(n, 'x');
+  EXPECT_EQ(0u, poll::formatHttpRequestHeader(short_buf.data(), short_buf.size(), "GET", "", path, "h",
+                                             80, true, poll::kPluginVersion, nullptr, 0));
+  EXPECT_EQ('\0', short_buf[0]);
 }
 
 TEST(PollHttp, ControlPathRefusesAShortBuffer) {

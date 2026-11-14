@@ -6,7 +6,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+
+#include "PollControlTypes.h"
 
 namespace poll {
 
@@ -308,6 +311,79 @@ static inline size_t buildPolicyPath(const char* observer_hex, const char* plugi
   if (observer_hex) httpPathAdd(p, observer_hex);
   appendClientQuery(p, clean);
   return p.ok ? p.len : 0;
+}
+
+// The control client's path buffer.
+static const size_t kHttpPathCap = 200;
+
+static const size_t kHttpHostTextMax = kHttpHostMax - 1;
+static const size_t kHttpPrefixTextMax = kHttpPrefixMax - 1;
+static const size_t kHttpPathTextMax = kHttpPathCap - 1;
+static const size_t kHttpPortTextMax = 5;                 // 65535
+static const size_t kHttpMethodTextMax = sizeof("POST") - 1;
+static const size_t kHttpAgentVersionMax = sizeof(kPluginVersion) - 1;
+static const size_t kHttpContentLengthDigits = 10;        // "%u" of an unsigned body length
+
+// Space after the method, then the POST literals, including the colon before the port.
+static const size_t kHttpRequestFixedPost =
+    sizeof(" " " HTTP/1.1\r\nHost: :\r\nUser-Agent: meshcore-observer/\r\n"
+           "Accept: application/json\r\nConnection: keep-alive\r\n"
+           "Content-Type: application/json\r\nContent-Length: \r\n\r\n") - 1;
+
+// Worst-case POST header length, not counting the terminator.
+static const size_t kHttpRequestHeaderMax =
+    kHttpMethodTextMax + kHttpPrefixTextMax + kHttpPathTextMax + kHttpHostTextMax +
+    kHttpPortTextMax + kHttpAgentVersionMax + kHttpContentLengthDigits + kHttpRequestFixedPost;
+
+static_assert(kHttpHostTextMax == 89, "host text maximum");
+static_assert(kHttpPrefixTextMax == 89, "prefix text maximum");
+static_assert(kHttpPathTextMax == 199, "path text maximum");
+static_assert(kHttpAgentVersionMax == 6, "plugin version length");
+static_assert(kHttpRequestFixedPost == 155, "fixed POST header literals");
+static_assert(kHttpRequestHeaderMax == 4 + 89 + 199 + 89 + 5 + 6 + 10 + 155, "header budget");
+static_assert(kHttpRequestHeaderMax > 352, "a long accepted URL must fit");
+
+// Request header, without the body. 0 means it did not fit; out is then empty.
+static inline size_t formatHttpRequestHeader(char* out, size_t cap, const char* method,
+                                             const char* prefix, const char* path, const char* host,
+                                             uint16_t port, bool default_port,
+                                             const char* agent_version, const char* body,
+                                             size_t body_len) {
+  if (!out || cap == 0) return 0;
+  out[0] = '\0';
+  if (!method || !path || !host || !agent_version) return 0;
+  if (!prefix) prefix = "";
+  int n;
+  if (body) {
+    if (default_port) {
+      n = snprintf(out, cap,
+                   "%s %s%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: meshcore-observer/%s\r\n"
+                   "Accept: application/json\r\nConnection: keep-alive\r\n"
+                   "Content-Type: application/json\r\nContent-Length: %u\r\n\r\n",
+                   method, prefix, path, host, agent_version, (unsigned)body_len);
+    } else {
+      n = snprintf(out, cap,
+                   "%s %s%s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: meshcore-observer/%s\r\n"
+                   "Accept: application/json\r\nConnection: keep-alive\r\n"
+                   "Content-Type: application/json\r\nContent-Length: %u\r\n\r\n",
+                   method, prefix, path, host, (unsigned)port, agent_version, (unsigned)body_len);
+    }
+  } else if (default_port) {
+    n = snprintf(out, cap,
+                 "%s %s%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: meshcore-observer/%s\r\n"
+                 "Accept: application/json\r\nConnection: keep-alive\r\n\r\n",
+                 method, prefix, path, host, agent_version);
+  } else {
+    n = snprintf(out, cap,
+                 "%s %s%s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: meshcore-observer/%s\r\n"
+                 "Accept: application/json\r\nConnection: keep-alive\r\n\r\n",
+                 method, prefix, path, host, (unsigned)port, agent_version);
+  }
+  if (n <= 0 || (size_t)n >= cap) {
+    out[0] = '\0';
+    return 0;
+  }
+  return (size_t)n;
 }
 
 }  // namespace poll
