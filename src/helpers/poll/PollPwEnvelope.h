@@ -6,14 +6,11 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "PollWipe.h"
+
 namespace poll {
 
 namespace detail {
-
-static inline void wipe(void* p, size_t n) {
-  volatile uint8_t* v = (volatile uint8_t*)p;
-  while (n--) *v++ = 0;
-}
 
 static inline uint32_t rotr32(uint32_t x, uint32_t n) {
   return (x >> n) | (x << (32 - n));

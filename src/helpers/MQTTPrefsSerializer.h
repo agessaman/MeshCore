@@ -7,6 +7,7 @@
 #include <helpers/MQTTNeighborsPolicy.h>
 #include <helpers/MQTTPrefsStorage.h>
 #include <helpers/poll/PollPrefsPolicy.h>
+#include <helpers/poll/PollWipe.h>
 #include <helpers/WifiPowerSavePolicy.h>
 #include <helpers/WifiTxPowerPolicy.h>
 
@@ -553,7 +554,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
         }
       }
     }
-    ~PollPrefs() { memset(_pass, 0, sizeof(_pass)); }
+    ~PollPrefs() { poll::detail::wipe(_pass, sizeof(_pass)); }
     void apply(bool* repaired) {
       if (_interval < static_cast<int32_t>(MQTT_POLL_INTERVAL_MIN) ||
           _interval > static_cast<int32_t>(MQTT_POLL_INTERVAL_MAX)) {

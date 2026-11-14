@@ -5,6 +5,7 @@
 
 #include "../MQTTPrefsStorage.h"
 #include "PollTypes.h"
+#include "PollWipe.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -237,7 +238,7 @@ static inline bool packTargets(uint8_t targets[][MQTT_POLL_PUBKEY_SIZE], uint8_t
   memcpy(targets, packed, sizeof(packed));
   memcpy(pw, packed_pw, sizeof(packed_pw));
   memcpy(pass, packed_pass, sizeof(packed_pass));
-  memset(packed_pass, 0, sizeof(packed_pass));
+  detail::wipe(packed_pass, sizeof(packed_pass));
   return moved;
 }
 

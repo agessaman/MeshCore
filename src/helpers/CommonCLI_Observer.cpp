@@ -34,6 +34,7 @@
 #include "MQTTDefaults.h"
 #include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
 #include "poll/PollPrefsPolicy.h"
+#include "poll/PollWipe.h"
 #if defined(POLL_TEST_CONTROL_CLI)
 #include "poll/PollControlClient.h"
 #include <esp_heap_caps.h>
@@ -2012,7 +2013,7 @@ bool CommonCLI::handlePollObserverCommand(const char* command, char* reply) {
             word_ok ? poll::setTargetPassword(_mqtt_prefs.poll_targets, _mqtt_prefs.poll_pw_mode,
                                               _mqtt_prefs.poll_pw, key, password)
                     : poll::TargetEdit::BadPassword;
-        memset(password, 0, sizeof(password));
+        poll::detail::wipe(password, sizeof(password));
         if (edit == poll::TargetEdit::Ok) {
           strcpy(reply, "OK");
           changed = true;
