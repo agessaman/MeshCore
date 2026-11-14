@@ -1,6 +1,7 @@
 #include "ed_25519.h"
 #include "sha512.h"
 #include "ge.h"
+#include "secure_zero.h"
 
 
 void ed25519_create_keypair(unsigned char *public_key, unsigned char *private_key, const unsigned char *seed) {
@@ -13,6 +14,7 @@ void ed25519_create_keypair(unsigned char *public_key, unsigned char *private_ke
 
     ge_scalarmult_base(&A, private_key);
     ge_p3_tobytes(public_key, &A);
+    ed25519_secure_zero(&A, sizeof(A));
 }
 
 void ed25519_derive_pub(unsigned char *public_key, const unsigned char *private_key) {
@@ -20,4 +22,5 @@ void ed25519_derive_pub(unsigned char *public_key, const unsigned char *private_
 
     ge_scalarmult_base(&A, private_key);
     ge_p3_tobytes(public_key, &A);
+    ed25519_secure_zero(&A, sizeof(A));
 }

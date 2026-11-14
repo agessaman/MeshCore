@@ -53,6 +53,7 @@
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
+#include "RepeaterPoller.h"
 
 #ifndef REPEATER_HISTORY_SLOTS
 #if defined(STM32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -110,6 +111,9 @@ struct NeighbourInfo {
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #ifdef WITH_WEBCONFIG
     , public WebConfigServer::Callbacks
+#endif
+#ifdef WITH_REPEATER_POLL
+    , public RepeaterPollHost
 #endif
 {
   FILESYSTEM* _fs;
@@ -233,6 +237,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   static const int NEIGHBOR_DISCOVER_PEER_BASE = 1000;
   static const unsigned long NEIGHBOR_DISCOVER_QUEUE_TIMEOUT_MS = 29000;
   static const int NEIGHBOR_DISCOVER_MIN_FREE_PACKETS = 5;
+#endif
+
+#ifdef WITH_REPEATER_POLL
+  RepeaterPoller _poller;
+  bool pollDiscoveryActive() const;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
@@ -405,7 +414,12 @@ public:
   void setAlertBridge(MQTTBridge* b) { _alerter.setBridge(b); }
   bool flashFromManifest(char* reply);
   bool isDeferredOtaUpdatePending() override { return _bridge_ctl.otaPending(_ota_update_at); }
-  void rebootForSelfHeal() { _cli.getBoard()->reboot(); }
+  void rebootForSelfHeal() {
+#ifdef WITH_REPEATER_POLL
+    _poller.flush();
+#endif
+    _cli.getBoard()->reboot();
+  }
   bool isOtaInProgress() {
     return _ota_update_at != 0 || _cli.getBoard()->isOTAPortalOpen() ||
            _cli.getBoard()->isOTAUpdateInProgress();
@@ -494,6 +508,9 @@ public:
     handleCommand(0, cmd, reply);
   }
   void rebootNow() override {
+#ifdef WITH_REPEATER_POLL
+    _poller.flush();
+#endif
     _cli.getBoard()->reboot();
   }
   void onConfigBatchStart() override { _bridge_ctl.beginConfigBatch(); }
@@ -508,6 +525,57 @@ public:
     return false;
   }
   void buildStatsJson(char* buf, size_t buf_size) override;
+#endif
+
+#ifdef WITH_REPEATER_POLL
+  // CommonCLICallbacks
+  bool supportsRepeaterPoll() override { return true; }
+  bool ensureRepeaterPollKey() override { return _poller.ensureIdentity(); }
+  int resolveRepeaterPollPrefix(const char* hex, uint8_t* pub_out) override { return pollResolveNeighborPrefix(hex, pub_out); }
+  bool repeaterPollRoomFor(const uint8_t* pub) override { return _poller.roomFor(pub); }
+  void appendRepeaterPollStatus(char* reply, size_t reply_size) override;
+  bool repeaterPollControlPending() override { return _poller.controlPending(); }
+
+  // RepeaterPollHost
+  mesh::Packet* pollObtainPacket() override;
+  mesh::Packet* pollCreateLogin(const mesh::LocalIdentity& poll_id, const mesh::Identity& target,
+                                const uint8_t* secret, const uint8_t* plain, size_t len) override;
+  bool pollSendDirect(mesh::Packet* pkt) override;
+  bool pollCancelQueued(const mesh::Packet* pkt) override;
+  bool pollIsTransmitting(const mesh::Packet* pkt) override { return isCurrentOutbound(pkt); }
+  void pollReleasePacket(mesh::Packet* pkt) override { releasePacket(pkt); }
+  bool pollNeighbor(const uint8_t* pub, uint32_t* heard_at, int8_t* snr_x4) override;
+  int pollResolveNeighborPrefix(const char* hex, uint8_t* pub_out) override;
+  uint32_t pollNow() override { return getRTCClock()->getCurrentTime(); }
+  uint32_t pollNowUnique() override { return getRTCClock()->getCurrentTimeUnique(); }
+  bool pollNtpSeen() override;
+  mesh::RNG* pollRng() override { return getRNG(); }
+  uint32_t pollReplyWindowMs() override;
+  bool pollDiscoveryBusy() override { return pollDiscoveryActive(); }
+  uint8_t pollNodeHash() override { return self_id.pub_key[0]; }
+  void pollReadSettings(PollSettings& out) override;
+  void pollEnvelopeSecret(uint8_t* out, const uint8_t* epk) override { self_id.calcSharedSecret(out, epk); }
+  void pollNodePub(uint8_t* out) override { memcpy(out, self_id.pub_key, PUB_KEY_SIZE); }
+  const char* pollNodeName() override { return _prefs.node_name; }
+  const char* pollFirmwareVersion() override { return FIRMWARE_VERSION; }
+  void pollSignRegistration(uint8_t* sig, const uint8_t* msg, size_t len) override { self_id.sign(sig, msg, (int)len); }
+  bool pollRequestControl(const poll::ControlRequest& req) override { return bridge && bridge->requestPollControl(req); }
+  bool pollTakeControlResult(poll::ControlResult& out) override { return bridge && bridge->takePollControlResult(out); }
+  bool pollRequestClaim(const char* json, size_t len, uint8_t slot, bool automatic,
+                        const char* host, uint32_t generation) override {
+    return bridge && bridge->requestPublishPollClaim(json, len, slot, automatic, host, generation);
+  }
+  void pollDiscardPassword(const uint8_t* pub) override;
+  uint8_t pollTakeClaimResult() override { return bridge ? bridge->takePollClaimResult() : (uint8_t)poll::CLAIM_NONE; }
+  bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind, bool automatic,
+                          const char* host, uint32_t generation) override {
+    return bridge && bridge->requestPublishPollReading(json, len, slot, kind, automatic, host, generation);
+  }
+  uint8_t pollTakeReadingResult() override { return bridge ? bridge->takePollReadingResult() : (uint8_t)poll::CLAIM_NONE; }
+  uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count, char* matched_host,
+                           uint32_t* matched_gen) override {
+    return bridge ? bridge->findPollSlotForHosts(hosts, count, matched_host, matched_gen) : 0;
+  }
 #endif
 
   // To check if there is pending work

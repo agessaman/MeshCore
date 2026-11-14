@@ -11,6 +11,7 @@
 
 #include "fixedint.h"
 #include "sha512.h"
+#include "secure_zero.h"
 
 /* the K array */
 static const uint64_t K[80] = {
@@ -135,6 +136,10 @@ static int sha512_compress(sha512_context *md, unsigned char *buf)
         md->state[i] = md->state[i] + S[i];
     }
 
+    ed25519_secure_zero(S, sizeof(S));
+    ed25519_secure_zero(W, sizeof(W));
+    ed25519_secure_zero(&t0, sizeof(t0));
+    ed25519_secure_zero(&t1, sizeof(t1));
     return 0;
 }
 
@@ -268,8 +273,9 @@ int sha512(const unsigned char *message, size_t message_len, unsigned char *out)
 {
     sha512_context ctx;
     int ret;
-    if ((ret = sha512_init(&ctx))) return ret;
-    if ((ret = sha512_update(&ctx, message, message_len))) return ret;
-    if ((ret = sha512_final(&ctx, out))) return ret;
-    return 0;
+    ret = sha512_init(&ctx);
+    if (!ret) ret = sha512_update(&ctx, message, message_len);
+    if (!ret) ret = sha512_final(&ctx, out);
+    ed25519_secure_zero(&ctx, sizeof(ctx));
+    return ret;
 }
