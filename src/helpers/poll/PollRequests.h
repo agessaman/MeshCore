@@ -126,16 +126,18 @@ static inline int findRequested(const RequestTable& table, const uint8_t* pub) {
   return -1;
 }
 
-// A new envelope drops the decrypted password and the refusal, so it can be tried again.
+// A new envelope drops the password; only a new present ver lifts a refusal.
 static inline void replaceEnvelope(RequestedTarget& target, const PwEnvelope& envelope) {
   volatile char* p = target.pw;
   for (uint8_t i = 0; i < (uint8_t)sizeof(target.pw); i++) p[i] = 0;
+  const bool refused = target.login_failed &&
+                       (!envelope.present || target.failed_ver == envelope.ver);
   target.envelope = envelope;
   target.pw_bad = envelope.bad;
   target.pw_ready = false;
   target.pw_ver = 0;
-  target.login_failed = false;
-  target.failed_ver = 0;
+  target.login_failed = refused;
+  if (!refused) target.failed_ver = 0;
 }
 
 static inline void removeRequested(RequestTable& table, uint8_t index, RequestDelta& delta) {
@@ -228,6 +230,13 @@ static inline void reconcile(RequestTable& table, const RequestOffer& offer, uin
   for (uint8_t i = 0; i < table.count;) {
     if (keyListed(table.targets[i].pub, offer.local, local_n)) removeRequested(table, i, delta);
     else i++;
+  }
+  // Local targets hold the eight seats first, whatever the fetch said.
+  const unsigned cap = local_n >= kMaxTargets ? 0u : (unsigned)(kMaxTargets - local_n);
+  while ((unsigned)table.count > cap) {
+    const int evict = requestToEvict(table, nullptr);   // no roles here: lowest rank is last
+    if (evict < 0) break;
+    removeRequested(table, (uint8_t)evict, delta);
   }
   if (!offer.owners_ok) return;
 

@@ -153,7 +153,7 @@ TEST(PollRequests, ReconcileAdoptsInOfferOrderUntilFull) {
   EXPECT_EQ(3u, table.targets[0].pw_ver);
 }
 
-TEST(PollRequests, EnvelopeChangeClearsPasswordAndRefusal) {
+TEST(PollRequests, EnvelopeChangeKeepsRefusalUntilTheVersionChanges) {
   poll::RequestTable table;
   memset(&table, 0, sizeof(table));
   hold(table, 0x31, envGood(1, 9), 'S');
@@ -175,22 +175,27 @@ TEST(PollRequests, EnvelopeChangeClearsPasswordAndRefusal) {
   poll::RequestedEntry changed = offerEntry(0x31, bytes);
   poll::reconcile(table, offerOf(true, nullptr, 0, &changed, 1), 50, delta);
   EXPECT_FALSE(table.targets[0].pw_ready);
-  EXPECT_FALSE(table.targets[0].login_failed);
+  EXPECT_TRUE(table.targets[0].login_failed);   // same ver: the refusal survives
   EXPECT_EQ(0u, table.targets[0].pw_ver);
-  EXPECT_EQ(0u, table.targets[0].failed_ver);
+  EXPECT_EQ(1u, table.targets[0].failed_ver);
   EXPECT_TRUE(pwIs(table.targets[0].pw, 0));
   EXPECT_EQ(0xee, table.targets[0].envelope.ct[0]);
   EXPECT_EQ(1u, table.targets[0].envelope.ver);
   EXPECT_FALSE(poll::requestMayPoll(table.targets[0]));
 
-  memset(table.targets[0].pw, 'S', sizeof(table.targets[0].pw));
-  table.targets[0].pw_ready = true;
-  table.targets[0].login_failed = true;
-  table.targets[0].failed_ver = 1;
+  // A fresh ephemeral key at the same ver does not re-arm the password.
+  char pw[16] = "guestpw";
+  poll::envelopeOpened(table.targets[0], true, pw);
+  EXPECT_TRUE(table.targets[0].pw_ready);
+  EXPECT_FALSE(poll::requestMayPoll(table.targets[0]));
+  EXPECT_EQ(nullptr, poll::requestedPassword(table.targets[0]));
+  EXPECT_FALSE(poll::noteEnvelopeLoginFails(table.targets[0], 2));
+
   poll::RequestedEntry next = offerEntry(0x31, envGood(2, 9));
   poll::reconcile(table, offerOf(true, nullptr, 0, &next, 1), 50, delta);
   EXPECT_EQ(2u, table.targets[0].envelope.ver);
   EXPECT_FALSE(table.targets[0].login_failed);
+  EXPECT_EQ(0u, table.targets[0].failed_ver);
   EXPECT_FALSE(table.targets[0].pw_ready);
   EXPECT_TRUE(pwIs(table.targets[0].pw, 0));
 
@@ -201,11 +206,21 @@ TEST(PollRequests, EnvelopeChangeClearsPasswordAndRefusal) {
   memset(table.targets[0].pw, 'S', sizeof(table.targets[0].pw));
   poll::reconcile(table, offerOf(true, nullptr, 0, &blank, 1), 50, delta);
   EXPECT_FALSE(table.targets[0].envelope.present);
-  EXPECT_FALSE(table.targets[0].login_failed);
+  EXPECT_TRUE(table.targets[0].login_failed);   // removal alone does not re-arm
+  EXPECT_EQ(2u, table.targets[0].failed_ver);
   EXPECT_TRUE(pwIs(table.targets[0].pw, 0));
-  EXPECT_TRUE(poll::requestMayPoll(table.targets[0]));
+  EXPECT_TRUE(poll::requestMayPoll(table.targets[0]));   // no password: blank hello
 
-  // The same blank envelope does not clear a refusal: ver did not change.
+  // Re-adding the refused ver after the gap still refuses the password.
+  poll::RequestedEntry back = offerEntry(0x31, envGood(2, 11));
+  poll::reconcile(table, offerOf(true, nullptr, 0, &back, 1), 50, delta);
+  EXPECT_TRUE(table.targets[0].login_failed);
+  EXPECT_EQ(2u, table.targets[0].failed_ver);
+  poll::envelopeOpened(table.targets[0], true, pw);
+  EXPECT_FALSE(poll::requestMayPoll(table.targets[0]));
+  EXPECT_EQ(nullptr, poll::requestedPassword(table.targets[0]));
+
+  // A refusal recorded at the absent ver keeps blocking.
   table.targets[0].login_failed = true;
   table.targets[0].failed_ver = 0;
   poll::reconcile(table, offerOf(true, nullptr, 0, &blank, 1), 50, delta);
@@ -288,17 +303,17 @@ TEST(PollRequests, LocalTargetTakesTheRequestedSlot) {
   setKey(local[7], 0x61);
   poll::RequestedEntry neu = offerEntry(0x63, envGood(1, 3));
   poll::RequestDelta delta;
-  // Roles are stale, but the operator's target still takes the slot.
+  // Eight seats are local-first even when the owners fetch failed.
   poll::reconcile(table, offerOf(false, local, 8, &neu, 1), 1, delta);
-  ASSERT_EQ(1, table.count);
-  EXPECT_EQ(0x62, table.targets[0].pub[0]);
-  EXPECT_TRUE(pwIs(table.targets[0].pw, 'Q'));
-  EXPECT_EQ(1, delta.dropped_count);
+  EXPECT_EQ(0, table.count);
+  EXPECT_EQ(2, delta.dropped_count);
   EXPECT_EQ(0x61, delta.dropped[0][0]);
+  EXPECT_EQ(0x62, delta.dropped[1][0]);
   EXPECT_EQ(0, delta.added_count);
   EXPECT_EQ(0, poll::requestFreeSlots(8, table.count));
-  EXPECT_TRUE(pwIs(table.targets[1].pw, 0));
+  EXPECT_TRUE(tablePwClear(table));
 
+  hold(table, 0x62, envClear(), 'Q');
   uint8_t one[1][poll::kPubKeySize];
   setKey(one[0], 0x62);
   poll::reconcile(table, offerOf(true, one, 1, &neu, 1), 2, delta);
@@ -308,6 +323,41 @@ TEST(PollRequests, LocalTargetTakesTheRequestedSlot) {
   EXPECT_EQ(0x63, delta.added[0][0]);
   EXPECT_EQ(6, poll::requestFreeSlots(1, table.count));
   EXPECT_TRUE(pwIs(table.targets[1].pw, 0));
+}
+
+TEST(PollRequests, SharedSeatsHoldWhenTheOwnersFetchFailsOrSucceeds) {
+  poll::RequestTable table;
+  memset(&table, 0, sizeof(table));
+  uint8_t local[8][poll::kPubKeySize];
+  for (uint8_t i = 0; i < 8; i++) setKey(local[i], (uint8_t)(0xB0 + i));
+  poll::RequestDelta delta;
+
+  // Eight locals leave no seat; a failed fetch does not keep the held request.
+  hold(table, 0x91, envGood(1, 1), 'R');
+  poll::reconcile(table, offerOf(false, local, 8, nullptr, 0), 1, delta);
+  EXPECT_EQ(0, table.count);
+  EXPECT_EQ(1, delta.dropped_count);
+  EXPECT_EQ(0x91, delta.dropped[0][0]);
+  EXPECT_TRUE(tablePwClear(table));
+
+  // A good answer also evicts from the end of the table down to the shared budget.
+  hold(table, 0x92, envGood(2, 2), 'T');
+  hold(table, 0x93, envGood(3, 3), 'U');
+  hold(table, 0x94, envGood(4, 4), 'V');
+  poll::RequestedEntry three[3];
+  three[0] = offerEntry(0x92, envGood(2, 2));
+  three[1] = offerEntry(0x93, envGood(3, 3));
+  three[2] = offerEntry(0x94, envGood(4, 4));
+  poll::reconcile(table, offerOf(true, local, 7, three, 3), 2, delta);
+  ASSERT_EQ(1, table.count);
+  EXPECT_EQ(0x92, table.targets[0].pub[0]);
+  EXPECT_EQ(2, delta.dropped_count);
+  EXPECT_EQ(0x94, delta.dropped[0][0]);
+  EXPECT_EQ(0x93, delta.dropped[1][0]);
+  EXPECT_EQ(0, delta.added_count);
+  EXPECT_TRUE(pwIs(table.targets[0].pw, 'T'));
+  EXPECT_TRUE(pwIs(table.targets[1].pw, 0));
+  EXPECT_TRUE(pwIs(table.targets[2].pw, 0));
 }
 
 TEST(PollRequests, DropAllWipesEveryPassword) {
