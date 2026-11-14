@@ -24,7 +24,8 @@ static_assert(PATH_HASH_SIZE == 1, "poll packets carry one-byte hashes");
 static_assert(PUB_KEY_SIZE == poll::kPubKeySize, "key size");
 static_assert(PRV_KEY_SIZE == poll::kPrvKeySize, "private key size");
 static_assert(MAX_HASH_SIZE == poll::kReadingHashSize, "a reading prints the packet hash the envelope does");
-static_assert(sizeof(RepeaterPoller) <= 5204, "repeater poller RAM budget");
+static_assert(sizeof(RepeaterPoller) <= 5540, "repeater poller RAM budget");
+static_assert(poll::kPolicyHostLen == kMQTTPollHostSize, "matched broker host fits the policy host buffer");
 
 namespace {
 
@@ -1769,13 +1770,25 @@ void RepeaterPoller::readControlSettings(const PollSettings& s) {
 void RepeaterPoller::updateClaimSlot() {
   uint8_t matched = 0;
   if (slot_setting_ == 0 && policy_.mqtt_host_count != 0) {
-    matched = host_->pollSlotForHosts(policy_.mqtt_hosts, policy_.mqtt_host_count);
+    matched = host_->pollSlotForHosts(policy_.mqtt_hosts, policy_.mqtt_host_count, nullptr, nullptr);
   }
   const uint8_t slot = poll::effectiveClaimSlot(slot_setting_, matched);
   if (slot == claim_slot_) return;
   if (slot == 0) POLL_LOG("claim slot none: poll.slot unset and no broker matches the policy");
   else POLL_LOG("claim slot %u (%s)", (unsigned)slot, slot_setting_ ? "poll.slot" : "broker match");
   claim_slot_ = slot;
+}
+
+bool RepeaterPoller::claimBroker(char* host, uint32_t* gen) {
+  host[0] = '\0';
+  *gen = 0;
+  if (slot_setting_ != 0) return true;
+  const uint8_t slot = host_->pollSlotForHosts(policy_.mqtt_hosts, policy_.mqtt_host_count, host, gen);
+  if (slot != claim_slot_ || host[0] == '\0') {
+    updateClaimSlot();
+    return false;
+  }
+  return true;
 }
 
 uint32_t RepeaterPoller::startupHoldS() const {
@@ -1926,6 +1939,10 @@ void RepeaterPoller::takeClaim(uint32_t now) {
     poll::claimSent(claim_, claim_pending_sig_, claim_pending_community_, claim_pending_listed_, now);
     claim_sent_at_ = now;
     POLL_LOG("claim published to slot %u%s", (unsigned)claim_slot_, claim_pending_community_ ? "" : " (community off)");
+  } else if (r == poll::CLAIM_WRONG_HOST) {
+    const uint8_t was = claim_slot_;
+    updateClaimSlot();
+    POLL_LOG("claim not published: MQTT%u broker changed", (unsigned)was);
   } else {
     // A bridge stop drops the answer (CLAIM_NONE): that is a failure too.
     poll::claimFailed(claim_, now);
@@ -2004,7 +2021,10 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
     POLL_LOG("claim not built (too long)");
     return;
   }
-  if (!host_->pollRequestClaim(json, len, claim_slot_)) {
+  char host[poll::kPolicyHostLen];
+  uint32_t gen = 0;
+  if (!claimBroker(host, &gen)) return;
+  if (!host_->pollRequestClaim(json, len, claim_slot_, slot_setting_ == 0, host, gen)) {
     poll::claimFailed(claim_, now);
     if (!(ctl_note_ & kNoteClaimRefused)) POLL_LOG("claim not handed to the bridge (stopped or busy); retry in %lus", (unsigned long)poll::kClaimRetrySec);
     ctl_note_ |= kNoteClaimRefused;
@@ -2109,6 +2129,12 @@ void RepeaterPoller::takeReading() {
     r = poll::CLAIM_FAILED;
   }
   reading_pending_ = false;
+  if (r == poll::CLAIM_WRONG_HOST) {
+    const uint8_t was = claim_slot_;
+    updateClaimSlot();
+    POLL_LOG("reading not published: MQTT%u broker changed", (unsigned)was);
+    return;
+  }
   if (r != poll::CLAIM_PUBLISHED) {
     reading_retry_ms_ = millis() | 1UL;
     POLL_LOG("reading to slot %u failed; kept, retry in %lus", (unsigned)claim_slot_, (unsigned long)(kReadingRetryMs / 1000));
@@ -2145,7 +2171,10 @@ void RepeaterPoller::maybePublishReading(uint32_t now) {
     poll::readingHoldRemoveAt(readings_->hold, 0);
     return;
   }
-  if (!host_->pollRequestReading(json_, len, claim_slot_, kind)) {
+  char host[poll::kPolicyHostLen];
+  uint32_t gen = 0;
+  if (!claimBroker(host, &gen)) return;
+  if (!host_->pollRequestReading(json_, len, claim_slot_, kind, slot_setting_ == 0, host, gen)) {
     reading_retry_ms_ = millis() | 1UL;
     POLL_LOG("reading not handed to the bridge (stopped or busy); retry in %lus", (unsigned long)(kReadingRetryMs / 1000));
     return;

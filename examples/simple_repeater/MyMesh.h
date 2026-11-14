@@ -561,17 +561,20 @@ public:
   void pollSignRegistration(uint8_t* sig, const uint8_t* msg, size_t len) override { self_id.sign(sig, msg, (int)len); }
   bool pollRequestControl(const poll::ControlRequest& req) override { return bridge && bridge->requestPollControl(req); }
   bool pollTakeControlResult(poll::ControlResult& out) override { return bridge && bridge->takePollControlResult(out); }
-  bool pollRequestClaim(const char* json, size_t len, uint8_t slot) override {
-    return bridge && bridge->requestPublishPollClaim(json, len, slot);
+  bool pollRequestClaim(const char* json, size_t len, uint8_t slot, bool automatic,
+                        const char* host, uint32_t generation) override {
+    return bridge && bridge->requestPublishPollClaim(json, len, slot, automatic, host, generation);
   }
   void pollDiscardPassword(const uint8_t* pub) override;
   uint8_t pollTakeClaimResult() override { return bridge ? bridge->takePollClaimResult() : (uint8_t)poll::CLAIM_NONE; }
-  bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind) override {
-    return bridge && bridge->requestPublishPollReading(json, len, slot, kind);
+  bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind, bool automatic,
+                          const char* host, uint32_t generation) override {
+    return bridge && bridge->requestPublishPollReading(json, len, slot, kind, automatic, host, generation);
   }
   uint8_t pollTakeReadingResult() override { return bridge ? bridge->takePollReadingResult() : (uint8_t)poll::CLAIM_NONE; }
-  uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count) override {
-    return bridge ? bridge->findPollSlotForHosts(hosts, count) : 0;
+  uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count, char* matched_host,
+                           uint32_t* matched_gen) override {
+    return bridge ? bridge->findPollSlotForHosts(hosts, count, matched_host, matched_gen) : 0;
   }
 #endif
 

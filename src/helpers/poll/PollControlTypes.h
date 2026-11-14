@@ -85,6 +85,7 @@ enum ClaimPublish : uint8_t {
   CLAIM_PENDING,
   CLAIM_PUBLISHED,
   CLAIM_FAILED,       // slot down, not allowed on that slot, or the broker did not take it
+  CLAIM_WRONG_HOST,   // automatic slot's broker is no longer the one that was matched
 };
 
 }  // namespace poll

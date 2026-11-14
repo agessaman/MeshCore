@@ -493,6 +493,9 @@ private:
     size_t len;
     uint8_t slot;                 // 1-based
     uint8_t type;                 // MQTTMessageType
+    bool automatic;               // false when the operator set poll.slot
+    char host[kMQTTPollHostSize]; // broker that automatic selection matched
+    uint32_t generation;          // snapshot generation that match was read from
     std::atomic<uint8_t> state;   // poll::ClaimPublish
   };
   PollPublishBox _poll_claim;
@@ -500,12 +503,27 @@ private:
   // Set once the mesh first uses either hand-off, so a node with polling off
   // pays one atomic load per bridge pass and nothing else.
   std::atomic<bool> _poll_used;
+  // Mesh-visible broker copy. MQTT task publishes it; seqlock plus critical section, like NTP diag.
+  struct PollSlotBroker {
+    bool enabled;
+    char broker[kMQTTPollHostSize];
+    uint32_t generation;
+  };
+  PollSlotBroker _poll_slot_broker[RUNTIME_MQTT_SLOTS];
+  std::atomic<uint32_t> _poll_slot_seq;
+#ifdef ESP_PLATFORM
+  mutable portMUX_TYPE _poll_slot_mux = portMUX_INITIALIZER_UNLOCKED;
+#endif
+  void publishPollSlotBroker(int index);
+  bool copyPollSlotBrokers(PollSlotBroker* out) const;
   void servicePollControl();
   void servicePollClaim();
   void servicePollReading();
+  enum class PollSendResult : uint8_t { Failed, Published, WrongHost };
   bool queuePollPublish(PollPublishBox& box, const char* json, size_t len, size_t cap,
-                        uint8_t slot, uint8_t type);
-  bool sendPollPublish(PollPublishBox& box);
+                        uint8_t slot, uint8_t type, bool automatic, const char* host,
+                        uint32_t generation);
+  PollSendResult sendPollPublish(PollPublishBox& box);
   static uint8_t takePollPublishResult(PollPublishBox& box);
   static void releasePollPublish(PollPublishBox& box);
   void finishPollControl(bool started, uint8_t timed_out_want = 0);
@@ -862,15 +880,17 @@ public:
   // session is requested, running or its result is still untaken.
   bool requestPollControl(const poll::ControlRequest& req);
   bool takePollControlResult(poll::ControlResult& out);
-  // slot is 1-based. Refused while the previous claim is still pending.
-  bool requestPublishPollClaim(const char* json, size_t len, uint8_t slot);
+  // slot is 1-based. automatic carries the matched host; an operator slot does not.
+  bool requestPublishPollClaim(const char* json, size_t len, uint8_t slot, bool automatic,
+                               const char* host, uint32_t generation);
   uint8_t takePollClaimResult();   // poll::ClaimPublish; a final answer is returned once
   // One reading at a time, beside the claim; kind is an MQTTPollReadingKind.
-  // Refused while the previous reading is still pending.
-  bool requestPublishPollReading(const char* json, size_t len, uint8_t slot, uint8_t kind);
+  bool requestPublishPollReading(const char* json, size_t len, uint8_t slot, uint8_t kind,
+                                 bool automatic, const char* host, uint32_t generation);
   uint8_t takePollReadingResult(); // poll::ClaimPublish; a final answer is returned once
-  // 1-based lowest enabled slot whose broker host equals an entry, 0 when none does.
-  uint8_t findPollSlotForHosts(const char hosts[][64], uint8_t count);
+  // 1-based slot whose broker matches, or 0. Optional outs receive that host and generation.
+  uint8_t findPollSlotForHosts(const char hosts[][64], uint8_t count, char* matched_host,
+                               uint32_t* matched_gen);
 #if defined(POLL_TEST_CONTROL_CLI)
   // Bench only: the running bridge, for `get poll.ctl`.
   static MQTTBridge* pollBenchInstance();

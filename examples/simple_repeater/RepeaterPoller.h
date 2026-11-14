@@ -84,15 +84,19 @@ public:
   // The bridge's CoreScope hand-offs; none block, all refuse while the bridge is stopped or busy.
   virtual bool pollRequestControl(const poll::ControlRequest& req) = 0;
   virtual bool pollTakeControlResult(poll::ControlResult& out) = 0;
-  virtual bool pollRequestClaim(const char* json, size_t len, uint8_t slot) = 0;
+  // automatic carries the matched host; an operator slot passes false and ignores host.
+  virtual bool pollRequestClaim(const char* json, size_t len, uint8_t slot, bool automatic,
+                                const char* host, uint32_t generation) = 0;
   virtual uint8_t pollTakeClaimResult() = 0;
   // Drops the operator's password for this target from the saved settings: it was answered as admin.
   virtual void pollDiscardPassword(const uint8_t* pub) = 0;
   // One reading at a time, beside the claim; kind is an MQTTPollReadingKind.
-  virtual bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind) = 0;
+  virtual bool pollRequestReading(const char* json, size_t len, uint8_t slot, uint8_t kind,
+                                  bool automatic, const char* host, uint32_t generation) = 0;
   virtual uint8_t pollTakeReadingResult() = 0;
-  // Lowest enabled MQTT slot (1-based) whose broker host is one of hosts, or 0.
-  virtual uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count) = 0;
+  // 1-based slot whose broker matches, or 0. Optional outs receive that host and generation.
+  virtual uint8_t pollSlotForHosts(const char hosts[][poll::kPolicyHostLen], uint8_t count,
+                                   char* matched_host, uint32_t* matched_gen) = 0;
 };
 
 // What identifies a queued packet when only its pool slot is known.
@@ -396,6 +400,7 @@ private:
   void takeClaim(uint32_t now);
   void maybeClaim(uint32_t now);
   void updateClaimSlot();
+  bool claimBroker(char* host, uint32_t* gen);
   uint8_t readingFormat() const;
   char* jsonBuffer();
   poll::ClaimOptions claimOptions() const;
