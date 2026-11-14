@@ -564,11 +564,12 @@ void RepeaterPoller::takeRequests(const poll::ControlResult& res, uint32_t now) 
           poll::sameEnvelope(table.targets[r].envelope, res.requested[n].entry.pw)) continue;
       const int8_t i = slotFor(table.targets[r].pub);
       if (i < 0) continue;
-      if (run_idx_ == i && run_kind_ == RUN_EXCHANGE) abortRun("requested envelope changed");
-      states_[i].logged_in_at = states_[i].login_checked_at = 0;
-      states_[i].learned_pw = poll::LEARNED_NONE;
-      if (poll::requestedLoginMustReset(table.targets[r].envelope, res.requested[n].entry.pw))
-        states_[i].key_login_fails = 0;
+      // A login copies the password when its packet is built, after the new envelope is opened.
+      const poll::RequestedEnvelopeEffect effect =
+          poll::requestedEnvelopeEffect(table.targets[r].envelope, res.requested[n].entry.pw);
+      if (effect.abort_run && run_idx_ == i && run_kind_ == RUN_EXCHANGE)
+        abortRun("requested envelope changed");
+      if (effect.reset_login_fails) states_[i].key_login_fails = 0;
     }
   }
   const poll::RequestOffer offer = {true, local_count_, requests_store_->local, res.requested_count, res.requested};

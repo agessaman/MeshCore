@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
+#include <helpers/poll/PollExchange.h>
 #include <helpers/poll/PollRequestRuntime.h>
+
+#include <vector>
 
 namespace {
 poll::RequestedTarget target() {
@@ -18,6 +21,68 @@ void seal(poll::RequestedTarget& t, const uint8_t secret[32], const uint8_t obse
 bool zero(const uint8_t* p, size_t n) {
   for (size_t i = 0; i < n; i++) if (p[i]) return false;
   return true;
+}
+
+const uint32_t kNow = 200000;
+
+poll::TargetState session() {
+  poll::TargetState state = {};
+  state.logged_in_at = 1000;
+  state.login_checked_at = kNow - 60;
+  state.learned_pw = poll::LEARNED_HELLO;
+  state.key_login_fails = 4;
+  state.code = poll::CODE_OK;
+  state.route_sent_at = kNow - 60;
+  state.status_checked_at = kNow;
+  return state;
+}
+
+void expectSessionKept(const poll::TargetState& state) {
+  EXPECT_EQ(1000u, state.logged_in_at);
+  EXPECT_EQ(kNow - 60, state.login_checked_at);
+  EXPECT_EQ(poll::LEARNED_HELLO, state.learned_pw);
+}
+
+poll::RequestedEnvelopeEffect applyEnvelope(poll::TargetState& state, const poll::PwEnvelope& before,
+                                            const poll::PwEnvelope& after) {
+  const poll::RequestedEnvelopeEffect effect = poll::requestedEnvelopeEffect(before, after);
+  if (effect.reset_login_fails) state.key_login_fails = 0;
+  return effect;
+}
+
+struct ExchangeTrace {
+  std::vector<uint8_t> acts;
+  std::vector<uint8_t> pws;
+};
+
+void driveExchange(poll::PollExchange& exchange, poll::TargetState& state, const poll::ExchangeConfig& cfg,
+                   uint32_t now, bool answer_data, bool answer_login, ExchangeTrace& trace) {
+  poll::Step step = exchange.start(state, cfg, now);
+  for (int guard = 0; guard < 40 && step.act != poll::ACT_FINISH; guard++) {
+    if (poll::isNoChange(step)) break;
+    if (step.act != poll::ACT_WAIT) {
+      trace.acts.push_back(step.act);
+      if (step.act == poll::ACT_SEND_LOGIN) trace.pws.push_back(step.pw);
+      step = exchange.onEvent(state, poll::EV_TX_DONE, false, now);
+      continue;
+    }
+    if (answer_login && exchange.expectsLogin() && !exchange.result().login_answered) {
+      step = exchange.onEvent(state, poll::EV_LOGIN_GUEST, false, now);
+      continue;
+    }
+    if (answer_data && exchange.expectsData() && !exchange.result().got_reply) {
+      step = exchange.onEvent(state, poll::EV_DATA_REPLY, false, now);
+      continue;
+    }
+    step = exchange.onEvent(state, poll::EV_TIMER, false, now);
+  }
+  EXPECT_EQ(poll::ACT_FINISH, step.act);
+}
+
+poll::ExchangeConfig exchangeCfg(bool custom_pw) {
+  poll::ExchangeConfig cfg = poll::defaultExchangeConfig();
+  cfg.custom_pw = custom_pw;
+  return cfg;
 }
 }
 
@@ -176,6 +241,181 @@ TEST(PollRequestRuntime, InvalidEnvelopePlaintextCannotBuildALogin) {
   EXPECT_EQ(0, poll::buildEnvelopeLoginPlain(out, sizeof(out), 1, nullptr));
   EXPECT_EQ(0, poll::buildEnvelopeLoginPlain(out, sizeof(out), 1, ""));
   EXPECT_EQ(0, poll::buildEnvelopeLoginPlain(out, sizeof(out), 1, "1234567890123456"));
+}
+
+TEST(PollRequestRuntime, SameVerReencryptionKeepsTheSessionAndDoesNotAbort) {
+  poll::RequestedTarget t = target();
+  uint8_t secret[32] = {5}, keep[32], observer[32] = {9};
+  memcpy(keep, secret, sizeof(keep));
+  seal(t, secret, observer);
+  poll::openRequestedEnvelope(t, secret, observer);
+  poll::PwEnvelope again = t.envelope;
+  again.epk[0]++;
+  ASSERT_TRUE(poll::sealPwEnvelope(keep, observer, t.pub, again.epk, again.ver, (const uint8_t*)"guest", 5,
+                                   again.ct, again.tag));
+  poll::TargetState state = session();
+  const poll::RequestedEnvelopeEffect effect = applyEnvelope(state, t.envelope, again);
+  EXPECT_FALSE(effect.abort_run);
+  EXPECT_FALSE(effect.reset_login_fails);
+  EXPECT_EQ(4, state.key_login_fails);
+  expectSessionKept(state);
+  poll::replaceEnvelope(t, again);
+  uint8_t opened[32];
+  memcpy(opened, keep, sizeof(opened));
+  poll::openRequestedEnvelope(t, opened, observer);
+  ASSERT_STREQ("guest", poll::requestedPassword(t));
+
+  poll::PollExchange exchange;
+  ExchangeTrace trace;
+  driveExchange(exchange, state, exchangeCfg(poll::requestedPassword(t) != nullptr), kNow, true, false, trace);
+  EXPECT_EQ(std::vector<uint8_t>{poll::ACT_SEND_REQUEST}, trace.acts);
+  EXPECT_TRUE(trace.pws.empty());
+  EXPECT_FALSE(exchange.result().login_tried);
+  EXPECT_EQ(1000u, state.logged_in_at);
+}
+
+TEST(PollRequestRuntime, VersionChangeKeepsTheSessionAndDoesNotAbort) {
+  poll::TargetState state = session();
+  poll::PwEnvelope before = target().envelope;
+  poll::PwEnvelope after = before;
+  after.ver++;
+  const poll::RequestedEnvelopeEffect effect = applyEnvelope(state, before, after);
+  EXPECT_FALSE(effect.abort_run);
+  EXPECT_TRUE(effect.reset_login_fails);
+  EXPECT_EQ(0, state.key_login_fails);
+  expectSessionKept(state);
+
+  poll::PollExchange exchange;
+  ExchangeTrace trace;
+  driveExchange(exchange, state, exchangeCfg(true), kNow, true, false, trace);
+  EXPECT_EQ(std::vector<uint8_t>{poll::ACT_SEND_REQUEST}, trace.acts);
+  EXPECT_TRUE(trace.pws.empty());
+  EXPECT_EQ(1000u, state.logged_in_at);
+}
+
+TEST(PollRequestRuntime, AddedOrRemovedEnvelopeKeepsTheSessionAndDoesNotAbort) {
+  poll::PwEnvelope present = target().envelope;
+  poll::PwEnvelope absent = {};
+  poll::TargetState added = session();
+  const poll::RequestedEnvelopeEffect add = applyEnvelope(added, absent, present);
+  EXPECT_FALSE(add.abort_run);
+  EXPECT_TRUE(add.reset_login_fails);
+  EXPECT_EQ(0, added.key_login_fails);
+  expectSessionKept(added);
+
+  poll::TargetState removed = session();
+  const poll::RequestedEnvelopeEffect drop = applyEnvelope(removed, present, absent);
+  EXPECT_FALSE(drop.abort_run);
+  EXPECT_TRUE(drop.reset_login_fails);
+  EXPECT_EQ(0, removed.key_login_fails);
+  expectSessionKept(removed);
+}
+
+TEST(PollRequestRuntime, NeverLoggedInTargetLogsInWithTheEnvelopePassword) {
+  poll::RequestedTarget t = target();
+  uint8_t secret[32] = {5}, observer[32] = {9};
+  seal(t, secret, observer);
+  poll::openRequestedEnvelope(t, secret, observer);
+  ASSERT_STREQ("guest", poll::requestedPassword(t));
+  poll::TargetState state = {};
+  poll::PollExchange exchange;
+  const poll::Step step = exchange.start(state, exchangeCfg(poll::requestedPassword(t) != nullptr), kNow);
+  EXPECT_EQ(poll::ACT_SEND_LOGIN, step.act);
+  EXPECT_EQ(poll::PW_CUSTOM, step.pw);
+
+  poll::RequestedTarget plain = {};
+  plain.held = true;
+  EXPECT_EQ(nullptr, poll::requestedPassword(plain));
+  poll::TargetState blank = {};
+  poll::PollExchange blank_exchange;
+  ExchangeTrace trace;
+  driveExchange(blank_exchange, blank, exchangeCfg(false), kNow, false, false, trace);
+  ASSERT_EQ((std::vector<uint8_t>{poll::PW_BLANK, poll::PW_HELLO}), trace.pws);
+}
+
+TEST(PollRequestRuntime, FastPathMissFallsBackToTheEnvelopePassword) {
+  for (uint8_t misses = 0; misses < poll::kForgetLoginAfter; misses++) {
+    poll::TargetState state = session();
+    state.no_reply_count = misses;
+    poll::PollExchange exchange;
+    ExchangeTrace trace;
+    driveExchange(exchange, state, exchangeCfg(true), kNow, false, false, trace);
+    const bool fallback = (misses + 1) % poll::kForgetLoginAfter == 0;
+    if (fallback) {
+      EXPECT_EQ(std::vector<uint8_t>{poll::PW_CUSTOM}, trace.pws) << (int)misses;
+      EXPECT_TRUE(exchange.result().login_tried);
+      EXPECT_EQ(poll::XR_LOGIN_UNANSWERED, exchange.result().reason);
+    } else {
+      EXPECT_TRUE(trace.pws.empty()) << (int)misses;
+      EXPECT_FALSE(exchange.result().login_tried);
+      EXPECT_EQ(poll::XR_ENTRY_KEPT, exchange.result().reason);
+      EXPECT_EQ(1000u, state.logged_in_at);
+    }
+  }
+}
+
+TEST(PollRequestRuntime, AdminRecheckUsesTheCurrentEnvelopePassword) {
+  poll::RequestedTarget t = target();
+  uint8_t secret[32] = {5}, keep[32], observer[32] = {9};
+  memcpy(keep, secret, sizeof(keep));
+  seal(t, secret, observer);
+  poll::openRequestedEnvelope(t, secret, observer);
+  poll::PwEnvelope next = t.envelope;
+  next.ver++;
+  next.epk[0]++;
+  ASSERT_TRUE(poll::sealPwEnvelope(keep, observer, t.pub, next.epk, next.ver, (const uint8_t*)"next", 4,
+                                   next.ct, next.tag));
+  poll::TargetState state = session();
+  state.login_checked_at = kNow - poll::kAdminRecheckS;
+  const poll::RequestedEnvelopeEffect effect = applyEnvelope(state, t.envelope, next);
+  EXPECT_FALSE(effect.abort_run);
+  EXPECT_EQ(kNow - poll::kAdminRecheckS, state.login_checked_at);
+  EXPECT_EQ(1000u, state.logged_in_at);
+  poll::replaceEnvelope(t, next);
+  uint8_t opened[32];
+  memcpy(opened, keep, sizeof(opened));
+  poll::openRequestedEnvelope(t, opened, observer);
+  ASSERT_STREQ("next", poll::requestedPassword(t));
+
+  poll::PollExchange exchange;
+  ExchangeTrace trace;
+  driveExchange(exchange, state, exchangeCfg(poll::requestedPassword(t) != nullptr), kNow, true, true, trace);
+  EXPECT_EQ(std::vector<uint8_t>{poll::PW_CUSTOM}, trace.pws);
+  EXPECT_TRUE(exchange.result().login_answered);
+  EXPECT_EQ(kNow, state.login_checked_at);
+  EXPECT_EQ(1000u, state.logged_in_at);
+}
+
+TEST(PollRequestRuntime, RefusedVerIsNotPolledEvenWhenTheKeyIsStillLoggedIn) {
+  poll::RequestedTarget t = target();
+  uint8_t secret[32] = {5}, observer[32] = {9};
+  seal(t, secret, observer);
+  poll::openRequestedEnvelope(t, secret, observer);
+  ASSERT_TRUE(poll::noteEnvelopeLoginFails(t, 2));
+  poll::TargetState state = session();
+  poll::PwEnvelope again = t.envelope;
+  again.ct[0]++;
+  const poll::RequestedEnvelopeEffect effect = applyEnvelope(state, t.envelope, again);
+  EXPECT_FALSE(effect.abort_run);
+  EXPECT_FALSE(effect.reset_login_fails);
+  expectSessionKept(state);
+  EXPECT_EQ(4, state.key_login_fails);
+  poll::replaceEnvelope(t, again);
+  EXPECT_TRUE(t.login_failed);
+  EXPECT_FALSE(poll::requestMayPoll(t));
+  poll::OwnerBrief owner = {};
+  owner.present = owner.requested = true;
+  owner.role = poll::OWNER_ROLE_POLLING;
+  EXPECT_FALSE(poll::requestedRunAllowed(t, owner));
+
+  poll::PwEnvelope newer = again;
+  newer.ver++;
+  poll::TargetState lifted = state;
+  const poll::RequestedEnvelopeEffect lift = applyEnvelope(lifted, again, newer);
+  EXPECT_FALSE(lift.abort_run);
+  EXPECT_EQ(1000u, lifted.logged_in_at);
+  poll::replaceEnvelope(t, newer);
+  EXPECT_FALSE(t.login_failed);
 }
 
 int main(int argc, char** argv) {

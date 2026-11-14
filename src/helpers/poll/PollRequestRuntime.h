@@ -27,6 +27,20 @@ static inline bool requestedLoginMustReset(const PwEnvelope& before, const PwEnv
   return before.present != after.present || before.ver != after.ver;
 }
 
+// The polling key keeps its session; an envelope change does not abort a run.
+struct RequestedEnvelopeEffect {
+  bool abort_run;
+  bool reset_login_fails;
+};
+
+static inline RequestedEnvelopeEffect requestedEnvelopeEffect(const PwEnvelope& before,
+                                                              const PwEnvelope& after) {
+  RequestedEnvelopeEffect effect;
+  effect.abort_run = false;
+  effect.reset_login_fails = requestedLoginMustReset(before, after);
+  return effect;
+}
+
 static inline bool requestedRunAllowed(const RequestedTarget& target, const OwnerBrief& owner) {
   const uint8_t role = requestedRole(owner);
   return requestMayPoll(target) && role != ROLE_DISABLED && role != ROLE_PAUSED && role != ROLE_EXCLUDED;
