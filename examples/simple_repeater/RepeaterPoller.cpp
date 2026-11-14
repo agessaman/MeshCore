@@ -1938,14 +1938,16 @@ void RepeaterPoller::takeClaim(uint32_t now) {
     poll::claimSent(claim_, claim_pending_sig_, claim_pending_community_, claim_pending_listed_, now);
     claim_sent_at_ = now;
     POLL_LOG("claim published to slot %u%s", (unsigned)claim_slot_, claim_pending_community_ ? "" : " (community off)");
-  } else if (r == poll::CLAIM_WRONG_HOST) {
-    const uint8_t was = claim_slot_;
-    updateClaimSlot();
-    POLL_LOG("claim not published: MQTT%u broker changed", (unsigned)was);
-  } else {
+  } else if (poll::publishAttemptFailed(r)) {
     // A bridge stop drops the answer (CLAIM_NONE): that is a failure too.
     poll::claimFailed(claim_, now);
-    POLL_LOG("claim to slot %u failed; retry in %lus", (unsigned)claim_slot_, (unsigned long)poll::kClaimRetrySec);
+    if (r == poll::CLAIM_WRONG_HOST) {
+      const uint8_t was = claim_slot_;
+      updateClaimSlot();
+      POLL_LOG("claim not published: MQTT%u broker changed", (unsigned)was);
+    } else {
+      POLL_LOG("claim to slot %u failed; retry in %lus", (unsigned)claim_slot_, (unsigned long)poll::kClaimRetrySec);
+    }
   }
 }
 
@@ -2128,16 +2130,16 @@ void RepeaterPoller::takeReading() {
     r = poll::CLAIM_FAILED;
   }
   reading_pending_ = false;
-  if (r == poll::CLAIM_WRONG_HOST) {
-    const uint8_t was = claim_slot_;
-    updateClaimSlot();
-    POLL_LOG("reading not published: MQTT%u broker changed", (unsigned)was);
-    return;
-  }
-  if (r != poll::CLAIM_PUBLISHED) {
+  if (poll::publishAttemptFailed(r)) {
     reading_retry_ = true;
     reading_retry_ms_ = millis();
-    POLL_LOG("reading to slot %u failed; kept, retry in %lus", (unsigned)claim_slot_, (unsigned long)(poll::kReadingRetryMs / 1000));
+    if (r == poll::CLAIM_WRONG_HOST) {
+      const uint8_t was = claim_slot_;
+      updateClaimSlot();
+      POLL_LOG("reading not published: MQTT%u broker changed", (unsigned)was);
+    } else {
+      POLL_LOG("reading to slot %u failed; kept, retry in %lus", (unsigned)claim_slot_, (unsigned long)(poll::kReadingRetryMs / 1000));
+    }
     return;
   }
   reading_retry_ = false;

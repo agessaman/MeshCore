@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "helpers/poll/PollControlTypes.h"
 #include "helpers/poll/PollReadings.h"
 
 namespace {
@@ -394,6 +395,29 @@ TEST(PollReadings, FailedReadingIsNotDueOnTheSameTick) {
   EXPECT_FALSE(poll::readingRetryDue(near_wrap, near_wrap));
   EXPECT_FALSE(poll::readingRetryDue(near_wrap, near_wrap + poll::kReadingRetryMs - 1));
   EXPECT_TRUE(poll::readingRetryDue(near_wrap, near_wrap + poll::kReadingRetryMs));
+}
+
+TEST(PollReadings, WrongHostWaitsOutTheRetryThenAllowsPublication) {
+  EXPECT_TRUE(poll::publishAttemptFailed(poll::CLAIM_WRONG_HOST));
+  EXPECT_TRUE(poll::publishAttemptFailed(poll::CLAIM_FAILED));
+  EXPECT_TRUE(poll::publishAttemptFailed(poll::CLAIM_NONE));
+  EXPECT_FALSE(poll::publishAttemptFailed(poll::CLAIM_PUBLISHED));
+  EXPECT_FALSE(poll::publishAttemptFailed(poll::CLAIM_PENDING));
+
+  poll::ClaimTiming timing = {};
+  const uint32_t sig = 1;
+  const uint32_t now = 1700000100;
+  ASSERT_TRUE(poll::claimDue(timing, sig, true, true, now));
+  poll::claimFailed(timing, now);
+  EXPECT_FALSE(timing.sent_once);
+  EXPECT_FALSE(poll::claimDue(timing, sig, true, true, now));
+  EXPECT_FALSE(poll::claimDue(timing, sig, true, true, now + poll::kClaimRetrySec - 1));
+  EXPECT_TRUE(poll::claimDue(timing, sig, true, true, now + poll::kClaimRetrySec));
+
+  const uint32_t ms = 100000;
+  EXPECT_FALSE(poll::readingRetryDue(ms, ms));
+  EXPECT_FALSE(poll::readingRetryDue(ms, ms + poll::kReadingRetryMs - 1));
+  EXPECT_TRUE(poll::readingRetryDue(ms, ms + poll::kReadingRetryMs));
 }
 
 TEST(PollReadings, SnrIsClampedToThirtyDb) {

@@ -88,4 +88,9 @@ enum ClaimPublish : uint8_t {
   CLAIM_WRONG_HOST,   // automatic slot's broker is no longer the one that was matched
 };
 
+// Wrong host, a refusal, or a dropped answer: unsent, and a reading stays held.
+static inline bool publishAttemptFailed(uint8_t result) {
+  return result != CLAIM_PENDING && result != CLAIM_PUBLISHED;
+}
+
 }  // namespace poll
