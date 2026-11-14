@@ -22,6 +22,7 @@
 #include <helpers/poll/PollPacketCodec.h>
 #include <helpers/poll/PollPolicy.h>
 #include <helpers/poll/PollReadings.h>
+#include <helpers/poll/PollRequestRuntime.h>
 #include <helpers/poll/PollRegistration.h>
 #include <helpers/poll/PollReplyParsers.h>
 #include <helpers/poll/PollStateStore.h>
@@ -42,10 +43,10 @@ struct PollSettings {
   char     url[poll::kControlUrlMax];                   // CoreScope base URL, "" = none
   uint8_t  slot;                                        // 1-based MQTT slot for the claim, 0 = unset
   bool     community;                                   // share polling with other observers
+  bool     requests;
 };
 
-// What the poller needs from the mesh. MyMesh implements it; the poller never
-// sees the node identity, so a poll packet cannot be built under it.
+// Mesh services; node-key operations are limited to registration and password envelopes.
 class RepeaterPollHost {
 public:
   virtual ~RepeaterPollHost() {}
@@ -75,6 +76,7 @@ public:
   virtual void pollReadSettings(PollSettings& out) = 0;
   // The node identity, public half only: claim origin and origin_id, registration observer_id.
   virtual void pollNodePub(uint8_t* out) = 0;
+  virtual void pollEnvelopeSecret(uint8_t* out, const uint8_t* epk) = 0;
   virtual const char* pollNodeName() = 0;
   virtual const char* pollFirmwareVersion() = 0;
   // Signs the polling key's registration with the node key; nothing else is ever signed with it.
@@ -156,6 +158,7 @@ private:
   struct Meta {
     bool     used;
     bool     orphan;       // removed from the list while its drill runs
+    bool     requested;
     bool     secret_ok;
     uint8_t  pw_mode;
     uint8_t  note;         // last schedule decision logged
@@ -195,7 +198,21 @@ private:
   // Targets
   Meta meta_[kSlots];
   poll::TargetState states_[kSlots];
-  uint8_t  count_;         // targets in the operator's list
+  uint8_t  count_;         // local and requested targets
+  uint8_t  local_count_;
+  bool     requests_;
+  bool     url_https_;
+  struct RequestStore {
+    poll::RequestTable table;
+    poll::RequestDelta delta;
+    uint8_t local[poll::kMaxTargets][poll::kPubKeySize];
+  };
+  RequestStore* requests_store_;
+  union ControlScratch {
+    poll::ControlRequest request;
+    poll::ControlResult result;
+  };
+  ControlScratch* control_scratch_;
   bool     enabled_;
   bool     consent_;
   uint16_t interval_min_;
@@ -313,7 +330,7 @@ private:
   bool     policy_answered_;         // the policy endpoint answered 200 or 404 this boot
   bool     gate_save_due_;           // the saved gate changed and is not on flash yet
   uint8_t  gate_now_;                // poll::Gate as last worked out
-  poll::OwnerEntry owners_[kSlots];  // per slot; cleared when the owners reply lapses
+  poll::OwnerBrief owners_[kSlots];  // per slot; cleared when the owners reply lapses
   uint32_t owners_ok_at_;
   poll::ClaimTiming claim_;
   bool     claim_pending_;
@@ -394,6 +411,17 @@ private:
   bool controlFileableNow() const;
   void resolveNow(uint32_t now);
   void detachSlot(uint8_t i);
+  bool requestsActive() const;
+  bool ensureRequestStore();
+  bool ensureControlScratch();
+  void logRequestDelta();
+  void syncRequests();
+  void dropRequests();
+  void enforceRequests(uint32_t now);
+  void takeRequests(const poll::ControlResult& res, uint32_t now);
+  bool requestReady(uint8_t idx) const;
+  void clearSlot(uint8_t idx);
+  void spreadTargets();
   void scheduleTick(uint32_t now);
   poll::CycleInput cycleInputFor(uint8_t idx, bool test, uint32_t now) const;
   void noteSkip(uint8_t idx, const poll::Decision& d, uint32_t now);

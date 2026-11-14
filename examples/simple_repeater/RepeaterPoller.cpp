@@ -11,6 +11,7 @@
 #include <math.h>
 #include <helpers/poll/PollControlPlan.h>
 #include <helpers/poll/PollPacketCodec.h>
+#include <helpers/poll/PollPrefsPolicy.h>
 #include <helpers/poll/PollSchedule.h>
 
 #if defined(MQTT_DEBUG)
@@ -78,8 +79,7 @@ const uint8_t kNoteNoSlot = 16;
 const uint8_t kNoteNoReadingMem = 32;
 
 void wipe(void* p, size_t n) {
-  volatile uint8_t* b = static_cast<volatile uint8_t*>(p);
-  for (size_t i = 0; i < n; i++) b[i] = 0;
+  poll::detail::wipe(p, n);
 }
 
 bool millisPassed(uint32_t now, uint32_t at) { return (int32_t)(now - at) >= 0; }
@@ -123,7 +123,7 @@ const char* actLabel(uint8_t act, uint8_t pw) {
 }
 
 const char* modeName(uint8_t m) {
-  return m == poll::MODE_ENCRYPTED ? "enc" : m == poll::MODE_JSON ? "json" : m == poll::MODE_TELEMETRY ? "telemetry" : "?";
+  return m == poll::MODE_ENCRYPTED ? "encrypted" : m == poll::MODE_JSON ? "json" : m == poll::MODE_TELEMETRY ? "telemetry" : "unknown";
 }
 
 const char* keyName(uint8_t k) {
@@ -168,7 +168,8 @@ bool hexPrefixMatches(const uint8_t* pub, const char* hex, size_t n) {
 
 RepeaterPoller::RepeaterPoller()
     : host_(NULL), fs_(NULL), has_id_(false), store_state_(poll::STATE_EMPTY), recovered_from_(0), seq_(0),
-      key_created_at_(0), tag_hw_(0), tag_hw_saved_(0), count_(0), enabled_(false), consent_(false),
+      key_created_at_(0), tag_hw_(0), tag_hw_saved_(0), count_(0), local_count_(0), requests_(false), url_https_(false),
+      requests_store_(NULL), control_scratch_(NULL), enabled_(false), consent_(false),
       interval_min_(60), status_hours_(6), run_kind_(RUN_NONE), run_idx_(-1), run_scheduled_(false),
       run_quick_(false), run_learned_before_(0), poll_tag_count_(0), inflight_(NULL), inflight_ms_(0),
       inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
@@ -413,7 +414,8 @@ void RepeaterPoller::foldSlots() {
     memcpy(e.pub, meta_[i].pub, poll::kPubKeySize);
     e.admin_seen = states_[i].admin_seen;
     e.admin_removed = states_[i].admin_removed;
-    e.learned_pw = states_[i].learned_pw;
+    e.learned_pw = meta_[i].requested ? (uint8_t)poll::LEARNED_NONE : states_[i].learned_pw;
+    if (meta_[i].requested && !e.admin_seen) continue;
     const uint8_t rank = poll::storedRank(e);
     const int k = poll::storedSlotFor(stored_, poll::kStoredTargets, e.pub, rank, !meta_[i].orphan, keep, n_keep);
     char pfx[9];
@@ -444,6 +446,142 @@ void RepeaterPoller::detachSlot(uint8_t i) {
     if (ctl_slot_[k] == (int8_t)i) ctl_slot_[k] = -1;
   }
   if (now_idx_ == (int8_t)i) now_idx_ = -1;
+  memset(&owners_[i], 0, sizeof(owners_[i]));
+}
+
+bool RepeaterPoller::requestsActive() const {
+  return poll::requestsActive(requests_, url_https_, poll::modeIsJson(mode_), community_, enabled_);
+}
+
+bool RepeaterPoller::ensureRequestStore() {
+  if (requests_store_) return true;
+  requests_store_ = static_cast<RequestStore*>(pollAlloc(sizeof(RequestStore)));
+  if (!requests_store_) return false;
+  memset(requests_store_, 0, sizeof(*requests_store_));
+  for (uint8_t i = 0; i < kSlots; i++) {
+    if (meta_[i].used && !meta_[i].orphan && !meta_[i].requested && meta_[i].list_pos < local_count_)
+      memcpy(requests_store_->local[meta_[i].list_pos], meta_[i].pub, poll::kPubKeySize);
+  }
+  return true;
+}
+
+bool RepeaterPoller::ensureControlScratch() {
+  if (!control_scratch_) control_scratch_ = static_cast<ControlScratch*>(pollAlloc(sizeof(ControlScratch)));
+  return control_scratch_ != NULL;
+}
+
+void RepeaterPoller::logRequestDelta() {
+  const poll::RequestDelta& d = requests_store_->delta;
+  char pfx[9];
+  for (uint8_t i = 0; i < d.dropped_count; i++) {
+    hex8(pfx, d.dropped[i]);
+    POLL_LOG("requested %s removed", pfx);
+  }
+  for (uint8_t i = 0; i < d.added_count; i++) {
+    hex8(pfx, d.added[i]);
+    POLL_LOG("requested %s added", pfx);
+  }
+}
+
+void RepeaterPoller::clearSlot(uint8_t idx) {
+  if (run_idx_ == (int8_t)idx) abortRun("requested target dropped");
+  if (readings_) poll::readingHoldDrop(readings_->hold, meta_[idx].pub);
+  foldSlots();
+  wipe(&meta_[idx], sizeof(meta_[idx]));
+  memset(&states_[idx], 0, sizeof(states_[idx]));
+  detachSlot(idx);
+}
+
+void RepeaterPoller::syncRequests() {
+  if (!requests_store_) return;
+  poll::RequestTable& table = requests_store_->table;
+  for (uint8_t i = 0; i < kSlots; i++) {
+    if (meta_[i].used && meta_[i].requested && poll::findRequested(table, meta_[i].pub) < 0) clearSlot(i);
+  }
+  for (uint8_t r = 0; r < table.count; r++) {
+    poll::RequestedTarget& target = table.targets[r];
+    int8_t idx = slotFor(target.pub);
+    if (idx < 0) {
+      for (uint8_t i = 0; i < kSlots; i++) {
+        if (!meta_[i].used) { idx = (int8_t)i; break; }
+      }
+      if (idx < 0) continue;
+      memset(&meta_[idx], 0, sizeof(meta_[idx]));
+      memset(&states_[idx], 0, sizeof(states_[idx]));
+      detachSlot((uint8_t)idx);
+      meta_[idx].used = meta_[idx].requested = true;
+      memcpy(meta_[idx].pub, target.pub, poll::kPubKeySize);
+      states_[idx].temperature_c10 = INT16_MIN;
+      restoreStored((uint8_t)idx);
+      states_[idx].learned_pw = poll::LEARNED_NONE;
+    }
+    meta_[idx].list_pos = local_count_ + r;
+    if (states_[idx].admin_seen) {
+      poll::discardRequestedPassword(target);
+    } else if (poll::envelopeNeedsOpen(target)) {
+      uint8_t secret[32] = {}, observer[32];
+      host_->pollNodePub(observer);
+      host_->pollEnvelopeSecret(secret, target.envelope.epk);
+      poll::openRequestedEnvelope(target, secret, observer);
+    }
+    if (run_idx_ == idx && !poll::requestMayPoll(target) && run_kind_ == RUN_EXCHANGE)
+      abortRun("requested password unavailable");
+  }
+  count_ = local_count_ + table.count;
+  spreadTargets();
+}
+
+void RepeaterPoller::dropRequests() {
+  if (!requests_store_ || requests_store_->table.count == 0) return;
+  poll::dropAll(requests_store_->table, requests_store_->delta);
+  logRequestDelta();
+  syncRequests();
+}
+
+void RepeaterPoller::enforceRequests(uint32_t now) {
+  if (!requestsActive() || poll::requestsMustDrop(requests_, url_https_, false, owners_ok_at_, now)) dropRequests();
+}
+
+bool RepeaterPoller::requestReady(uint8_t idx) const {
+  if (!meta_[idx].requested) return true;
+  if (!requestsActive() || !requests_store_ || poll::ownersLapsed(owners_ok_at_, host_->pollNow())) return false;
+  uint8_t keep[kSlots][poll::kPubKeySize];
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < kSlots; i++) {
+    if (meta_[i].used) memcpy(keep[n++], meta_[i].pub, poll::kPubKeySize);
+  }
+  if (!poll::storedRoomForList(stored_, poll::kStoredTargets, keep, n)) return false;
+  const int r = poll::findRequested(requests_store_->table, meta_[idx].pub);
+  return r >= 0 && poll::requestedRunAllowed(requests_store_->table.targets[r], owners_[idx]);
+}
+
+void RepeaterPoller::takeRequests(const poll::ControlResult& res, uint32_t now) {
+  if (!requestsActive() || !ensureRequestStore()) return;
+  poll::RequestTable& table = requests_store_->table;
+  for (uint8_t r = 0; r < table.count; r++) {
+    for (uint8_t n = 0; n < res.requested_count && n < poll::kMaxTargets; n++) {
+      if (!poll::sameKey(table.targets[r].pub, res.requested[n].pub) ||
+          poll::sameEnvelope(table.targets[r].envelope, res.requested[n].entry.pw)) continue;
+      const int8_t i = slotFor(table.targets[r].pub);
+      if (i < 0) continue;
+      if (run_idx_ == i && run_kind_ == RUN_EXCHANGE) abortRun("requested envelope changed");
+      states_[i].logged_in_at = states_[i].login_checked_at = 0;
+      states_[i].learned_pw = poll::LEARNED_NONE;
+      if (poll::requestedLoginMustReset(table.targets[r].envelope, res.requested[n].entry.pw))
+        states_[i].key_login_fails = 0;
+    }
+  }
+  const poll::RequestOffer offer = {true, local_count_, requests_store_->local, res.requested_count, res.requested};
+  poll::reconcile(table, offer, now, requests_store_->delta);
+  logRequestDelta();
+  syncRequests();
+  for (uint8_t n = 0; n < res.requested_count && n < poll::kMaxTargets; n++) {
+    const int8_t i = slotFor(res.requested[n].pub);
+    if (i < 0 || !meta_[i].requested) continue;
+    owners_[i] = poll::ownerBrief(res.requested[n].entry);
+    if (run_idx_ == i && run_kind_ == RUN_EXCHANGE && !requestReady((uint8_t)i)) abortRun("requested role changed");
+  }
+  spreadTargets();
 }
 
 bool RepeaterPoller::roomFor(const uint8_t* pub) {
@@ -465,11 +603,23 @@ bool RepeaterPoller::roomFor(const uint8_t* pub) {
 // Settings and targets
 
 const char* RepeaterPoller::passwordFor(uint8_t idx) const {
+  if (meta_[idx].requested) {
+    if (!requests_store_) return NULL;
+    const int r = poll::findRequested(requests_store_->table, meta_[idx].pub);
+    return r < 0 ? NULL : poll::requestedPassword(requests_store_->table.targets[r]);
+  }
   return meta_[idx].custom && meta_[idx].custom_pw[0] ? meta_[idx].custom_pw : NULL;
 }
 
 // An admin answer to the operator's password: it must not be sent again, here or after a reboot.
 void RepeaterPoller::discardPassword(uint8_t idx) {
+  if (meta_[idx].requested) {
+    if (requests_store_) {
+      const int r = poll::findRequested(requests_store_->table, meta_[idx].pub);
+      if (r >= 0) poll::discardRequestedPassword(requests_store_->table.targets[r]);
+    }
+    return;
+  }
   if (!meta_[idx].custom) return;
   wipe(meta_[idx].custom_pw, sizeof(meta_[idx].custom_pw));
   meta_[idx].custom = false;
@@ -507,12 +657,23 @@ void RepeaterPoller::readSettings() {
   consent_ = s.consent;
   interval_min_ = s.interval_min ? s.interval_min : 60;
   status_hours_ = s.status_hours;
-  count_ = s.count;
+  local_count_ = s.count;
   readControlSettings(s);
+  if (requests_store_) {
+    memcpy(requests_store_->local, s.targets, sizeof(s.targets));
+    uint8_t roles[poll::kMaxTargets] = {};
+    for (uint8_t r = 0; r < requests_store_->table.count; r++) {
+      const int8_t i = slotFor(requests_store_->table.targets[r].pub);
+      roles[r] = i < 0 ? (uint8_t)poll::ROLE_DISABLED : poll::requestedRole(owners_[i]);
+    }
+    poll::reserveLocalRequests(requests_store_->table, s.targets, local_count_, roles, requests_store_->delta);
+    logRequestDelta();
+    syncRequests();
+  }
 
   // Drop targets no longer listed; a running drill keeps its slot until it ends.
   for (uint8_t i = 0; i < kSlots; i++) {
-    if (!meta_[i].used) continue;
+    if (!meta_[i].used || meta_[i].requested) continue;
     bool listed = false;
     for (uint8_t p = 0; p < s.count && !listed; p++) {
       listed = memcmp(s.targets[p], meta_[i].pub, poll::kPubKeySize) == 0;
@@ -549,6 +710,7 @@ void RepeaterPoller::readSettings() {
       restoreStored((uint8_t)idx);
     }
     meta_[idx].orphan = false;
+    meta_[idx].requested = false;
     meta_[idx].list_pos = p;
     meta_[idx].pw_mode = s.pw_mode[p] <= poll::PWMODE_HELLO ? s.pw_mode[p] : (uint8_t)poll::PWMODE_AUTO;
     const bool custom = s.pw_mode[p] == kPollPwModeCustom && s.pw[p][0] != 0;
@@ -563,7 +725,12 @@ void RepeaterPoller::readSettings() {
   }
   wipe(s.pw, sizeof(s.pw));
 
-  // Phase spread over the targets sorted by key, among those sharing an interval.
+  count_ = local_count_ + (requests_store_ ? requests_store_->table.count : 0);
+  spreadTargets();
+}
+
+void RepeaterPoller::spreadTargets() {
+  // Spread targets sorted by key among those sharing an interval.
   for (uint8_t i = 0; i < kSlots; i++) {
     if (!meta_[i].used || meta_[i].orphan) continue;
     meta_[i].interval_s = intervalFor(controlFor(i));
@@ -583,7 +750,7 @@ void RepeaterPoller::readSettings() {
 PollControl RepeaterPoller::controlFor(uint8_t idx) const {
   const uint32_t now = host_->pollNow();
   PollControl c;
-  c.role = poll::mapRole(community_, owners_[idx]);
+  c.role = meta_[idx].requested ? poll::requestedRole(owners_[idx]) : poll::mapRole(community_, owners_[idx]);
   c.gate = gateAt(now);
   c.window_s = windowFor(idx, now);
   c.max_requests = policy_.max_requests;
@@ -635,6 +802,7 @@ void RepeaterPoller::note(uint8_t idx, uint8_t what, uint32_t detail) {
 
 void RepeaterPoller::loop() {
   if (!host_) return;
+  enforceRequests(host_->pollNow());
   processEvents();
 
   const uint32_t now_ms = millis();
@@ -704,6 +872,7 @@ void RepeaterPoller::tick() {
 // Running an exchange
 
 void RepeaterPoller::startPoll(uint8_t idx, bool scheduled) {
+  if (!requestReady(idx)) return;
   poll::TargetState& t = states_[idx];
   const uint32_t now = host_->pollNow();
   const PollControl c = controlFor(idx);
@@ -828,7 +997,10 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
   switch (s.act) {
     case poll::ACT_SEND_LOGIN: {
       tag = nextTag();
-      if (s.pw == poll::PW_CUSTOM) n = poll::buildLoginPlainCustom(plain, sizeof(plain), tag, passwordFor(idx));
+      if (s.pw == poll::PW_CUSTOM) {
+        n = meta_[idx].requested ? poll::buildEnvelopeLoginPlain(plain, sizeof(plain), tag, passwordFor(idx))
+                                 : poll::buildLoginPlainCustom(plain, sizeof(plain), tag, passwordFor(idx));
+      }
       else n = poll::buildLoginPlain(plain, sizeof(plain), tag, s.pw);
       if (n) {
         mesh::Identity target(meta_[idx].pub);
@@ -868,7 +1040,7 @@ bool RepeaterPoller::sendFor(const poll::Step& s) {
     default:
       break;
   }
-  memset(plain, 0, sizeof(plain));
+  wipe(plain, sizeof(plain));
 
   if (!pkt) {
     POLL_LOG("tx %s not queued: %s", actLabel(s.act, s.pw), n ? "packet pool low" : "build failed");
@@ -1030,7 +1202,7 @@ void RepeaterPoller::onRx(const mesh::Packet* pkt) {
       POLL_LOG("rx ignored tag=%lu len=%u %s", (unsigned long)r.tag, (unsigned)r.len, flooded ? "flooded" : "direct");
       break;
   }
-  memset(plain, 0, sizeof(plain));
+  wipe(plain, sizeof(plain));
 }
 
 // After an admin answer nothing more may go out under the exchange; a packet already on the air cannot be recalled.
@@ -1101,7 +1273,11 @@ void RepeaterPoller::finishRun() {
            poll::exchangeReasonName(r.reason), (unsigned)r.logins, (unsigned)r.teaches, (unsigned)r.requests,
            r.reply_flooded ? " reply flooded" : "", reading);
 
-  if (r.discard_password) discardPassword(idx);
+  if (meta_[idx].requested && requests_store_) {
+    const int r_idx = poll::findRequested(requests_store_->table, meta_[idx].pub);
+    if (r_idx >= 0) poll::noteEnvelopeLoginFails(requests_store_->table.targets[r_idx], t.key_login_fails);
+  }
+  if (r.discard_password || (r.admin && meta_[idx].requested)) discardPassword(idx);
   if (r.admin) {
     t.admin_seen = true;
     t.admin_removed = false;
@@ -1114,7 +1290,7 @@ void RepeaterPoller::finishRun() {
     apply(drill_.start(now));
     return;
   }
-  if (t.learned_pw != run_learned_before_) save_due_ = true;
+  if (!meta_[idx].requested && t.learned_pw != run_learned_before_) save_due_ = true;
   endRun();
   if (save_due_) saveState("learned password");
 }
@@ -1139,6 +1315,14 @@ void RepeaterPoller::abortRun(const char* why) {
   // A packet already on the air finishes; its report is ignored once the run is gone.
   if (inflightIntact()) host_->pollCancelQueued(inflight_);
   POLL_LOG("aborted: %s", why);
+  if (run_idx_ >= 0 && meta_[run_idx_].requested && meta_[run_idx_].admin_held) {
+    states_[run_idx_].admin_seen = true;
+    states_[run_idx_].admin_removed = false;
+    states_[run_idx_].code = poll::CODE_ADMIN_STOP;
+    discardPassword((uint8_t)run_idx_);
+    save_safety_ = true;
+    saveState("admin stop before cancel");
+  }
   endRun();
 }
 
@@ -1202,23 +1386,14 @@ void RepeaterPoller::cmdGetPoll(char* reply) {
   summary(&ok, &total);
   const uint32_t now = host_->pollNow();
   const uint8_t gate = gateAt(now);
-  const char* key = key_in_use_ == poll::KEY_OWN ? "own"
-                    : key_in_use_ == poll::KEY_SHARED ? "shared"
-                    : !consent_ && !poll::modeIsJson(mode_) ? "none (consent needed)"
-                    : !has_id_ ? "none (no polling key yet)"
-                    : "none (not registered, no shared key)";
-  // CoreScope details are in `get poll.control`; this line stays under the reply buffer, with the key reason dropped first.
-  for (int pass = 0; pass < 2; pass++) {
-    const int n = snprintf(reply, 160, "> %s, mode %s, targets %u (%u ok), key %s%s, gate %s%s, clock %s%s%s",
-                           enabled_ ? "on" : "off", modeName(mode_), (unsigned)total, (unsigned)ok, key,
-                           claim_slot_ != 0 ? "" : policy_.mqtt_host_count ? ", slot none (no broker matches)"
-                                                                           : ", slot none (poll.slot unset)",
-                           gate == poll::GATE_OPEN ? "open" : poll::gateName(gate),
-                           gate != poll::GATE_OPEN && !policy_.ever_fetched ? " (saved)" : "", clockOk() ? "ok" : "not synced",
-                           busy() ? ", polling now" : "", store_state_ == poll::STATE_NEWER ? ", state from newer fw (read-only)" : "");
-    if (n < 160) break;
-    key = keyName(key_in_use_);
-  }
+  char slot[48];
+  if (claim_slot_) snprintf(slot, sizeof(slot), "%u (%s)", (unsigned)claim_slot_, slot_setting_ ? "set" : "host match");
+  else snprintf(slot, sizeof(slot), "none (%s)", policy_.mqtt_host_count ? "no broker matches" : "poll.slot unset");
+  const unsigned held = requests_store_ ? requests_store_->table.count : 0;
+  snprintf(reply, 160, "> %s, mode %s, slot %s, requests %s (%u held/%u free), targets %u (%u ok), key %s, gate %s, clock %s",
+           enabled_ ? "on" : "off", modeName(mode_), slot, requestsActive() ? "on" : "off", held,
+           (unsigned)claimOptions().request_slots, (unsigned)total, (unsigned)ok, keyName(key_in_use_),
+           poll::gateName(gate), clockOk() ? "ok" : "not synced");
 }
 
 void RepeaterPoller::cmdGetKey(char* reply) {
@@ -1244,8 +1419,9 @@ void RepeaterPoller::cmdGetStatus(const char* arg, char* reply) {
         if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
         char pfx[9];
         hex8(pfx, meta_[i].pub);
-        char item[32];
-        int n = snprintf(item, sizeof(item), " %u %s %s", (unsigned)(p + 1), pfx, poll::codeName(states_[i].code));
+        char item[48];
+        int n = snprintf(item, sizeof(item), " %u %s%s %s", (unsigned)(p + 1), pfx,
+                         meta_[i].requested ? " requested" : "", poll::codeName(states_[i].code));
         if (pos + n > 160 - 5) {
           strcpy(reply + pos, " ...");
           return;
@@ -1291,7 +1467,7 @@ void RepeaterPoller::cmdGetStatus(const char* arg, char* reply) {
     snprintf(next, sizeof(next), "%lus", (unsigned long)(at > now ? at - now : 0));
   }
   const char* pw = t.learned_pw == poll::LEARNED_HELLO ? "hello" : t.learned_pw == poll::LEARNED_BLANK ? "blank" : "?";
-  const uint8_t role = poll::mapRole(community_, owners_[idx]);
+  const uint8_t role = controlFor((uint8_t)idx).role;
   char role_txt[16];
   if (role == poll::ROLE_STANDBY) {
     snprintf(role_txt, sizeof(role_txt), "standby#%u", (unsigned)(owners_[idx].standby_rank ? owners_[idx].standby_rank : 1));
@@ -1300,7 +1476,8 @@ void RepeaterPoller::cmdGetStatus(const char* arg, char* reply) {
   }
   char skip[24] = "";
   if (skip_[idx] != poll::SKIP_NONE && !t.admin_seen) snprintf(skip, sizeof(skip), ", skip %s", poll::skipReasonName(skip_[idx]));
-  snprintf(reply, 160, "> %s %s %s ago, %s, %s, %s, %s, next %s%s, login %s pw %s, flood %u%s", pfx,
+  snprintf(reply, 160, "> %s%s %s %s ago, %s, %s, %s, %s, next %s%s, login %s pw %s, flood %u%s", pfx,
+           meta_[idx].requested ? " requested" : " local",
            poll::codeName(t.code), age, batt, temp, route, role_txt, next, skip,
            t.logged_in_at ? "acl" : "none", pw, (unsigned)t.flood_replies,
            t.admin_seen ? (t.admin_removed ? ", admin removed" : ", admin NOT removed") : "");
@@ -1351,6 +1528,8 @@ bool RepeaterPoller::nowRefused(uint8_t idx, uint32_t now, char* reply, bool loc
     strcpy(reply, "Error: no polling key yet (set poll on)");
   } else if (t.admin_seen) {
     strcpy(reply, "Error: admin stop; clear it with poll enable <key>");
+  } else if (!requestReady(idx)) {
+    strcpy(reply, "Error: requested target is not available");
   } else if (!clockOk()) {
     strcpy(reply, "Error: clock not synced");
   } else if (!local_only && c.gate != poll::GATE_OPEN) {
@@ -1545,6 +1724,7 @@ void RepeaterPoller::initControl() {
 
 // What one CoreScope said belongs to it; the plugin starts over when the URL changes.
 void RepeaterPoller::resetCorescope() {
+  dropRequests();
   poll::policyDefaults(policy_);
   policy_answered_ = false;
   policy_covered_ = 0;
@@ -1573,12 +1753,15 @@ void RepeaterPoller::resetCorescope() {
 void RepeaterPoller::readControlSettings(const PollSettings& s) {
   has_url_ = s.url[0] != 0;
   community_ = s.community;
+  requests_ = s.requests;
+  url_https_ = poll::pollUrlIsHttps(s.url);
   slot_setting_ = s.slot;
   const uint32_t h = fnv(s.url);
   if (h != url_hash_) {
     if (url_hash_ != 0) resetCorescope();
     url_hash_ = h;
   }
+  enforceRequests(host_->pollNow());
   updateClaimSlot();
 }
 
@@ -1622,11 +1805,11 @@ bool RepeaterPoller::startingAt(uint32_t now) const {
 poll::CycleInput RepeaterPoller::cycleInputFor(uint8_t idx, bool test, uint32_t now) const {
   poll::CycleInput in;
   memset(&in, 0, sizeof(in));
-  const poll::OwnerEntry& e = owners_[idx];
+  const poll::OwnerBrief& e = owners_[idx];
   in.test = test;
   in.gate = gateAt(now);
   in.excluded = poll::policyExcludesTarget(policy_, meta_[idx].pub, policyCovers(idx));
-  in.role = poll::mapRole(community_, e);
+  in.role = controlFor(idx).role;
   in.rank = e.standby_rank ? e.standby_rank : 1;
   in.starting = startingAt(now);
   in.has_url = has_url_;
@@ -1659,6 +1842,7 @@ void RepeaterPoller::serviceControl() {
   const bool clock = clockOk();
   ctl_deferred_ = false;
   takeControl(now);
+  enforceRequests(now);
   takeClaim(now);
   takeReading();
   updateClaimSlot();   // the policy just taken may name other brokers
@@ -1776,6 +1960,7 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
         memset(&c, 0, sizeof(c));
         memcpy(c.node, meta_[i].pub, poll::kPubKeySize);
         c.reply_hops = 0;
+        c.requested = meta_[i].requested;
         c.personal_key = key_in_use_ == poll::KEY_OWN;
         c.has_snr = direct;
         c.snr_x4 = direct ? (opts.extended ? poll::clampSnrX4(snr) : snr) : 0;
@@ -1784,6 +1969,13 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
           // A JSON mode always polls under the own key; an operator password is named as such.
           c.key = passwordFor(i) ? poll::CLAIM_KEY_PASSWORD : poll::CLAIM_KEY_OWN;
           c.state = poll::claimStateFor(t, passwordFor(i) != NULL);
+          if (meta_[i].requested && requests_store_) {
+            const int r = poll::findRequested(requests_store_->table, meta_[i].pub);
+            if (r >= 0) {
+              c.key = poll::requestedClaimKey(requests_store_->table.targets[r]);
+              c.state = poll::requestedClaimState(t, requests_store_->table.targets[r]);
+            }
+          }
           c.misses = t.no_reply_count;
           c.last_attempt = t.last_attempt;
           c.last_ok = t.last_success;
@@ -1844,12 +2036,12 @@ char* RepeaterPoller::jsonBuffer() {
   return json_;
 }
 
-// Every claim option is decided here; requested targets are not offered yet.
+// Request capacity in a claim is the number of seats currently free.
 poll::ClaimOptions RepeaterPoller::claimOptions() const {
   poll::ClaimOptions o;
   o.extended = poll::modeIsJson(mode_);
-  o.accepts_requests = false;
-  o.request_slots = 0;
+  o.accepts_requests = requestsActive();
+  o.request_slots = o.accepts_requests ? poll::requestFreeSlots(local_count_, requests_store_ ? requests_store_->table.count : 0) : 0;
   return o;
 }
 
@@ -1999,13 +2191,14 @@ void RepeaterPoller::maybeFileControl(uint32_t now) {
 // A finished session nobody here asked for (a timed-out one, or the bench command's) would keep
 // the mailbox from taking a new request; drop it without applying it.
 __attribute__((noinline)) void RepeaterPoller::discardUnasked() {
-  poll::ControlResult res;
+  if (!ensureControlScratch()) return;
+  poll::ControlResult& res = control_scratch_->result;
   if (!host_->pollTakeControlResult(res)) return;
   wipe(&res, sizeof(res));
   POLL_LOG("dropped a CoreScope answer the poller was not waiting for");
 }
 
-// Own frames, so the request on the stack does not sit on top of the settings copy or the signing buffers.
+// Keep the settings copy separate from the signing buffers.
 __attribute__((noinline)) void RepeaterPoller::copyUrl(char* out, size_t cap) {
   PollSettings s;
   host_->pollReadSettings(s);
@@ -2032,16 +2225,17 @@ __attribute__((noinline)) bool RepeaterPoller::buildRegistration(poll::ControlRe
 }
 
 __attribute__((noinline)) void RepeaterPoller::fileControl(uint32_t now, bool registering, bool want_shared) {
-  poll::ControlRequest req;
+  if (!ensureControlScratch()) return;
+  poll::ControlRequest& req = control_scratch_->request;
   memset(&req, 0, sizeof(req));
   copyUrl(req.url, sizeof(req.url));
   strncpy(req.client_version, host_->pollFirmwareVersion(), sizeof(req.client_version) - 1);   // as in the claim's plugin tag
   req.mode = mode_;
   host_->pollNodePub(req.observer_pub);
   ctl_count_ = 0;
-  for (uint8_t p = 0; p < count_; p++) {
+  for (uint8_t p = 0; p < local_count_; p++) {
     for (uint8_t i = 0; i < kSlots; i++) {
-      if (!meta_[i].used || meta_[i].orphan || meta_[i].list_pos != p) continue;
+      if (!meta_[i].used || meta_[i].orphan || meta_[i].requested || meta_[i].list_pos != p) continue;
       if (ctl_count_ >= poll::kMaxTargets) break;
       memcpy(req.targets[ctl_count_], meta_[i].pub, poll::kPubKeySize);
       ctl_slot_[ctl_count_] = (int8_t)i;
@@ -2051,6 +2245,7 @@ __attribute__((noinline)) void RepeaterPoller::fileControl(uint32_t now, bool re
     }
   }
   req.target_count = ctl_count_;
+  req.request_capacity = requestsActive() && ensureRequestStore() ? poll::requestFreeSlots(local_count_, 0) : 0;
 
   if (registering && !buildRegistration(req, now)) {
     registering = false;
@@ -2103,7 +2298,8 @@ __attribute__((noinline)) void RepeaterPoller::takeControl(uint32_t now) {
     POLL_LOG("CoreScope session not answered in %lus: treated as not started", (unsigned long)poll::kControlTimeoutS);
     return;
   }
-  poll::ControlResult res;
+  if (!ensureControlScratch()) return;
+  poll::ControlResult& res = control_scratch_->result;
   if (!host_->pollTakeControlResult(res)) return;
   ctl_pending_ = false;
   applyControl(res, now);
@@ -2173,10 +2369,12 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
     for (uint8_t k = 0; k < ctl_count_ && k < poll::kMaxTargets; k++) {
       const int8_t i = ctl_slot_[k];
       if (i < 0 || !meta_[i].used || memcmp(meta_[i].pub, ctl_pfx_[k], sizeof(ctl_pfx_[0])) != 0) continue;
-      owners_[i] = res.owners[k];
+      owners_[i] = poll::ownerBrief(res.owners[k]);
     }
     owners_ok_at_ = now;
+    takeRequests(res, now);
   }
+  enforceRequests(now);
 
   if ((want & poll::WANT_REGISTER) && !res.keys_skipped) {
     const bool was_ok = reg_.ok, was_unsupported = reg_.unsupported;
@@ -2264,7 +2462,7 @@ void RepeaterPoller::scheduleTick(uint32_t now) {
   bool any = false;
   for (uint8_t i = 0; i < kSlots; i++) {
     due[i] = false;
-    if (!meta_[i].used || meta_[i].orphan) continue;
+    if (!meta_[i].used || meta_[i].orphan || !requestReady(i)) continue;
     poll::TargetState& t = states_[i];
     if (t.admin_seen) {
       note(i, NOTE_ADMIN, 0);

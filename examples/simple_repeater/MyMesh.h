@@ -554,6 +554,7 @@ public:
   bool pollDiscoveryBusy() override { return pollDiscoveryActive(); }
   uint8_t pollNodeHash() override { return self_id.pub_key[0]; }
   void pollReadSettings(PollSettings& out) override;
+  void pollEnvelopeSecret(uint8_t* out, const uint8_t* epk) override { self_id.calcSharedSecret(out, epk); }
   void pollNodePub(uint8_t* out) override { memcpy(out, self_id.pub_key, PUB_KEY_SIZE); }
   const char* pollNodeName() override { return _prefs.node_name; }
   const char* pollFirmwareVersion() override { return FIRMWARE_VERSION; }
