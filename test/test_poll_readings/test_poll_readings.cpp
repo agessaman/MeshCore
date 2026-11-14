@@ -380,6 +380,22 @@ TEST(PollReadings, DataReplyCodeInTelemetryPacesOnlyEmptyReplies) {
   EXPECT_EQ(poll::replyEmptyForPacing(r), poll::dataReplyCode(poll::kReadingV2, r.has_battery, r.battery_mv, r.other_records) == poll::CODE_NO_BATTERY);
 }
 
+TEST(PollReadings, FailedReadingIsNotDueOnTheSameTick) {
+  EXPECT_EQ(60000u, poll::kReadingRetryMs);
+  const uint32_t even = 100000;
+  EXPECT_EQ(0u, even & 1u);
+  EXPECT_FALSE(poll::readingRetryDue(even, even));
+  EXPECT_FALSE(poll::readingRetryDue(even, even + poll::kReadingRetryMs - 1));
+  EXPECT_TRUE(poll::readingRetryDue(even, even + poll::kReadingRetryMs));
+
+  const uint32_t near_wrap = 0u - 2000u;
+  EXPECT_EQ(0u, near_wrap & 1u);
+  EXPECT_LT(near_wrap + poll::kReadingRetryMs - 1, near_wrap);
+  EXPECT_FALSE(poll::readingRetryDue(near_wrap, near_wrap));
+  EXPECT_FALSE(poll::readingRetryDue(near_wrap, near_wrap + poll::kReadingRetryMs - 1));
+  EXPECT_TRUE(poll::readingRetryDue(near_wrap, near_wrap + poll::kReadingRetryMs));
+}
+
 TEST(PollReadings, SnrIsClampedToThirtyDb) {
   EXPECT_EQ(-120, poll::clampSnrX4(-500));
   EXPECT_EQ(120, poll::clampSnrX4(127));

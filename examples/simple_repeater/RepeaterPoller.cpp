@@ -68,7 +68,6 @@ const bool kFastPolicy = false;
 #endif
 const uint32_t kCtlRetryMs = 30000;          // a session the bridge refused is filed again after this
 const uint32_t kClaimTimeoutMs = 60000;      // a claim the bridge never answered counts as failed
-const uint32_t kReadingRetryMs = 60000;      // a reading the bridge could not publish waits this long
 const size_t kJsonBufSize = (poll::kClaimJsonMax > poll::kReadingJsonMax ? poll::kClaimJsonMax : poll::kReadingJsonMax) + 1;
 
 // Log-once bits in ctl_note_.
@@ -176,8 +175,8 @@ RepeaterPoller::RepeaterPoller()
       inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
       rd_temp_(false), rd_temp_c10_(0), rd_uptime_(0), rd_noise_(0), rd_parsed_(false), rd_other_(false),
-      rd_full_(false), readings_(NULL), json_(NULL), reading_pending_(false), reading_filed_ms_(0),
-      reading_retry_ms_(0), reading_sampled_(0), last_tick_ms_(0),
+      rd_full_(false), readings_(NULL), json_(NULL), reading_pending_(false), reading_retry_(false),
+      reading_filed_ms_(0), reading_retry_ms_(0), reading_sampled_(0), last_tick_ms_(0),
       last_scheduled_at_(0), id_retry_ms_(0UL - 60000UL), ntp_seen_(false), save_due_(false), save_safety_(false),
       save_retry_ms_(0), ahead_save_ms_(0), ahead_saved_(false), hold_note_(0), fold_full_logged_(false) {
   memset(&gate_, 0, sizeof(gate_));
@@ -2136,11 +2135,12 @@ void RepeaterPoller::takeReading() {
     return;
   }
   if (r != poll::CLAIM_PUBLISHED) {
-    reading_retry_ms_ = millis() | 1UL;
-    POLL_LOG("reading to slot %u failed; kept, retry in %lus", (unsigned)claim_slot_, (unsigned long)(kReadingRetryMs / 1000));
+    reading_retry_ = true;
+    reading_retry_ms_ = millis();
+    POLL_LOG("reading to slot %u failed; kept, retry in %lus", (unsigned)claim_slot_, (unsigned long)(poll::kReadingRetryMs / 1000));
     return;
   }
-  reading_retry_ms_ = 0;
+  reading_retry_ = false;
   // Only the entry that went out leaves; a newer one for the same node, or a dropped one, is left alone.
   for (uint8_t i = 0; readings_ && i < readings_->hold.count; i++) {
     const poll::Reading& e = readings_->hold.entries[i];
@@ -2156,7 +2156,7 @@ void RepeaterPoller::maybePublishReading(uint32_t now) {
   if (reading_pending_ || !readings_ || !json_ || claim_slot_ == 0) return;   // json_ comes with readings_
   const uint8_t fmt = readingFormat();
   if (fmt == 0) return;
-  if (reading_retry_ms_ != 0 && (uint32_t)(millis() - reading_retry_ms_) < kReadingRetryMs) return;
+  if (reading_retry_ && !poll::readingRetryDue(reading_retry_ms_, millis())) return;
   const poll::Reading* g = poll::readingHoldPeek(readings_->hold);
   if (!g) return;
   char tag[48];
@@ -2175,8 +2175,9 @@ void RepeaterPoller::maybePublishReading(uint32_t now) {
   uint32_t gen = 0;
   if (!claimBroker(host, &gen)) return;
   if (!host_->pollRequestReading(json_, len, claim_slot_, kind, slot_setting_ == 0, host, gen)) {
-    reading_retry_ms_ = millis() | 1UL;
-    POLL_LOG("reading not handed to the bridge (stopped or busy); retry in %lus", (unsigned long)(kReadingRetryMs / 1000));
+    reading_retry_ = true;
+    reading_retry_ms_ = millis();
+    POLL_LOG("reading not handed to the bridge (stopped or busy); retry in %lus", (unsigned long)(poll::kReadingRetryMs / 1000));
     return;
   }
   memcpy(reading_node_, g->node, sizeof(reading_node_));

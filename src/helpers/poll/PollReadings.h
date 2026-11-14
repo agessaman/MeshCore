@@ -25,6 +25,14 @@ static const uint8_t kReadingHashSize = 8;
 static const uint16_t kReadingJsonMax = 1664;  // v2 with every field and a fully escaped origin
 static const uint8_t kReadingHoldMax = kMaxTargets;
 
+// A reading the bridge did not publish waits this long before another try.
+static const uint32_t kReadingRetryMs = 60000;
+
+// Millis subtraction wraps; equal stamps have not elapsed.
+static inline bool readingRetryDue(uint32_t failed_ms, uint32_t now_ms) {
+  return (uint32_t)(now_ms - failed_ms) >= kReadingRetryMs;
+}
+
 // What one poll learned. The counters live in status and their presence in
 // status_len; the telemetry records are copied so a v2 envelope can carry them.
 struct Reading {

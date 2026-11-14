@@ -266,8 +266,9 @@ private:
   ReadingStore* readings_;
   char*    json_;           // a claim's or reading's JSON, built just before it is handed to the bridge
   bool     reading_pending_;
+  bool     reading_retry_;        // a failed publish is waiting out its minute
   uint32_t reading_filed_ms_;
-  uint32_t reading_retry_ms_;     // a failed publish waits a minute; 0 = none
+  uint32_t reading_retry_ms_;     // millis() when that wait started
   uint8_t  reading_node_[8];      // the held reading in flight: node prefix and sample time
   uint32_t reading_sampled_;
 
