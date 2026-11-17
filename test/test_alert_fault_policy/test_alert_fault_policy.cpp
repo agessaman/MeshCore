@@ -394,6 +394,27 @@ TEST(AlertFaultPolicy, DownDurationSurvivesMillisRollover) {
   EXPECT_EQ(kWifiThresh, r.duration_ms);
 }
 
+TEST(AlertFaultPolicy, OutageStartStampedAfterNowIsZeroElapsed) {
+  Alert::Fault f = OkFault();
+  const uint32_t now = 500000U;
+  EXPECT_EQ(0U, Alert::downDurationMs(now, Down(now + 1U)));
+  EXPECT_EQ(0U, Alert::downDurationMs(now, Down(now + Alert::kMaxStartSkewMs)));
+  Alert::TickResult r =
+      Alert::tick(f, now, Down(now + 1U), kWifiThresh, kMinInterval);
+  EXPECT_EQ(Alert::Action::None, r.action);
+
+  // The same outage still fires once it is really past the threshold.
+  r = Alert::tick(f, now + 1U + kWifiThresh, Down(now + 1U), kWifiThresh,
+                  kMinInterval);
+  EXPECT_EQ(Alert::Action::FireDown, r.action);
+  EXPECT_EQ(kWifiThresh, r.duration_ms);
+}
+
+TEST(AlertFaultPolicy, OutageStartStampedAfterNowAcrossRollover) {
+  const uint32_t now = std::numeric_limits<uint32_t>::max() - 1U;
+  EXPECT_EQ(0U, Alert::downDurationMs(now, Down(now + 5U)));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
