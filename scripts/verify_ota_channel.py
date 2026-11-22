@@ -16,6 +16,8 @@ and dev tags match the workflow's URLs, and the native tag is the URL of the
 channel named by --expect.
 
   python3 scripts/verify_ota_channel.py --expect prod
+  python3 scripts/verify_ota_channel.py --expect custom   # native = OTA_MANIFEST_BASE_URL,
+                                                          # which must be neither prod nor beta
   python3 scripts/verify_ota_channel.py --self-test
 
 URLs default to OTA_MANIFEST_BASE_URL, OTA_MANIFEST_BASE_STABLE_URL and
@@ -42,7 +44,12 @@ def check(data, expect, native_url, stable_url, dev_url):
     problems = []
     if stable_url == dev_url:
         problems.append("stable and dev URLs are identical (%s)" % stable_url)
-    expected_native = stable_url if expect == "prod" else dev_url
+    if expect == "custom":
+        expected_native = native_url
+        if native_url in (stable_url, dev_url):
+            problems.append("OTA_MANIFEST_BASE_URL %s is a prod/beta URL, not a custom channel" % native_url)
+    else:
+        expected_native = stable_url if expect == "prod" else dev_url
     if native_url != expected_native:
         problems.append("OTA_MANIFEST_BASE_URL %s is not the %s URL %s"
                         % (native_url, expect, expected_native))
@@ -65,7 +72,7 @@ def find_bins(root):
 
 
 def self_test():
-    P, B = "https://h/v", "https://h/beta/v"
+    P, B, C = "https://h/v", "https://h/beta/v", "https://h/poll/v"
 
     def blob(native, stable=P, dev=B):
         return b"\x00junk\x00ota-base-native:%s\x00ota-base-stable:%s\x00ota-base-dev:%s\x00ota-compat:1\x00" % (
@@ -81,6 +88,9 @@ def self_test():
         ("conflicting native tags fail", blob(P) + blob(B), "prod", P, False),
         ("workflow URL off-channel fails", blob(P), "prod", B, False),
         ("missing compat tag fails", blob(P).replace(b"ota-compat:1", b"ota-compat:"), "prod", P, False),
+        ("custom build passes", blob(C), "custom", C, True),
+        ("custom check rejects a beta native URL", blob(B), "custom", B, False),
+        ("custom check rejects a mismatched native tag", blob(B), "custom", C, False),
         ("conflicting compat tags fail", blob(P) + b"ota-compat:2+eth\x00", "prod", P, False),
     ]
     failed = 0
@@ -95,7 +105,7 @@ def self_test():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--expect", choices=("prod", "beta"))
+    ap.add_argument("--expect", choices=("prod", "beta", "custom"))
     ap.add_argument("--bin-dir", default="out")
     ap.add_argument("--native-url", default=os.environ.get("OTA_MANIFEST_BASE_URL"))
     ap.add_argument("--stable-url", default=os.environ.get("OTA_MANIFEST_BASE_STABLE_URL"))

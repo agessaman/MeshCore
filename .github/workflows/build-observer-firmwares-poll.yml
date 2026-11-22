@@ -1,0 +1,372 @@
+name: Build MQTT Observer Firmwares (POLL test channel)
+
+permissions:
+  contents: write
+
+# Temporary third channel for testing repeater polling (feat/repeater-poll)
+# on more devices before it merges into observer-firmware-dev. A copy of the
+# beta workflow with its own release tag, manifest dir, download host and build
+# counter, so it can never publish into or prune the prod or beta channels.
+#
+# Lives only on `observer-firmware-poll` (= feat/repeater-poll + this CI commit),
+# so the workflow never reaches dev. Publish = merge feat/repeater-poll into
+# observer-firmware-poll and push.
+#
+# Builds carry the prod and beta bases as usual, so `ota branch beta` moves a
+# poll node to beta. Retiring the channel: once polling is on dev, push one last
+# build here with OTA_MANIFEST_BASE_URL set to the beta URL (and verify with
+# --expect beta); poll nodes then OTA onto a beta-native image and stay on beta.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - observer-firmware-poll
+    # Same rationale as production: docs/CI-only changes do not alter binaries.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'scripts/gen_changelog.py'
+      - '.github/**'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.editorconfig'
+      - 'LICENSE'
+      - '.vscode/**'
+      - '.claude/**'
+      # Host unit tests and their mocks are never compiled into firmware.
+      - 'test/**'
+      # Throwaway build worktrees never affect the binaries.
+      - '.build-wt-*'
+      - '.build-wt-*/**'
+      # The crash collector runs on a host and is never compiled into firmware.
+      - 'tools/observer_crash_collector/**'
+
+# Own group, never shared with prod or beta (a shared group can cancel their runs).
+concurrency:
+  group: observer-firmware-poll-build
+  cancel-in-progress: false
+
+env:
+  # Keep equal to the beta workflow's FIRMWARE_VERSION (this branch tracks dev).
+  FIRMWARE_VERSION: v1.18.0
+
+  # Own tag: pruning keeps KEEP_BUILDS hashes per tag, so a shared tag would
+  # delete another channel's assets.
+  RELEASE_TAG: observer-mqtt-poll-latest
+
+  # The channel itself. Firmware fetches <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json,
+  # so this URL is what keeps poll nodes on the poll channel.
+  OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/poll/v
+  # Both channel bases are baked into every build so `ota branch prod|beta` can
+  # move a node between channels. Identical in both observer workflows.
+  OTA_MANIFEST_BASE_STABLE_URL: https://observer.gessaman.com/v
+  OTA_MANIFEST_BASE_DEV_URL: https://observer.gessaman.com/beta/v
+  # Embedded version, e.g. v1.18.0.3-observer-beta-poll-abc1234. Transparent to
+  # OTA parsing (version reads to the first '-', hash is the last token).
+  OTA_CHANNEL_TAG: beta-poll
+  # Asset filenames, e.g. <env>-v1.18.0-poll-abc1234.bin. Lowercase letters only:
+  # the filename parsers accept exactly (?:-[a-z]+)? between version and hash.
+  FILENAME_CHANNEL_TAG: "-poll"
+
+  # Own build counter, so build numbers never interleave with beta's.
+  COUNTER_URL: https://observer.gessaman.com/observer-poll-build-counter.json
+  COUNTER_FILE: observer-poll-build-counter.json
+
+  # MANIFEST_DIR must match OTA_MANIFEST_BASE_URL's path; STATIC_PATH is the
+  # Worker serving this release (flasher repo cloudflare-worker/wrangler.poll.toml).
+  MANIFEST_DIR: poll/v
+  STATIC_PATH: https://observer-fw-poll.gessaman.com
+
+  # PSRAM repeater boards only; polling is repeater-side.
+  POLL_ENVS: >-
+    Station_G2_repeater_observer_mqtt
+    Station_G3_ESP32_repeater_observer_mqtt
+    Station_G3_ESP32_r2_repeater_observer_mqtt
+    heltec_v4_repeater_observer_mqtt
+    heltec_v4_expansionkit_repeater_observer_mqtt
+    heltec_v4_r8_repeater_observer_mqtt
+    heltec_v4_r8_tft_repeater_observer_mqtt
+    heltec_v4_r8_tft_portrait_repeater_observer_mqtt
+    T_Beam_S3_Supreme_SX1262_repeater_observer_mqtt
+
+jobs:
+
+  enumerate:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      build_number: ${{ steps.buildnum.outputs.n }}
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Split poll envs into shards
+        id: split
+        shell: bash
+        run: |
+          SHARDS=3
+          ALL=$(grep -rhoE '^\[env:[^]]*observer_mqtt\]' platformio.ini variants/*/platformio.ini \
+                 | sed -E 's/^\[env:(.*)\]$/\1/' | sort -u)
+          # Fail on a renamed or removed env rather than silently dropping a board.
+          for e in $POLL_ENVS; do
+            grep -qxF "$e" <<<"$ALL" || { echo "::error::env $e not found"; exit 1; }
+          done
+          ENVS=$(printf '%s\n' $POLL_ENVS)
+          echo "Discovered envs:"; echo "$ENVS"
+          MATRIX=$(echo "$ENVS" | awk -v n="$SHARDS" '
+              { shard[NR % n] = shard[NR % n] " " $0 }
+              END { for (i = 0; i < n; i++) { sub(/^ /, "", shard[i]);
+                    printf "{\"idx\":%d,\"envs\":\"%s\"}\n", i, shard[i] } }' \
+              | jq -cs .)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+      - name: Compute poll build number
+        id: buildnum
+        shell: bash
+        run: |
+          # Same scheme as beta but off the POLL counter.
+          CUR=$(curl -fsSL "$COUNTER_URL" 2>/dev/null || echo '{}')
+          PREV_BASE=$(echo "$CUR" | jq -r '.baseVersion // ""')
+          PREV_BUILD=$(echo "$CUR" | jq -r '.build // 0')
+          if [ "$PREV_BASE" = "$FIRMWARE_VERSION" ]; then
+            N=$((PREV_BUILD + 1))
+          else
+            N=1
+          fi
+          echo "Base $FIRMWARE_VERSION; previous poll build $PREV_BUILD (base $PREV_BASE) -> N=$N"
+          echo "n=$N" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: enumerate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.enumerate.outputs.matrix) }}
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Cache PlatformIO Toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-toolchains-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-toolchains-${{ runner.os }}-
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Build Shard ${{ matrix.shard.idx }}
+        env:
+          FIRMWARE_BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
+          # OTA_MANIFEST_BASE_URL and OTA_CHANNEL_TAG (what actually make this a
+          # poll build) come from the workflow-level env: above, which every step
+          # inherits. Do NOT redeclare them as ${{ env.X }} here — that is a
+          # self-reference, and if it resolved empty it would blank the channel.
+        run: /usr/bin/env bash build.sh build-firmware ${{ matrix.shard.envs }}
+
+      - name: Verify poll channel is baked in
+        # Native base must be the poll URL (not prod or beta) in every .bin.
+        run: python3 scripts/verify_ota_channel.py --expect custom
+
+      - name: Upload Shard Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.shard.idx }}
+          path: out
+          if-no-files-found: error
+
+  release:
+    needs: [enumerate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+        # Shallow on purpose — see the production workflow: `git rev-parse --short`
+        # must produce the same abbreviation build.sh used for the asset filenames.
+
+      - name: Download All Shard Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten into out/
+        run: |
+          mkdir -p out
+          find artifacts -type f -name '*.bin' -exec cp -f {} out/ \;
+          find artifacts -type f -name '*.partsig' -exec cp -f {} out/ \;
+          echo "Collected binaries:"; ls -1 out
+
+      - name: Compute Short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to Poll Rolling Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Retry wrapper for GitHub API calls. This job runs AFTER ~15 minutes of
+          # building across 14 runners, and every call below is an API write; with
+          # `bash -e`, a single transient 5xx throws all of that away. Observed
+          # 2026-07-19: `gh release create` got HTTP 503 during a GitHub incident
+          # and killed a run whose builds had all passed.
+          # `until` in a condition does not trip `-e`, so this is safe here.
+          gh_retry() {
+            local n=0 max=5 delay=10
+            until "$@"; do
+              n=$((n + 1))
+              if [ "$n" -ge "$max" ]; then
+                echo "::error::gh failed after $max attempts: $*" >&2
+                return 1
+              fi
+              echo "gh call failed (attempt $n/$max), retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+          }
+
+          # Deliberately NOT retried: a plain "release does not exist" is the
+          # expected answer on the first run, and retrying it would just burn the
+          # backoff. A 5xx here instead makes us fall through to create, which is
+          # then tolerated below if the release actually did already exist.
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh_retry gh release create "$RELEASE_TAG" --prerelease \
+              --title "MQTT Observer Firmwares (POLL test)" \
+              --notes "Rolling repeater-polling test build. Separate channel from prod and beta." \
+            || gh release view "$RELEASE_TAG" >/dev/null 2>&1 \
+            || { echo "::error::could not create or confirm $RELEASE_TAG" >&2; exit 1; }
+          fi
+
+          gh_retry gh release upload "$RELEASE_TAG" $(find out -maxdepth 1 -type f ! -name '*.partsig') --clobber
+
+          # Keep the release body in sync with the repo's notes source, with the
+          # dev-channel warning prepended: the /releases feed serves the body as
+          # this channel's dropdown changelog. Non-fatal — stale notes beat a
+          # red build whose binaries are already live.
+          {
+            printf '%s' '<p><b>&#9888; REPEATER POLLING TEST CHANNEL:</b> the beta firmware plus guest-key repeater polling for CoreScope, for testing before it merges into beta. A node flashed from this version receives OTA updates from this test channel; run <code>ota branch beta</code> to move it back to beta.</p>'
+            cat firmware-notes.html
+          } > /tmp/poll-notes.html
+          gh_retry gh release edit "$RELEASE_TAG" --notes-file /tmp/poll-notes.html \
+            || echo "WARNING: release notes sync failed" >&2
+
+          # Pruning is housekeeping and runs AFTER the upload has succeeded. If the
+          # API is flaky here, skip it rather than fail the job — old assets simply
+          # linger until the next run, which is strictly better than reporting
+          # failure for a build whose binaries are already published.
+          KEEP_BUILDS=2
+          if ! asset_list=$(gh_retry gh release view "$RELEASE_TAG" --json assets \
+                              -q '.assets[] | "\(.createdAt) \(.name)"'); then
+            echo "::warning::could not list assets; skipping prune this run"
+            exit 0
+          fi
+          keep_hashes=$(printf '%s\n' "$asset_list" \
+            | sort -r \
+            | while read -r _ts name; do
+                printf '%s' "$name" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}'
+              done \
+            | awk '!seen[$0]++' | head -n "$KEEP_BUILDS")
+          echo "Retaining build hashes:"; echo "$keep_hashes"
+          # Reuse asset_list rather than making a second API call (its lines are
+          # "<createdAt> <name>", so the name is field 2).
+          printf '%s\n' "$asset_list" | awk '{print $2}' \
+            | while read -r asset; do
+                ah=$(printf '%s' "$asset" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}' || true)
+                if [ -n "$ah" ] && grep -qxF "$ah" <<<"$keep_hashes"; then
+                  continue
+                fi
+                gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
+              done
+
+      - name: Checkout Flasher Repo
+        uses: actions/checkout@v4
+        with:
+          repository: agessaman/flasher.meshcore.io
+          token: ${{ secrets.FLASHER_DISPATCH_TOKEN }}
+          path: flasher
+
+      - name: Generate Poll Manifests
+        env:
+          BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
+        run: |
+          # The flasher's Version dropdown is feed-driven (RELEASE_FEED on the
+          # prod Worker), so this commit touches only poll/v/ and the counter.
+          mkdir -p "flasher/$MANIFEST_DIR"
+          # Slim manifests come from the build output in out/ (the assets
+          # actually uploaded to the release), not from config.json — see
+          # gen-slim-manifests.py's --bin-dir mode (flasher repo PR #1).
+          # --prune deletes manifests for envs this build no longer produces.
+          # Without it the dir only ever grew: the retired
+          # LilyGo_TLora_V2_1_1_6_*_observer_mqtt_ manifests sat here for two
+          # months pointing at release assets that had since been pruned, so any
+          # node still on that build got a 404 from `ota update`. The generator
+          # caps the prune (--prune-limit, default 4) and fails the run instead
+          # of pruning when a build looks like it silently lost envs.
+          python3 flasher/scripts/gen-slim-manifests.py \
+            --bin-dir out \
+            --prune \
+            --static-path "$STATIC_PATH" \
+            --out-dir "flasher/$MANIFEST_DIR" \
+            --base-version "$FIRMWARE_VERSION" \
+            --build "$BUILD_NUMBER" \
+            --partsig-dir out
+
+          printf '{\n  "baseVersion": "%s",\n  "build": %s\n}\n' \
+            "$FIRMWARE_VERSION" "$BUILD_NUMBER" > "flasher/$COUNTER_FILE"
+          echo "Poll build $FIRMWARE_VERSION.$BUILD_NUMBER"
+
+      - name: Verify poll manifests point at the poll channel
+        run: |
+          # Guards against a poll manifest handing out a prod or beta download URL.
+          SAMPLE=$(find "flasher/$MANIFEST_DIR" -name '*.json' | head -1)
+          echo "sample: $SAMPLE"; cat "$SAMPLE"
+          if ! grep -qF "$STATIC_PATH" "$SAMPLE"; then
+            echo "ERROR: poll manifest does not use $STATIC_PATH" >&2; exit 1
+          fi
+
+      # NOTE: production's "Generate Changelog" and "Sync Docs into Flasher" steps
+      # are deliberately omitted. Those rewrite site-wide content (CHANGELOG.md,
+      # MQTT_IMPLEMENTATION.md, ...) that the production channel owns; a poll build
+      # must not overwrite them.
+
+      - name: Commit & Push Poll Artifacts
+        working-directory: flasher
+        run: |
+          # Scoped add: poll only ever touches its own manifest dir and counter,
+          # so a stray edit elsewhere in the flasher checkout (in particular
+          # production's config.json) can never be published by this workflow.
+          git add -A "$MANIFEST_DIR" "$COUNTER_FILE"
+          if git diff --cached --quiet; then
+            echo "No poll changes to commit."
+            exit 0
+          fi
+          git config user.name "meshcore-bot"
+          git config user.email "noreply@gessaman.com"
+          git commit -m "Update POLL observer firmware to ${{ steps.sha.outputs.short }} (build ${FIRMWARE_VERSION}.${{ needs.enumerate.outputs.build_number }})"
+          # The production workflows can be pushing to the flasher repo right now
+          # (no shared concurrency group any more), so a non-fast-forward is expected
+          # rather than fatal: rebase onto their commit and retry. The scoped add
+          # above keeps this commit inside the poll paths, so a conflict with
+          # production's files is not possible.
+          br=$(git rev-parse --abbrev-ref HEAD)
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$br"; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing onto origin/$br"
+            git fetch origin "$br"
+            # --autostash: the scoped add above leaves unrelated edits in the
+            # checkout unstaged on purpose, and plain rebase refuses to run with a
+            # dirty tree. They stay unstaged, so they still never get published.
+            git rebase --autostash "origin/$br" || {
+              git rebase --abort || true
+              echo "::error::flasher rebase conflicted; re-run this workflow to republish"
+              exit 1
+            }
+          done
+          echo "::error::could not push poll changes after 3 attempts"
+          exit 1
