@@ -13,18 +13,24 @@ Developer-facing notes on how the MQTT observer feature is structured in the cod
 - `src/helpers/MQTTMessageBuilder.h` - JSON message formatting utilities
 - `src/helpers/MQTTMessageBuilder.cpp` - JSON message formatting implementation
 - `src/helpers/JWTHelper.h` - JWT token generation for Ed25519-based authentication
-- `src/helpers/CommonCLI_Observer.cpp` - All observer CLI command handling (MQTT, WiFi,
-  timezone, NTP, OTA, SNMP, alerts)
+- `src/helpers/ObserverConfig.h` / `ObserverConfig.cpp` - `/mqtt.json` load, recovery and
+  atomic save, independent of any firmware's `NodePrefs`
+- `src/helpers/ObserverCLI.cpp` - All observer CLI command handling (MQTT, WiFi,
+  timezone, NTP, OTA, SNMP, alerts), as `ObserverConfig` members
+- `src/helpers/bridges/MQTTBridgeHost.h` - What the bridge reads from its host node
+  (name, radio params, forwarding, role)
 
 ### Integration seams with upstream code
 
 The observer feature is kept out of upstream-tracked files through three mechanisms:
 
-- **CLI hook methods** — upstream `CommonCLI.cpp` delegates to three `CommonCLI`
-  methods defined in the fork-owned `CommonCLI_Observer.cpp`: `handleObserverCommand()`,
-  `handleObserverSetCmd()`, and `handleObserverGetCmd()`. Each returns `true` if it
-  consumed the command, otherwise the upstream parser runs. Only these three call
-  sites touch upstream CLI code.
+- **CLI hook methods** — upstream `CommonCLI.cpp` delegates to the `ObserverConfig`
+  it owns (fork-owned `ObserverCLI.cpp`): `handleCommand()`, `handleSetCmd()`, and
+  `handleGetCmd()`. Each returns `true` if it consumed the command, otherwise the
+  upstream parser runs. Only these three call sites touch upstream CLI code.
+  `ObserverConfig` reaches the host through `ObserverCallbacks`; `CommonCLI`'s nested
+  `ObserverHost` adapter forwards those to `CommonCLICallbacks`, and a companion
+  build implements them directly.
 - **Callback virtuals** — observer behaviour needed from the application is exposed
   as default-no-op virtuals on `CommonCLICallbacks` (e.g. `restartBridgeSlot`,
   `isMqttBridgeRunning`, `syncMqttNtp`, `onAlertConfigChanged`, `sendAlertText`,

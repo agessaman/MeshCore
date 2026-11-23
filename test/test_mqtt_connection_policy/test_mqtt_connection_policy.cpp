@@ -688,6 +688,24 @@ TEST(MQTTConnectionPolicy, WifiReconnectRequiresBothDownAndSinceAttemptToClearRu
   EXPECT_TRUE(Policy::wifiReconnectDue(1000U + 15000U, down_since, last_attempt, attempt));
 }
 
+TEST(MQTTConnectionPolicy, WifiPromptReconnectOnlyForReasonsTheStackIgnores) {
+  // Reasons Arduino-ESP32 retries by itself: auth expired, beacon lost, SSID not found.
+  EXPECT_FALSE(Policy::wifiPromptReconnectWanted(2));
+  EXPECT_FALSE(Policy::wifiPromptReconnectWanted(200));
+  EXPECT_FALSE(Policy::wifiPromptReconnectWanted(201));
+  // Reason 0 is treated as "unspecified" by the stack, which it retries.
+  EXPECT_FALSE(Policy::wifiPromptReconnectWanted(0));
+  // Our own WiFi.disconnect() must never trigger a reconnect.
+  EXPECT_FALSE(Policy::wifiPromptReconnectWanted(8));
+  // Not retried by the stack: vendor code 220, BSS transition, auth failed, SA query timeout.
+  EXPECT_TRUE(Policy::wifiPromptReconnectWanted(220));
+  EXPECT_TRUE(Policy::wifiPromptReconnectWanted(12));
+  EXPECT_TRUE(Policy::wifiPromptReconnectWanted(202));
+  EXPECT_TRUE(Policy::wifiPromptReconnectWanted(209));
+  // The prompt attempt lands well before the first 15 s rung.
+  EXPECT_LT(Policy::kWifiPromptReconnectDelayMs, Policy::wifiReconnectBackoffMs(0));
+}
+
 TEST(MQTTConnectionPolicy, WifiOutageStartStickyAcrossReconnectAttempts) {
   // First observe-down (or connected→down) records `now`. Further down samples
   // — including STA backoff WiFi.disconnect() — must keep that start so

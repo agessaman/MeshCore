@@ -85,7 +85,7 @@ def board_table():
 # the table for so long: grepping CommonCLI alone does not see them.
 COMMAND_SOURCES = [
     "src/helpers/CommonCLI.cpp",
-    "src/helpers/CommonCLI_Observer.cpp",
+    "src/helpers/ObserverCLI.cpp",
     "examples/simple_repeater/MyMesh.cpp",
 ]
 

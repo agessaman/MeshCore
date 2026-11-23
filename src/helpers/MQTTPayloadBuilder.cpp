@@ -51,7 +51,8 @@ int MQTTPayloadBuilder::buildStatusMessage(
   const char* reset_reason,
   const char* crash_json,
   bool* crash_included,
-  const char* selfheal, int selfheal_n
+  const char* selfheal, int selfheal_n,
+  const char* role
 ) {
   if (crash_included != nullptr) *crash_included = false;
   doc.clear();
@@ -67,6 +68,9 @@ int MQTTPayloadBuilder::buildStatusMessage(
   root["client_version"] = client_version;
   if (repeat != nullptr) {
     root["repeat"] = repeat;
+  }
+  if (role != nullptr) {
+    root["role"] = role;
   }
 
   const bool has_conn_health = conn_health.slots_up >= 0 || conn_health.slots_total >= 0 ||

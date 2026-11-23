@@ -68,6 +68,10 @@
 
 #include <helpers/BaseChatMesh.h>
 #include <helpers/TransportKeyStore.h>
+#include <helpers/NodeDiagCLI.h>
+#ifdef WITH_MQTT_BRIDGE
+#include <helpers/CompanionObserver.h>
+#endif
 
 /* -------------------------------------------------------------------------------------- */
 
@@ -87,7 +91,11 @@ struct AdvertPath {
   uint8_t path[MAX_PATH_SIZE];
 };
 
-class MyMesh : public BaseChatMesh, public DataStoreHost {
+class MyMesh : public BaseChatMesh, public DataStoreHost, public NodeDiagHost
+#ifdef WITH_MQTT_BRIDGE
+  , public MQTTBridgeHost
+#endif
+{
 public:
   class Listener {
     public:
@@ -126,6 +134,22 @@ public:
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
+  // NodeDiagHost (memory, stats-radio-diag)
+  int getDiagQueueSize() override;
+  void formatDiagRadio(char* reply) override;
+
+#ifdef WITH_MQTT_BRIDGE
+  const CompanionObserver& getObserver() const { return _observer; }
+
+  // MQTTBridgeHost
+  const char* getObserverNodeName() const override { return _prefs.node_name; }
+  void getObserverRadioParams(float& freq, float& bw, uint8_t& sf, uint8_t& cr) const override {
+    freq = _prefs.freq; bw = _prefs.bw; sf = _prefs.sf; cr = _prefs.cr;
+  }
+  bool isObserverForwarding() const override { return isClientRepeatActive(); }
+  const char* getObserverRole() const override { return "companion"; }
+#endif
+
 protected:
   float getAirtimeBudgetFactor() const override;
   int getInterferenceThreshold() const override;
@@ -145,6 +169,10 @@ protected:
   void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
+#ifdef WITH_MQTT_BRIDGE
+  void logRx(mesh::Packet* pkt, int len, float score) override;
+  void logTx(mesh::Packet* pkt, int len) override;
+#endif
   bool isAutoAddEnabled() const override;
   bool shouldAutoAddContactType(uint8_t type) const override;
   bool shouldOverwriteWhenFull() const override;
@@ -235,6 +263,7 @@ private:
   bool handleCommand(const char* text, uint32_t sender_timestamp, char* reply);
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
+  bool isClientRepeatActive() const;
 
   // helpers, short-cuts
   void saveChannels() { _store->saveChannels(this); }
@@ -254,9 +283,14 @@ private:
   uint32_t _most_recent_lastmod;
   uint32_t _active_ble_pin;
   bool _iter_started;
+  uint32_t _active_freq_khz = 0;  // frequency last applied to the radio
   bool _cli_rescue;
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
+#ifdef WITH_MQTT_BRIDGE
+  char cli_command[161];   // observer values (hostnames, tokens) run long
+#else
   char cli_command[80];
+#endif
   char reply_buf[166];
   uint8_t app_target_ver;
   uint8_t *sign_data;
@@ -264,6 +298,9 @@ private:
   unsigned long dirty_contacts_expiry;
 
   TransportKey send_scope;
+#ifdef WITH_MQTT_BRIDGE
+  CompanionObserver _observer;
+#endif
 
   uint8_t cmd_frame[MAX_FRAME_SIZE + 1];
   uint8_t out_frame[MAX_FRAME_SIZE + 1];
@@ -291,4 +328,13 @@ private:
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
 };
 
+#if defined(ESP32) && defined(BOARD_HAS_PSRAM) && defined(WITH_MQTT_BRIDGE)
+  // Observer builds need internal DRAM for WiFi and MQTT slots; the mesh
+  // object (contacts, offline queue) lives in PSRAM instead, constructed at the
+  // start of setup() because Arduino only brings PSRAM up after static init.
+  #define COMPANION_MESH_IN_PSRAM 1
+extern MyMesh* g_companion_mesh;
+#define the_mesh (*g_companion_mesh)
+#else
 extern MyMesh the_mesh;
+#endif

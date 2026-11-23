@@ -18,6 +18,15 @@
 // Bridge provides: isRunning, isStopUnproven, anyClientQuarantined, isNetworkUp,
 //   ntpEvidenceAgeMs, candidateSlotCount, connectedSlotCount.
 
+// For roles that never self-heal (companion observer): the driver does nothing.
+struct ObserverSelfHealDisabledPlatform {
+  static const bool kSupported = false;
+  static uint32_t nowMs() { return 0; }
+  static uint32_t randomBelow(uint32_t) { return 0; }
+  static MQTTSelfHealPolicy::RtcRecord rtcLoad() { return MQTTSelfHealPolicy::rtcCleared(); }
+  static void rtcStore(const MQTTSelfHealPolicy::RtcRecord&) {}
+};
+
 #if defined(ESP_PLATFORM) && defined(WITH_MQTT_BRIDGE)
 #include <Arduino.h>
 #include <esp_random.h>
@@ -39,13 +48,7 @@ struct ObserverSelfHealPlatform {
   static void rtcStore(const MQTTSelfHealPolicy::RtcRecord& rec) { ObserverSelfHealRtc::store(rec); }
 };
 #else
-struct ObserverSelfHealPlatform {
-  static const bool kSupported = false;
-  static uint32_t nowMs() { return 0; }
-  static uint32_t randomBelow(uint32_t) { return 0; }
-  static MQTTSelfHealPolicy::RtcRecord rtcLoad() { return MQTTSelfHealPolicy::rtcCleared(); }
-  static void rtcStore(const MQTTSelfHealPolicy::RtcRecord&) {}
-};
+struct ObserverSelfHealPlatform : ObserverSelfHealDisabledPlatform {};
 #endif
 
 #ifndef MQTT_SELFHEAL_ALL_DOWN_JITTER_MS

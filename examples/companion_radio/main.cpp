@@ -1,6 +1,9 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#ifdef WITH_MQTT_BRIDGE
+#include <helpers/CrashReport.h>
+#endif
 
 #if defined(ENABLE_WIFI_INTERFACE) && defined(ENABLE_ESP_MDNS)
 #define HAS_ESP_MDNS
@@ -119,7 +122,20 @@ MultiSerialInterface interface_manager;
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
+#ifdef COMPANION_MESH_IN_PSRAM
+#include <esp_heap_caps.h>
+#include <new>
+MyMesh* g_companion_mesh = nullptr;
+static void allocMesh() {
+  void* mem = heap_caps_malloc(sizeof(MyMesh), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (mem == nullptr) mem = malloc(sizeof(MyMesh));   // board fitted without PSRAM
+  if (mem == nullptr) abort();
+  memset(mem, 0, sizeof(MyMesh));   // match the zero-init a static object gets
+  g_companion_mesh = new (mem) MyMesh(radio_driver, fast_rng, rtc_clock, tables, store);
+}
+#else
 MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store);
+#endif
 
 /* END GLOBAL OBJECTS */
 
@@ -141,9 +157,70 @@ void halt() {
 static void loopDuringDisplayRefresh();
 #endif
 
+#ifdef HAS_ESP_MDNS
+static bool mdns_started = false;
+static char mdns_node_name[32];   // node name the responder currently advertises
+
+// "meshcore_" prefix + sanitized node name, capped at 63 chars (max DNS label length)
+static void buildMdnsName(const char* nodeName, char mdnsName[64]) {
+  size_t pos = snprintf(mdnsName, 64, "meshcore_");
+  for (size_t i = 0; nodeName[i] != '\0' && pos < 63; ++i) {
+    const char c = nodeName[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+      mdnsName[pos++] = c;
+    }
+  }
+  mdnsName[pos] = '\0';
+}
+
+static void startMdns() {
+  const char* nodeName = the_mesh.getNodeName();
+  char mdnsName[64];
+  buildMdnsName(nodeName, mdnsName);
+
+  if (!MDNS.begin(mdnsName)) {
+    WIFI_DEBUG_PRINTLN("mDNS failed to start!");
+  } else {
+    MDNS.addService("meshcore", "tcp", TCP_PORT);
+    MDNS.addServiceTxt("meshcore", "tcp", "node-name", nodeName);
+    MDNS.addServiceTxt("meshcore", "tcp", "firmware-version", FIRMWARE_VERSION);
+    char protocol[12];
+    snprintf(protocol, sizeof(protocol), "%d", (int)FIRMWARE_VER_CODE);
+    MDNS.addServiceTxt("meshcore", "tcp", "protocol-version", (const char*)protocol);
+    MDNS.addServiceTxt("meshcore", "tcp", "build-date", __DATE__);
+    MDNS.addServiceTxt("meshcore", "tcp", "build-time", __TIME__);
+    strncpy(mdns_node_name, nodeName, sizeof(mdns_node_name) - 1);
+    mdns_node_name[sizeof(mdns_node_name) - 1] = '\0';
+    mdns_started = true;
+  }
+}
+
+// the node name can change at runtime (app or CLI), so keep the advertised name in step
+static void refreshMdnsName() {
+  const char* nodeName = the_mesh.getNodeName();
+  if (!mdns_started || strncmp(nodeName, mdns_node_name, sizeof(mdns_node_name) - 1) == 0) return;
+
+  char mdnsName[64], oldName[64];
+  buildMdnsName(nodeName, mdnsName);
+  buildMdnsName(mdns_node_name, oldName);
+  // setting the hostname re-announces every record, so skip it when only the TXT name changed
+  if (strcmp(mdnsName, oldName) != 0) mdns_hostname_set(mdnsName);
+  MDNS.addServiceTxt("meshcore", "tcp", "node-name", nodeName);
+  strncpy(mdns_node_name, nodeName, sizeof(mdns_node_name) - 1);
+  mdns_node_name[sizeof(mdns_node_name) - 1] = '\0';
+}
+#endif
+
 void setup() {
+#ifdef COMPANION_MESH_IN_PSRAM
+  allocMesh();   // before anything touches the_mesh
+#endif
   Serial.begin(115200);
   board.begin();
+#ifdef WITH_MQTT_BRIDGE
+  CrashReport::captureAtBoot();
+#endif
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
@@ -220,7 +297,13 @@ void setup() {
 #endif
 
 // add wifi interface
-#ifdef ENABLE_WIFI_INTERFACE
+#if defined(ENABLE_WIFI_INTERFACE) && defined(WITH_MQTT_BRIDGE)
+  // The observer's network link owns WiFi (credentials in /mqtt.json, joined by
+  // the MQTT task). The app's TCP server is started from loop() once the link
+  // has an address, since sockets cannot be opened before the stack is up.
+  board.setInhibitSleep(true);
+  interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+#elif defined(ENABLE_WIFI_INTERFACE)
   // use wifi ssid and password from prefs if ssid is not empty, otherwise use the build flag defaults
   if (the_mesh.getNodePrefs()->wifi_ssid[0]) {
     strcpy(wifi_ssid, the_mesh.getNodePrefs()->wifi_ssid);
@@ -275,31 +358,8 @@ void setup() {
   interface_manager.addInterface(InterfaceType::Ethernet, &ethernet_interface);
 #endif
 
-#ifdef HAS_ESP_MDNS
-  String nodeName = the_mesh.getNodeName();
-  String sanitizedNodeName;
-  sanitizedNodeName.reserve(nodeName.length());
-  for (size_t i = 0; i < nodeName.length(); ++i) {
-    const char c = nodeName[i];
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') || c == '-' || c == '_') {
-      sanitizedNodeName += c;
-    }
-  }
-
-  String mdnsName = "meshcore_";
-  mdnsName += sanitizedNodeName;
-  if (!MDNS.begin(mdnsName.c_str())) {
-    WIFI_DEBUG_PRINTLN("mDNS failed to start!");
-  } else {
-    MDNS.addService("meshcore", "tcp", TCP_PORT);
-    MDNS.addServiceTxt("meshcore", "tcp", "node-name", the_mesh.getNodeName());
-    MDNS.addServiceTxt("meshcore", "tcp", "firmware-version", FIRMWARE_VERSION);
-    String protocol; protocol+=FIRMWARE_VER_CODE;
-    MDNS.addServiceTxt("meshcore", "tcp", "protocol-version", protocol.c_str());
-    MDNS.addServiceTxt("meshcore", "tcp", "build-date", __DATE__);
-    MDNS.addServiceTxt("meshcore", "tcp", "build-time", __TIME__);
-  }
+#if defined(HAS_ESP_MDNS) && !defined(WITH_MQTT_BRIDGE)
+  startMdns();
 #endif
 
 // add hardware serial interface
@@ -365,7 +425,26 @@ void loop() {
 #endif
   }
 
-#ifdef ENABLE_WIFI_INTERFACE
+#ifdef HAS_ESP_MDNS
+  refreshMdnsName();
+#endif
+
+#if defined(ENABLE_WIFI_INTERFACE) && defined(WITH_MQTT_BRIDGE)
+  {
+    // (Re)open the listener whenever the link comes up; begin() is a no-op once listening.
+    bool wifi_up = WiFi.status() == WL_CONNECTED;
+    if (wifi_up && !wifi_was_connected) {
+      wifi_interface.begin(TCP_PORT);
+      WIFI_DEBUG_PRINTLN("connected, listening on %s:%d", WiFi.localIP().toString().c_str(), TCP_PORT);
+#ifdef HAS_ESP_MDNS
+      // The network link brings WiFi up after setup(), so the responder starts on a link-up;
+      // a failed start is retried on the next one.
+      if (!mdns_started) startMdns();
+#endif
+    }
+    wifi_was_connected = wifi_up;
+  }
+#elif defined(ENABLE_WIFI_INTERFACE)
   if (wifi_enabled) {
     // RP2040 has no WiFi event callbacks, so poll the link state instead
   #if defined(RP2040_PLATFORM)

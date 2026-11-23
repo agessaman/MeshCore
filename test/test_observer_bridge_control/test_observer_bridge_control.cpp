@@ -39,6 +39,12 @@ struct FakeHealPlatform {
 uint32_t FakeHealPlatform::now = 0;
 MQTTSelfHealPolicy::RtcRecord FakeHealPlatform::rtc{};
 
+// Unsupported, but with a running clock and recorded RTC writes, so a driver that
+// ignored kSupported would be seen acting.
+struct FakeUnsupportedHealPlatform : FakeHealPlatform {
+  static const bool kSupported = false;
+};
+
 // Mirrors the MQTTBridge lifecycle surface the control class touches.
 struct FakeBridge {
   std::vector<std::string>* calls;
@@ -552,6 +558,40 @@ TEST_F(ObserverSelfHealTest, NullBridgeNeverActs) {
   EXPECT_EQ(nullptr, bridge);
   EXPECT_TRUE(host.calls.empty());
   EXPECT_EQ(1, MQTTSelfHealPolicy::rtcConsecutive(FakeHealPlatform::rtc));
+}
+
+// The companion observer's configuration: lifecycle sequencing without the self-heal driver.
+// The same stop-unproven timeline alerts and reboots in StopUnprovenAlertsThenRebootsAfterGrace.
+TEST(ObserverBridgeControlDisabledHeal, SavedPrefOnNeverActsAndLateAckStillResumes) {
+  static_assert(!ObserverSelfHealDisabledPlatform::kSupported, "companion platform must stay unsupported");
+  g_log.clear();
+  FakeHost host;
+  FakeBridge* bridge = nullptr;
+  FakeHealPlatform::now = 0;
+  FakeHealPlatform::rtc = MQTTSelfHealPolicy::rtcCleared();
+  g_heal_calls = &host.calls;
+  ObserverBridgeControl<FakeBridge, FakeLog, FakeUnsupportedHealPlatform> ctl;
+  ctl.setState(host, bridge, true);
+  ASSERT_TRUE(bridge && bridge->running);
+  bridge->next_stop_times_out = true;
+  ctl.restart(host, bridge);
+  ASSERT_TRUE(bridge->unproven);
+  ASSERT_EQ(1, host.obs.mqtt_selfheal_enabled);
+  host.calls.clear();
+
+  for (uint32_t t = 40 * 60000UL; t < 600 * 60000UL; t += 60000UL) {
+    FakeHealPlatform::now = t;
+    ctl.poll(host, bridge);
+  }
+  EXPECT_TRUE(host.calls.empty());
+  EXPECT_TRUE(g_log.empty());
+
+  bridge->late_acked = true;
+  ctl.poll(host, bridge);
+  EXPECT_TRUE(bridge->running);
+  EXPECT_FALSE(ctl.resumePending());
+  g_heal_calls = nullptr;
+  delete bridge;
 }
 
 TEST_F(ObserverSelfHealTest, AllSlotsDownNeedsFreshEvidence) {

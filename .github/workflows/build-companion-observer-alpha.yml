@@ -1,0 +1,101 @@
+name: Build Companion Observer Firmwares (ALPHA, manual)
+
+# Manual alpha release of the *_companion_observer_wifi envs only. To publish:
+#
+#   git tag -a compobs-alpha-<n> -m "<release notes>" <commit>
+#   git push origin compobs-alpha-<n>
+#
+# Tag-triggered because workflow_dispatch only surfaces for workflows on the
+# default branch (`dev`, the upstream mirror). The prefix deliberately avoids
+# `companion-*`, which the upstream companion workflow listens on.
+#
+# Output is a GitHub prerelease named after the tag, nothing else: no flasher
+# manifests and no OTA channel (companion observers refuse `ota`), and the
+# observer workflows never pick these envs up (they match *observer_mqtt).
+on:
+  push:
+    tags:
+      - 'compobs-alpha-*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: companion-observer-alpha
+  cancel-in-progress: false
+
+env:
+  # Embedded version reads e.g. v1.18.0-observer-alpha-<hash>; filenames
+  # <env>-v1.18.0-alpha-<hash>.bin.
+  OTA_CHANNEL_TAG: alpha
+  FILENAME_CHANNEL_TAG: -alpha
+
+jobs:
+  alpha:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Cache PlatformIO Toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-toolchains-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-toolchains-${{ runner.os }}-
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+
+      - name: Resolve base version and envs
+        run: |
+          # Follow the beta channel's base version so alphas sort with it.
+          v=$(sed -nE 's/^  FIRMWARE_VERSION: (v[0-9.]+)$/\1/p' .github/workflows/build-observer-firmwares-beta.yml)
+          [ -n "$v" ] || { echo "::error::could not read FIRMWARE_VERSION from the beta workflow"; exit 1; }
+          echo "FIRMWARE_VERSION=$v" >> "$GITHUB_ENV"
+          envs=$(grep -rhoE '^\[env:[^]]*_companion_observer_wifi\]' platformio.ini variants/*/platformio.ini \
+            | sed -E 's/^\[env:(.*)\]$/\1/' | sort -u | tr '\n' ' ')
+          [ -n "$envs" ] || { echo "::error::no *_companion_observer_wifi envs found"; exit 1; }
+          echo "Base $v; envs: $envs"
+          echo "ALPHA_ENVS=$envs" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: /usr/bin/env bash build.sh build-firmware $ALPHA_ENVS
+
+      - name: Check every env produced app and merged images
+        run: |
+          missing=0
+          for e in $ALPHA_ENVS; do
+            app=0; merged=0
+            for f in out/"$e"-*.bin; do
+              [ -e "$f" ] || continue
+              case "$f" in *-merged.bin) merged=1 ;; *) app=1 ;; esac
+            done
+            [ "$app" = 1 ] || { echo "::error::missing $e app .bin"; missing=1; }
+            [ "$merged" = 1 ] || { echo "::error::missing $e -merged.bin"; missing=1; }
+          done
+          [ "$missing" = 0 ]
+          (cd out && sha256sum *.bin > SHA256SUMS.txt)
+          ls -1 out
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          SHORT=$(git rev-parse --short HEAD)
+          git fetch --depth=1 origin "+refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+          {
+            echo "**ALPHA: companion radio + MQTT observer (WiFi).** Untested beyond the bench. Flash by cable; these builds do not OTA."
+            echo
+            echo "Commit \`$SHORT\`. Use the \`-merged.bin\` for a fresh flash at 0x0, or the plain \`.bin\` to replace only the app."
+            echo
+            git for-each-ref "refs/tags/$TAG" --format='%(contents)'
+          } > notes.md
+          gh release create "$TAG" --prerelease --verify-tag \
+            --title "Companion Observer ALPHA ($TAG)" \
+            --notes-file notes.md \
+            out/*.bin out/SHA256SUMS.txt

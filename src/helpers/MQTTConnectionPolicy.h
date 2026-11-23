@@ -266,6 +266,30 @@ static inline uint32_t wifiReconnectBackoffMs(uint8_t attempt) {
   return kBackoffMs[index];
 }
 
+// Arduino-ESP32 2.0.x reconnects by itself only after these disconnect reasons
+// (WiFiGenericClass::_isReconnectableReason). After any other one, such as a
+// vendor code from a managed AP, the station stays idle until the ladder runs.
+static inline bool wifiStackAutoReconnects(uint8_t reason) {
+  switch (reason) {
+    case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 9:
+    case 14: case 15: case 16: case 17: case 23: case 49:
+    case 200: case 201: case 203: case 204: case 205: case 206: case 207:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static const uint8_t kWifiReasonAssocLeave = 8;  // our own WiFi.disconnect()
+// Long enough for the WiFi stack to finish tearing the old association down.
+static const uint32_t kWifiPromptReconnectDelayMs = 2000UL;
+
+// One prompt reconnect per outage, so a drop the stack will not retry does not
+// wait out the first 15 s rung.
+static inline bool wifiPromptReconnectWanted(uint8_t reason) {
+  return reason != kWifiReasonAssocLeave && !wifiStackAutoReconnects(reason);
+}
+
 // A reconnect is due only once the link has been down for the current rung AND
 // no attempt has been made within that rung (both measured wrap-safely). This
 // mirrors the two-part guard the bridge applied inline.
