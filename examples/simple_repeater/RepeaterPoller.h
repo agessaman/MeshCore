@@ -356,6 +356,7 @@ private:
   uint32_t gated_at_;                // last time the gate was seen closed
   uint32_t url_hash_;                // a new CoreScope starts its state over
   bool     has_url_;
+  bool     local_;                    // poll::localModeActive: no CoreScope, readings on poll.slot
   bool     community_;
   uint8_t  slot_setting_;            // poll.slot as the operator set it, 0 = unset
   uint8_t  claim_slot_;              // in use: poll.slot, else the slot whose broker the policy names, else 0

@@ -93,7 +93,11 @@ TEST(PollPrefsPolicy, NormalizesUrlsAndGatesEnable) {
   EXPECT_FALSE(poll::normalizePollUrl(url, &changed));
   EXPECT_STREQ("", url);
 
-  EXPECT_FALSE(poll::pollCanEnable("", 1, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_TRUE(poll::pollCanEnable("", 1, MQTT_PREFS_SLOT_COUNT));    // local mode
+  EXPECT_FALSE(poll::pollCanEnable("", 0, MQTT_PREFS_SLOT_COUNT));   // local mode needs a slot
+  EXPECT_FALSE(poll::pollCanEnable("", 7, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_FALSE(poll::pollCanEnable("corescope.example", 1, MQTT_PREFS_SLOT_COUNT));
+  EXPECT_FALSE(poll::pollCanEnable(nullptr, 1, MQTT_PREFS_SLOT_COUNT));
   EXPECT_TRUE(poll::pollCanEnable("https://corescope.example", 0, MQTT_PREFS_SLOT_COUNT));
   EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", -1, MQTT_PREFS_SLOT_COUNT));
   EXPECT_FALSE(poll::pollCanEnable("https://corescope.example", 7, MQTT_PREFS_SLOT_COUNT));

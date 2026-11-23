@@ -319,12 +319,14 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
       strcpy(reply, "Error: usage set poll on");
       return PollSetResult::Done;
     }
-    if (!poll::pollUrlHasScheme(prefs->poll_url)) {
-      strcpy(reply, "Error: poll.url is not set");
+    // A blank URL is local mode: readings go to poll.slot and the key never leaves the device.
+    const bool local = !poll::pollUrlHasScheme(prefs->poll_url);
+    if (local && prefs->poll_slot == 0) {
+      strcpy(reply, "Error: set poll.url, or poll.slot for local mode");
     } else if (prefs->poll_slot > RUNTIME_MQTT_SLOTS) {
       snprintf(reply, 160, "Error: poll.slot must be 1-%d", RUNTIME_MQTT_SLOTS);
     // Without consent the key waits for a JSON mode, where it never leaves the device.
-    } else if (prefs->poll_consent != 0 && !cb->ensureRepeaterPollKey()) {
+    } else if ((local || prefs->poll_consent != 0) && !cb->ensureRepeaterPollKey()) {
       strcpy(reply, "Error: could not create the polling key");
     } else {
       prefs->poll_enabled = 1;
@@ -369,6 +371,8 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
     if (strcmp(word, "none") == 0 || strcmp(word, "0") == 0) {
       prefs->poll_slot = 0;   // polling stays on; the policy's broker hosts may pick a slot
       strcpy(reply, "OK");
+      // Local mode has no policy to pick one.
+      if (!poll::pollUrlHasScheme(prefs->poll_url)) pollNoteCleared(prefs, "poll.slot", reply);
       return PollSetResult::Changed;
     }
     int slot = 0;

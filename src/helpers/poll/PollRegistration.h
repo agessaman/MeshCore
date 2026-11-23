@@ -113,6 +113,11 @@ static inline uint8_t modeFromFormat(uint8_t format) {
 
 static inline bool modeIsJson(uint8_t mode) { return mode == MODE_JSON || mode == MODE_TELEMETRY; }
 
+// Local mode: polling on, no CoreScope URL, poll.slot set. Telemetry readings, no CoreScope traffic.
+static inline bool localModeActive(bool enabled, bool has_url, uint8_t slot) {
+  return enabled && !has_url && slot != 0;
+}
+
 // A policy 200 sets the mode from its field, a 404 selects encrypted, and a failure keeps it.
 static inline uint8_t modeAfterPolicy(uint8_t mode, bool policy_ok, int16_t policy_status,
                                       uint8_t format) {

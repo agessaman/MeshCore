@@ -991,9 +991,17 @@ TEST(MQTTPrefsSerializer, PollRepairsEachOutOfRangeRule) {
 
   repaired = false;
   prefs = loadPoll(
-      "{version:1,poll:{enabled:1,url:\"\",slot:1,consent:1}}",
+      "{version:1,poll:{enabled:1,url:\"\",slot:1,consent:0}}",
       &repaired);
-  EXPECT_TRUE(repaired);
+  EXPECT_FALSE(repaired);   // local mode: blank URL with a slot survives load
+  EXPECT_EQ(1, prefs.poll_enabled);
+  EXPECT_EQ(1, prefs.poll_slot);
+
+  repaired = false;
+  prefs = loadPoll(
+      "{version:1,poll:{enabled:1,url:\"\",slot:0,consent:1}}",
+      &repaired);
+  EXPECT_TRUE(repaired);   // local mode needs a slot
   EXPECT_EQ(0, prefs.poll_enabled);
 
   repaired = false;

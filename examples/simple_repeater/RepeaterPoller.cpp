@@ -1392,7 +1392,7 @@ void RepeaterPoller::cmdGetPoll(char* reply) {
   else snprintf(slot, sizeof(slot), "none (%s)", policy_.mqtt_host_count ? "no broker matches" : "poll.slot unset");
   const unsigned held = requests_store_ ? requests_store_->table.count : 0;
   snprintf(reply, 160, "> %s, mode %s, slot %s, requests %s (%u held/%u free), targets %u (%u ok), key %s, gate %s, clock %s",
-           enabled_ ? "on" : "off", modeName(mode_), slot, requestsActive() ? "on" : "off", held,
+           enabled_ ? "on" : "off", local_ ? "local" : modeName(mode_), slot, requestsActive() ? "on" : "off", held,
            (unsigned)claimOptions().request_slots, (unsigned)total, (unsigned)ok, keyName(key_in_use_),
            poll::gateName(gate), clockOk() ? "ok" : "not synced");
 }
@@ -1486,6 +1486,8 @@ void RepeaterPoller::cmdGetStatus(const char* arg, char* reply) {
 
 void RepeaterPoller::cmdNow(const char* arg, char* reply) {
   readSettings();
+  // A mode switch since the last tick must not leave the previous mode's key in use.
+  if (enabled_) updateKey(host_->pollNow());
   int matches = 0;
   int8_t idx = findTarget(arg, &matches);
   if (idx < 0) {
@@ -1540,8 +1542,9 @@ bool RepeaterPoller::nowRefused(uint8_t idx, uint32_t now, char* reply, bool loc
   } else if (!local_only && claim_slot_ == 0) {
     strcpy(reply, "Error: no MQTT slot (poll.slot unset, no broker matches)");
   } else if (!local_only && key_in_use_ == poll::KEY_NONE) {
-    strcpy(reply, !consent_ && !poll::modeIsJson(mode_) ? "Error: no polling key in use (consent needed)"
-                                                        : "Error: no polling key in use (not registered with CoreScope, no shared key)");
+    strcpy(reply, local_ ? "Error: no polling key in use yet; try again"
+                  : !consent_ && !poll::modeIsJson(mode_) ? "Error: no polling key in use (consent needed)"
+                                                          : "Error: no polling key in use (not registered with CoreScope, no shared key)");
   } else if (busy() || host_->pollDiscoveryBusy()) {
     strcpy(reply, "busy");
   } else if (t.last_attempt && t.last_attempt <= now && now - t.last_attempt < kNowSpacingS) {
@@ -1699,6 +1702,7 @@ void RepeaterPoller::initControl() {
   gated_at_ = 0;
   url_hash_ = 0;
   has_url_ = false;
+  local_ = false;
   community_ = true;
   slot_setting_ = 0;
   claim_slot_ = 0;
@@ -1762,6 +1766,14 @@ void RepeaterPoller::readControlSettings(const PollSettings& s) {
     if (url_hash_ != 0) resetCorescope();
     url_hash_ = h;
   }
+  const bool local = poll::localModeActive(s.enabled, has_url_, s.slot);
+  if (local != local_) {
+    local_ = local;
+    mode_ = local ? poll::MODE_TELEMETRY : poll::MODE_UNKNOWN;
+    dropReadings("local mode changed");
+    if (local) POLL_LOG("local mode: no CoreScope, telemetry readings on slot %u", (unsigned)s.slot);
+    else POLL_LOG("local mode off");
+  }
   enforceRequests(host_->pollNow());
   updateClaimSlot();
 }
@@ -1808,6 +1820,7 @@ uint32_t RepeaterPoller::windowFor(uint8_t idx, uint32_t now) const {
 }
 
 uint8_t RepeaterPoller::gateAt(uint32_t now) const {
+  if (local_) return poll::GATE_OPEN;   // a gate saved from an earlier CoreScope does not apply
   return poll::gateInForce(policy_, gate_, poll::kPluginVersion, now);
 }
 
@@ -1956,7 +1969,7 @@ void RepeaterPoller::takeClaim(uint32_t now) {
 // while paused, gated or on standby so CoreScope keeps the roles current. No polling key: the
 // list is withheld, and one empty claim takes back a list already published this boot.
 __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
-  if (claim_pending_ || claim_slot_ == 0) return;
+  if (local_ || claim_pending_ || claim_slot_ == 0) return;   // claims are CoreScope coordination
   const poll::ClaimOptions opts = claimOptions();
   const bool may_list = poll::claimMayList(key_in_use_, opts.accepts_requests);
   if (may_list) ctl_note_ &= (uint8_t)~kNoteClaimsHeld;
@@ -2390,7 +2403,7 @@ void RepeaterPoller::applyControl(const poll::ControlResult& res, uint32_t now) 
     POLL_LOG("CoreScope policy: status %d; keeping the %s", (int)res.policy_status, had_policy ? "fetched copy" : "saved gate and defaults");
   }
 
-  const uint8_t mode = poll::modeAfterPolicy(mode_, res.policy_ok, res.policy_status, res.policy.reading_format);
+  const uint8_t mode = local_ ? mode_ : poll::modeAfterPolicy(mode_, res.policy_ok, res.policy_status, res.policy.reading_format);
   if (mode != mode_) {
     if (poll::registrationVoided(mode_, mode)) memset(&reg_, 0, sizeof(reg_));   // registered again before the key is used
     POLL_LOG("reading mode %s (was %s)", modeName(mode), modeName(mode_));
