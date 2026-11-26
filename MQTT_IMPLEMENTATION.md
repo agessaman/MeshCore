@@ -112,6 +112,7 @@ column lists the presets that need more. Every preset except `meshrank` uses the
 | `comchan` | `wss://obs.comchan.net:443/` | JWT | |
 | `virginiamesh` | `wss://mqtt.virginiamesh.com:8883` | none | |
 | `meshcore-analyzer-eu` | `wss://mqtt.meshcore-analyzer.eu:443` | JWT | |
+| `nodakmesh` | `wss://mqtt.nodakmesh.org:443` | JWT | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 
