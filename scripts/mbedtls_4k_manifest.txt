@@ -1,11 +1,13 @@
 # Reduced-TLS mbedTLS archives (OUT_CONTENT_LEN 4096, IN_CONTENT_LEN 16384).
 # Format: <arch> <sha256> <filename>
 #
-# Rebuild these for every espressif32 platform bump — the archives must match the
-# rest of the framework they link against. Built as of platformio/espressif32@6.11.0
+# Each platform bump gets a new release tag named after the platform version.
+# Never delete old tags: old commits must keep building with their pinned assets.
+# Rebuild both archive sets together. Built as of platformio/espressif32@6.11.0
 # from the recipe in docs/mbedtls-tls-footprint.md.
 #
-# Fetch with: scripts/fetch_mbedtls_4k.sh esp32s3
+# Fetch with: scripts/fetch_mbedtls_4k.sh --all
+release mbedtls-4k
 esp32s3 01629f635b33ffa2c1fdfcd8ac52327cd3a92e8d4e7c9a32d92974e0cfdfe398 libmbedcrypto.a
 esp32s3 07e7a09847589fefc35bc8d2f739d556535d535acd7185a9824b2af8edd5b05a libmbedtls_2.a
 esp32s3 e12bcc8d76a368e819987f266e73c265178d6b6675f05d0e29014bb543c402af libmbedtls.a

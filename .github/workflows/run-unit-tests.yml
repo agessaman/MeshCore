@@ -24,8 +24,11 @@ jobs:
           python3 -B scripts/check_arduinojson_pin.py --self-test
           python3 -B scripts/check_arduinojson_pin.py
 
+      - name: Run build script tests
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
       - name: Run Unit Tests
-        run: pio test -e native -e native_kiss_modem -vv
+        run: pio test -e native -e native_kiss_modem -e native_rak3401_onboard_radio -e native_jwt_helper -vv
 
       - name: Upload Test Results
         # Upload test results even if the test step failed.

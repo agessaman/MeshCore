@@ -15,6 +15,7 @@
 #include <helpers/CommonCLI.h>
 #include <helpers/NetworkLink.h>
 #include <helpers/MQTTPacketFilter.h>
+#include <helpers/MQTTNeighborsPolicy.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
 #include <helpers/WifiPowerSavePolicy.h>
@@ -276,7 +277,11 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   // AP_STA (not pure AP) so the WiFi scan for the SSID picker works while
   // the AP is up. STA stays unconnected - the bridge won't touch WiFi
   // while wifi_ssid is empty, and `start webconfig ap` requires it stopped.
+  // Starting as STA first lets the cap land before the AP beacons at the SDK
+  // default (~20 dBm), which brownout-prone boards cannot take.
+  activeNetworkLink().prepareWifiForAp();
   WiFi.mode(WIFI_AP_STA);
+  activeNetworkLink().reapplyWifiTxPower();
   // Setup mode serves an UNAUTHENTICATED API on the trust of physical AP
   // proximity. `start webconfig ap` can be run with the STA still associated
   // to the operator's LAN (MQTTBridge::end() leaves the STA link up and
@@ -298,6 +303,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
     strcpy(reply, "Err: failed to start AP");
     return false;
   }
+  activeNetworkLink().reapplyWifiTxPower();
   delay(100);  // let the AP netif settle before reading its IP
   IPAddress ip = WiFi.softAPIP();
 
@@ -445,6 +451,7 @@ void WebConfigServer::finalizeTeardown() {
       WiFi.mode(WIFI_OFF);
     } else {
       WiFi.mode(WIFI_STA);
+      activeNetworkLink().reapplyWifiTxPower();
     }
     _was_setup_ap = false;
   }
@@ -954,6 +961,17 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     wifi["ssid"] = (const char*)_obs->wifi_ssid;
     wifi["pwd"] = _obs->wifi_password[0] ? SECRET_SENTINEL : "";
     wifi["powersave"] = WifiPowerSavePolicy::nameFor(_obs->wifi_power_save);
+    // Stored dBm (0 = board default) plus what the radio reports, so the form
+    // can show the quantized value instead of echoing the request.
+    wifi["txpower"] = _obs->wifi_tx_power;
+    {
+      const int8_t applied = activeNetworkLink().appliedWifiTxPower();
+      if (applied >= 0) {
+        wifi["txpower_applied"] = applied / 4.0f;
+      } else {
+        wifi["txpower_applied"] = nullptr;
+      }
+    }
 
     JsonObject mqtt = doc.createNestedObject("mqtt");
     mqtt["origin"] = (const char*)_obs->mqtt_origin;
@@ -966,7 +984,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     mqtt["rx"] = (bool)_obs->mqtt_rx_enabled;
     mqtt["advert_verify"] = (bool)_obs->mqtt_advert_verify;
     mqtt["interval"] = _obs->mqtt_status_interval / 60000;  // CLI takes minutes
-    mqtt["neighbors"] = (bool)_obs->mqtt_neighbors_enabled;
+    mqtt["neighbors"] = mqttNeighborsModeName(_obs->mqtt_neighbors_enabled);
     mqtt["neighbors_interval"] = _obs->mqtt_neighbors_interval / 3600000UL;  // CLI takes hours
     mqtt["timezone"] = (const char*)_obs->timezone_string;
     mqtt["timezone_offset"] = _obs->timezone_offset;
@@ -987,6 +1005,8 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
       s["token"] = _obs->mqtt_slot_token[i][0] ? SECRET_SENTINEL : "";
       s["topic"] = (const char*)_obs->mqtt_slot_topic[i];
       s["audience"] = (const char*)_obs->mqtt_slot_audience[i];
+      s["iata"] = (const char*)_obs->mqtt_slot_iata[i];
+      s["neighbors"] = mqttNeighborsModeName(_obs->mqtt_slot_neighbors[i]);
       char filter_text[MQTTPacketFilter::kFilterTextSize];
       if (MQTTPacketFilter::format(_obs->mqtt_slot_packet_filter[i],
                                    filter_text, sizeof(filter_text))) {

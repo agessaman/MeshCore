@@ -160,6 +160,8 @@ ROUND_TRIPS = [
     ("set mqtt.neighbors on", "get mqtt.neighbors", "on"),
     ("set path.hash.mode 2", "get path.hash.mode", "2"),
     ("set mqtt.iata den", "get mqtt.iata", "DEN"),
+    ("set wifi.txpower 15", "get wifi.txpower", "15 dBm, applied 15 dBm"),
+    ("set wifi.txpower default", "get wifi.txpower", "default, applied 11 dBm"),
     # Board commands, exercised only when this board answers for them (see
     # BOARD_ROUND_TRIPS below); the settings form drives the two FEM keys.
     # Secret reads are masked back down for an HTTP caller, in CommonCLI's own

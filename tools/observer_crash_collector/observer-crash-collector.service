@@ -1,0 +1,41 @@
+[Unit]
+Description=MeshCore observer MQTT crash report collector
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=simple
+User=meshcore-observer
+Group=meshcore-observer
+WorkingDirectory=/var/lib/observer-crash-collector
+EnvironmentFile=/etc/observer-crash-collector/collector.env
+ExecStart=/opt/observer-crash-collector/venv/bin/python /opt/observer-crash-collector/collector.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+MemoryMax=256M
+StateDirectory=observer-crash-collector
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

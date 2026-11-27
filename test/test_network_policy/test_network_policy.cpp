@@ -196,6 +196,36 @@ TEST(NetworkPolicy, ManualOtaTimeoutIsUploadSafeAndWrapSafe) {
       100, 100 - timeout, false));
 }
 
+TEST(NetworkPolicy, ManualOtaRestartWaitsForCloseOrFallback) {
+  const uint32_t grace = NetworkPolicy::kManualOtaRestartGraceMs;
+  const uint32_t fallback = NetworkPolicy::kManualOtaRestartFallbackMs;
+
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(0, 0, false));
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(0, 0, true));
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(grace - 1, 0, true));
+  EXPECT_TRUE(NetworkPolicy::manualOtaRestartDue(grace, 0, true));
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(grace, 0, false));
+  EXPECT_TRUE(NetworkPolicy::manualOtaRestartDue(grace + 500, 0, true));
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(grace + 500, 0, false));
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(fallback - 1, 0, false));
+  EXPECT_TRUE(NetworkPolicy::manualOtaRestartDue(fallback, 0, false));
+  EXPECT_TRUE(NetworkPolicy::manualOtaRestartDue(fallback, 0, true));
+  // A loop sample captured before the arm must not look like a full wrap.
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(999, 1000, true));
+
+  const uint32_t grace_armed = (uint32_t)(0 - grace);
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(
+      grace_armed + (grace - 1), grace_armed, true));
+  EXPECT_TRUE(NetworkPolicy::manualOtaRestartDue(
+      grace_armed + grace, grace_armed, true));
+
+  const uint32_t fallback_armed = (uint32_t)(0 - fallback);
+  EXPECT_FALSE(NetworkPolicy::manualOtaRestartDue(
+      fallback_armed + (fallback - 1), fallback_armed, false));
+  EXPECT_TRUE(NetworkPolicy::manualOtaRestartDue(
+      fallback_armed + fallback, fallback_armed, false));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

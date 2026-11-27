@@ -1,15 +1,12 @@
 # SNMP Agent for MeshCore Observer Firmware
 
-This document describes the optional SNMP v2c agent that allows network monitoring tools to poll MeshCore observer nodes for health and performance metrics.
-
-## Overview
-
-The SNMP agent exposes radio statistics, MQTT connectivity status, memory usage, and network information via standard SNMP v2c GET/GETNEXT/GETBULK operations. It is designed for use with monitoring tools such as Nagios, Zabbix, LibreNMS, PRTG, or any SNMP-capable system.
+Observer nodes can run a read-only SNMP v2c agent so tools such as Zabbix, LibreNMS, or
+PRTG can poll radio, MQTT, memory, and network stats.
 
 - **Protocol**: SNMPv2c (read-only, no SET support)
 - **Port**: UDP 161 (standard SNMP)
 - **Library**: [0neblock/SNMP_Agent](https://github.com/0neblock/Arduino_SNMP)
-- **Disabled by default** -- must be explicitly enabled via CLI
+- **Off by default**
 
 ## Quick Start
 
@@ -107,17 +104,12 @@ The SNMP agent runs inside the existing MQTT FreeRTOS task on Core 0 (the WiFi/n
 - **MQTT stats** are updated from Core 0 each MQTT task loop iteration
 - **Memory and WiFi stats** are read directly in the SNMP loop on Core 0
 
-The agent starts automatically once WiFi connects and `snmp_enabled = 1` in prefs. It adds approximately 2-3 KB RAM overhead plus per-OID handler storage.
+The agent starts once the network connects with SNMP enabled, and uses about 2-3 KB of RAM.
 
 ## Build Configuration
 
-SNMP is enabled at compile time with the `WITH_SNMP=1` build flag and included in observer firmware targets:
-
-- `heltec_v3_repeater_observer_mqtt`
-- `heltec_v4_repeater_observer_mqtt`
-- `Station_G2_repeater_observer_mqtt`
-
-To add SNMP to another observer variant, add the following to its `platformio.ini`:
+`WITH_SNMP=1` is set on most ESP32 observer environments. Check a board with
+`grep -n WITH_SNMP variants/<board>/platformio.ini`. To add it to another observer env:
 
 ```ini
 build_flags =
@@ -139,11 +131,12 @@ lib_deps =
 |---|---|
 | `src/helpers/SNMPAgent.h` | SNMP agent wrapper class declaration |
 | `src/helpers/SNMPAgent.cpp` | OID registration and stats update implementation |
-| `src/helpers/CommonCLI.h` | `NodePrefs` struct (`snmp_enabled`, `snmp_community` fields) |
-| `src/helpers/CommonCLI.cpp` | CLI command parsing and prefs persistence |
+| `src/helpers/CommonCLI.h` | `MQTTPrefs` (`snmp_enabled`, `snmp_community`) |
+| `src/helpers/CommonCLI_Observer.cpp` | CLI commands |
 | `src/helpers/bridges/MQTTBridge.cpp` | SNMP loop integration in `mqttTaskLoop()` |
 | `examples/simple_repeater/MyMesh.cpp` | Radio stats push and agent initialization |
 
 ## Private Enterprise Number
 
-The OIDs currently use a temporary unregistered enterprise number (`99999`). A proper Private Enterprise Number (PEN) can be registered with IANA at no cost at https://pen.iana.org/pen/PenApplication.page.
+The OIDs use `99999`, a placeholder. A real Private Enterprise Number is free from
+[IANA](https://pen.iana.org/pen/PenApplication.page).

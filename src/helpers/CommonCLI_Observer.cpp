@@ -18,6 +18,7 @@
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
 #include "NetworkLink.h"
 #include "WifiPowerSavePolicy.h"     // one powersave value->mode/name mapping
+#include "WifiTxPowerPolicy.h"       // wifi.txpower parsing and dBm formatting
 #include <Utils.h>
 #include <climits>
 #include <new>
@@ -28,9 +29,13 @@
 #endif
 #ifdef WITH_MQTT_BRIDGE
 #include "bridges/MQTTBridge.h"
+#include "CrashReport.h"
 #include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
+#include "MQTTNeighborsPolicy.h"  // mqtt.neighbors auto/on/off and per-preset opt-in
 #include "MQTTPacketFilter.h"
+#include "MQTTTopicRouter.h"   // mqttSlotIata() — a slot's effective region code
+#include "ObserverSelfHealRtc.h"  // last self-heal cause and count for get mqtt.selfheal
 #endif
 
 // Local copy of the busted-libc-safe atoi (the original in CommonCLI.cpp is static).
@@ -370,6 +375,29 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     _mqtt_prefs.mqtt_advert_verify = memcmp(&config[19], "on", 2) == 0 ? 1 : 0;
     if (!persistObserverPrefs(reply)) return true;
     strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.breaker.interval ", 22) == 0) {
+    uint8_t minutes = 0;
+    if (!MQTTConnectionPolicy::parseBreakerProbeMinutes(&config[22], &minutes)) {
+      sprintf(reply, "Error: breaker interval must be between %u-%u minutes",
+              (unsigned)MQTTConnectionPolicy::kBreakerProbeMinMinutes,
+              (unsigned)MQTTConnectionPolicy::kBreakerProbeMaxMinutes);
+    } else {
+      _mqtt_prefs.mqtt_breaker_probe_min = minutes;
+      if (!persistObserverPrefs(reply)) return true;
+      // Published to the bridge only once saved, so a rolled-back value never applies.
+      MQTTBridge::setBreakerProbeMinutes(minutes);
+      sprintf(reply, "OK - breaker probe every %u minutes", (unsigned)minutes);
+    }
+  } else if (memcmp(config, "mqtt.selfheal ", 14) == 0) {
+    const char* val = &config[14];
+    if (strcmp(val, "on") == 0 || strcmp(val, "off") == 0) {
+      // Read live by the self-heal driver on its next tick.
+      _mqtt_prefs.mqtt_selfheal_enabled = val[1] == 'n' ? 1 : 0;
+      if (!persistObserverPrefs(reply)) return true;
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: use on or off");
+    }
   } else if (memcmp(config, "mqtt.interval ", 14) == 0) {
     uint32_t minutes = _atoi(&config[14]);
     if (minutes >= 1 && minutes <= 60) {
@@ -396,9 +424,14 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.neighbors ", 15) == 0) {
     // The mesh loop reads this live, so no bridge restart is needed; enabling it
     // triggers a discovery on the next eligible loop pass.
-    _mqtt_prefs.mqtt_neighbors_enabled = memcmp(&config[15], "on", 2) == 0;
-    if (!persistObserverPrefs(reply)) return true;
-    strcpy(reply, "OK");
+    uint8_t mode;
+    if (!mqttNeighborsParseMode(&config[15], &mode)) {
+      strcpy(reply, "Error: use auto, on, or off");
+    } else {
+      _mqtt_prefs.mqtt_neighbors_enabled = mode;
+      if (!persistObserverPrefs(reply)) return true;
+      strcpy(reply, "OK");
+    }
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0 ||
              memcmp(config, "mqtt.neighbors ", 15) == 0) {
@@ -473,6 +506,37 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       sprintf(reply, "OK - saved as %s", ps_name);
 #endif
     }
+  } else if (memcmp(config, "wifi.txpower ", 13) == 0) {
+    uint8_t tx_value;
+    if (!WifiTxPowerPolicy::parse(&config[13], &tx_value)) {
+      sprintf(reply, "Error: must be default or %u..%u (dBm)",
+              (unsigned)WifiTxPowerPolicy::kMinDbm, (unsigned)WifiTxPowerPolicy::kMaxDbm);
+    } else {
+      _mqtt_prefs.wifi_tx_power = tx_value;
+      if (!persistObserverPrefs(reply)) return true;
+      char stored[12];
+      if (tx_value == WifiTxPowerPolicy::kBoardDefault) {
+        strcpy(stored, "default");
+      } else {
+        sprintf(stored, "%u dBm", (unsigned)tx_value);
+      }
+#ifdef ESP_PLATFORM
+      // The radio quantizes the request per chip, so report its readback.
+      const int8_t applied = activeNetworkLink().setWifiTxPower(tx_value);
+      if (applied >= 0) {
+        char applied_dbm[8];
+        WifiTxPowerPolicy::formatQdbm(applied_dbm, sizeof(applied_dbm), applied);
+        sprintf(reply, "OK - TX power %s (applied %s dBm)", stored, applied_dbm);
+      } else if (applied == WifiTxPowerPolicy::kApplyFailed) {
+        // Saved; the next association retries it.
+        sprintf(reply, "OK - saved as %s, but failed to apply", stored);
+      } else {
+        sprintf(reply, "OK - saved as %s (will apply when WiFi starts)", stored);
+      }
+#else
+      sprintf(reply, "OK - saved as %s", stored);
+#endif
+    }
   } else if (memcmp(config, "timezone ", 9) == 0) {
     if (valueTooLong(&config[9], sizeof(_mqtt_prefs.timezone_string), reply, "timezone")) return true;
     StrHelper::strncpy(_mqtt_prefs.timezone_string, &config[9], sizeof(_mqtt_prefs.timezone_string));
@@ -510,10 +574,11 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           _callbacks->restartBridgeSlot(slot);
           // Check if the slot has everything it needs to connect
           const MQTTPresetDef* p = findMQTTPreset(preset_name);
+          const char* slot_iata = mqttSlotIata(_mqtt_prefs.mqtt_iata, _mqtt_prefs.mqtt_slot_iata[slot]);
           if (p && p->topic_style == MQTT_TOPIC_MESHRANK && _mqtt_prefs.mqtt_slot_token[slot][0] == '\0') {
             sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt%d.token <your_token>' to connect)", slot + 1, preset_name, slot + 1);
           } else if (p && p->topic_style == MQTT_TOPIC_MESHCORE &&
-                     (strlen(_mqtt_prefs.mqtt_iata) == 0 || strcmp(_mqtt_prefs.mqtt_iata, "XXX") == 0)) {
+                     (strlen(slot_iata) == 0 || strcmp(slot_iata, "XXX") == 0)) {
             sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt.iata <airport_code>' to publish)", slot + 1, preset_name);
           } else if (p && mqttPresetNeedsSlotPassword(p) &&
                      _mqtt_prefs.mqtt_slot_password[slot][0] == '\0' &&
@@ -610,6 +675,26 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         _callbacks->restartBridgeSlot(slot);
         sprintf(reply, "OK - slot %d topic: %s", slot + 1, _mqtt_prefs.mqtt_slot_topic[slot]);
       }
+    } else if (strcmp(subcmd, "iata") == 0 || memcmp(subcmd, "iata ", 5) == 0) {
+      // Per-slot region code for MeshCore-style topics. Bare or empty clears
+      // the override so the slot follows mqtt.iata again.
+      const char* iata = subcmd[4] == '\0' ? "" : &subcmd[5];
+      if (iata[0] == '\0') {
+        _mqtt_prefs.mqtt_slot_iata[slot][0] = '\0';
+        if (!persistObserverPrefs(reply)) return true;
+        _callbacks->restartBridgeSlot(slot);
+        sprintf(reply, "OK - slot %d IATA cleared (using mqtt.iata)", slot + 1);
+      } else if (!mqttIataValid(iata)) {
+        strcpy(reply, "Error: IATA code must be exactly 3 letters/digits (e.g. DEN)");
+      } else {
+        StrHelper::strncpy(_mqtt_prefs.mqtt_slot_iata[slot], iata, sizeof(_mqtt_prefs.mqtt_slot_iata[slot]));
+        for (int i = 0; _mqtt_prefs.mqtt_slot_iata[slot][i]; i++) {
+          _mqtt_prefs.mqtt_slot_iata[slot][i] = toupper(_mqtt_prefs.mqtt_slot_iata[slot][i]);
+        }
+        if (!persistObserverPrefs(reply)) return true;
+        _callbacks->restartBridgeSlot(slot);
+        sprintf(reply, "OK - slot %d IATA: %s", slot + 1, _mqtt_prefs.mqtt_slot_iata[slot]);
+      }
     } else if (memcmp(subcmd, "audience ", 9) == 0) {
       if (valueTooLong(&subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_audience[slot]), reply, "audience")) return true;
       StrHelper::strncpy(_mqtt_prefs.mqtt_slot_audience[slot], &subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_audience[slot]));
@@ -626,6 +711,21 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       if (!persistObserverPrefs(reply)) return true;
       _callbacks->restartBridgeSlot(slot);
       sprintf(reply, "OK - slot %d JWT audience cleared (using username/password auth)", slot + 1);
+#if defined(WITH_MQTT_NEIGHBORS)
+    } else if (strncmp(subcmd, "neighbors ", 10) == 0) {
+      // Read live by the mesh loop; no bridge restart needed.
+      uint8_t mode;
+      if (!mqttNeighborsParseMode(&subcmd[10], &mode)) {
+        strcpy(reply, "Error: use auto, on, or off");
+      } else {
+        _mqtt_prefs.mqtt_slot_neighbors[slot] = mode;
+        if (!persistObserverPrefs(reply)) return true;
+        sprintf(reply, "OK - slot %d neighbors: %s", slot + 1, mqttNeighborsModeName(mode));
+      }
+#elif defined(WITH_MQTT_BRIDGE)
+    } else if (strncmp(subcmd, "neighbors ", 10) == 0) {
+      strcpy(reply, "Err - neighbors not enabled in this build");
+#endif
     } else if (strcmp(subcmd, "filter") == 0 ||
                strncmp(subcmd, "filter ", 7) == 0) {
       // Empty/bare input resets to the backwards-compatible all-types default.
@@ -922,6 +1022,10 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       start = (int)_atoi(start_arg);
     }
     formatMQTTPresetListReply(reply, 160, start);
+  } else if (memcmp(config, "crash", 5) == 0 && (config[5] == '\0' || config[5] == '\n' || config[5] == '\r')) {
+    CrashReport::formatCli(reply, 160);
+  } else if (memcmp(config, "mqtt.stacks", 11) == 0) {
+    MQTTBridge::formatMqttStacksReply(reply, 160);
   } else if (memcmp(config, "mqtt.stats", 10) == 0) {
     MQTTBridge::formatMqttStatsReply(reply, 160);
   } else if (memcmp(config, "mqtt.status", 11) == 0) {
@@ -937,6 +1041,18 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     sprintf(reply, "> %s", _mqtt_prefs.mqtt_rx_enabled ? "on" : "off");
   } else if (memcmp(config, "mqtt.advert.verify", 18) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.mqtt_advert_verify ? "on" : "off");
+  } else if (memcmp(config, "mqtt.breaker.interval", 21) == 0) {
+    sprintf(reply, "> %u minutes",
+            (unsigned)(MQTTConnectionPolicy::breakerProbeMs(_mqtt_prefs.mqtt_breaker_probe_min) / 60000UL));
+  } else if (memcmp(config, "mqtt.selfheal", 13) == 0) {
+    const MQTTSelfHealPolicy::RtcRecord rec = ObserverSelfHealRtc::load();
+    const uint8_t n = ObserverSelfHealRtc::lastCount(rec);
+    if (n == 0) {
+      sprintf(reply, "> %s, last: none", _mqtt_prefs.mqtt_selfheal_enabled ? "on" : "off");
+    } else {
+      sprintf(reply, "> %s, last: %s x%u", _mqtt_prefs.mqtt_selfheal_enabled ? "on" : "off",
+              MQTTSelfHealPolicy::causeLabel(ObserverSelfHealRtc::lastCause(rec)), (unsigned)n);
+    }
   } else if (memcmp(config, "mqtt.interval", 13) == 0) {
     uint32_t minutes = (_mqtt_prefs.mqtt_status_interval + 29999) / 60000;
     sprintf(reply, "> %u minutes (%lu ms)", minutes, (unsigned long)_mqtt_prefs.mqtt_status_interval);
@@ -947,7 +1063,12 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     uint32_t hours = (_mqtt_prefs.mqtt_neighbors_interval + 3599999) / 3600000;
     sprintf(reply, "> %u hours (%lu ms)", (unsigned)hours, (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
   } else if (memcmp(config, "mqtt.neighbors", 14) == 0) {
-    sprintf(reply, "> %s", _mqtt_prefs.mqtt_neighbors_enabled ? "on" : "off");
+    if (_mqtt_prefs.mqtt_neighbors_enabled == MQTT_NEIGHBORS_AUTO) {
+      sprintf(reply, "> auto (%s)",
+              mqttNeighborsCollectionEnabled(&_mqtt_prefs, RUNTIME_MQTT_SLOTS) ? "active" : "inactive");
+    } else {
+      sprintf(reply, "> %s", mqttNeighborsModeName(_mqtt_prefs.mqtt_neighbors_enabled));
+    }
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval", 23) == 0 ||
              memcmp(config, "mqtt.neighbors", 14) == 0) {
@@ -1005,12 +1126,29 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       } else {
         strcpy(reply, "> (default: meshcore/{iata}/{device}/{type})");
       }
+    } else if (strcmp(subcmd, "iata") == 0) {
+      if (_mqtt_prefs.mqtt_slot_iata[slot][0] != '\0') {
+        sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_iata[slot]);
+      } else {
+        sprintf(reply, "> (not set - using mqtt.iata: %s)",
+                _mqtt_prefs.mqtt_iata[0] ? _mqtt_prefs.mqtt_iata : "not set");
+      }
     } else if (memcmp(subcmd, "audience", 8) == 0) {
       if (_mqtt_prefs.mqtt_slot_audience[slot][0] != '\0') {
         sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_audience[slot]);
       } else {
         strcpy(reply, "> (not set - custom slots use username/password auth)");
       }
+#if defined(WITH_MQTT_NEIGHBORS)
+    } else if (strcmp(subcmd, "neighbors") == 0) {
+      // Show the setting and whether periodic snapshots reach this slot.
+      sprintf(reply, "> %s (periodic: %s)",
+              mqttNeighborsModeName(_mqtt_prefs.mqtt_slot_neighbors[slot]),
+              mqttNeighborsSlotWants(&_mqtt_prefs, slot, true) ? "yes" : "no");
+#elif defined(WITH_MQTT_BRIDGE)
+    } else if (strcmp(subcmd, "neighbors") == 0) {
+      strcpy(reply, "Err - neighbors not enabled in this build");
+#endif
     } else if (strcmp(subcmd, "filter") == 0) {
       char filter_text[MQTTPacketFilter::kFilterTextSize];
       if (MQTTPacketFilter::format(_mqtt_prefs.mqtt_slot_packet_filter[slot],
@@ -1119,6 +1257,25 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     }
   } else if (memcmp(config, "wifi.powersave", 14) == 0) {
     sprintf(reply, "> %s", WifiPowerSavePolicy::nameFor(_mqtt_prefs.wifi_power_save));
+  } else if (memcmp(config, "wifi.txpower", 12) == 0) {
+    char stored[12];
+    if (_mqtt_prefs.wifi_tx_power == WifiTxPowerPolicy::kBoardDefault) {
+      strcpy(stored, "default");
+    } else {
+      sprintf(stored, "%u dBm", (unsigned)_mqtt_prefs.wifi_tx_power);
+    }
+#ifdef ESP_PLATFORM
+    const int8_t applied = activeNetworkLink().appliedWifiTxPower();
+    if (applied >= 0) {
+      char applied_dbm[8];
+      WifiTxPowerPolicy::formatQdbm(applied_dbm, sizeof(applied_dbm), applied);
+      sprintf(reply, "> %s, applied %s dBm", stored, applied_dbm);
+    } else {
+      sprintf(reply, "> %s, not applied yet (WiFi off)", stored);
+    }
+#else
+    sprintf(reply, "> %s", stored);
+#endif
   } else if (memcmp(config, "timezone.offset", 15) == 0) {
     // Must precede the "timezone" (8-byte) check below — that prefix-matches
     // "timezone.offset" too, so the more-specific key has to come first or
@@ -1174,7 +1331,10 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 
 bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
-  if (memcmp(command, "tls.bundletest ", 15) == 0) {
+  if (memcmp(command, "clear crash", 11) == 0) {
+    strcpy(reply, CrashReport::clear() ? "OK - crash dump cleared" : "ERR: crash dump erase failed");
+    return true;
+  } else if (memcmp(command, "tls.bundletest ", 15) == 0) {
 #ifdef ESP_PLATFORM
     if (!activeNetworkLink().isConnected()) {
       snprintf(reply, 160, "ERR: %s not connected",
@@ -1227,11 +1387,11 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       snprintf(reply, 160, "ERR: %s not connected",
                activeNetworkLink().mediumName());
     } else if (memcmp(command, "ota check", 9) == 0) {
-      // Check is synchronous so its result lands in this reply, and runs with the
-      // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only
-      // costs a single TLS handshake (no large JSON doc) — which fits alongside
-      // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
-      _board->otaFromManifest(ota_resolve_base(_prefs->ota_channel), _callbacks->getFirmwareVer(), true, reply);
+      if (_callbacks->isDeferredOtaUpdatePending()) {
+        strcpy(reply, "ERR: OTA update pending; retry check later");
+      } else {
+        _board->otaCheck(_prefs->ota_channel, _callbacks->getFirmwareVer(), reply);
+      }
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
       // schedule the real update — which tears the bridge down, flashes, and

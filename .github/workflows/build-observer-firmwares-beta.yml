@@ -38,9 +38,13 @@ on:
       - 'LICENSE'
       - '.vscode/**'
       - '.claude/**'
+      # Host unit tests and their mocks are never compiled into firmware.
+      - 'test/**'
       # Throwaway build worktrees never affect the binaries.
       - '.build-wt-*'
       - '.build-wt-*/**'
+      # The crash collector runs on a host and is never compiled into firmware.
+      - 'tools/observer_crash_collector/**'
 
 # Own group: serialize beta builds against each other only. Concurrency groups are
 # repo-wide, not per-branch, so sharing one with the production workflows let an
@@ -56,7 +60,7 @@ env:
   # OTA comparison treats a different base version as "always an update", so a
   # distinct base here would make every beta node think it is permanently behind.
   # Channels are separated by manifest URL, not by base version.
-  FIRMWARE_VERSION: v1.17.1
+  FIRMWARE_VERSION: v1.18.0
 
   # Beta-only rolling release. A separate tag is required, not cosmetic: the
   # publish step prunes all but the KEEP_BUILDS most recent build hashes within

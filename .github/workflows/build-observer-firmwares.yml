@@ -25,9 +25,13 @@ on:
       - 'LICENSE'
       - '.vscode/**'
       - '.claude/**'
+      # Host unit tests and their mocks are never compiled into firmware.
+      - 'test/**'
       # Throwaway build worktrees never affect the binaries.
       - '.build-wt-*'
       - '.build-wt-*/**'
+      # The crash collector runs on a host and is never compiled into firmware.
+      - 'tools/observer_crash_collector/**'
 
 # Own group: serialize builds against each other only. Do NOT share this group
 # with sync-flasher-content.yml — a mixed code+docs commit triggers both, and a
@@ -41,7 +45,7 @@ concurrency:
 env:
   # Version embedded in firmware filenames; must match the version key in the
   # flasher's config.json. Bump here when the observer version changes.
-  FIRMWARE_VERSION: v1.17.1
+  FIRMWARE_VERSION: v1.18.0
   # Rolling release tag that hosts the latest observer binaries.
   RELEASE_TAG: observer-mqtt-latest
   # Download host serving RELEASE_TAG's assets (cloudflare-worker in the flasher

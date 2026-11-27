@@ -6,6 +6,8 @@
 #include <MeshCore.h>
 #include "CommonCLI.h"
 #include "MQTTPacketFilter.h"
+#include "MQTTConnectionPolicy.h"
+#include "MQTTNeighborsPolicy.h"
 #include "MQTTPresets.h"
 
 // Compile-time defaults for fresh /mqtt.json (override via platformio build_flags).
@@ -70,7 +72,10 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_rx_enabled = 1;
   prefs->mqtt_advert_verify = 0;
   prefs->mqtt_status_interval = 300000;
+  prefs->mqtt_breaker_probe_min = MQTTConnectionPolicy::kBreakerProbeDefaultMinutes;
+  prefs->mqtt_selfheal_enabled = 0;  // opt-in
   prefs->wifi_power_save = 1;
+  prefs->wifi_tx_power = 0;  // board default
 
   mqttDefaultSlotPreset(prefs->mqtt_slot_preset[0], sizeof(prefs->mqtt_slot_preset[0]),
                         MQTT_DEFAULT_SLOT1_PRESET);
@@ -106,9 +111,9 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->alert_mqtt_minutes = 240;
   prefs->alert_min_interval_min = 60;
 
-  // Neighbors publishing defaults off; a defaulted tail is a valid 24h interval
-  // (not 0) so an in-lineage upgrade from a pre-neighbors payload is sane.
-  prefs->mqtt_neighbors_enabled = 0;
+  // Neighbors default to auto (per-preset opt-in); a defaulted tail is a valid 24h
+  // interval (not 0) so an in-lineage upgrade from a pre-neighbors payload is sane.
+  prefs->mqtt_neighbors_enabled = MQTT_NEIGHBORS_AUTO;
   prefs->mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
 
   prefs->display_timeout_secs = DISPLAY_TIMEOUT_DEFAULT_SECS;

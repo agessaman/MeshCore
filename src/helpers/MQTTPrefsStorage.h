@@ -135,6 +135,28 @@ struct MQTTPrefs {
   // Drop received adverts whose Ed25519 signature fails before publishing.
   // Defaults off so RF corruption on the mesh stays visible to collectors.
   uint8_t mqtt_advert_verify;
+
+  // Per-slot IATA override for MeshCore-style topics. Empty uses mqtt_iata, so
+  // one observer can publish under different region codes to brokers whose
+  // region maps differ. Runtime only, like display_timeout_secs.
+  char mqtt_slot_iata[MQTT_PREFS_SLOT_COUNT][8];
+
+  // WiFi TX power cap in whole dBm; 0 follows the build's MQTT_WIFI_TX_POWER
+  // (see WifiTxPowerPolicy). Runtime only, like display_timeout_secs.
+  uint8_t wifi_tx_power;
+
+  // Per-slot neighbors override (MQTTNeighborsMode): 0 auto follows
+  // mqtt.neighbors and the preset opt-in, 1 on, 2 off. Runtime only, like
+  // display_timeout_secs.
+  uint8_t mqtt_slot_neighbors[MQTT_PREFS_SLOT_COUNT];
+
+  // Minutes between MQTT circuit-breaker probes (mqtt.breaker.interval). Runtime
+  // only, like display_timeout_secs.
+  uint8_t mqtt_breaker_probe_min;
+
+  // Bounded self-heal reboot when MQTT is stuck (mqtt.selfheal): 1 on, 0 off (default).
+  // Runtime only, like display_timeout_secs.
+  uint8_t mqtt_selfheal_enabled;
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {

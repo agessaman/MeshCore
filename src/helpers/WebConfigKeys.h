@@ -23,7 +23,7 @@ static const char* const WC_ALLOWED_SET_KEYS[] = {
   "repeat", "advert.interval", "flood.advert.interval",
   "flood.max", "flood.max.advert", "flood.max.unscoped", "loop.detect",
   // MQTTPrefs (WiFi / MQTT / misc observer)
-  "wifi.ssid", "wifi.pwd", "wifi.powersave",
+  "wifi.ssid", "wifi.pwd", "wifi.powersave", "wifi.txpower",
   "mqtt.origin", "mqtt.iata", "mqtt.status", "mqtt.packets", "mqtt.raw",
   "mqtt.tx", "mqtt.rx", "mqtt.advert.verify", "mqtt.interval", "mqtt.neighbors", "mqtt.neighbors.interval",
   "mqtt.ntp", "mqtt.owner", "mqtt.email",
@@ -31,7 +31,7 @@ static const char* const WC_ALLOWED_SET_KEYS[] = {
 };
 static const char* const WC_ALLOWED_SLOT_KEYS[] = {
   "preset", "server", "port", "username", "password", "token", "topic", "audience",
-  "filter",
+  "filter", "iata", "neighbors",
 };
 
 // True when `key` is a well-formed per-slot key ("mqttN.<field>" with N in

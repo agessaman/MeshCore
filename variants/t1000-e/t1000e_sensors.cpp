@@ -21,7 +21,7 @@ static unsigned int ntc_res2[136] = {
   1081,   1053,   1026,   999,   974,   949,   925,   902,   880,   858,
 };
 
-static char ntc_temp2[136] = {
+static int8_t ntc_temp2[136] = {
   -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11,
   -10, -9,  -8,  -7,  -6,  -5,  -4,  -3,  -2,  -1,  0,   1,   2,   3,   4,   5,   6,   7,   8,   9,
   10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,  25,  26,  27,  28,  29,
@@ -72,7 +72,6 @@ float t1000e_get_temperature(void) {
   unsigned int ntc_v, vcc_v;
 
   digitalWrite(PIN_3V3_EN, HIGH);
-  digitalWrite(SENSOR_EN, HIGH);
   analogReference(AR_INTERNAL_3_0);
   analogReadResolution(12);
   delay(10);
@@ -80,7 +79,6 @@ float t1000e_get_temperature(void) {
   vcc_v = (rail_v > NTC_REF_VCC) ? NTC_REF_VCC : rail_v;
   ntc_v = (1000.0 * AREF_VOLTAGE * analogRead(TEMP_SENSOR)) / 4096;
   digitalWrite(PIN_3V3_EN, LOW);
-  digitalWrite(SENSOR_EN, LOW);
 
   return get_heater_temperature(vcc_v, ntc_v);
 }
@@ -90,13 +88,11 @@ uint32_t t1000e_get_light(void) {
   unsigned int lux_v = 0;
 
   digitalWrite(PIN_3V3_EN, HIGH);
-  digitalWrite(SENSOR_EN, HIGH);
   analogReference(AR_INTERNAL_3_0);
   analogReadResolution(12);
   delay(10);
   lux_v = 1000 * analogRead(LUX_SENSOR) * AREF_VOLTAGE / 4096;
   lux = get_light_lv(lux_v);
-  digitalWrite(SENSOR_EN, LOW);
   digitalWrite(PIN_3V3_EN, LOW);
 
   return lux;

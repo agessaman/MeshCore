@@ -130,7 +130,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 38;
+static const int MQTT_PRESET_COUNT = 43;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -181,6 +181,16 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "bsmesh",        "wss://mqtt.bsmesh.de:8885",               "mqtt.bsmesh.de",                  ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "marwoj",        "mqtts://mqtt.marwoj.net:8883",            nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   55,      "observer-agessaman", "ipRwCEclZkX47K" },
     { "westmichmesh",        "wss://mqtt.westmichmesh.org:443",               nullptr,                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // LE Gen-Y ECDSA chain (YE1 → Root YE → X2) anchors at ISRG Root X1.
+    { "sacmesh",       "wss://mqtt.sacmesh.org:443/",             "mqtt.sacmesh.org",                ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // Upstate Mesh (NY Capital District). JWT; LE Gen-Y ECDSA chain (YE1 → Root YE → X2) anchors at ISRG Root X1.
+    { "upstatemesh",   "wss://mqtt.upst8me.sh:443/mqtt",          "mqtt.upst8me.sh",                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // Comchan (Central Texas). JWT; LE Gen-Y RSA chain (YR1 → Root YR → X1) anchors at ISRG Root X1.
+    { "comchan",       "wss://obs.comchan.net:443/",              "obs.comchan.net",                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // Virginia Mesh. No auth; LE Gen-Y ECDSA chain (YE2 → Root YE → X2) anchors at ISRG Root X1.
+    { "virginiamesh",  "wss://mqtt.virginiamesh.com:8883",       nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // EU MeshCore Analyzer. JWT; leaf → GTS WE1 → GTS Root R4 (same PEM as GTS_ROOT_R4).
+    { "meshcore-analyzer-eu", "wss://mqtt.meshcore-analyzer.eu:443", "mqtt.meshcore-analyzer.eu",     GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found

@@ -90,6 +90,22 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   it in pool — and a starved pool sets `doc.overflowed()`, which drops the entire publish
   instead of truncating it. `NEIGHBORS_MAX_PUBLISH_ENTRIES` (20 without PSRAM) keeps the
   pool inside a single block.
+- **Mode and per-preset opt-in** (`MQTTNeighborsPolicy.h`): `mqtt_neighbors_enabled` holds
+  a mode in RAM, 0 = auto, 1 = on, 2 = off. `/mqtt.json` stores it as `neighbors.mode` and
+  keeps `neighbors.enabled` as the 0/1 older firmware validates (1 only for on), so a
+  rollback repairs nothing, does not rewrite the file, and keeps `mode` for the next
+  upgrade. A file without `mode` maps `enabled` 0 to auto and 1 to on without counting
+  as a repair, so upgrading does not rewrite every node's file. Out-of-range values
+  repair to off. `mqttNeighborsCollectionEnabled()` gates the mesh loop's periodic cycle: on always runs
+  it, auto only while a stored slot preset passes `mqttPresetNameWantsNeighbors()`
+  (`MQTTPresetPolicy.h`, keyed by name so `MQTTPresets.h` stays identical across
+  channels). `startNeighborDiscover(reply, periodic)` records the origin. A periodic
+  scope pass is abandoned (`abortNeighborDiscover()`) if collection turns off mid-run.
+  `mqttNeighborsSlotWants()` combines the node mode, the per-slot
+  `mqtt_slot_neighbors` override (0 auto, 1 on, 2 off; `slotN.neighbors` in
+  `/mqtt.json`, missing = auto) and the preset list. The mesh hands the bridge a slot
+  bitmask (`mqttNeighborsSlotMask()`) with each snapshot, so the MQTT task never
+  reads prefs.
 - **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into the
   persistent buffer (`NEIGHBORS_JSON_BUFFER_SIZE`, PSRAM where available) and sets
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)
@@ -136,6 +152,17 @@ reconnection per slot.
   (`BACKOFF_STABLE_RESET_MS`), which is longer than the 75 s keepalive — a link that can't
   survive one keepalive round-trip keeps its earned rung instead of hammering TLS
   handshakes at the 10 s rung. CONNACK alone does not reset it.
+- The ladder advances just before each due reconnect, charging the failure that preceded
+  it. When the link comes back, each disconnected slot gets one immediate retry
+  (`link_retry_pending`). At the link-down edge, before live clients are closed,
+  `outageCausedByLink()` blames the outage on the link if the slot was still connected or
+  its session ended within 20 s of the edge (either side: the socket usually fails before
+  the 10 s Wi-Fi status poll reports the drop). That retry then holds the ladder where it
+  was. Any other outage (the slot was already failing), or any drop when the link had been
+  up for under 30 s (`kLinkFlapFloorMs`), or 40 s for a slot still marked connected at the
+  polled edge, advances it as usual; the recovery retry still
+  cannot trip the breaker itself. Refusals, handshake failures and quick drops while the
+  link stays up never take this path.
 - After 3 more failures at the top rung (~15 min) the slot's circuit breaker trips and
   routine reconnects stop. A tripped slot is probed once every 30 minutes (with a fresh
   JWT where applicable); a successful connect clears the breaker, as does reconfiguring
@@ -175,7 +202,7 @@ first property of the root object. The main shape is:
 
 ```text
 {version:1,
- wifi:{ssid:"...",password:"...",power_save:1},
+ wifi:{ssid:"...",password:"...",power_save:1,tx_power:0},
  time:{timezone:"...",utc_offset:0,ntp_server:"..."},
  mqtt:{origin:"...",iata:"SEA",packets_enabled:1,raw_enabled:0,
        tx_enabled:2,rx_enabled:1,
@@ -305,3 +332,15 @@ ABIs with size/offset assertions. The runtime `MQTTPrefs` layout is not an on-fl
 - Settings the pre-split firmware stored *inside* the `/com_prefs` MQTT gap (the MQTT
   slot/WiFi config itself) are **not** recovered — users upgrading from firmware that
   old must re-enter their MQTT and WiFi configuration.
+
+### Local testing without hardware
+
+- **Portal UI:** `python3 scripts/webconfig_mock_server.py` (add `--setup` for the
+  first-boot wizard), then open `http://localhost:8080/`. It serves `webui/index.html` and
+  mimics the firmware's `/api/*` behavior. Standard library only.
+- **Boot, WiFi, MQTT, CLI, OLED:** the Wokwi ESP32-S3 sim. Build
+  `pio run -e Heltec_v3_repeater_observer_mqtt_sim -t mergebin` (radio stubbed by
+  `SimRadio`, WiFi set to `Wokwi-GUEST`), then run it from `wokwi.toml`/`diagram.json`.
+  Outbound MQTT works on the free gateway; reaching the on-device portal needs Wokwi's
+  paid Private Gateway.
+- **Host unit tests:** `pio test -e native`; see [test/README.md](test/README.md).

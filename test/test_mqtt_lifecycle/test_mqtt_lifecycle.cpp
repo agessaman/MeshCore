@@ -253,6 +253,12 @@ TEST(MQTTLifecycle, LateAckRecoversFromAnUnprovenStop) {
   EXPECT_FALSE(c.mayBeginFlash());
   EXPECT_TRUE(c.stopTimedOut());
 
+  ops.now += kStopTimeoutMs;
+  c.tick();
+  EXPECT_EQ(1, ops.stop_complete_calls);
+  EXPECT_FALSE(ops.last_stop_clean);
+  EXPECT_FALSE(c.mayBeginFlash());
+
   // Restarting from the proven stop clears the latch, and a second ack is inert.
   EXPECT_FALSE(c.onTaskStopped());
   EXPECT_EQ(1, ops.release_calls);

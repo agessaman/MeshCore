@@ -27,6 +27,17 @@ static inline bool mqttTopicSlotIndexValid(int index, size_t slot_count) {
   return index >= 0 && (size_t)index < slot_count;
 }
 
+// The region code a slot publishes under: its own override when one is set,
+// otherwise the node-wide mqtt.iata. The override wins only when it is a usable
+// code, so a stale or invalid value can't stop a slot that would otherwise
+// publish under the global one.
+static inline const char* mqttSlotIata(const char* global_iata, const char* slot_iata) {
+  if (slot_iata && mqttIataValid(slot_iata) && strcmp(slot_iata, "XXX") != 0) {
+    return slot_iata;
+  }
+  return global_iata ? global_iata : "";
+}
+
 static inline const char* mqttPublicationTypeName(int type) {
   switch (type) {
     case MQTT_PUBLICATION_STATUS: return "status";

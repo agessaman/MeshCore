@@ -154,8 +154,14 @@ static inline uint32_t thresholdMs(uint16_t minutes) {
   return (uint32_t)minutes * kMsPerMinute;
 }
 
+// The outage start is stamped by another task and can be a few ms newer than
+// the caller's `now`; that is zero elapsed, not a 49.7-day outage.
+static const uint32_t kMaxStartSkewMs = 60000UL;
+
 static inline uint32_t downDurationMs(uint32_t now, const OutageSnapshot& snap) {
-  return snap.down ? elapsedMs(now, snap.started_ms) : 0;
+  if (!snap.down) return 0;
+  if (elapsedMs(snap.started_ms, now) <= kMaxStartSkewMs) return 0;
+  return elapsedMs(now, snap.started_ms);
 }
 
 static inline bool rateLimitAllows(uint32_t now, uint32_t fired_at_ms,

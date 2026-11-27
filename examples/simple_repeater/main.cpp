@@ -2,6 +2,7 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#include <helpers/CrashReport.h>
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -41,6 +42,7 @@ void setup() {
   delay(1000);
 
   board.begin();
+  CrashReport::captureAtBoot();
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();

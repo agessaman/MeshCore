@@ -7,7 +7,7 @@ and `ota update` refuses only when the target build's signature differs from the
 running device's — i.e. a real partition-table change, not a blanket flag.
 
 The signature MUST be computed identically here and in firmware
-(src/helpers/ESP32Board.cpp). Definition:
+(src/helpers/ESP32ManifestOTA.cpp). Definition:
 
   for each partition-table entry: (type, subtype, offset, size)
   sort by offset ascending

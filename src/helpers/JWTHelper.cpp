@@ -5,14 +5,17 @@
 
 #include "JWTHelper.h"
 #include <ArduinoJson.h>
-#include <SHA256.h>
 #include <string.h>
-#include "ed_25519.h"
 #include "mbedtls/base64.h"
 
-// Base64 URL encoding table (without padding)
-static const char base64url_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+// base64url of {"alg":"Ed25519","typ":"JWT"}, the fixed JWT header.
+static const char kJwtHeader[] = "eyJhbGciOiJFZDI1NTE5IiwidHlwIjoiSldUIn0";
+static const size_t kJwtHeaderLen = sizeof(kJwtHeader) - 1;
+static const size_t kSignatureHexLen = SIGNATURE_SIZE * 2;
+// Encoded payload cap including NUL, which limits the payload JSON to 381 bytes.
+static const size_t kPayloadOutputMax = 512;
 
+// Builds header.payload.signatureHex in place; size checks run before the first write.
 bool JWTHelper::createAuthToken(
   const mesh::LocalIdentity& identity,
   const char* audience,
@@ -32,84 +35,56 @@ bool JWTHelper::createAuthToken(
   if (issuedAt == 0) {
     issuedAt = time(nullptr);
   }
-  
-  // Create header
-  char header[256];
-  size_t headerLen = createHeader(header, sizeof(header));
-  if (headerLen == 0) {
+
+  const size_t fixedLen = kJwtHeaderLen + 1 + 1 + kSignatureHexLen + 1;
+  if (tokenSize <= fixedLen) {
     return false;
   }
-  
-  // Get public key as UPPERCASE HEX string
-  char publicKeyHex[65];
-  mesh::Utils::toHex(publicKeyHex, identity.pub_key, PUB_KEY_SIZE);
-  for (int i = 0; publicKeyHex[i]; i++) {
-    publicKeyHex[i] = toupper(publicKeyHex[i]);
+  // The encoder briefly needs padding and a NUL past the payload; the signature overwrites them.
+  size_t encodeCap = tokenSize - (kJwtHeaderLen + 1);
+  if (encodeCap > kPayloadOutputMax) {
+    encodeCap = kPayloadOutputMax;
   }
-  
-  // Create payload
-  char payload[512];
-  size_t payloadLen = createPayload(publicKeyHex, audience, issuedAt, expiresIn, payload, sizeof(payload), owner, client, email);
+
+  char* payload = token + kJwtHeaderLen + 1;
+  size_t payloadLen = createPayload(identity.pub_key, audience, issuedAt, expiresIn,
+                                    payload, encodeCap, tokenSize - fixedLen,
+                                    owner, client, email);
   if (payloadLen == 0) {
     return false;
   }
-  
-  // Create signing input: header.payload
-  char signingInput[768];
-  size_t signingInputLen = headerLen + 1 + payloadLen;
-  if (signingInputLen >= sizeof(signingInput)) {
-    return false;
-  }
-  
-  memcpy(signingInput, header, headerLen);
-  signingInput[headerLen] = '.';
-  memcpy(signingInput + headerLen + 1, payload, payloadLen);
-  
-  // Sign the data using direct Ed25519 signing
-  uint8_t signature[64];
-  mesh::LocalIdentity identity_copy = identity;
-  
-  uint8_t export_buffer[96];
-  size_t exported_size = identity_copy.writeTo(export_buffer, sizeof(export_buffer));
-  
-  if (exported_size != 96) {
-    return false;
-  }
-  
-  uint8_t* private_key = export_buffer;
-  uint8_t* public_key = export_buffer + 64;
-  
-  ed25519_sign(signature, (const unsigned char*)signingInput, signingInputLen, public_key, private_key);
-  
-  // Verify the signature locally
-  int verify_result = ed25519_verify(signature, (const unsigned char*)signingInput, signingInputLen, public_key);
-  if (verify_result != 1) {
+
+  memcpy(token, kJwtHeader, kJwtHeaderLen);
+  token[kJwtHeaderLen] = '.';
+  const size_t signingLen = kJwtHeaderLen + 1 + payloadLen;
+
+  uint8_t signature[SIGNATURE_SIZE];
+  identity.sign(signature, (const uint8_t*)token, (int)signingLen);
+
+  // Signature as uppercase hex (MeshCore Decoder format); toHex() writes the NUL.
+  token[signingLen] = '.';
+  mesh::Utils::toHex(token + signingLen + 1, signature, SIGNATURE_SIZE);
+
+  if (!verifyTokenSignature(identity, token, signingLen)) {
+    memset(token, 0, signingLen + 1 + kSignatureHexLen + 1);
     if (Serial.availableForWrite() > 0) Serial.println("JWTHelper: Signature verification failed!");
     return false;
   }
-  
-  // Convert signature to hex
-  char signatureHex[129];
-  for (int i = 0; i < 64; i++) {
-    sprintf(signatureHex + (i * 2), "%02X", signature[i]);
-  }
-  signatureHex[128] = '\0';
-  
-  // Create final token: header.payload.signatureHex (MeshCore Decoder format)
-  size_t sigHexLen = strlen(signatureHex);
-  size_t totalLen = headerLen + 1 + payloadLen + 1 + sigHexLen;
-  if (totalLen >= tokenSize) {
-    return false;
-  }
-  
-  memcpy(token, header, headerLen);
-  token[headerLen] = '.';
-  memcpy(token + headerLen + 1, payload, payloadLen);
-  token[headerLen + 1 + payloadLen] = '.';
-  memcpy(token + headerLen + 1 + payloadLen + 1, signatureHex, sigHexLen);
-  token[totalLen] = '\0';
 
   return true;
+}
+
+// Kept out of line so the verifier's deep stack never sits under createAuthToken's locals.
+__attribute__((noinline)) bool JWTHelper::verifyTokenSignature(
+  const mesh::Identity& identity,
+  const char* token,
+  size_t signingLen
+) {
+  uint8_t signature[SIGNATURE_SIZE];
+  if (!mesh::Utils::fromHex(signature, SIGNATURE_SIZE, token + signingLen + 1)) {
+    return false;
+  }
+  return identity.verify(signature, (const uint8_t*)token, (int)signingLen);
 }
 
 size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* output, size_t outputSize) {
@@ -141,35 +116,24 @@ size_t JWTHelper::base64UrlEncode(const uint8_t* input, size_t inputLen, char* o
   return outlen;
 }
 
-size_t JWTHelper::createHeader(char* output, size_t outputSize) {
-  // Create JWT header: {"alg":"Ed25519","typ":"JWT"}
-  DynamicJsonDocument doc(256);
-  doc["alg"] = "Ed25519";
-  doc["typ"] = "JWT";
-  
-  char jsonBuffer[256];
-  size_t len = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
-  if (len == 0 || len >= sizeof(jsonBuffer)) {
-    return 0;
-  }
-  
-  return base64UrlEncode((uint8_t*)jsonBuffer, len, output, outputSize);
-}
-
 size_t JWTHelper::createPayload(
-  const char* publicKey,
+  const uint8_t* publicKey,
   const char* audience,
   unsigned long issuedAt,
   unsigned long expiresIn,
   char* output,
   size_t outputSize,
+  size_t maxLen,
   const char* owner,
   const char* client,
   const char* email
 ) {
+  char publicKeyHex[PUB_KEY_SIZE * 2 + 1];
+  mesh::Utils::toHex(publicKeyHex, publicKey, PUB_KEY_SIZE);
+
   // Create JWT payload
   DynamicJsonDocument doc(512);
-  doc["publicKey"] = publicKey;
+  doc["publicKey"] = publicKeyHex;
   doc["aud"] = audience;
   doc["iat"] = issuedAt;
   
@@ -198,6 +162,11 @@ size_t JWTHelper::createPayload(
     return 0;
   }
   
+  // Unpadded base64url length, checked before the encoder writes anything.
+  if ((len * 4 + 2) / 3 > maxLen) {
+    return 0;
+  }
+
   return base64UrlEncode((uint8_t*)jsonBuffer, len, output, outputSize);
 }
 
