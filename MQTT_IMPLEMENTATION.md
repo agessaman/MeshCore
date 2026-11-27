@@ -165,6 +165,7 @@ below documents the current build.
 | `ntxmesh` | `wss://ntxmesh.dhovin.me:8883` | JWT | — |
 | `bsmesh` | `wss://mqtt.bsmesh.de:8885` | JWT | — |
 | `marwoj` | `mqtts://mqtt.marwoj.net:8883` | User/pass (in firmware) | — |
+| `westmichmesh` | `wss://mqtt.westmichmesh.org:443` | JWT | - | 
 | `custom` | your own broker | User/pass, or JWT when `mqttN.audience` is set | `set mqttN.server` (see [custom broker setup](#custom-brokers)) |
 | `none` | (slot disabled) | — | — |
 
