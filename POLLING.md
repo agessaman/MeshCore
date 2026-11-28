@@ -7,6 +7,22 @@ separate polling key, asks for telemetry, and never floods: only direct neighbor
 Polling is in testing. It ships only in the poll test channel (`observer-firmware-poll`) and
 is not on the beta or production channels yet.
 
+## Getting the poll build
+
+Flash the `-poll` version from the flasher, or switch a running node over the air:
+
+```
+ota branch poll                  # or: ota branch beta / ota branch prod to leave
+ota update
+```
+
+- `ota branch poll` works only on the repeater boards in `scripts/poll-ota-variants.txt`;
+  other boards reply `ERR: poll OTA unavailable for this firmware variant`.
+- A node on an older build needs one `ota update` on its current channel before it knows
+  `ota branch poll`.
+- Polling settings are kept in `/mqtt.json` across switches, so they are back in place if the
+  node returns to poll later.
+
 ## Three ways to run it
 
 Where readings go depends on whether a polling server (analyzer) is configured, and which kind.
