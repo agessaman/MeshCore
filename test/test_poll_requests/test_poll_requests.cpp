@@ -97,6 +97,37 @@ TEST(PollRequests, AllowedAndFreeSlots) {
   EXPECT_EQ(0, poll::requestFreeSlots(9, 0));
   EXPECT_EQ(0, poll::requestFreeSlots(0, 9));
   EXPECT_EQ(0, poll::requestFreeSlots(200, 100));
+
+  // poll.limit caps local and requested targets together, never above eight.
+  EXPECT_EQ(3, poll::requestFreeSlots(0, 0, 3));
+  EXPECT_EQ(1, poll::requestFreeSlots(1, 1, 3));
+  EXPECT_EQ(0, poll::requestFreeSlots(2, 1, 3));
+  EXPECT_EQ(0, poll::requestFreeSlots(5, 0, 3));
+  EXPECT_EQ(0, poll::requestFreeSlots(0, 0, 0));
+  EXPECT_EQ(poll::kMaxTargets, poll::requestFreeSlots(0, 0, 200));
+}
+
+TEST(PollRequests, ReconcileStopsAtTheLimit) {
+  poll::RequestTable table;
+  memset(&table, 0, sizeof(table));
+  uint8_t local[1][poll::kPubKeySize];
+  setKey(local[0], 0x10);
+  poll::RequestedEntry entries[4];
+  for (uint8_t i = 0; i < 4; i++) entries[i] = offerEntry((uint8_t)(0x21 + i), envGood(1, i));
+  poll::RequestOffer offer = offerOf(true, local, 1, entries, 4);
+  offer.limit = 3;
+  poll::RequestDelta delta;
+  poll::reconcile(table, offer, 1, delta);
+  ASSERT_EQ(2, table.count);
+  EXPECT_EQ(0x21, table.targets[0].pub[0]);
+  EXPECT_EQ(0x22, table.targets[1].pub[0]);
+  EXPECT_EQ(0, poll::requestFreeSlots(1, table.count, 3));
+
+  // A memset offer (limit 0) keeps the full eight.
+  memset(&table, 0, sizeof(table));
+  offer.limit = 0;
+  poll::reconcile(table, offer, 2, delta);
+  EXPECT_EQ(4, table.count);
 }
 
 TEST(PollRequests, MustDropWhenOptInUrlOrRolesFail) {

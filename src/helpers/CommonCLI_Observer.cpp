@@ -298,7 +298,7 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
                     pollToken(config, "poll.url") || pollToken(config, "poll.slot") ||
                     pollToken(config, "poll.interval") || pollToken(config, "poll.status") ||
                     pollToken(config, "poll.community") || pollToken(config, "poll.consent") ||
-                    pollToken(config, "poll.requests");
+                    pollToken(config, "poll.requests") || pollToken(config, "poll.limit");
   if (!mine) return PollSetResult::NotMine;
   if (!cb->supportsRepeaterPoll()) {
     strcpy(reply, "Error: not supported on this build");
@@ -319,12 +319,14 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
       strcpy(reply, "Error: usage set poll on");
       return PollSetResult::Done;
     }
-    if (!poll::pollUrlHasScheme(prefs->poll_url)) {
-      strcpy(reply, "Error: poll.url is not set");
+    // A blank URL is local mode: readings go to poll.slot and the key never leaves the device.
+    const bool local = !poll::pollUrlHasScheme(prefs->poll_url);
+    if (local && prefs->poll_slot == 0) {
+      strcpy(reply, "Error: set poll.url, or poll.slot for local mode");
     } else if (prefs->poll_slot > RUNTIME_MQTT_SLOTS) {
       snprintf(reply, 160, "Error: poll.slot must be 1-%d", RUNTIME_MQTT_SLOTS);
     // Without consent the key waits for a JSON mode, where it never leaves the device.
-    } else if (prefs->poll_consent != 0 && !cb->ensureRepeaterPollKey()) {
+    } else if ((local || prefs->poll_consent != 0) && !cb->ensureRepeaterPollKey()) {
       strcpy(reply, "Error: could not create the polling key");
     } else {
       prefs->poll_enabled = 1;
@@ -369,6 +371,8 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
     if (strcmp(word, "none") == 0 || strcmp(word, "0") == 0) {
       prefs->poll_slot = 0;   // polling stays on; the policy's broker hosts may pick a slot
       strcpy(reply, "OK");
+      // Local mode has no policy to pick one.
+      if (!poll::pollUrlHasScheme(prefs->poll_url)) pollNoteCleared(prefs, "poll.slot", reply);
       return PollSetResult::Changed;
     }
     int slot = 0;
@@ -431,6 +435,19 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
     strcpy(reply, "OK");
     return PollSetResult::Changed;
   }
+  if (pollToken(config, "poll.limit")) {
+    char word[8];
+    bool extra = false;
+    int limit = 0;
+    if (!pollCopyWord(pollValue(config, "poll.limit"), word, sizeof(word), &extra) || extra ||
+        !pollParseUnsigned(word, &limit) || !poll::pollLimitValid(limit)) {
+      snprintf(reply, 160, "Error: limit must be 1-%u", (unsigned)MQTT_POLL_MAX_TARGETS);
+      return PollSetResult::Done;
+    }
+    prefs->poll_limit = static_cast<uint8_t>(limit);
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
   char word[8];
   bool extra = false;
   if (!pollCopyWord(pollValue(config, "poll.consent"), word, sizeof(word), &extra) || extra ||
@@ -451,7 +468,8 @@ static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
   const bool mine = strcmp(config, "poll.status.hours") == 0 ||
                     strcmp(config, "poll.url") == 0 || strcmp(config, "poll.slot") == 0 ||
                     strcmp(config, "poll.interval") == 0 || strcmp(config, "poll.community") == 0 ||
-                    strcmp(config, "poll.consent") == 0 || strcmp(config, "poll.requests") == 0;
+                    strcmp(config, "poll.consent") == 0 || strcmp(config, "poll.requests") == 0 ||
+                    strcmp(config, "poll.limit") == 0;
   if (!mine) return false;
   if (!cb->supportsRepeaterPoll()) {
     strcpy(reply, "Error: not supported on this build");
@@ -469,6 +487,8 @@ static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
     strcpy(reply, prefs->poll_community ? "> on" : "> off");
   } else if (strcmp(config, "poll.requests") == 0) {
     strcpy(reply, prefs->poll_requests ? "> on" : "> off");
+  } else if (strcmp(config, "poll.limit") == 0) {
+    sprintf(reply, "> %u", (unsigned)prefs->poll_limit);
   } else {
     strcpy(reply, prefs->poll_consent ? "> yes" : "> no");
   }

@@ -309,6 +309,19 @@ TEST(PollRegistration, LeavingJsonModeVoidsTheRegistration) {
   EXPECT_FALSE(registrationVoided(MODE_UNKNOWN, MODE_ENCRYPTED));
 }
 
+TEST(PollRegistration, LocalModeNeedsPollingOnABlankUrlAndASlot) {
+  using namespace poll;
+  EXPECT_TRUE(localModeActive(true, false, 2));
+  EXPECT_FALSE(localModeActive(false, false, 2));
+  EXPECT_FALSE(localModeActive(true, true, 2));
+  EXPECT_FALSE(localModeActive(true, false, 0));
+  // Local mode runs as telemetry: the own key is usable without consent or registration.
+  RegistrationState none{false, false, 0, 0, 0};
+  EXPECT_TRUE(identityAllowed(false, MODE_TELEMETRY));
+  EXPECT_EQ(chooseKeyForMode(MODE_TELEMETRY, true, false, none, false, 0), KEY_OWN);
+  EXPECT_FALSE(registrationWanted(true, true, MODE_TELEMETRY));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

@@ -2608,6 +2608,7 @@ void MyMesh::pollReadSettings(PollSettings& out) {
   out.slot = obs->poll_slot;
   out.community = obs->poll_community != 0;
   out.requests = obs->poll_requests != 0;
+  out.limit = obs->poll_limit;
   for (int i = 0; i < MQTT_POLL_MAX_TARGETS && out.count < poll::kMaxTargets; i++) {
     if (poll::targetIsEmpty(obs->poll_targets[i])) continue;
     memcpy(out.targets[out.count], obs->poll_targets[i], PUB_KEY_SIZE);

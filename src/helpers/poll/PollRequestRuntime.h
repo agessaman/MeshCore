@@ -9,14 +9,15 @@ namespace poll {
 
 // Reserve local seats before asking the analyzer again.
 static inline void reserveLocalRequests(RequestTable& table, const uint8_t (*local)[kPubKeySize],
-                                         uint8_t local_count, uint8_t* roles, RequestDelta& delta) {
+                                         uint8_t local_count, uint8_t* roles, RequestDelta& delta,
+                                         uint8_t limit = kMaxTargets) {
   memset(&delta, 0, sizeof(delta));
   for (uint8_t r = 0; r < table.count;) {
     if (!keyListed(table.targets[r].pub, local, local_count)) { r++; continue; }
     removeRequested(table, r, delta);
     for (uint8_t j = r; j < table.count; j++) roles[j] = roles[j + 1];
   }
-  while (table.count > requestFreeSlots(local_count, 0)) {
+  while (table.count > requestFreeSlots(local_count, 0, limit)) {
     const uint8_t r = (uint8_t)requestToEvict(table, roles);
     removeRequested(table, r, delta);
     for (uint8_t j = r; j < table.count; j++) roles[j] = roles[j + 1];

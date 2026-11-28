@@ -171,6 +171,7 @@ struct MQTTPrefs {
   uint8_t  poll_pw_mode[8];       // per target: 0 auto, 1 blank, 2 hello, 3 custom
   uint8_t  poll_requests;         // also poll targets the analyzer asks for, default 0
   char     poll_pw[8][16];        // per target custom password; all zero unless pw mode is custom
+  uint8_t  poll_limit;            // most targets polled, local first, then requested; default 8, valid 1..8
 };
 
 static inline bool mqttNetworkSetupComplete(const MQTTPrefs* prefs) {
@@ -197,6 +198,7 @@ static const uint8_t MQTT_POLL_PW_HELLO = 2;
 static const uint8_t MQTT_POLL_PW_CUSTOM = 3;
 static const size_t MQTT_POLL_PW_MAX_LEN = 15;
 static const uint8_t MQTT_POLL_REQUESTS_DEFAULT = 0;
+static const uint8_t MQTT_POLL_LIMIT_DEFAULT = MQTT_POLL_MAX_TARGETS;
 static_assert(sizeof(MQTTPrefs::poll_url) == MQTT_POLL_URL_LEN, "poll url capacity");
 static_assert(sizeof(MQTTPrefs::poll_targets) / sizeof(MQTTPrefs::poll_targets[0]) == MQTT_POLL_MAX_TARGETS,
               "poll target capacity");

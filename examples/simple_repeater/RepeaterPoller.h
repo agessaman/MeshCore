@@ -44,6 +44,7 @@ struct PollSettings {
   uint8_t  slot;                                        // 1-based MQTT slot for the claim, 0 = unset
   bool     community;                                   // share polling with other observers
   bool     requests;
+  uint8_t  limit;                                       // poll.limit, 1..kMaxTargets
 };
 
 // Mesh services; node-key operations are limited to registration and password envelopes.
@@ -221,6 +222,7 @@ private:
   bool     consent_;
   uint16_t interval_min_;
   uint8_t  status_hours_;
+  uint8_t  limit_;
 
   // Run
   uint8_t  run_kind_;
@@ -356,6 +358,7 @@ private:
   uint32_t gated_at_;                // last time the gate was seen closed
   uint32_t url_hash_;                // a new CoreScope starts its state over
   bool     has_url_;
+  bool     local_;                    // poll::localModeActive: no CoreScope, readings on poll.slot
   bool     community_;
   uint8_t  slot_setting_;            // poll.slot as the operator set it, 0 = unset
   uint8_t  claim_slot_;              // in use: poll.slot, else the slot whose broker the policy names, else 0

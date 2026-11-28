@@ -102,6 +102,10 @@ static inline bool pollIntervalValid(int minutes) {
          minutes <= static_cast<int>(MQTT_POLL_INTERVAL_MAX);
 }
 
+static inline bool pollLimitValid(int limit) {
+  return limit >= 1 && limit <= static_cast<int>(MQTT_POLL_MAX_TARGETS);
+}
+
 static inline bool pollStatusHoursValid(int hours) {
   return hours == 1 || hours == 3 || hours == 6 || hours == 12 || hours == 24;
 }
@@ -186,11 +190,11 @@ static inline bool normalizePollUrl(char* url, bool* changed) {
 
 // slot_max is the highest 1-based slot this check accepts (prefs capacity or
 // the build's runtime slot count). Slot 0 is allowed: the policy's broker hosts may pick one.
-// Consent is not needed: it gates only the key upload.
+// A blank URL is local mode, which needs a slot. Consent is not needed: it gates only the key upload.
 static inline bool pollCanEnable(const char* url, int slot, int slot_max) {
-  if (!pollUrlHasScheme(url) || url[0] == '\0') return false;
   if (slot < 0 || slot > slot_max) return false;
-  return true;
+  if (url && url[0] == '\0') return slot >= 1;
+  return pollUrlHasScheme(url);
 }
 
 static inline const char* pwModeName(uint8_t mode) {
