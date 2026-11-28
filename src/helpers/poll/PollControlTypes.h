@@ -12,7 +12,10 @@ namespace poll {
 
 static const uint8_t  kControlUrlMax = 96;     // the size of the poll.url setting
 static const uint16_t kRegBodyMax = 560;       // registration JSON with a 64-byte private key
-static const uint16_t kClaimJsonMax = 2944;    // worst case 2929 bytes, rounded up to a multiple of 64
+static const uint16_t kClaimJsonMax = 3008;    // worst case 2961 bytes, rounded up to a multiple of 64
+
+// Buffer for "meshcore.observer_fw/<FIRMWARE_VERSION>", sized for channel-tagged versions.
+static const uint8_t  kPluginTagMax = 80;
 
 // The plugin release this firmware mirrors; CoreScope gates on it.
 static const char kPluginVersion[] = "0.11.1";
