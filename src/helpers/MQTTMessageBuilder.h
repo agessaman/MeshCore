@@ -74,6 +74,7 @@ public:
    * @param crash_json Pre-formatted `crash` object; dropped if it would overflow the buffer
    * @param crash_included Set true when the `crash` field made it into the output
    * @param selfheal Last self-heal cause and selfheal_n its consecutive count; omitted when 0
+   * @param boot_id Eight lowercase hex digits, constant for this boot; nullptr omits it
    * @return Length of JSON string, or 0 on error
    */
   static int buildStatusMessage(
@@ -105,7 +106,8 @@ public:
     const char* reset_reason = nullptr,
     const char* crash_json = nullptr,
     bool* crash_included = nullptr,
-    const char* selfheal = nullptr, int selfheal_n = 0
+    const char* selfheal = nullptr, int selfheal_n = 0,
+    const char* boot_id = nullptr
   );
 
   /**

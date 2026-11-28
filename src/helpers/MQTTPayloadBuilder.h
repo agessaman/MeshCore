@@ -72,7 +72,8 @@ public:
     const char* reset_reason = nullptr,
     const char* crash_json = nullptr,
     bool* crash_included = nullptr,
-    const char* selfheal = nullptr, int selfheal_n = 0
+    const char* selfheal = nullptr, int selfheal_n = 0,
+    const char* boot_id = nullptr
   );
 
   static int buildPacketMessage(
