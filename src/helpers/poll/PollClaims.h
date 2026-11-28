@@ -316,7 +316,8 @@ static inline void jsonTimestamp(Out& o, uint32_t epoch) {
   write2(o, (sod / 60) % 60);
   o.ch(':');
   write2(o, sod % 60);
-  o.ch('Z');
+  // Same shape as the bridge's MQTT timestamps; the clock has whole seconds only.
+  o.lit(".000000+00:00");
 }
 
 }  // namespace detail

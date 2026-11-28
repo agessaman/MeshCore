@@ -91,7 +91,7 @@ std::string claimField(const std::string& json, const char* name) {
 TEST(PollClaims, EmptyNodeListMatchesPlugin) {
   initKeys();
   const std::string expected =
-      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "nodes": []})json";
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "nodes": []})json";
   expectClaim(expected, "Cadham Village", kTs, "", true, nullptr, 0);
 }
 
@@ -99,7 +99,7 @@ TEST(PollClaims, OneNodeMatchesPlugin) {
   initKeys();
   const poll::ClaimNode n = makeNode(0xab, 0, false, 0, true, 26);
   const std::string expected =
-      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "a1b2c3d4", "community": true, "nodes": [{"node_id": "abababababababababababababababababababababababababababababababab", "reply_hops": 0, "via": null, "key": "shared", "snr": 6.5}]})json";
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "a1b2c3d4", "community": true, "nodes": [{"node_id": "abababababababababababababababababababababababababababababababab", "reply_hops": 0, "via": null, "key": "shared", "snr": 6.5}]})json";
   expectClaim(expected, "Cadham Village", kTs, "a1b2c3d4", true, &n, 1);
 }
 
@@ -112,7 +112,7 @@ TEST(PollClaims, SeveralNodesMatchPlugin) {
       makeNode(0x22, 0, true, 0x33, true, 40),
   };
   const std::string expected =
-      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "a1b2c3d4", "community": true, "nodes": [{"node_id": "abababababababababababababababababababababababababababababababab", "reply_hops": 0, "via": null, "key": "shared", "snr": 6.5}, {"node_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "reply_hops": 1, "via": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef", "key": "shared", "snr": null}, {"node_id": "1111111111111111111111111111111111111111111111111111111111111111", "reply_hops": 1, "via": null, "key": "shared", "snr": -3.2}, {"node_id": "2222222222222222222222222222222222222222222222222222222222222222", "reply_hops": 0, "via": "3333333333333333333333333333333333333333333333333333333333333333", "key": "shared", "snr": 10.0}]})json";
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "a1b2c3d4", "community": true, "nodes": [{"node_id": "abababababababababababababababababababababababababababababababab", "reply_hops": 0, "via": null, "key": "shared", "snr": 6.5}, {"node_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "reply_hops": 1, "via": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef", "key": "shared", "snr": null}, {"node_id": "1111111111111111111111111111111111111111111111111111111111111111", "reply_hops": 1, "via": null, "key": "shared", "snr": -3.2}, {"node_id": "2222222222222222222222222222222222222222222222222222222222222222", "reply_hops": 0, "via": "3333333333333333333333333333333333333333333333333333333333333333", "key": "shared", "snr": 10.0}]})json";
   expectClaim(expected, "Cadham Village", kTs, "a1b2c3d4", true, nodes, 4);
 }
 
@@ -121,7 +121,7 @@ TEST(PollClaims, OriginEscapingMatchesEnsureAscii) {
   const char* origin = "Cadham \"Village\" \\ Caf\xc3\xa9 \xf0\x9f\x98\x80\n\t\x01/<>";
   const poll::ClaimNode n = makeNode(0x11, 1, false, 0, true, -13);
   const std::string expected =
-      R"json({"v": 2, "origin": "Cadham \"Village\" \\ Caf\u00e9 \ud83d\ude00\n\t\u0001/<>", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:21Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "x\"y", "community": false, "nodes": [{"node_id": "1111111111111111111111111111111111111111111111111111111111111111", "reply_hops": 1, "via": null, "key": "shared", "snr": -3.2}]})json";
+      R"json({"v": 2, "origin": "Cadham \"Village\" \\ Caf\u00e9 \ud83d\ude00\n\t\u0001/<>", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:21.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "x\"y", "community": false, "nodes": [{"node_id": "1111111111111111111111111111111111111111111111111111111111111111", "reply_hops": 1, "via": null, "key": "shared", "snr": -3.2}]})json";
   expectClaim(expected, origin, kTs + 1, "x\"y", false, &n, 1);
 }
 
@@ -160,7 +160,7 @@ TEST(PollClaims, MalformedUtf8BecomesReplacementChars) {
 TEST(PollClaims, ReplacementCharsNeedRoomLikeAnyOtherText) {
   initKeys();
   const std::string expected =
-      R"json({"v": 2, "origin": "abc\ufffd", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "nodes": []})json";
+      R"json({"v": 2, "origin": "abc\ufffd", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "nodes": []})json";
   expectClaim(expected, "abc\xc3", kTs, "", true, nullptr, 0);
 }
 
@@ -209,11 +209,11 @@ TEST(PollClaims, TimestampIsUtcCivilTime) {
     const char* iso;
   };
   const Case cases[] = {
-      {0, "1970-01-01T00:00:00Z"},
-      {951782400, "2000-02-29T00:00:00Z"},
-      {1700000000, "2023-11-14T22:13:20Z"},
-      {4102444799, "2099-12-31T23:59:59Z"},
-      {4294967295, "2106-02-07T06:28:15Z"},
+      {0, "1970-01-01T00:00:00.000000+00:00"},
+      {951782400, "2000-02-29T00:00:00.000000+00:00"},
+      {1700000000, "2023-11-14T22:13:20.000000+00:00"},
+      {4102444799, "2099-12-31T23:59:59.000000+00:00"},
+      {4294967295, "2106-02-07T06:28:15.000000+00:00"},
   };
   for (const Case& c : cases) {
     char buf[1024];
@@ -222,7 +222,7 @@ TEST(PollClaims, TimestampIsUtcCivilTime) {
     const std::string json(buf, len);
     const std::string key = "\"timestamp\": \"";
     const size_t pos = json.find(key) + key.size();
-    EXPECT_EQ(c.iso, json.substr(pos, 20)) << c.epoch;
+    EXPECT_EQ(c.iso, json.substr(pos, 32)) << c.epoch;
   }
 }
 
@@ -442,7 +442,7 @@ TEST(PollClaims, ExtendedClaimWritesEveryOptionalField) {
   n.last_attempt = kTs - 100;
   n.last_ok = kTs - 50;
   const std::string expected =
-      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "a1b2c3d4", "community": true, "accepts_requests": true, "request_slots": 3, "nodes": [{"node_id": "abababababababababababababababababababababababababababababababab", "reply_hops": 0, "via": null, "key": "own", "snr": 6.5, "requested": true, "state": "ok", "misses": 2, "last_attempt": "2023-11-14T22:11:40Z", "last_ok": "2023-11-14T22:12:30Z"}]})json";
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "a1b2c3d4", "community": true, "accepts_requests": true, "request_slots": 3, "nodes": [{"node_id": "abababababababababababababababababababababababababababababababab", "reply_hops": 0, "via": null, "key": "own", "snr": 6.5, "requested": true, "state": "ok", "misses": 2, "last_attempt": "2023-11-14T22:11:40.000000+00:00", "last_ok": "2023-11-14T22:12:30.000000+00:00"}]})json";
   char buf[1024];
   const size_t len =
       buildExtended(buf, sizeof(buf), "Cadham Village", kTs, "a1b2c3d4", true, &n, 1, true, 3);
@@ -453,7 +453,7 @@ TEST(PollClaims, ExtendedClaimWritesEveryOptionalField) {
 TEST(PollClaims, ExtendedClaimReportsLimitAndInterval) {
   initKeys();
   const std::string expected =
-      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "accepts_requests": true, "request_slots": 3, "max_slots": 5, "poll_interval": 60, "nodes": []})json";
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "accepts_requests": true, "request_slots": 3, "max_slots": 5, "poll_interval": 60, "nodes": []})json";
   poll::ClaimOptions opts{};
   opts.extended = true;
   opts.accepts_requests = true;
@@ -482,7 +482,7 @@ TEST(PollClaims, ExtendedClaimReportsLimitAndInterval) {
 TEST(PollClaims, ExtendedEmptyClaimStillCarriesTheEnvelope) {
   initKeys();
   const std::string expected =
-      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": false, "accepts_requests": true, "request_slots": 8, "nodes": []})json";
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20.000000+00:00", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": false, "accepts_requests": true, "request_slots": 8, "nodes": []})json";
   char buf[1024];
   const size_t len = buildExtended(buf, sizeof(buf), "Cadham Village", kTs, "", false, nullptr, 0,
                                    true, 8);
@@ -588,7 +588,7 @@ TEST(PollClaims, ExtendedStateAndHistoryFields) {
   std::string json(buf, len);
   EXPECT_EQ("\"login_failed\"", claimField(json, "state"));
   EXPECT_EQ("255", claimField(json, "misses"));
-  EXPECT_EQ("\"2023-11-14T22:13:20Z\"", claimField(json, "last_attempt"));
+  EXPECT_EQ("\"2023-11-14T22:13:20.000000+00:00\"", claimField(json, "last_attempt"));
   EXPECT_EQ("null", claimField(json, "last_ok"));
 
   n.last_attempt = 0;
@@ -597,7 +597,7 @@ TEST(PollClaims, ExtendedStateAndHistoryFields) {
   ASSERT_GT(len, 0u);
   json.assign(buf, len);
   EXPECT_EQ("null", claimField(json, "last_attempt"));
-  EXPECT_EQ("\"2023-11-14T22:13:20Z\"", claimField(json, "last_ok"));
+  EXPECT_EQ("\"2023-11-14T22:13:20.000000+00:00\"", claimField(json, "last_ok"));
 }
 
 TEST(PollClaims, StopsAndRequestFlagsChangeTheExtendedSignature) {
@@ -808,7 +808,7 @@ TEST(PollClaims, ExtendedWorstCaseFitsClaimBuffer) {
   const size_t len = buildExtended(buf.data(), buf.size(), origin.c_str(), 4294967295u,
                                    policy.c_str(), false, nodes, poll::kMaxTargets, true, 8,
                                    plugin.c_str());
-  ASSERT_EQ(2725u, len);
+  ASSERT_EQ(2929u, len);
   EXPECT_LE(len, (size_t)poll::kClaimJsonMax);
   EXPECT_EQ(0u, poll::kClaimJsonMax % 64);
   EXPECT_LT((size_t)poll::kClaimJsonMax - len, 64u);
