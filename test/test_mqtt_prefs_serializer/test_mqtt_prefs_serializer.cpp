@@ -1188,6 +1188,50 @@ TEST(MQTTPrefsSerializer, PollPasswordLongerThanStorageFailsTheLoad) {
   EXPECT_FALSE(reader.loadSerial(input));
 }
 
+TEST(MQTTPrefsSerializer, ObserverSettingsSavePreservesPollConfiguration) {
+  const std::string target = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const std::string config =
+      "{version:1,wifi:{ssid:\"before\"},poll:{enabled:1,consent:1,url:\"https://analyzer.example\","
+      "slot:2,interval_min:90,status_hours:12,community:0,requests:1,limit:3,t1:\"" + target +
+      "\",pw1:3,pass1:\"guest-password\"}}";
+  MQTTPrefs prefs = defaults();
+  InputStream input(config);
+  MQTTPrefsSerializer reader(&prefs);
+  ASSERT_TRUE(reader.loadSerial(input));
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+
+  strcpy(prefs.wifi_ssid, "after");
+  OutputStream output;
+  MQTTPrefsSerializer writer(&prefs);
+  ASSERT_TRUE(writer.normalize(&repaired));
+  EXPECT_FALSE(repaired);
+  ASSERT_TRUE(writer.saveSerial(output));
+
+  MQTTPrefs saved = defaults();
+  InputStream saved_input(output.text());
+  MQTTPrefsSerializer saved_reader(&saved);
+  ASSERT_TRUE(saved_reader.loadSerial(saved_input));
+  ASSERT_TRUE(saved_reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_STREQ("after", saved.wifi_ssid);
+  EXPECT_EQ(1, saved.poll_enabled);
+  EXPECT_EQ(1, saved.poll_consent);
+  EXPECT_STREQ("https://analyzer.example", saved.poll_url);
+  EXPECT_EQ(2, saved.poll_slot);
+  EXPECT_EQ(90, saved.poll_interval_min);
+  EXPECT_EQ(12, saved.poll_status_hours);
+  EXPECT_EQ(0, saved.poll_community);
+  EXPECT_EQ(1, saved.poll_requests);
+  EXPECT_EQ(3, saved.poll_limit);
+  char saved_target[65];
+  poll::formatTargetHex(saved.poll_targets[0], saved_target);
+  EXPECT_EQ(target, saved_target);
+  EXPECT_EQ(MQTT_POLL_PW_CUSTOM, saved.poll_pw_mode[0]);
+  EXPECT_STREQ("guest-password", saved.poll_pw[0]);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
