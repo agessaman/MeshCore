@@ -51,10 +51,10 @@ set poll on
 One reading per message, published as JSON:
 
 ```json
-{"v":2,"origin":"My Observer","origin_id":"AB12…","timestamp":"2026-11-22T18:04:11Z",
+{"v":2,"origin":"My Observer","origin_id":"AB12…","timestamp":"2026-11-22T18:04:11.000000+00:00",
  "plugin":"meshcore.observer_fw/v1.18.0.9",
  "readings":[{"node_id":"c8c8c858…","battery_mv":4226,"source":"poll","reply_hops":0,
-   "method":"telemetry","sampled_at":"2026-11-22T18:04:09Z","snr":9.25,"temperature_c":21.5,
+   "method":"telemetry","sampled_at":"2026-11-22T18:04:09.000000+00:00","snr":9.25,"temperature_c":21.5,
    "lpp":"0174107e…","tag":1763834649,"packet_hash":"9F3C…"}]}
 ```
 
