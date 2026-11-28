@@ -236,9 +236,9 @@ TEST(PollReadings, WorstCaseFitsKReadingJsonMax) {
   char origin[32];
   memset(origin, 0xFF, 31);
   origin[31] = '\0';
-  char plugin[48];
-  memset(plugin, 0xFF, 47);
-  plugin[47] = '\0';
+  char plugin[poll::kPluginTagMax];
+  memset(plugin, 0xFF, sizeof(plugin) - 1);
+  plugin[sizeof(plugin) - 1] = '\0';
 
   std::vector<char> buf(poll::kReadingJsonMax + 8, 'X');
   const size_t len = poll::buildReadingJson(buf.data(), poll::kReadingJsonMax, poll::kReadingV2,

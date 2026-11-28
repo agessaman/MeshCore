@@ -789,9 +789,9 @@ TEST(PollClaims, ExtendedWorstCaseFitsClaimBuffer) {
   initKeys();
   // 31 origin bytes, each one written as a six-byte \u00XX escape.
   const std::string origin(31, '\x01');
-  const std::string plugin = "meshcore.observer_fw/" + std::string(26, 'p');
+  const std::string plugin = "meshcore.observer_fw/" + std::string(poll::kPluginTagMax - 22, 'p');
   const std::string policy(15, 'v');
-  ASSERT_EQ(47u, plugin.size());
+  ASSERT_EQ((size_t)poll::kPluginTagMax - 1, plugin.size());
 
   poll::ClaimNode nodes[poll::kMaxTargets];
   for (uint8_t i = 0; i < poll::kMaxTargets; i++) {
@@ -808,7 +808,7 @@ TEST(PollClaims, ExtendedWorstCaseFitsClaimBuffer) {
   const size_t len = buildExtended(buf.data(), buf.size(), origin.c_str(), 4294967295u,
                                    policy.c_str(), false, nodes, poll::kMaxTargets, true, 8,
                                    plugin.c_str());
-  ASSERT_EQ(2929u, len);
+  ASSERT_EQ(2961u, len);
   EXPECT_LE(len, (size_t)poll::kClaimJsonMax);
   EXPECT_EQ(0u, poll::kClaimJsonMax % 64);
   EXPECT_LT((size_t)poll::kClaimJsonMax - len, 64u);
