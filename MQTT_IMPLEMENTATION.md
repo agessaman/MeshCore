@@ -296,10 +296,13 @@ Observer builds update themselves from the release manifest on observer.gessaman
 | `ota branch` | Show the selected channel, the channel this build came from, and the manifest URL |
 | `ota branch prod` | Follow production (alias `stable`) |
 | `ota branch beta` | Follow beta (alias `dev`) |
+| `ota branch poll` | Follow the repeater polling channel on supported boards |
 | `ota branch default` | Follow the channel this build came from |
 | `start ota` | Serve a manual upload page (ElegantOTA) on the node's IP, or a `MeshCore-OTA` hotspot when offline. Stops after 15 minutes idle |
 | `start ota ap` | Always use the `MeshCore-OTA` hotspot, e.g. on networks with client isolation |
 | `stop ota` | Stop the manual upload page |
+
+Older builds need a normal update on their current channel to pick up `ota branch poll`.
 
 `ota branch` only saves the choice. Run `ota update` afterward to switch:
 

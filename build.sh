@@ -124,6 +124,9 @@ disable_debug_flags() {
 
 # build firmware for the provided pio env in $1
 build_firmware() {
+  # Keep variant-specific definitions local when a shard builds multiple targets.
+  local PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS-}"
+
   # get env platform for post build actions
   ENV_PLATFORM=($(get_platform_for_env $1))
 
@@ -203,18 +206,20 @@ build_firmware() {
   # the .ini declarations were removed rather than overridden.
   OTA_MANIFEST_BASE_URL="${OTA_MANIFEST_BASE_URL:-https://observer.gessaman.com/v}"
 
-  # Both named channel bases are baked into EVERY observer build so `ota branch`
-  # can re-point a device at either channel at runtime. OTA_MANIFEST_BASE above stays
-  # the build's NATIVE channel (= stable base for stable builds, dev base for dev
-  # builds), so `ota branch default` resolves correctly. These must match the
-  # production (/v) and beta (/beta/v) manifest paths.
+  # The named bases let a running build select a different release channel.
   OTA_MANIFEST_BASE_STABLE_URL="${OTA_MANIFEST_BASE_STABLE_URL:-https://observer.gessaman.com/v}"
   OTA_MANIFEST_BASE_DEV_URL="${OTA_MANIFEST_BASE_DEV_URL:-https://observer.gessaman.com/beta/v}"
+  OTA_MANIFEST_BASE_POLL_URL="${OTA_MANIFEST_BASE_POLL_URL:-https://observer.gessaman.com/poll/v}"
+
+  local poll_availability_flag=""
+  if ! grep -Fxq -- "$1" scripts/poll-ota-variants.txt; then
+    poll_availability_flag=" -DOTA_POLL_UNAVAILABLE"
+  fi
 
   # add firmware version info to end of existing platformio build flags in environment vars.
   # OTA_VARIANT is the env name ($1) — it selects this build's slim per-variant manifest
   # (<OTA_MANIFEST_BASE>/<OTA_VARIANT>.json) that the observer pull-OTA fetches.
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"' -DOTA_VARIANT='\"$1\"' -DOTA_MANIFEST_BASE='\"${OTA_MANIFEST_BASE_URL}\"' -DOTA_MANIFEST_BASE_STABLE='\"${OTA_MANIFEST_BASE_STABLE_URL}\"' -DOTA_MANIFEST_BASE_DEV='\"${OTA_MANIFEST_BASE_DEV_URL}\"'"
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"' -DOTA_VARIANT='\"$1\"' -DOTA_MANIFEST_BASE='\"${OTA_MANIFEST_BASE_URL}\"' -DOTA_MANIFEST_BASE_STABLE='\"${OTA_MANIFEST_BASE_STABLE_URL}\"' -DOTA_MANIFEST_BASE_DEV='\"${OTA_MANIFEST_BASE_DEV_URL}\"' -DOTA_MANIFEST_BASE_POLL='\"${OTA_MANIFEST_BASE_POLL_URL}\"'${poll_availability_flag}"
 
   # disable debug flags if requested
   disable_debug_flags
