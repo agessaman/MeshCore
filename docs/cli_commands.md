@@ -95,6 +95,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 - `ota update`: downloads and flashes the newer build, then reboots. Refuses builds that change the partition table (flash those by cable).
 - `ota branch`: shows the selected channel, the channel this build came from, and the manifest URL.
 - `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`): pull future updates from that channel. The choice is saved; run `ota update` to switch.
+- `ota branch poll`: select the polling channel on supported repeater builds.
 - `ota branch default`: follow the channel this build came from.
 
 See [MQTT_IMPLEMENTATION.md](../MQTT_IMPLEMENTATION.md#firmware-updates-ota) for replies and channel-switch rules.

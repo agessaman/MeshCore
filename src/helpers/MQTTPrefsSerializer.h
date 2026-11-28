@@ -11,6 +11,8 @@
 
 #ifdef WITH_MQTT_BRIDGE
 
+#include <helpers/MQTTPollPrefsSerializer.h>
+
 static const int32_t MQTT_PREFS_JSON_FORMAT_VERSION = 1;
 
 // Format invariant, binding on every future schema version: `version` is the
@@ -493,6 +495,7 @@ class MQTTPrefsSerializer : public ConfigSerializer {
   RadioPrefs _radio;
   AlertPrefs _alert;
   DisplayPrefs _display;
+  MQTTPollPrefsSerializer _poll;
 
 protected:
   void structure() override {
@@ -504,6 +507,7 @@ protected:
     def("radio", _radio);
     def("alert", _alert);
     def("display", _display);
+    def("poll", _poll);
   }
 
 public:
@@ -511,7 +515,7 @@ public:
       : _prefs(prefs), _wifi(prefs),
         _time(prefs, repair_defaults ? repair_defaults : prefs),
         _mqtt(prefs, repair_defaults ? repair_defaults : prefs), _snmp(prefs),
-        _radio(prefs), _alert(prefs), _display(prefs) {}
+        _radio(prefs), _alert(prefs), _display(prefs), _poll(prefs) {}
 
   bool hasSupportedVersion() const {
     return _seen_version && _version == MQTT_PREFS_JSON_FORMAT_VERSION;
@@ -530,6 +534,7 @@ public:
     _radio.apply(repaired);
     _alert.apply(repaired);
     _display.apply(repaired);
+    _poll.apply(repaired);
     return true;
   }
 
