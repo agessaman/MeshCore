@@ -130,7 +130,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 43;
+static const int MQTT_PRESET_COUNT = 44;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -192,6 +192,8 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "meshcore-analyzer-eu", "wss://mqtt.meshcore-analyzer.eu:443", "mqtt.meshcore-analyzer.eu",     GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     // NoDak Mesh (North Dakota). JWT; LE Gen-Y ECDSA chain (YE2 → Root YE → X2) anchors at ISRG Root X1.
     { "nodakmesh",     "wss://mqtt.nodakmesh.org:443",            "mqtt.nodakmesh.org",              ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // West Michigan Mesh. JWT; leaf → GTS WE1 → GTS Root R4 (same PEM as GTS_ROOT_R4).
+    { "westmichmesh",  "wss://mqtt.westmichmesh.org:443",         "mqtt.westmichmesh.org",           GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found
