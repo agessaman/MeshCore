@@ -266,6 +266,13 @@ bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* curr
   strcpy(reply, "ERR: OTA not configured (build via build.sh)");
   return false;
 #else
+#if defined(OTA_MANIFEST_BASE_POLL)
+  const bool poll_channel = strcmp(manifest_base, ota_resolve_base(OTA_CH_POLL)) == 0;
+  if (poll_channel && !ota_poll_available()) {
+    strcpy(reply, "ERR: poll OTA unavailable for this firmware variant");
+    return false;
+  }
+#endif
   if (!activeNetworkLink().isConnected()) {
     snprintf(reply, 160, "ERR: %s not connected",
              activeNetworkLink().mediumName());

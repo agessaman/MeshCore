@@ -104,7 +104,7 @@ TEST(PollReadings, BatteryV1StatusMatchesTheExample) {
   initKeys();
   const poll::Reading r = fullStatusReading(0x22);
   const std::string expected =
-      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"2222222222222222222222222222222222222222222222222222222222222222","battery_mv":4038,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20Z","snr":6.5,"stats":{"uptime_secs":788089,"noise_floor":-116,"last_rssi":-114,"last_snr":1.25,"tx_queue":0,"packets_recv":81234,"packets_sent":20276,"recv_flood":76198,"recv_direct":5012,"sent_flood":19211,"sent_direct":1065,"tx_air_secs":18301,"rx_air_secs":73835,"flood_dups":56298,"direct_dups":36,"recv_errors":28074,"err_events":2},"tag":1794484800,"packet_hash":"0123456789ABCDEF"}]})json";
+      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"2222222222222222222222222222222222222222222222222222222222222222","battery_mv":4038,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20.000000+00:00","snr":6.5,"stats":{"uptime_secs":788089,"noise_floor":-116,"last_rssi":-114,"last_snr":1.25,"tx_queue":0,"packets_recv":81234,"packets_sent":20276,"recv_flood":76198,"recv_direct":5012,"sent_flood":19211,"sent_direct":1065,"tx_air_secs":18301,"rx_air_secs":73835,"flood_dups":56298,"direct_dups":36,"recv_errors":28074,"err_events":2},"tag":1794484800,"packet_hash":"0123456789ABCDEF"}]})json";
   expectReading(expected, poll::kReadingV1, "Cadham Village", r);
 }
 
@@ -122,7 +122,7 @@ TEST(PollReadings, ShortStatusWritesOnlyTheStatsItHad) {
   r.battery_mv = r.status.battery_mv;
 
   const std::string expected =
-      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"2222222222222222222222222222222222222222222222222222222222222222","battery_mv":3900,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20Z","stats":{"noise_floor":-110,"last_rssi":-90,"tx_queue":0}}]})json";
+      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"2222222222222222222222222222222222222222222222222222222222222222","battery_mv":3900,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20.000000+00:00","stats":{"noise_floor":-110,"last_rssi":-90,"tx_queue":0}}]})json";
   expectReading(expected, poll::kReadingV1, "Cadham Village", r);
 }
 
@@ -133,7 +133,7 @@ TEST(PollReadings, BatteryV1TelemetryCarriesNoLpp) {
   EXPECT_TRUE(r.has_battery);
   EXPECT_EQ(3940, r.battery_mv);
   const std::string expected =
-      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"3333333333333333333333333333333333333333333333333333333333333333","battery_mv":3940,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20Z","temperature_c":16.5}]})json";
+      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"3333333333333333333333333333333333333333333333333333333333333333","battery_mv":3940,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20.000000+00:00","temperature_c":16.5}]})json";
   expectReading(expected, poll::kReadingV1, "Cadham Village", r);
 
   // Without a voltage the version 1 field is still written, as a zero.
@@ -142,7 +142,7 @@ TEST(PollReadings, BatteryV1TelemetryCarriesNoLpp) {
   EXPECT_FALSE(no_volts.has_battery);
   EXPECT_FALSE(poll::readingPublishable(poll::kReadingV1, no_volts));
   const std::string zero =
-      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"3333333333333333333333333333333333333333333333333333333333333333","battery_mv":0,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20Z","temperature_c":16.5}]})json";
+      R"json({"v":1,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"3333333333333333333333333333333333333333333333333333333333333333","battery_mv":0,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20.000000+00:00","temperature_c":16.5}]})json";
   expectReading(zero, poll::kReadingV1, "Cadham Village", no_volts);
 }
 
@@ -151,7 +151,7 @@ TEST(PollReadings, TelemetryV2KeepsTheLppRecords) {
   const uint8_t data[8] = {1, 116, 0x01, 0x8A, 1, 103, 0x00, 0xA5};
   const poll::Reading r = telemetryReading(data, sizeof(data), 0x33);
   const std::string expected =
-      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"3333333333333333333333333333333333333333333333333333333333333333","battery_mv":3940,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20Z","temperature_c":16.5,"lpp":"0174018a016700a5"}]})json";
+      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"3333333333333333333333333333333333333333333333333333333333333333","battery_mv":3940,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20.000000+00:00","temperature_c":16.5,"lpp":"0174018a016700a5"}]})json";
   expectReading(expected, poll::kReadingV2, "Cadham Village", r);
 }
 
@@ -165,7 +165,7 @@ TEST(PollReadings, TelemetryV2WithoutVoltageAndWithAnUnknownRecord) {
   EXPECT_EQ(6, r.lpp_len);
   EXPECT_TRUE(poll::readingPublishable(poll::kReadingV2, r));
   const std::string expected =
-      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"4444444444444444444444444444444444444444444444444444444444444444","source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20Z","lpp":"0267006401fa"}]})json";
+      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"4444444444444444444444444444444444444444444444444444444444444444","source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20.000000+00:00","lpp":"0267006401fa"}]})json";
   expectReading(expected, poll::kReadingV2, "Cadham Village", r);
 }
 
@@ -179,7 +179,7 @@ TEST(PollReadings, TelemetryV2WithZeroVoltageAndPadding) {
   EXPECT_EQ(0, r.battery_mv);
   EXPECT_EQ(4, r.lpp_len);
   const std::string expected =
-      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"5555555555555555555555555555555555555555555555555555555555555555","battery_mv":0,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20Z","lpp":"01740000"}]})json";
+      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"5555555555555555555555555555555555555555555555555555555555555555","battery_mv":0,"source":"poll","reply_hops":0,"method":"telemetry","sampled_at":"2023-11-14T22:13:20.000000+00:00","lpp":"01740000"}]})json";
   expectReading(expected, poll::kReadingV2, "Cadham Village", r);
 }
 
@@ -187,7 +187,7 @@ TEST(PollReadings, TelemetryV2StatusReadsNoLpp) {
   initKeys();
   const poll::Reading r = fullStatusReading(0x22);
   const std::string expected =
-      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"2222222222222222222222222222222222222222222222222222222222222222","battery_mv":4038,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20Z","snr":6.5,"stats":{"uptime_secs":788089,"noise_floor":-116,"last_rssi":-114,"last_snr":1.25,"tx_queue":0,"packets_recv":81234,"packets_sent":20276,"recv_flood":76198,"recv_direct":5012,"sent_flood":19211,"sent_direct":1065,"tx_air_secs":18301,"rx_air_secs":73835,"flood_dups":56298,"direct_dups":36,"recv_errors":28074,"err_events":2},"tag":1794484800,"packet_hash":"0123456789ABCDEF"}]})json";
+      R"json({"v":2,"origin":"Cadham Village","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"2222222222222222222222222222222222222222222222222222222222222222","battery_mv":4038,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20.000000+00:00","snr":6.5,"stats":{"uptime_secs":788089,"noise_floor":-116,"last_rssi":-114,"last_snr":1.25,"tx_queue":0,"packets_recv":81234,"packets_sent":20276,"recv_flood":76198,"recv_direct":5012,"sent_flood":19211,"sent_direct":1065,"tx_air_secs":18301,"rx_air_secs":73835,"flood_dups":56298,"direct_dups":36,"recv_errors":28074,"err_events":2},"tag":1794484800,"packet_hash":"0123456789ABCDEF"}]})json";
   expectReading(expected, poll::kReadingV2, "Cadham Village", r);
   EXPECT_EQ(std::string::npos, expected.find("\"lpp\""));
 }
@@ -207,7 +207,7 @@ TEST(PollReadings, OriginIsEscapedLikeTheClaim) {
   r.battery_mv = r.status.battery_mv;
 
   const std::string expected =
-      R"json({"v":1,"origin":"Cadham \"Village\" \\ Caf\u00e9 \ud83d\ude00\n\t\u0001/<>","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23Z","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"6666666666666666666666666666666666666666666666666666666666666666","battery_mv":500,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20Z","stats":{}}]})json";
+      R"json({"v":1,"origin":"Cadham \"Village\" \\ Caf\u00e9 \ud83d\ude00\n\t\u0001/<>","origin_id":"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F","timestamp":"2023-11-14T22:13:23.000000+00:00","plugin":"meshcore.observer_fw/example","readings":[{"node_id":"6666666666666666666666666666666666666666666666666666666666666666","battery_mv":500,"source":"poll","reply_hops":0,"method":"status","sampled_at":"2023-11-14T22:13:20.000000+00:00","stats":{}}]})json";
   expectReading(expected, poll::kReadingV1, origin, r);
 }
 
@@ -236,9 +236,9 @@ TEST(PollReadings, WorstCaseFitsKReadingJsonMax) {
   char origin[32];
   memset(origin, 0xFF, 31);
   origin[31] = '\0';
-  char plugin[48];
-  memset(plugin, 0xFF, 47);
-  plugin[47] = '\0';
+  char plugin[poll::kPluginTagMax];
+  memset(plugin, 0xFF, sizeof(plugin) - 1);
+  plugin[sizeof(plugin) - 1] = '\0';
 
   std::vector<char> buf(poll::kReadingJsonMax + 8, 'X');
   const size_t len = poll::buildReadingJson(buf.data(), poll::kReadingJsonMax, poll::kReadingV2,

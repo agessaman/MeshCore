@@ -12,10 +12,10 @@ permissions:
 # so the workflow never reaches dev. Publish = merge feat/repeater-poll into
 # observer-firmware-poll and push.
 #
-# Builds carry the prod and beta bases as usual, so `ota branch beta` moves a
-# poll node to beta. Retiring the channel: once polling is on dev, push one last
-# build here with OTA_MANIFEST_BASE_URL set to the beta URL (and verify with
-# --expect beta); poll nodes then OTA onto a beta-native image and stay on beta.
+# Users can select prod, dev, or poll via OTA on these repeater variants.
+# To retire poll, first move nodes with an explicit poll selection to dev.
+# Then publish a beta-native build here (OTA_MANIFEST_BASE_URL = beta URL,
+# verified with --expect beta) for nodes tracking poll via the default selector.
 on:
   workflow_dispatch:
   push:
@@ -57,10 +57,10 @@ env:
   # The channel itself. Firmware fetches <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json,
   # so this URL is what keeps poll nodes on the poll channel.
   OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/poll/v
-  # Both channel bases are baked into every build so `ota branch prod|beta` can
-  # move a node between channels. Identical in both observer workflows.
+  # Named OTA bases are shared by all observer release channels.
   OTA_MANIFEST_BASE_STABLE_URL: https://observer.gessaman.com/v
   OTA_MANIFEST_BASE_DEV_URL: https://observer.gessaman.com/beta/v
+  OTA_MANIFEST_BASE_POLL_URL: https://observer.gessaman.com/poll/v
   # Embedded version, e.g. v1.18.0.3-observer-beta-poll-abc1234. Transparent to
   # OTA parsing (version reads to the first '-', hash is the last token).
   OTA_CHANNEL_TAG: beta-poll
@@ -76,18 +76,6 @@ env:
   # Worker serving this release (flasher repo cloudflare-worker/wrangler.poll.toml).
   MANIFEST_DIR: poll/v
   STATIC_PATH: https://observer-fw-poll.gessaman.com
-
-  # PSRAM repeater boards only; polling is repeater-side.
-  POLL_ENVS: >-
-    Station_G2_repeater_observer_mqtt
-    Station_G3_ESP32_repeater_observer_mqtt
-    Station_G3_ESP32_r2_repeater_observer_mqtt
-    heltec_v4_repeater_observer_mqtt
-    heltec_v4_expansionkit_repeater_observer_mqtt
-    heltec_v4_r8_repeater_observer_mqtt
-    heltec_v4_r8_tft_repeater_observer_mqtt
-    heltec_v4_r8_tft_portrait_repeater_observer_mqtt
-    T_Beam_S3_Supreme_SX1262_repeater_observer_mqtt
 
 jobs:
 
@@ -107,6 +95,9 @@ jobs:
           SHARDS=3
           ALL=$(grep -rhoE '^\[env:[^]]*observer_mqtt\]' platformio.ini variants/*/platformio.ini \
                  | sed -E 's/^\[env:(.*)\]$/\1/' | sort -u)
+          # Use the same PSRAM repeater list as the OTA channel selector.
+          POLL_ENVS=$(cat scripts/poll-ota-variants.txt)
+          test -n "$POLL_ENVS"
           # Fail on a renamed or removed env rather than silently dropping a board.
           for e in $POLL_ENVS; do
             grep -qxF "$e" <<<"$ALL" || { echo "::error::env $e not found"; exit 1; }
@@ -171,7 +162,7 @@ jobs:
 
       - name: Verify poll channel is baked in
         # Native base must be the poll URL (not prod or beta) in every .bin.
-        run: python3 scripts/verify_ota_channel.py --expect custom
+        run: python3 scripts/verify_ota_channel.py --expect poll
 
       - name: Upload Shard Artifact
         uses: actions/upload-artifact@v4
@@ -248,7 +239,7 @@ jobs:
           # this channel's dropdown changelog. Non-fatal — stale notes beat a
           # red build whose binaries are already live.
           {
-            printf '%s' '<p><b>&#9888; REPEATER POLLING TEST CHANNEL:</b> the beta firmware plus guest-key repeater polling for CoreScope, for testing before it merges into beta. A node flashed from this version receives OTA updates from this test channel; run <code>ota branch beta</code> to move it back to beta.</p>'
+            printf '%s' '<p><b>&#9888; REPEATER POLLING TEST CHANNEL:</b> the beta firmware plus guest-key repeater polling for CoreScope, for testing before it merges into beta. A node flashed from this version receives OTA updates from this test channel; use <code>ota branch prod</code> or <code>ota branch dev</code> and <code>ota update</code> to switch channels.</p>'
             cat firmware-notes.html
           } > /tmp/poll-notes.html
           gh_retry gh release edit "$RELEASE_TAG" --notes-file /tmp/poll-notes.html \

@@ -2026,7 +2026,7 @@ __attribute__((noinline)) void RepeaterPoller::maybeClaim(uint32_t now) {
     return;
   }
 
-  char tag[48];
+  char tag[poll::kPluginTagMax];
   uint8_t self_pub[poll::kPubKeySize];
   snprintf(tag, sizeof(tag), "meshcore.observer_fw/%s", host_->pollFirmwareVersion());
   host_->pollNodePub(self_pub);
@@ -2178,7 +2178,7 @@ void RepeaterPoller::maybePublishReading(uint32_t now) {
   if (reading_retry_ && !poll::readingRetryDue(reading_retry_ms_, millis())) return;
   const poll::Reading* g = poll::readingHoldPeek(readings_->hold);
   if (!g) return;
-  char tag[48];
+  char tag[poll::kPluginTagMax];
   uint8_t self_pub[poll::kPubKeySize];
   snprintf(tag, sizeof(tag), "meshcore.observer_fw/%s", host_->pollFirmwareVersion());
   host_->pollNodePub(self_pub);
