@@ -56,10 +56,10 @@ env:
   # same value the build was handed instead of a second hardcoded copy. Must match
   # build.sh's OTA_MANIFEST_BASE_URL default and the Pages path serving flasher/v.
   OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/v
-  # Both channel bases are baked into every build so `ota branch prod|beta` can
-  # move a node between channels. Identical in both observer workflows.
+  # Named OTA bases are shared by all observer release channels.
   OTA_MANIFEST_BASE_STABLE_URL: https://observer.gessaman.com/v
   OTA_MANIFEST_BASE_DEV_URL: https://observer.gessaman.com/beta/v
+  OTA_MANIFEST_BASE_POLL_URL: https://observer.gessaman.com/poll/v
 
 jobs:
 

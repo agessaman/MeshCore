@@ -112,6 +112,8 @@ column lists the presets that need more. Every preset except `meshrank` uses the
 | `comchan` | `wss://obs.comchan.net:443/` | JWT | |
 | `virginiamesh` | `wss://mqtt.virginiamesh.com:8883` | none | |
 | `meshcore-analyzer-eu` | `wss://mqtt.meshcore-analyzer.eu:443` | JWT | |
+| `nodakmesh` | `wss://mqtt.nodakmesh.org:443` | JWT | |
+| `westmichmesh` | `wss://mqtt.westmichmesh.org:443` | JWT | |
 | `custom` | your broker | user/pass, or JWT when `mqttN.audience` is set | see [Custom Brokers](#custom-brokers) |
 | `none` | slot disabled | | |
 
@@ -296,10 +298,13 @@ Observer builds update themselves from the release manifest on observer.gessaman
 | `ota branch` | Show the selected channel, the channel this build came from, and the manifest URL |
 | `ota branch prod` | Follow production (alias `stable`) |
 | `ota branch beta` | Follow beta (alias `dev`) |
+| `ota branch poll` | Follow the repeater polling channel on supported boards |
 | `ota branch default` | Follow the channel this build came from |
 | `start ota` | Serve a manual upload page (ElegantOTA) on the node's IP, or a `MeshCore-OTA` hotspot when offline. Stops after 15 minutes idle |
 | `start ota ap` | Always use the `MeshCore-OTA` hotspot, e.g. on networks with client isolation |
 | `stop ota` | Stop the manual upload page |
+
+Older builds need a normal update on their current channel to pick up `ota branch poll`.
 
 `ota branch` only saves the choice. Run `ota update` afterward to switch:
 
