@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "helpers/OtaChannel.h"
 
-// The three base URLs are provided as -D macros by the test env (see platformio.ini).
+// The manifest base URLs are provided as -D macros by the test env (see platformio.ini).
 TEST(OtaChannel, ResolvesNativeToBaseMacro) {
   EXPECT_STREQ(ota_resolve_base(OTA_CH_NATIVE), "https://stable.example/mqtt/v");
 }
@@ -11,10 +11,20 @@ TEST(OtaChannel, ResolvesStable) {
 TEST(OtaChannel, ResolvesDev) {
   EXPECT_STREQ(ota_resolve_base(OTA_CH_DEV), "https://dev.example/mqtt/dev/v");
 }
+TEST(OtaChannel, ResolvesPollWithoutRenumberingStoredSelectors) {
+  EXPECT_EQ(0, OTA_CH_NATIVE);
+  EXPECT_EQ(1, OTA_CH_STABLE);
+  EXPECT_EQ(2, OTA_CH_DEV);
+  EXPECT_EQ(3, OTA_CH_POLL);
+  EXPECT_TRUE(ota_poll_available());
+  EXPECT_STREQ(ota_resolve_base(OTA_CH_POLL), "https://poll.example/mqtt/poll/v");
+  EXPECT_STREQ(ota_channel_name(OTA_CH_POLL), "poll");
+}
 TEST(OtaChannel, BasesAreStoredBehindCiTags) {
   EXPECT_STREQ(ota_tagged_native, "ota-base-native:https://stable.example/mqtt/v");
   EXPECT_STREQ(ota_tagged_stable, "ota-base-stable:https://stable.example/mqtt/v");
   EXPECT_STREQ(ota_tagged_dev, "ota-base-dev:https://dev.example/mqtt/dev/v");
+  EXPECT_STREQ(ota_tagged_poll, "ota-base-poll:https://poll.example/mqtt/poll/v");
 }
 TEST(OtaChannel, ParseKnownKeywords) {
   uint8_t ch = 99;
@@ -23,6 +33,7 @@ TEST(OtaChannel, ParseKnownKeywords) {
   EXPECT_TRUE(ota_parse_channel("beta", &ch));    EXPECT_EQ(ch, OTA_CH_DEV);
   EXPECT_TRUE(ota_parse_channel("default", &ch)); EXPECT_EQ(ch, OTA_CH_NATIVE);
   EXPECT_TRUE(ota_parse_channel("dev", &ch));     EXPECT_EQ(ch, OTA_CH_DEV);
+  EXPECT_TRUE(ota_parse_channel("poll", &ch));    EXPECT_EQ(ch, OTA_CH_POLL);
 }
 TEST(OtaChannel, ParseRejectsUnknownAndLeavesOutputUntouched) {
   uint8_t ch = 7;

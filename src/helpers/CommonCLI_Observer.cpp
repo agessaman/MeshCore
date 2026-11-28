@@ -1450,7 +1450,9 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     } else {
       uint8_t ch;
       if (!ota_parse_channel(arg, &ch)) {
-        strcpy(reply, "ERR: usage ota branch [prod|beta|default] (aliases: stable, dev)");
+        strcpy(reply, "ERR: usage ota branch [prod|beta|poll|default] (aliases: stable, dev)");
+      } else if (ch == OTA_CH_POLL && !ota_poll_available()) {
+        strcpy(reply, "ERR: poll OTA unavailable for this firmware variant");
       } else {
         _prefs->ota_channel = ch;
         savePrefs();
