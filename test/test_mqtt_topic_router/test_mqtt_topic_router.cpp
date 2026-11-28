@@ -178,6 +178,55 @@ TEST(MQTTTopicRouter, RejectsInvalidStyleTypeSlotAndOutput) {
   EXPECT_FALSE(mqttTopicSlotIndexValid(0, 0));
 }
 
+TEST(MQTTTopicRouter, PollingTopicsFollowMeshCoreAndCustomAndAreRefusedByMeshRank) {
+  char topic[128];
+  ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, MQTT_PUBLICATION_POLLING,
+                                        nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("meshcore/DEN/0123456789ABCDEF/polling", topic);
+
+  ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_CUSTOM, MQTT_PUBLICATION_POLLING,
+                                        "custom/{iata}/{device}/{type}",
+                                        IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("custom/DEN/0123456789ABCDEF/polling", topic);
+
+  EXPECT_FALSE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHRANK, MQTT_PUBLICATION_POLLING,
+                                         nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+  EXPECT_STREQ("polling", mqttPublicationTypeName(MQTT_PUBLICATION_POLLING));
+}
+
+TEST(MQTTTopicRouter, PollReadingTopicsRouteLikePolling) {
+  const struct { int type; const char* name; } kinds[] = {
+    {MQTT_PUBLICATION_BATTERY, "battery"},
+    {MQTT_PUBLICATION_TELEMETRY, "telemetry"},
+  };
+  for (const auto& k : kinds) {
+    char topic[128];
+    char expected[128];
+    ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, k.type,
+                                          nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+    snprintf(expected, sizeof(expected), "meshcore/DEN/0123456789ABCDEF/%s", k.name);
+    EXPECT_STREQ(expected, topic);
+
+    ASSERT_TRUE(mqttBuildPublicationTopic(MQTT_ROUTE_CUSTOM, k.type,
+                                          "custom/{iata}/{device}/{type}",
+                                          IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+    snprintf(expected, sizeof(expected), "custom/DEN/0123456789ABCDEF/%s", k.name);
+    EXPECT_STREQ(expected, topic);
+
+    // Same IATA rule as polling: no usable code, no MeshCore topic.
+    EXPECT_FALSE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, k.type,
+                                           nullptr, "XXX", DEVICE, TOKEN, topic, sizeof(topic)));
+    EXPECT_FALSE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, k.type,
+                                           nullptr, "", DEVICE, TOKEN, topic, sizeof(topic)));
+
+    EXPECT_FALSE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHRANK, k.type,
+                                           nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+    EXPECT_STREQ("", topic);
+    EXPECT_STREQ(k.name, mqttPublicationTypeName(k.type));
+  }
+}
+
 TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
   // The bridge passes MQTTBridge::MQTTMessageType to mqttBuildPublicationTopic
   // as an int; a compile-time static_assert in the bridge ties the two enums
@@ -186,10 +235,17 @@ TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
   EXPECT_EQ(1, MQTT_PUBLICATION_PACKETS);
   EXPECT_EQ(2, MQTT_PUBLICATION_RAW);
   EXPECT_EQ(3, MQTT_PUBLICATION_NEIGHBORS);
+  EXPECT_EQ(4, MQTT_PUBLICATION_POLLING);
+  EXPECT_EQ(5, MQTT_PUBLICATION_BATTERY);
+  EXPECT_EQ(6, MQTT_PUBLICATION_TELEMETRY);
   EXPECT_STREQ("status", mqttPublicationTypeName(MQTT_PUBLICATION_STATUS));
   EXPECT_STREQ("packets", mqttPublicationTypeName(MQTT_PUBLICATION_PACKETS));
   EXPECT_STREQ("raw", mqttPublicationTypeName(MQTT_PUBLICATION_RAW));
   EXPECT_STREQ("neighbors", mqttPublicationTypeName(MQTT_PUBLICATION_NEIGHBORS));
+  EXPECT_STREQ("polling", mqttPublicationTypeName(MQTT_PUBLICATION_POLLING));
+  EXPECT_STREQ("battery", mqttPublicationTypeName(MQTT_PUBLICATION_BATTERY));
+  EXPECT_STREQ("telemetry", mqttPublicationTypeName(MQTT_PUBLICATION_TELEMETRY));
+  EXPECT_EQ(nullptr, mqttPublicationTypeName(MQTT_PUBLICATION_TELEMETRY + 1));
 }
 
 TEST(MQTTTopicRouter, SlotIataOverridesTheGlobalCodeOnlyWhenUsable) {

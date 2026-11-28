@@ -87,12 +87,22 @@ public:
   }
 };
 
+// Free packets below which createObserverPacketManager's manager sheds priority > 1 outbound.
+inline int observerRxReserve(int pool_size) {
+#ifdef WITH_MQTT_BRIDGE
+  return pool_size / 4;
+#else
+  (void)pool_size;
+  return 0;
+#endif
+}
+
 // The packet manager for an app build: observer builds reserve a quarter of the pool
 // for RX so MQTT capture survives duty-cycle throttling; non-observer builds keep the
 // upstream pool behavior unchanged.
 inline mesh::PacketManager* createObserverPacketManager(int pool_size) {
 #ifdef WITH_MQTT_BRIDGE
-  return new RxReservePacketManager(pool_size, pool_size / 4);
+  return new RxReservePacketManager(pool_size, observerRxReserve(pool_size));
 #else
   return new StaticPoolPacketManager(pool_size);
 #endif
