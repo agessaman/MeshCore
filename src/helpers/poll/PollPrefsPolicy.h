@@ -102,6 +102,10 @@ static inline bool pollIntervalValid(int minutes) {
          minutes <= static_cast<int>(MQTT_POLL_INTERVAL_MAX);
 }
 
+static inline bool pollLimitValid(int limit) {
+  return limit >= 1 && limit <= static_cast<int>(MQTT_POLL_MAX_TARGETS);
+}
+
 static inline bool pollStatusHoursValid(int hours) {
   return hours == 1 || hours == 3 || hours == 6 || hours == 12 || hours == 24;
 }

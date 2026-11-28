@@ -85,6 +85,7 @@ static MQTTPrefs defaults() {
   prefs.poll_interval_min = MQTT_POLL_INTERVAL_DEFAULT;
   prefs.poll_status_hours = MQTT_POLL_STATUS_HOURS_DEFAULT;
   prefs.poll_community = MQTT_POLL_COMMUNITY_DEFAULT;
+  prefs.poll_limit = MQTT_POLL_LIMIT_DEFAULT;
   strcpy(prefs.snmp_community, "public");
   for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
     strcpy(prefs.mqtt_slot_preset[i], "none");
@@ -1028,7 +1029,7 @@ TEST(MQTTPrefsSerializer, PollKeysFitTheSerializerLimit) {
       "poll", "enabled", "consent", "url", "slot", "interval_min", "status_hours",
       "community", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8",
       "pw1", "pw2", "pw3", "pw4", "pw5", "pw6", "pw7", "pw8", "requests",
-      "pass1", "pass2", "pass3", "pass4", "pass5", "pass6", "pass7", "pass8",
+      "pass1", "pass2", "pass3", "pass4", "pass5", "pass6", "pass7", "pass8", "limit",
   };
   for (const char* key : keys) {
     EXPECT_LE(strlen(key), 15u) << key;
@@ -1084,6 +1085,7 @@ TEST(MQTTPrefsSerializer, PollFileWithoutNewKeysLoadsUnchanged) {
   EXPECT_EQ(MQTT_POLL_PW_HELLO, prefs.poll_pw_mode[0]);
   EXPECT_EQ(MQTT_POLL_PW_BLANK, prefs.poll_pw_mode[1]);
   EXPECT_EQ(MQTT_POLL_REQUESTS_DEFAULT, prefs.poll_requests);
+  EXPECT_EQ(MQTT_POLL_LIMIT_DEFAULT, prefs.poll_limit);
   const char zero[MQTT_POLL_MAX_TARGETS][MQTT_POLL_PW_MAX_LEN + 1] = {};
   EXPECT_EQ(0, memcmp(zero, prefs.poll_pw, sizeof(zero)));
 
@@ -1096,6 +1098,31 @@ TEST(MQTTPrefsSerializer, PollFileWithoutNewKeysLoadsUnchanged) {
   ASSERT_NE(std::string::npos, pw8) << text;
   EXPECT_LT(pw8, text.find("requests:0")) << text;
   EXPECT_LT(pw8, text.find("pass1:\"\"")) << text;
+}
+
+TEST(MQTTPrefsSerializer, PollLimitRoundTripsAndRepairs) {
+  MQTTPrefs source = defaults();
+  EXPECT_EQ(8, source.poll_limit);
+  source.poll_limit = 3;
+  OutputStream output;
+  MQTTPrefsSerializer writer(&source);
+  ASSERT_TRUE(writer.saveSerial(output));
+  EXPECT_NE(std::string::npos, output.text().find("limit:3")) << output.text();
+  MQTTPrefs loaded = defaults();
+  InputStream input(output.text());
+  MQTTPrefsSerializer reader(&loaded);
+  ASSERT_TRUE(reader.loadSerial(input)) << output.text();
+  bool repaired = true;
+  ASSERT_TRUE(reader.apply(&repaired));
+  EXPECT_FALSE(repaired);
+  EXPECT_EQ(3, loaded.poll_limit);
+
+  for (const char* bad : {"{version:1,poll:{limit:0}}", "{version:1,poll:{limit:9}}"}) {
+    repaired = false;
+    MQTTPrefs prefs = loadPoll(bad, &repaired);
+    EXPECT_TRUE(repaired) << bad;
+    EXPECT_EQ(MQTT_POLL_LIMIT_DEFAULT, prefs.poll_limit) << bad;
+  }
 }
 
 TEST(MQTTPrefsSerializer, PollRepairsRequestsAndPasswords) {

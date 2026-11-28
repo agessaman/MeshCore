@@ -43,6 +43,7 @@ struct RequestOffer {
   const uint8_t (*local)[kPubKeySize];
   uint8_t count;
   const RequestedEntry* entries;
+  uint8_t limit;   // poll.limit: local and requested targets together; 0 = eight
 };
 
 // Both the opt-in and https are required before a requested target is accepted.
@@ -50,11 +51,12 @@ static inline bool requestsAllowed(bool opt_in, bool url_is_https) {
   return opt_in && url_is_https;
 }
 
-// Configured targets and held requested targets share the eight slots.
-static inline uint8_t requestFreeSlots(uint8_t local_count, uint8_t held_count) {
+// Configured targets and held requested targets share poll.limit slots (at most eight).
+static inline uint8_t requestFreeSlots(uint8_t local_count, uint8_t held_count, uint8_t limit = kMaxTargets) {
+  const unsigned cap = limit > kMaxTargets ? kMaxTargets : limit;
   const unsigned used = (unsigned)local_count + (unsigned)held_count;
-  if (used >= kMaxTargets) return 0;
-  return (uint8_t)(kMaxTargets - used);
+  if (used >= cap) return 0;
+  return (uint8_t)(cap - used);
 }
 
 // True when the opt-in, the https URL, or the owners roles no longer hold.
@@ -267,7 +269,7 @@ static inline void reconcile(RequestTable& table, const RequestOffer& offer, uin
     if (!entries[j].entry.requested) continue;
     if (keyListed(entries[j].pub, offer.local, local_n)) continue;
     if (findRequested(table, entries[j].pub) >= 0) continue;
-    if (requestFreeSlots(local_n, table.count) == 0) break;
+    if (requestFreeSlots(local_n, table.count, offer.limit ? offer.limit : kMaxTargets) == 0) break;
     RequestedTarget& target = table.targets[table.count];
     memset(&target, 0, sizeof(target));
     target.held = true;

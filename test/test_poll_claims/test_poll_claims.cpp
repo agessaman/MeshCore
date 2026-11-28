@@ -450,6 +450,35 @@ TEST(PollClaims, ExtendedClaimWritesEveryOptionalField) {
   EXPECT_EQ(expected, std::string(buf, len));
 }
 
+TEST(PollClaims, ExtendedClaimReportsLimitAndInterval) {
+  initKeys();
+  const std::string expected =
+      R"json({"v": 2, "origin": "Cadham Village", "origin_id": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F", "timestamp": "2023-11-14T22:13:20Z", "plugin": "openhop.corescope_observer_plus/0.11.1", "policy_version": "", "community": true, "accepts_requests": true, "request_slots": 3, "max_slots": 5, "poll_interval": 60, "nodes": []})json";
+  poll::ClaimOptions opts{};
+  opts.extended = true;
+  opts.accepts_requests = true;
+  opts.request_slots = 3;
+  opts.max_slots = 5;
+  opts.poll_interval_min = 60;
+  char buf[1024];
+  const size_t len = poll::buildClaimJson(buf, sizeof(buf), "Cadham Village", g_observer, kTs, kPlugin, "",
+                                          true, nullptr, 0, opts);
+  ASSERT_EQ(expected.size(), len);
+  EXPECT_EQ(expected, std::string(buf, len));
+
+  // A changed limit or interval is sent at once; the plain v2 claim carries neither.
+  poll::ClaimOptions other = opts;
+  other.max_slots = 4;
+  EXPECT_NE(poll::claimSignature(nullptr, 0, true, opts), poll::claimSignature(nullptr, 0, true, other));
+  other = opts;
+  other.poll_interval_min = 90;
+  EXPECT_NE(poll::claimSignature(nullptr, 0, true, opts), poll::claimSignature(nullptr, 0, true, other));
+  opts.extended = false;
+  const size_t plain = poll::buildClaimJson(buf, sizeof(buf), "Cadham Village", g_observer, kTs, kPlugin, "",
+                                            true, nullptr, 0, opts);
+  EXPECT_EQ(std::string::npos, std::string(buf, plain).find("max_slots"));
+}
+
 TEST(PollClaims, ExtendedEmptyClaimStillCarriesTheEnvelope) {
   initKeys();
   const std::string expected =

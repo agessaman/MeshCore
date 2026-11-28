@@ -298,7 +298,7 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
                     pollToken(config, "poll.url") || pollToken(config, "poll.slot") ||
                     pollToken(config, "poll.interval") || pollToken(config, "poll.status") ||
                     pollToken(config, "poll.community") || pollToken(config, "poll.consent") ||
-                    pollToken(config, "poll.requests");
+                    pollToken(config, "poll.requests") || pollToken(config, "poll.limit");
   if (!mine) return PollSetResult::NotMine;
   if (!cb->supportsRepeaterPoll()) {
     strcpy(reply, "Error: not supported on this build");
@@ -435,6 +435,19 @@ static PollSetResult applyPollSet(MQTTPrefs* prefs, CommonCLICallbacks* cb,
     strcpy(reply, "OK");
     return PollSetResult::Changed;
   }
+  if (pollToken(config, "poll.limit")) {
+    char word[8];
+    bool extra = false;
+    int limit = 0;
+    if (!pollCopyWord(pollValue(config, "poll.limit"), word, sizeof(word), &extra) || extra ||
+        !pollParseUnsigned(word, &limit) || !poll::pollLimitValid(limit)) {
+      snprintf(reply, 160, "Error: limit must be 1-%u", (unsigned)MQTT_POLL_MAX_TARGETS);
+      return PollSetResult::Done;
+    }
+    prefs->poll_limit = static_cast<uint8_t>(limit);
+    strcpy(reply, "OK");
+    return PollSetResult::Changed;
+  }
   char word[8];
   bool extra = false;
   if (!pollCopyWord(pollValue(config, "poll.consent"), word, sizeof(word), &extra) || extra ||
@@ -455,7 +468,8 @@ static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
   const bool mine = strcmp(config, "poll.status.hours") == 0 ||
                     strcmp(config, "poll.url") == 0 || strcmp(config, "poll.slot") == 0 ||
                     strcmp(config, "poll.interval") == 0 || strcmp(config, "poll.community") == 0 ||
-                    strcmp(config, "poll.consent") == 0 || strcmp(config, "poll.requests") == 0;
+                    strcmp(config, "poll.consent") == 0 || strcmp(config, "poll.requests") == 0 ||
+                    strcmp(config, "poll.limit") == 0;
   if (!mine) return false;
   if (!cb->supportsRepeaterPoll()) {
     strcpy(reply, "Error: not supported on this build");
@@ -473,6 +487,8 @@ static bool applyPollGet(const MQTTPrefs* prefs, CommonCLICallbacks* cb,
     strcpy(reply, prefs->poll_community ? "> on" : "> off");
   } else if (strcmp(config, "poll.requests") == 0) {
     strcpy(reply, prefs->poll_requests ? "> on" : "> off");
+  } else if (strcmp(config, "poll.limit") == 0) {
+    sprintf(reply, "> %u", (unsigned)prefs->poll_limit);
   } else {
     strcpy(reply, prefs->poll_consent ? "> yes" : "> no");
   }

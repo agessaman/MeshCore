@@ -83,6 +83,8 @@ struct ClaimOptions {
   bool    extended = false;          // write the optional per-node and envelope fields
   bool    accepts_requests = false;  // the operator opted in to requested targets
   uint8_t request_slots = 0;         // target entries still free, clamped to 0..8
+  uint8_t max_slots = 0;             // poll.limit; 0 leaves the field out
+  uint16_t poll_interval_min = 0;    // poll.interval, a floor under the policy window; 0 leaves it out
 };
 
 // The key kind a claim names; a target password wins over the own polling key.
@@ -344,6 +346,14 @@ static inline size_t buildClaimJson(char* out, size_t cap, const char* origin,
     o.lit(opts.accepts_requests ? ", \"accepts_requests\": true" : ", \"accepts_requests\": false");
     o.lit(", \"request_slots\": ");
     detail::writeUint(o, opts.request_slots > kMaxTargets ? kMaxTargets : opts.request_slots);
+    if (opts.max_slots) {
+      o.lit(", \"max_slots\": ");
+      detail::writeUint(o, opts.max_slots > kMaxTargets ? kMaxTargets : opts.max_slots);
+    }
+    if (opts.poll_interval_min) {
+      o.lit(", \"poll_interval\": ");
+      detail::writeUint(o, opts.poll_interval_min);
+    }
   }
   o.lit(", \"nodes\": [");
   for (uint8_t i = 0; i < count; i++) {
@@ -458,7 +468,11 @@ static inline uint32_t claimSignature(const ClaimNode* nodes, uint8_t count, boo
     h = (h ^ 0xffu) * 16777619u;
   }
   h = (h ^ (community ? 1u : 0u)) * 16777619u;
-  if (opts.extended) h = (h ^ (opts.accepts_requests ? 1u : 0u)) * 16777619u;
+  if (opts.extended) {
+    h = (h ^ (opts.accepts_requests ? 1u : 0u)) * 16777619u;
+    h = (h ^ opts.max_slots) * 16777619u;
+    h = (h ^ opts.poll_interval_min) * 16777619u;
+  }
   return h;
 }
 

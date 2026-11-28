@@ -44,6 +44,7 @@ struct PollSettings {
   uint8_t  slot;                                        // 1-based MQTT slot for the claim, 0 = unset
   bool     community;                                   // share polling with other observers
   bool     requests;
+  uint8_t  limit;                                       // poll.limit, 1..kMaxTargets
 };
 
 // Mesh services; node-key operations are limited to registration and password envelopes.
@@ -221,6 +222,7 @@ private:
   bool     consent_;
   uint16_t interval_min_;
   uint8_t  status_hours_;
+  uint8_t  limit_;
 
   // Run
   uint8_t  run_kind_;

@@ -92,6 +92,8 @@ Notes:
 - Requested targets (`poll.requests on`, Beacon over HTTPS only) are held in RAM only, with
   their passwords. A password an analyzer sends you is readable by your node: treat it as
   shared with volunteer observers, which is why only guest passwords are accepted.
+- In JSON reading mode the claim also reports `accepts_requests`, `request_slots` (free
+  seats), `max_slots` (`poll.limit`) and `poll_interval` (`poll.interval`, in minutes).
 
 ## Safety rules (all modes)
 
@@ -119,6 +121,7 @@ Notes:
 | `set poll.interval <30-1440>` | Minutes between polls of one target | 60 |
 | `set poll.status <1\|3\|6\|12\|24>` | Hours between status requests | 6 |
 | `set poll.requests on\|off` | Accept analyzer-requested targets (Beacon over HTTPS) | off |
+| `set poll.limit <1-8>` | Most targets polled. Your own targets count first and are never dropped; requested targets fill the rest | 8 |
 | `set poll.community on\|off` | Share polling with other observers of the same analyzer | on |
 | `poll add <key \| prefix>` | Add a target (up to 8). A prefix must match one heard neighbor | |
 | `poll remove <key>`, `poll clear`, `poll list` | Edit or show targets | |

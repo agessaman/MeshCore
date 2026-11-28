@@ -174,6 +174,23 @@ TEST(PollRequestRuntime, LocalAddEvictsStandbyWithoutAnOwnersAnswer) {
   EXPECT_TRUE(zero((const uint8_t*)table.targets[2].pw, sizeof(table.targets[2].pw)));
 }
 
+TEST(PollRequestRuntime, LowerLimitEvictsStandbyFirst) {
+  poll::RequestTable table = {};
+  for (uint8_t i = 0; i < 3; i++) {
+    table.targets[i] = target();
+    table.targets[i].pub[0] = i + 1;
+  }
+  table.count = 3;
+  uint8_t local[1][poll::kPubKeySize] = {};
+  local[0][0] = 10;
+  uint8_t roles[3] = {poll::ROLE_POLLER, poll::ROLE_STANDBY, poll::ROLE_POLLER};
+  poll::RequestDelta delta;
+  poll::reserveLocalRequests(table, local, 1, roles, delta, 3);
+  ASSERT_EQ(2, table.count);
+  ASSERT_EQ(1, delta.dropped_count);
+  EXPECT_EQ(2, delta.dropped[0][0]);
+}
+
 TEST(PollRequestRuntime, LocalTakeoverRemovesMatchingKeyAndKeepsRoleIndicesAligned) {
   poll::RequestTable table = {};
   for (uint8_t i = 0; i < 3; i++) {

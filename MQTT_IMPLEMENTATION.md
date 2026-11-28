@@ -430,6 +430,7 @@ shares, and setup; the commands are below.
 | `set poll.interval <30-1440>` | Minutes between polls of one target (never faster than the window) | 60 |
 | `set poll.status <1\|3\|6\|12\|24>` | Hours between status requests (others ask for telemetry) | 6 |
 | `set poll.requests on\|off` | Accept analyzer targets in a JSON reading mode over HTTPS, while polling and community are on | off |
+| `set poll.limit <1-8>` | Most targets polled, local ones first. Requested targets fill what is left; lowering it drops the extra requested targets at once (standby before poller). Local targets are never dropped. JSON-mode claims report it as `max_slots`, next to `request_slots` (still free) and `poll_interval` (`poll.interval`, minutes) | 8 |
 | `set poll.community on\|off` | Share polling with other CoreScope observers (used once CoreScope control lands) | on |
 | `poll add <64-hex key \| neighbor prefix>` | Add a target (up to 8). A prefix must match exactly one heard neighbor | |
 | `poll remove <key>`, `poll clear`, `poll list` | Edit or show targets | |

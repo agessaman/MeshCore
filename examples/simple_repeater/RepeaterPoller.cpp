@@ -170,7 +170,7 @@ RepeaterPoller::RepeaterPoller()
     : host_(NULL), fs_(NULL), has_id_(false), store_state_(poll::STATE_EMPTY), recovered_from_(0), seq_(0),
       key_created_at_(0), tag_hw_(0), tag_hw_saved_(0), count_(0), local_count_(0), requests_(false), url_https_(false),
       requests_store_(NULL), control_scratch_(NULL), enabled_(false), consent_(false),
-      interval_min_(60), status_hours_(6), run_kind_(RUN_NONE), run_idx_(-1), run_scheduled_(false),
+      interval_min_(60), status_hours_(6), limit_(poll::kMaxTargets), run_kind_(RUN_NONE), run_idx_(-1), run_scheduled_(false),
       run_quick_(false), run_learned_before_(0), poll_tag_count_(0), inflight_(NULL), inflight_ms_(0),
       inflight_act_(0), inflight_pw_(0), inflight_tag_(0), timer_on_(false), timer_at_(0),
       listening_(false), listen_act_(0), listen_pw_(0), listen_tag_(0), event_count_(0), rd_voltage_(false), rd_mv_(0),
@@ -572,7 +572,7 @@ void RepeaterPoller::takeRequests(const poll::ControlResult& res, uint32_t now) 
       if (effect.reset_login_fails) states_[i].key_login_fails = 0;
     }
   }
-  const poll::RequestOffer offer = {true, local_count_, requests_store_->local, res.requested_count, res.requested};
+  const poll::RequestOffer offer = {true, local_count_, requests_store_->local, res.requested_count, res.requested, limit_};
   poll::reconcile(table, offer, now, requests_store_->delta);
   logRequestDelta();
   syncRequests();
@@ -658,6 +658,7 @@ void RepeaterPoller::readSettings() {
   consent_ = s.consent;
   interval_min_ = s.interval_min ? s.interval_min : 60;
   status_hours_ = s.status_hours;
+  limit_ = (s.limit && s.limit <= poll::kMaxTargets) ? s.limit : poll::kMaxTargets;
   local_count_ = s.count;
   readControlSettings(s);
   if (requests_store_) {
@@ -667,7 +668,7 @@ void RepeaterPoller::readSettings() {
       const int8_t i = slotFor(requests_store_->table.targets[r].pub);
       roles[r] = i < 0 ? (uint8_t)poll::ROLE_DISABLED : poll::requestedRole(owners_[i]);
     }
-    poll::reserveLocalRequests(requests_store_->table, s.targets, local_count_, roles, requests_store_->delta);
+    poll::reserveLocalRequests(requests_store_->table, s.targets, local_count_, roles, requests_store_->delta, limit_);
     logRequestDelta();
     syncRequests();
   }
@@ -2076,7 +2077,9 @@ poll::ClaimOptions RepeaterPoller::claimOptions() const {
   poll::ClaimOptions o;
   o.extended = poll::modeIsJson(mode_);
   o.accepts_requests = requestsActive();
-  o.request_slots = o.accepts_requests ? poll::requestFreeSlots(local_count_, requests_store_ ? requests_store_->table.count : 0) : 0;
+  o.request_slots = o.accepts_requests ? poll::requestFreeSlots(local_count_, requests_store_ ? requests_store_->table.count : 0, limit_) : 0;
+  o.max_slots = limit_;
+  o.poll_interval_min = interval_min_;
   return o;
 }
 
@@ -2293,7 +2296,7 @@ __attribute__((noinline)) void RepeaterPoller::fileControl(uint32_t now, bool re
     }
   }
   req.target_count = ctl_count_;
-  req.request_capacity = requestsActive() && ensureRequestStore() ? poll::requestFreeSlots(local_count_, 0) : 0;
+  req.request_capacity = requestsActive() && ensureRequestStore() ? poll::requestFreeSlots(local_count_, 0, limit_) : 0;
 
   if (registering && !buildRegistration(req, now)) {
     registering = false;
